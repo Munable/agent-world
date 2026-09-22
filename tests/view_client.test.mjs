@@ -46,4 +46,15 @@ const denied = new WorldClient("http://localhost:9876", () => "TEST_ONLY", async
 denied.view = base;
 await assert.rejects(() => denied.request("/v1/views"));
 assert.equal(denied.view, null);
+let pendingReply;
+const revokedRace = new WorldClient("http://localhost:9876", () => "TEST_ONLY", (url) => {
+  if (url.endsWith("/denied")) return Promise.resolve({ok: false, status: 401, json: async () => ({error: "InvalidIdentityToken"})});
+  return new Promise(resolve => { pendingReply = resolve; });
+});
+const pendingLoad = revokedRace.loadView("scene");
+await new Promise(resolve => setImmediate(resolve));
+await assert.rejects(() => revokedRace.request("/denied"));
+pendingReply(ok(base));
+await pendingLoad;
+assert.equal(revokedRace.view, null);
 console.log("view client: snapshot, delta, order, viewer, resource removal, safe IDs, stable intents, race, access denial PASS");

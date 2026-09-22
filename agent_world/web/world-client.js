@@ -58,7 +58,10 @@ export class WorldClient {
     });
     const result = await response.json().catch(() => ({error: "InvalidResponse", message: "World returned invalid JSON"}));
     if (!response.ok) {
-      if ([401, 403].includes(response.status)) this.view = null;
+      if ([401, 403].includes(response.status)) {
+        this.view = null;
+        ++this.viewGeneration; // A late successful load must not restore a revoked view.
+      }
       throw new WorldRequestError(response.status, result);
     }
     if (result.error === "InvalidResponse") throw new WorldRequestError(502, result);
