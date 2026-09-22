@@ -5,6 +5,7 @@ import sqlite3
 
 from .identity_auth import resolve_authorization, bound_role
 from .world_views import ViewNotFound, ViewResetRequired
+from .world_timers import TimerConflict, TimerNotFound
 from .runtime_contracts import (
     CORE_TOOL_NAMES,
     arguments_object,
@@ -185,6 +186,10 @@ def function_schema(desc, *, auth_required):
 def error_response(exc: Exception):
     if isinstance(exc, ViewResetRequired):
         return 409, {"error": "ViewResetRequired", "message": str(exc), "retryable": False, "recovery": "reset_view"}
+    if isinstance(exc, TimerConflict):
+        return 409, {"error": "TimerConflict", "message": str(exc), "retryable": False}
+    if isinstance(exc, TimerNotFound):
+        return 404, {"error": "TimerNotFound", "message": str(exc), "retryable": False}
     if isinstance(exc, ViewNotFound):
         return 404, {"error": "ViewNotFound", "message": str(exc), "retryable": False}
     if isinstance(exc, (AuthenticationRequired, InvalidIdentityToken)):

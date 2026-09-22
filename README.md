@@ -22,7 +22,7 @@ python -m agent_world --world my_world:WORLD --universe campaign --db campaign.s
 ```
 
 See [the SDK contract](docs/FOUNDATION.md), [the audit](docs/FOUNDATION_AUDIT.md),
-[world data and views](docs/WORLD_DATA.md), and the independent
+[world data and views](docs/WORLD_DATA.md), [durable time](docs/DURABLE_TIME.md), and the independent
 [encounter](examples/encounter_world.py) and [workflow](examples/workflow_world.py) examples.
 
 ## Test

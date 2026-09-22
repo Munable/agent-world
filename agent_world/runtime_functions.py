@@ -209,6 +209,7 @@ class RuntimeFunctions:
             now=now,
             state_validator=definition.validate_state if definition else None,
             state_authorizer=definition.state_authorizer if definition else None,
+            timers_enabled=definition is not None,
         )
 
     def _run_user_code(self, c, callback, *args, read_only=False):
@@ -258,7 +259,7 @@ class RuntimeFunctions:
             old_access = ctx.access
             ctx.access = "read"
             try:
-                allowed = self._run_user_code(c, policy, ctx, arguments, read_only=True)
+                allowed = self._run_user_code(c, policy, ctx, json.loads(json_text(arguments)), read_only=True)
             finally:
                 ctx.access = old_access
             if allowed is not True:
@@ -436,6 +437,8 @@ class RuntimeFunctions:
         identifier(operation_id, "operation_id")
         identifier(function_id, "function_id")
         arguments_object(arguments)
+        intent_arguments = json.loads(json_text(arguments))
+        arguments = json.loads(json_text(intent_arguments))
         if expected_version is not None:
             integer(expected_version, "expected_version", 1)
         if activity_claim is not None and not isinstance(activity_claim, dict):
@@ -494,55 +497,47 @@ class RuntimeFunctions:
             self._admit_actor_tx(c, universe, actor_role_id, identity_token)
             if activity_claim:
                 self._validate_claim_tx(c, universe, actor_role_id, activity_claim, time.time())
-            event_seqs = []
-            for event in outcome.events:
-                cursor = c.execute(
-                    "INSERT INTO events(universe,recipient_role_id,actor_role_id,kind,payload_json,created_at) VALUES(?,?,?,?,?,?)",
-                    (
-                        universe,
-                        event.recipient_role_id,
-                        actor_role_id,
-                        event.kind,
-                        json_text(event.payload),
-                        now,
-                    ),
-                )
-                event_seqs.append(int(cursor.lastrowid))
-            commit_seq = self._record_commit_tx(
-                c, universe, journal_marker, actor_role_id=actor_role_id,
-                function_id=function_id, operation_id=operation_id,
-                world_version=self._worlds[universe].version if universe in self._worlds else None,
-                event_seqs=event_seqs,
-            )
-            receipt = {
-                "commit_seq": commit_seq,
-                "ok": True,
-                "operation_id": operation_id,
-                "function_id": function_id,
-                "function_version": version,
-                "result": outcome.result,
-                "event_seqs": event_seqs,
-                "replayed": False,
-            }
-            if ctx.random_draws:
-                receipt["random_draws"] = ctx.random_draws
-            encoded = json_text(receipt)
-            c.execute(
-                "INSERT INTO operations(universe,actor_role_id,idempotency_key,function_id,function_version,args_hash,receipt_json,created_at,activity_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
-                (
-                    universe,
-                    actor_role_id,
-                    operation_id,
-                    function_id,
-                    version,
-                    self._sha256({"function_id": function_id, "arguments": arguments}),
-                    encoded,
-                    now,
-                    activity_id,
-                ),
+            receipt = self._commit_outcome_tx(
+                c, ctx, outcome, intent_arguments, journal_marker=journal_marker, activity_id=activity_id,
             )
         self.wake_waiters()
+        return receipt
+
+    def _commit_outcome_tx(self, c, ctx, outcome, arguments, *, journal_marker,
+                           activity_id=None, source="action", extra_receipt=None):
+        """One effect/receipt path shared by immediate actions and durable timers."""
+        transitions = self._apply_timer_commands_tx(c, ctx)
+        event_seqs = []
+        for event in outcome.events:
+            cursor = c.execute(
+                "INSERT INTO events(universe,recipient_role_id,actor_role_id,kind,payload_json,created_at) VALUES(?,?,?,?,?,?)",
+                (ctx.universe, event.recipient_role_id, ctx.actor_role_id, event.kind,
+                 json_text(event.payload), ctx.now),
+            )
+            event_seqs.append(int(cursor.lastrowid))
+        commit_seq = self._record_commit_tx(
+            c, ctx.universe, journal_marker, actor_role_id=ctx.actor_role_id,
+            function_id=ctx.function_id, operation_id=ctx.operation_id, source=source,
+            world_version=self._worlds[ctx.universe].version if ctx.universe in self._worlds else None,
+            event_seqs=event_seqs,
+        )
+        self._bind_timer_transitions_tx(c, transitions, commit_seq)
+        receipt = {
+            "commit_seq": commit_seq, "ok": True, "operation_id": ctx.operation_id,
+            "function_id": ctx.function_id, "function_version": ctx.function_version,
+            "result": outcome.result, "event_seqs": event_seqs, "replayed": False,
+        }
+        if extra_receipt:
+            receipt.update(extra_receipt)
+        if ctx.random_draws:
+            receipt["random_draws"] = ctx.random_draws
+        encoded = json_text(receipt)
+        c.execute(
+            "INSERT INTO operations(universe,actor_role_id,idempotency_key,function_id,function_version,args_hash,receipt_json,created_at,activity_id) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (ctx.universe, ctx.actor_role_id, ctx.operation_id, ctx.function_id, ctx.function_version,
+             self._sha256({"function_id": ctx.function_id, "arguments": arguments}), encoded, ctx.now, activity_id),
+        )
         return json.loads(encoded)
 
     def get_receipt(self, universe, role_id, operation_id, *, identity_token=None):

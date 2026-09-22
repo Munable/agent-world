@@ -17,6 +17,7 @@ from .runtime_errors import WorldDefinitionError, WorldVersionMismatch, SchemaRe
 from .world_context import FunctionContext
 from .world_types import EventSpec, FunctionOutcome
 from .world_views import ViewSpec
+from .world_timers import TimerSpec
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class WorldDefinition:
     migrations: dict[int, Callable] = field(default_factory=dict)
     entry_instructions: str = "Discover the world functions, then inspect the current state before acting."
     views: tuple[ViewSpec, ...] = ()
+    timers: tuple[TimerSpec, ...] = ()
 
     def manifest(self):
         identifier(self.world_id, "world_id")
@@ -81,6 +83,10 @@ class WorldDefinition:
             raise WorldDefinitionError("world must declare at most 64 ViewSpec values")
         if len({v.name for v in self.views}) != len(self.views):
             raise WorldDefinitionError("duplicate view names")
+        if len(self.timers) > 64 or any(not isinstance(t, TimerSpec) for t in self.timers):
+            raise WorldDefinitionError("world must declare at most 64 TimerSpec values")
+        if len({t.name for t in self.timers}) != len(self.timers):
+            raise WorldDefinitionError("duplicate timer handler names")
         names = [f.name for f in self.functions]
         if len(names) != len(set(names)):
             raise WorldDefinitionError("duplicate function names in world definition")
@@ -106,6 +112,8 @@ class WorldDefinition:
         }
         if self.views:
             value["views"] = [v.contract() for v in self.views]
+        if self.timers:
+            value["timers"] = [t.contract() for t in self.timers]
         json_text(value)
         return value
 
@@ -152,7 +160,8 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
         journal_marker = runtime._journal_marker_tx(c)
         # Migrations use only the scoped storage API and run in one transaction.
         migration_ctx = FunctionContext(
-            c, universe, "system:installer", "world.migrate", definition.version, access="write"
+            c, universe, "system:installer", "world.migrate", definition.version, access="write",
+            timers_enabled=True
         )
         if old is None:
             if definition.initialize is not None:
@@ -198,12 +207,14 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
             "ON CONFLICT(universe) DO UPDATE SET version=excluded.version,manifest_json=excluded.manifest_json,state_version=excluded.state_version",
             (universe, definition.world_id, definition.version, encoded, definition.state_version),
         )
+        transitions = runtime._apply_timer_commands_tx(c, migration_ctx, definition)
         if old is None or old["manifest_json"] != encoded:
-            runtime._record_commit_tx(
+            commit_seq = runtime._record_commit_tx(
                 c, universe, journal_marker, actor_role_id="system:installer",
                 function_id="world.install", source="migration" if old else "initialize",
                 world_version=definition.version,
             )
+            runtime._bind_timer_transitions_tx(c, transitions, commit_seq)
     # Publish handlers only after the entire migration and registry transaction commits.
     runtime._handlers = {k: v for k, v in runtime._handlers.items() if k[0] != universe}
     runtime._function_options = {k: v for k, v in runtime._function_options.items() if k[0] != universe}
@@ -256,6 +267,7 @@ __all__ = [
     "FunctionSpec",
     "StateRule",
     "ViewSpec",
+    "TimerSpec",
     "FunctionContext",
     "FunctionOutcome",
     "EventSpec",

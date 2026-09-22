@@ -27,6 +27,8 @@ class FunctionContext:
         operation_id=None,
         state_validator=None,
         state_authorizer=None,
+        timers_enabled=False,
+        timer=None,
     ):
         self.conn = conn  # Legacy escape hatch; not part of the portable World SDK.
         self.universe = universe
@@ -40,6 +42,49 @@ class FunctionContext:
         self.random_draws: list[dict[str, int]] = []
         self._state_validator = state_validator
         self._state_authorizer = state_authorizer
+        self._timers_enabled = timers_enabled
+        self._timer_commands = []
+        self.timer = timer
+
+    def schedule_timer(self, timer_id, handler, arguments, *, due_at):
+        from .world_timers import MAX_TIMER_COMMANDS, MAX_TIMER_ARGUMENT_BYTES
+        from .runtime_contracts import duration, arguments_object
+
+        if self.access != "write" or not self._timers_enabled:
+            raise WorldRuntimeError("timers require a managed world write")
+        identifier(timer_id, "timer_id")
+        identifier(handler, "timer handler")
+        due_at = duration(due_at, "due_at", 253402300799, zero=True)
+        arguments_object(arguments)
+        if len(self._timer_commands) >= MAX_TIMER_COMMANDS:
+            raise InvalidArguments("too many timer changes in one transaction")
+        self._timer_commands.append({"kind": "schedule", "timer_id": timer_id, "handler": handler,
+                                     "arguments": json.loads(json_text(arguments, maximum=MAX_TIMER_ARGUMENT_BYTES)),
+                                     "due_at": due_at})
+        json_text(self._timer_commands)
+        return timer_id
+
+    def cancel_timer(self, timer_id):
+        from .world_timers import MAX_TIMER_COMMANDS
+
+        if self.access != "write" or not self._timers_enabled:
+            raise WorldRuntimeError("timers require a managed world write")
+        identifier(timer_id, "timer_id")
+        if self.timer is not None and self.timer.timer_id == timer_id:
+            raise InvalidArguments("a firing timer cannot cancel itself")
+        if len(self._timer_commands) >= MAX_TIMER_COMMANDS:
+            raise InvalidArguments("too many timer changes in one transaction")
+        self._timer_commands.append({"kind": "cancel", "timer_id": timer_id})
+
+    def get_timer(self, timer_id):
+        from .world_timers import TimerNotFound, public_timer
+
+        identifier(timer_id, "timer_id")
+        row = self.conn.execute("SELECT * FROM world_timers WHERE universe=? AND timer_id=?",
+                                (self.universe, timer_id)).fetchone()
+        if row is None:
+            raise TimerNotFound("timer not found in this universe")
+        return public_timer(row)
 
     def _check(self, scope, key, access):
         identifier(scope, "scope", 256)

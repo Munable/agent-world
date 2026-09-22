@@ -74,9 +74,10 @@ from .runtime_activities import RuntimeActivities
 
 from .runtime_journal import RuntimeJournal
 from .runtime_views import RuntimeViews
+from .runtime_timers import RuntimeTimers
 
 
-class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJournal, RuntimeViews):
+class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJournal, RuntimeViews, RuntimeTimers):
     def __init__(self, db_path: str | Path):
         if str(db_path) == ":memory:":
             raise ValueError("WorldRuntime requires a file-backed SQLite database")
@@ -123,7 +124,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     @staticmethod
     def _schema_script(c, script):
         c.execute("BEGIN IMMEDIATE")
-        if c.execute("PRAGMA user_version").fetchone()[0] > 2:
+        if c.execute("PRAGMA user_version").fetchone()[0] > 3:
             raise WorldVersionMismatch("database schema is newer than this runtime")
         for statement in script.split(";"):
             statement = statement.strip()
@@ -132,7 +133,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
 
     def _init_db(self) -> None:
         with self._conn() as c:
-            if c.execute("PRAGMA user_version").fetchone()[0] > 2:
+            if c.execute("PRAGMA user_version").fetchone()[0] > 3:
                 raise WorldVersionMismatch("database schema is newer than this runtime")
             self._enable_wal(c)
             self._schema_script(
@@ -293,7 +294,8 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             )
             self._init_journal_tx(c)
             self._init_views_tx(c)
-            c.execute("PRAGMA user_version=2")
+            self._init_timers_tx(c)
+            c.execute("PRAGMA user_version=3")
             c.execute("COMMIT")
 
     @staticmethod

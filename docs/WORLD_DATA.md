@@ -102,7 +102,8 @@ Uncertain writes are not automatically repeated: query the receipt first.
 
 This release adds no genre-specific rule system. Encounter and workflow examples only
 verify that different worlds use the same data/observation contracts.
-Remaining independent work includes durable external-effect delivery, persistent timers,
+Persistent world timers are covered by [DURABLE_TIME.md](DURABLE_TIME.md).
+Remaining independent work includes durable external-effect delivery,
 group/delegated authority, permanent asset/blob versioning and provenance, public/group
 subscriptions, end-user identity/control ownership, archival policies, and large-view
 materialization. None is replaced by this view cache or state journal.
