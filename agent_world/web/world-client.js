@@ -47,6 +47,7 @@ export class WorldClient {
     this.fetcher = fetcher;
     this.view = null;
     this.selector = null;
+    this.timelineCursor = null;
     this.viewGeneration = 0;
   }
   async request(path, body) {
@@ -60,6 +61,7 @@ export class WorldClient {
     if (!response.ok) {
       if ([401, 403].includes(response.status)) {
         this.view = null;
+        this.timelineCursor = null;
         ++this.viewGeneration; // A late successful load must not restore a revoked view.
       }
       throw new WorldRequestError(response.status, result);
@@ -70,9 +72,13 @@ export class WorldClient {
   async loadView(name, argumentsObject = {}) {
     const generation = ++this.viewGeneration;
     this.selector = {name, argumentsObject: structuredClone(argumentsObject)};
+    this.timelineCursor = null;
     this.view = null;
     const update = await this.request("/v1/views/" + encodeURIComponent(name) + "/snapshot", {arguments: argumentsObject});
-    if (generation === this.viewGeneration) this.view = applyViewUpdate(null, update);
+    if (generation === this.viewGeneration) {
+      this.view = applyViewUpdate(null, update);
+      this.timelineCursor = update.timeline_cursor || null;
+    }
     return this.view;
   }
   async syncView() {
@@ -91,6 +97,27 @@ export class WorldClient {
       throw error;
     }
     return this.view;
+  }
+  async readTimeline(limit = 50) {
+    if (!this.view || !this.timelineCursor) throw new Error("Load a timeline-enabled view first");
+    const cursor = this.timelineCursor;
+    const generation = this.viewGeneration;
+    try {
+      const result = await this.request("/v1/views/timeline", {cursor, limit});
+      if (generation !== this.viewGeneration || cursor !== this.timelineCursor) return {events: [], has_more: false};
+      if (result.base_cursor !== cursor || result.view !== this.view.view || result.viewer_role_id !== this.view.viewer_role_id ||
+          result.world_version !== this.view.world_version || result.view_version !== this.view.view_version) {
+        throw new StaleViewDelta("Timeline reply does not match the loaded view");
+      }
+      this.timelineCursor = result.cursor;
+      return result;
+    } catch (error) {
+      if (error.code === "ViewResetRequired" && generation === this.viewGeneration && cursor === this.timelineCursor) {
+        await this.loadView(this.selector.name, this.selector.argumentsObject);
+        return {events: [], has_more: false, reset: true};
+      }
+      throw error;
+    }
   }
   query(name, argumentsObject = {}) {
     return this.request("/v1/functions/" + encodeURIComponent(name) + "/invoke", {arguments: argumentsObject});

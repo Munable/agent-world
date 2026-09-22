@@ -58,3 +58,27 @@ pendingReply(ok(base));
 await pendingLoad;
 assert.equal(revokedRace.view, null);
 console.log("view client: snapshot, delta, order, viewer, resource removal, safe IDs, stable intents, race, access denial PASS");
+
+// Timeline is consumed independently from net state deltas.
+const timelineSnapshot = {...base, cursor: "view-base", timeline_cursor: "timeline-base"};
+let timelineNumber = 0;
+const timelineClient = new WorldClient("http://localhost:9876", () => "TEST_ONLY", async (url, options) => {
+  if (url.endsWith("/snapshot")) return ok(timelineSnapshot);
+  const request = JSON.parse(options.body);
+  return ok({view: base.view, viewer_role_id: "A", world_version: 1, view_version: 1,
+    base_cursor: request.cursor, cursor: "timeline-" + (++timelineNumber),
+    events: [{event_id: "event-" + timelineNumber, cue: {phase: timelineNumber === 1 ? "start" : "finish"}}], has_more: false});
+});
+await timelineClient.loadView("scene");
+assert.equal((await timelineClient.readTimeline()).events[0].cue.phase, "start");
+assert.equal((await timelineClient.readTimeline()).events[0].cue.phase, "finish");
+let resetNeeded = true;
+const gapClient = new WorldClient("http://localhost:9876", () => "TEST_ONLY", async (url) => {
+  if (url.endsWith("/snapshot")) return ok(timelineSnapshot);
+  return {ok: false, status: 409, json: async () => ({error: "ViewResetRequired", recovery: "reset_view"})};
+});
+await gapClient.loadView("scene");
+const recovered = await gapClient.readTimeline();
+assert.equal(recovered.reset, true);
+assert.deepEqual(recovered.events, []);
+console.log("timeline client: ordered consumption and reset without fabricated replay PASS");

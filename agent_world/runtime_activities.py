@@ -28,7 +28,7 @@ class RuntimeActivities:
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             now = time.time()
-            self._admit_actor_tx(c, universe, role_id, identity_token)
+            self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
             c.execute(
                 "UPDATE activities SET status='expired' WHERE universe=? AND status='active' "
                 "AND expires_at IS NOT NULL AND expires_at<=?",
@@ -101,7 +101,7 @@ class RuntimeActivities:
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             now = time.time()
-            self._admit_actor_tx(c, universe, role_id, identity_token)
+            self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
             self._expire_activity_tx(c, universe, activity_id, now)
             activity = c.execute(
                 "SELECT * FROM activities WHERE universe=? AND activity_id=?", (universe, activity_id)
@@ -224,7 +224,7 @@ class RuntimeActivities:
         }
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
-            self._admit_actor_tx(c, universe, role_id, identity_token)
+            self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
             old = c.execute(
                 "SELECT * FROM operations WHERE universe=? AND actor_role_id=? AND idempotency_key=?",
                 (universe, role_id, operation_id),
@@ -266,7 +266,7 @@ class RuntimeActivities:
         }
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
-            self._admit_actor_tx(c, universe, role_id, identity_token)
+            self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
             old = c.execute(
                 "SELECT * FROM operations WHERE universe=? AND actor_role_id=? AND idempotency_key=?",
                 (universe, role_id, operation_id),

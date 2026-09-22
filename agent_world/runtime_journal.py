@@ -28,6 +28,8 @@ class RuntimeJournal:
             before_json TEXT, before_version INTEGER NOT NULL, before_deleted INTEGER NOT NULL,
             value_json TEXT NOT NULL, version INTEGER NOT NULL, deleted INTEGER NOT NULL,
             created_at REAL NOT NULL, commit_seq INTEGER REFERENCES world_commits(seq))""")
+        if "payload_retained" not in {r["name"] for r in c.execute("PRAGMA table_info(state_changes)")}:
+            c.execute("ALTER TABLE state_changes ADD COLUMN payload_retained INTEGER NOT NULL DEFAULT 1")
         c.execute("""CREATE TABLE IF NOT EXISTS state_history_floors(
             universe TEXT PRIMARY KEY, floor INTEGER NOT NULL)""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_state_changes_world ON state_changes(universe,seq)")
@@ -67,7 +69,7 @@ class RuntimeJournal:
         return int(row[0]) if row else 0
 
     def _record_commit_tx(self, c, universe, marker, *, actor_role_id, function_id,
-                          operation_id=None, source="action", world_version=None, event_seqs=()):
+                          operation_id=None, source="action", world_version=None, event_seqs=(), history_definition=None):
         if c.execute("SELECT 1 FROM state_changes WHERE seq>? AND universe!=? LIMIT 1", (marker, universe)).fetchone():
             raise PermissionDenied("a world transaction cannot change another universe")
         count, size = c.execute("""SELECT COUNT(*),COALESCE(SUM(
@@ -80,6 +82,13 @@ class RuntimeJournal:
             (universe, actor_role_id, function_id, operation_id, source, world_version,
              time.time(), count, json_text(list(event_seqs)))).lastrowid
         c.execute("UPDATE state_changes SET commit_seq=? WHERE seq>?", (seq, marker))
+        definition = history_definition or self._worlds.get(universe)
+        if definition is not None:
+            for rule in definition.state_rules:
+                if rule.history == "metadata":
+                    c.execute("UPDATE state_changes SET before_json=NULL,value_json='null',payload_retained=0 "
+                              "WHERE universe=? AND seq>? AND substr(scope,1,?)=? AND substr(state_key,1,?)=?",
+                              (universe, marker, len(rule.scope_prefix), rule.scope_prefix, len(rule.key_prefix), rule.key_prefix))
         return int(seq)
 
     def _state_revision_tx(self, c, universe):

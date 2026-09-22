@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,16 @@ def main():
             ]
         )
         subprocess.run([sys.executable, "-c", code], cwd=base, env=env, check=True)
+        project = base / "independent-world"
+        project.mkdir()
+        for name in ("reference_world.py", "reference_acceptance.py"):
+            shutil.copy2(ROOT / "tests" / "fixtures" / name, project / name)
+        import tomllib
+        expected = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+        (project / "pyproject.toml").write_text(
+            '[project]\nname="reference-world-probe"\nversion="0.0.0"\ndependencies=["agent-world==' + expected + '"]\n',
+            encoding="utf-8")
+        subprocess.run([sys.executable, "reference_acceptance.py", expected], cwd=project, env=env, check=True)
 
 
 if __name__ == "__main__":

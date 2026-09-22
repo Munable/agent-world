@@ -35,6 +35,7 @@ from .runtime_errors import (
 from .world_context import FunctionContext
 from .runtime_journal import JOURNAL_TRIGGERS
 from .world_types import FunctionOutcome, EventSpec
+from .presentation import PRESENTATION_KIND, validate_cue
 
 
 class RuntimeFunctions:
@@ -270,9 +271,11 @@ class RuntimeFunctions:
         with self._lock, self._conn(readonly=True) as c:
             c.execute("BEGIN")
             self._check_world_tx(c, universe)
+            identity = None
             if actor_role_id is not None:
-                self._admit_actor_tx(c, universe, actor_role_id, identity_token)
-            return self._catalog_tx(c, universe, actor_role_id)
+                identity = self._admit_actor_tx(c, universe, actor_role_id, identity_token)
+            catalog = self._catalog_tx(c, universe, actor_role_id)
+            return [d for d in catalog if d["access"] == "read"] if identity and identity["access_mode"] == "observe" else catalog
 
     def _catalog_tx(self, c, universe, actor_role_id):
         rows = c.execute(
@@ -356,6 +359,8 @@ class RuntimeFunctions:
                 identifier(event.kind, "event kind")
                 if not isinstance(event.payload, dict):
                     raise InvalidArguments("event payload must be an object")
+                if event.kind == PRESENTATION_KIND:
+                    validate_cue(event.payload)
                 total += len(json_text(event.payload).encode())
             if total > MAX_RESULT_BYTES:
                 raise InvalidArguments("event batch exceeds size budget")
@@ -446,7 +451,7 @@ class RuntimeFunctions:
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             now = time.time()  # Admission time is AFTER the database write lock.
-            self._admit_actor_tx(c, universe, actor_role_id, identity_token)
+            self._admit_actor_tx(c, universe, actor_role_id, identity_token, require_control=True)
             old = c.execute(
                 "SELECT * FROM operations WHERE universe=? AND actor_role_id=? AND idempotency_key=?",
                 (universe, actor_role_id, operation_id),
@@ -494,7 +499,7 @@ class RuntimeFunctions:
             outcome = self._run_user_code(c, handler, ctx, arguments)
             self._validate_outcome(outcome, desc)
             # Expiry during rule evaluation cannot turn into a late unauthorized commit.
-            self._admit_actor_tx(c, universe, actor_role_id, identity_token)
+            self._admit_actor_tx(c, universe, actor_role_id, identity_token, require_control=True)
             if activity_claim:
                 self._validate_claim_tx(c, universe, actor_role_id, activity_claim, time.time())
             receipt = self._commit_outcome_tx(

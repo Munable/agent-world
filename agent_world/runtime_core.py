@@ -75,9 +75,10 @@ from .runtime_activities import RuntimeActivities
 from .runtime_journal import RuntimeJournal
 from .runtime_views import RuntimeViews
 from .runtime_timers import RuntimeTimers
+from .retention import RuntimeRetention
 
 
-class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJournal, RuntimeViews, RuntimeTimers):
+class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJournal, RuntimeViews, RuntimeTimers, RuntimeRetention):
     def __init__(self, db_path: str | Path):
         if str(db_path) == ":memory:":
             raise ValueError("WorldRuntime requires a file-backed SQLite database")
@@ -124,7 +125,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     @staticmethod
     def _schema_script(c, script):
         c.execute("BEGIN IMMEDIATE")
-        if c.execute("PRAGMA user_version").fetchone()[0] > 3:
+        if c.execute("PRAGMA user_version").fetchone()[0] > 4:
             raise WorldVersionMismatch("database schema is newer than this runtime")
         for statement in script.split(";"):
             statement = statement.strip()
@@ -133,7 +134,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
 
     def _init_db(self) -> None:
         with self._conn() as c:
-            if c.execute("PRAGMA user_version").fetchone()[0] > 3:
+            if c.execute("PRAGMA user_version").fetchone()[0] > 4:
                 raise WorldVersionMismatch("database schema is newer than this runtime")
             self._enable_wal(c)
             self._schema_script(
@@ -295,7 +296,9 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             self._init_journal_tx(c)
             self._init_views_tx(c)
             self._init_timers_tx(c)
-            c.execute("PRAGMA user_version=3")
+            if "access_mode" not in {r["name"] for r in c.execute("PRAGMA table_info(identity_tokens)")}:
+                c.execute("ALTER TABLE identity_tokens ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'control'")
+            c.execute("PRAGMA user_version=4")
             c.execute("COMMIT")
 
     @staticmethod
@@ -454,11 +457,14 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         ttl_seconds: float | None = None,
         now: float | None = None,
         token_override: str | None = None,
+        access_mode: str = "control",
     ) -> dict[str, Any]:
         identifier(universe, "universe")
         identifier(role_id, "role_id")
         if ttl_seconds is not None:
             ttl_seconds = duration(ttl_seconds, "identity ttl_seconds", 315360000)
+        if not isinstance(access_mode, str) or access_mode not in {"control", "observe"}:
+            raise InvalidArguments("identity access_mode must be control or observe")
         issued_at = time.time() if now is None else now
         expires_at = issued_at + ttl_seconds if ttl_seconds is not None else None
         for _ in range(5):
@@ -468,8 +474,8 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             try:
                 conn.execute(
                     """INSERT INTO identity_tokens(
-                         token_id,token_hash,universe,role_id,created_at,expires_at,revoked_at
-                       ) VALUES(?,?,?,?,?,?,NULL)""",
+                         token_id,token_hash,universe,role_id,created_at,expires_at,revoked_at,access_mode
+                       ) VALUES(?,?,?,?,?,?,NULL,?)""",
                     (
                         token_id,
                         token_hash,
@@ -477,6 +483,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                         role_id,
                         issued_at,
                         expires_at,
+                        access_mode,
                     ),
                 )
                 return {
@@ -486,16 +493,17 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                     "role_id": role_id,
                     "created_at": issued_at,
                     "expires_at": expires_at,
+                    "access_mode": access_mode,
                 }
             except sqlite3.IntegrityError:
                 continue
         raise InvalidIdentityToken("could not allocate a unique identity token")
 
-    def issue_identity_token(self, universe, role_id, *, ttl_seconds=None):
+    def issue_identity_token(self, universe, role_id, *, ttl_seconds=None, access_mode="control"):
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             self._admit_actor_tx(c, universe, role_id)
-            return self._issue_identity_token_tx(c, universe, role_id, ttl_seconds=ttl_seconds)
+            return self._issue_identity_token_tx(c, universe, role_id, ttl_seconds=ttl_seconds, access_mode=access_mode)
 
     def _identity_metadata_tx(self, c, token, *, universe=None, role_id=None):
         if not isinstance(token, str) or not token.startswith("awid_") or len(token) > 256:
@@ -516,13 +524,16 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             raise IdentityScopeMismatch("identity token belongs to another universe")
         if role_id is not None and row["role_id"] != role_id:
             raise IdentityScopeMismatch("identity token belongs to another role")
-        return {key: row[key] for key in ("token_id", "universe", "role_id", "created_at", "expires_at")}
+        return {key: row[key] for key in ("token_id", "universe", "role_id", "created_at", "expires_at", "access_mode")}
 
-    def _admit_actor_tx(self, c, universe, role_id, identity_token=None):
+    def _admit_actor_tx(self, c, universe, role_id, identity_token=None, *, require_control=False):
         identifier(universe, "universe")
         identifier(role_id, "role_id")
         if identity_token is not None:
-            return self._identity_metadata_tx(c, identity_token, universe=universe, role_id=role_id)
+            identity = self._identity_metadata_tx(c, identity_token, universe=universe, role_id=role_id)
+            if require_control and identity["access_mode"] != "control":
+                raise PermissionDenied("observation credential cannot control this role")
+            return identity
         # Omitting a token is only for trusted in-process code and explicit test mode.
         row = c.execute("SELECT status FROM roles WHERE role_id=?", (role_id,)).fetchone()
         if row is not None and row["status"] != "active":
@@ -578,7 +589,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             c.execute("BEGIN IMMEDIATE")
             try:
                 row = c.execute(
-                    """SELECT t.universe,t.role_id,t.revoked_at,
+                    """SELECT t.universe,t.role_id,t.revoked_at,t.access_mode,
                               r.status AS role_status
                        FROM identity_tokens t
                        LEFT JOIN roles r ON r.role_id=t.role_id
@@ -598,6 +609,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                     row["role_id"],
                     ttl_seconds=ttl_seconds,
                     now=now,
+                    access_mode=row["access_mode"],
                 )
                 c.execute(
                     "UPDATE identity_tokens SET revoked_at=? WHERE token_id=?",
@@ -858,20 +870,21 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             now = time.time()
-            self._admit_actor_tx(c, universe, role_id, identity_token)
+            identity = self._admit_actor_tx(c, universe, role_id, identity_token)
             self._check_world_tx(c, universe)
-            if record_presence:
+            if record_presence and (identity is None or identity["access_mode"] == "control"):
                 c.execute(
                     "INSERT INTO role_world_presence(universe,role_id,first_bootstrap_at,last_bootstrap_at,bootstrap_count) "
                     "VALUES(?,?,?,?,1) ON CONFLICT(universe,role_id) DO UPDATE SET "
                     "last_bootstrap_at=excluded.last_bootstrap_at,bootstrap_count=role_world_presence.bootstrap_count+1",
                     (universe, role_id, now, now),
                 )
-            c.execute(
-                "UPDATE activities SET status='expired' WHERE universe=? AND status='active' "
-                "AND expires_at IS NOT NULL AND expires_at<=?",
-                (universe, now),
-            )
+            if identity is None or identity["access_mode"] == "control":
+                c.execute(
+                    "UPDATE activities SET status='expired' WHERE universe=? AND status='active' "
+                    "AND expires_at IS NOT NULL AND expires_at<=?",
+                    (universe, now),
+                )
             floor_row = c.execute("SELECT floor FROM event_floors WHERE universe=?", (universe,)).fetchone()
             floor = int(floor_row["floor"]) if floor_row else 0
             latest = max(
@@ -884,8 +897,9 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             )
             rows = c.execute(
                 "SELECT universe,activity_id,role_id,kind,exclusive_group,status,expires_at,created_at "
-                "FROM activities WHERE universe=? AND role_id=? AND status='active' ORDER BY activity_id LIMIT 51",
-                (universe, role_id),
+                "FROM activities WHERE universe=? AND role_id=? AND status='active' "
+                "AND (expires_at IS NULL OR expires_at>?) ORDER BY activity_id LIMIT 51",
+                (universe, role_id, now),
             ).fetchall()
             profile = c.execute("SELECT * FROM roles WHERE role_id=?", (role_id,)).fetchone()
             definition = self._worlds.get(universe)
@@ -917,7 +931,8 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 "discovery": {"tool": "world.discover", "include_schemas": True},
             }
             if include_catalog:
-                result["functions"] = self._catalog_tx(c, universe, role_id)
+                catalog = self._catalog_tx(c, universe, role_id)
+                result["functions"] = [d for d in catalog if d["access"] == "read"] if identity and identity["access_mode"] == "observe" else catalog
             json_text(result)
         return result
 

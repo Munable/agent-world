@@ -1,4 +1,4 @@
-# Foundation contract 0.11
+# Foundation contract 0.12
 
 This is a versioned development contract, not a claim of production completeness.
 The runtime owns transport, identity admission, transactions, receipts and event cursors.
@@ -109,7 +109,7 @@ Initialization runs once. Migration, state validation, registry changes and mani
 Failure leaves prior data and version intact. Missing steps, downgrades and same-version manifest drift are rejected.
 After upgrade, an old process loaded with a previous world definition refuses new rule execution.
 Restart it with the matching package. A committed receipt can still be recovered.
-Back up real databases before upgrading; the additive runtime schema currently has version 3.
+Back up real databases before upgrading; the additive runtime schema currently has version 4.
 Existing values are journaled once as an explicit baseline; unavailable old versions are not reconstructed.
 
 ## Data and observation plane
@@ -124,6 +124,13 @@ See [WORLD_DATA.md](WORLD_DATA.md) for the contract, client usage and remaining 
 Optional `TimerSpec` hooks support server-owned one-shot obligations. Scheduling and cancellation
 commit with world Actions; firing uses the same state/history/receipt pipeline. World policy,
 not a saved bearer token, determines authority at the due time. See [DURABLE_TIME.md](DURABLE_TIME.md).
+
+## Reference consumer boundary
+
+[REFERENCE_GATE.md](REFERENCE_GATE.md) defines the bounded gate before building an independent world.
+[RETENTION_PRESENTATION.md](RETENTION_PRESENTATION.md) defines observer-only credentials, optional
+retention, metadata-only history and the ordered public cue feed. These do not imply full accounts
+or a complete production asset system.
 
 ## Deployment and explicit limits
 

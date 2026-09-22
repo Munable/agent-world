@@ -62,6 +62,10 @@ CLAIM = {
 }
 
 CORE = {
+    "world.view_timeline": (
+        "Read ordered public presentation cues for an authorized view checkpoint; reset if history expired.",
+        {"cursor": STRING, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, ["cursor"], True,
+    ),
     "world.list_views": (
         "Discover bounded observer projections for Agent or human clients.",
         {"after": {"type": "string", "maxLength": 128},
@@ -301,6 +305,8 @@ class WorldGateway:
     def call(self, name, arguments, authorization=None):
         role, token, args = self.prepare(name, arguments, authorization)
         r, u = self.runtime, self.universe
+        if name == "world.view_timeline":
+            return r.view_timeline(u, role, args["cursor"], limit=args.get("limit", 50), identity_token=token)
         if name == "world.list_views":
             return r.list_views(u, role, identity_token=token, **args)
         if name == "world.view_snapshot":

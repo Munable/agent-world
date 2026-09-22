@@ -18,6 +18,7 @@ from .world_context import FunctionContext
 from .world_types import EventSpec, FunctionOutcome
 from .world_views import ViewSpec
 from .world_timers import TimerSpec
+from .retention import RetentionPolicy
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,15 @@ class StateRule:
     scope_prefix: str
     key_prefix: str
     schema: dict
+    history: str = "full"
+
+    def contract(self):
+        if self.history not in {"full", "metadata"}:
+            raise WorldDefinitionError("state history must be full or metadata")
+        value = {"scope_prefix": self.scope_prefix, "key_prefix": self.key_prefix, "schema": self.schema}
+        if self.history != "full":
+            value["history"] = self.history
+        return value
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,7 @@ class WorldDefinition:
     entry_instructions: str = "Discover the world functions, then inspect the current state before acting."
     views: tuple[ViewSpec, ...] = ()
     timers: tuple[TimerSpec, ...] = ()
+    retention: RetentionPolicy | None = None
 
     def manifest(self):
         identifier(self.world_id, "world_id")
@@ -104,16 +115,17 @@ class WorldDefinition:
             "api_version": self.api_version,
             "strict_state": self.strict_state,
             "functions": [f.contract() for f in self.functions],
-            "state_rules": [
-                {"scope_prefix": r.scope_prefix, "key_prefix": r.key_prefix, "schema": r.schema}
-                for r in self.state_rules
-            ],
+            "state_rules": [r.contract() for r in self.state_rules],
             "entry_instructions": self.entry_instructions,
         }
         if self.views:
             value["views"] = [v.contract() for v in self.views]
         if self.timers:
             value["timers"] = [t.contract() for t in self.timers]
+        if self.retention is not None:
+            if not isinstance(self.retention, RetentionPolicy):
+                raise WorldDefinitionError("invalid retention policy")
+            value["retention"] = self.retention.contract()
         json_text(value)
         return value
 
@@ -213,6 +225,7 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
                 c, universe, journal_marker, actor_role_id="system:installer",
                 function_id="world.install", source="migration" if old else "initialize",
                 world_version=definition.version,
+                history_definition=definition,
             )
             runtime._bind_timer_transitions_tx(c, transitions, commit_seq)
     # Publish handlers only after the entire migration and registry transaction commits.

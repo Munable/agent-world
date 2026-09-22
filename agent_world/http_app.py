@@ -132,6 +132,10 @@ def create_app(
         return await call("world.list_views", {**role_args(role_id), "after": after,
                           "limit": limit, "include_schemas": include_schemas}, request)
 
+    @app.post("/v1/views/timeline")
+    async def view_timeline(body: dict[str, Any], request: Request):
+        return await call("world.view_timeline", body, request)
+
     @app.post("/v1/views/sync")
     async def sync_view(body: dict[str, Any], request: Request):
         return await call("world.view_sync", body, request)

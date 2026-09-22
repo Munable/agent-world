@@ -14,6 +14,7 @@ from .mcp_app import create_mcp_app, BearerIdentityMiddleware
 from .product_app import create_product_app
 from .universe_loader import get_universe_installer
 from .timer_worker import timer_lifespan
+from .maintenance import retention_lifespan
 
 
 def create_application(
@@ -71,8 +72,9 @@ def create_application(
     @asynccontextmanager
     async def lifespan(app):
         async with mcp_base.router.lifespan_context(mcp_base):
-            async with timer_lifespan(mcp_runtime, universe, enabled=timers_enabled, interval=timer_interval):
-                yield
+            async with retention_lifespan(mcp_runtime, universe):
+                async with timer_lifespan(mcp_runtime, universe, enabled=timers_enabled, interval=timer_interval):
+                    yield
 
     app = Starlette(routes=[Mount("/", app=Dispatch())], lifespan=lifespan)
     app.state.runtime = mcp_runtime

@@ -34,6 +34,7 @@ class ViewSpec:
     authorize: Callable | None = None
     visible_to: Callable | None = None
     output_schema: dict | None = None
+    timeline: bool = False
 
     def contract(self):
         identifier(self.name, "view name")
@@ -53,6 +54,10 @@ class ViewSpec:
             check_schema(self.output_schema)
         value = {"name": self.name, "version": self.version, "description": self.description,
                  "renderer": self.renderer, "input_schema": self.input_schema}
+        if type(self.timeline) is not bool:
+            raise WorldDefinitionError("timeline flag must be boolean")
+        if self.timeline:
+            value["timeline"] = True
         if self.output_schema is not None:
             value["output_schema"] = self.output_schema
         return value

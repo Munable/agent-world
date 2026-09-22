@@ -82,6 +82,7 @@ Sync recomputes the authorized projection, including changes to visibility or ro
 then compares it with the previous projected view. It never streams raw history.
 Object/resource removal must be applied by the client, including when visibility is withdrawn.
 Net deltas are NOT an animation timeline, individual event replay, or deterministic re-execution.
+0.12 adds a separate opt-in [public cue timeline](RETENTION_PRESENTATION.md) on existing recipient events.
 A delta can skip intermediate states; gameplay timelines need a separate world event contract.
 
 Checkpoints bind universe, role, credential, view, selector and world/view versions.

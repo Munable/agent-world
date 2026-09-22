@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError, SchemaError
 from .runtime_errors import InvalidArguments, RegistryConflict, SchemaRejected
 
-PROTOCOL_VERSION = "0.11"
+PROTOCOL_VERSION = "0.12"
 SDK_API_VERSION = 1
 CORE_TOOL_NAMES = frozenset(
     {
@@ -17,6 +17,7 @@ CORE_TOOL_NAMES = frozenset(
         "world.list_views",
         "world.view_snapshot",
         "world.view_sync",
+        "world.view_timeline",
         "world.discover",
         "world.get_receipt",
         "world.start_activity",

@@ -171,7 +171,10 @@ def create_mcp_server(db_path: str | pathlib.Path, universe="demo", *, auth_requ
             actor_role_id=identity["role_id"] if identity else None,
             identity_token=token,
         )
-        tools = _core_tools(auth_required) + [_function_tool(desc, universe, auth_required) for desc in descs]
+        core = _core_tools(auth_required)
+        if identity and identity["access_mode"] == "observe":
+            core = [t for t in core if CORE[t.name][3] or t.name == "world.bootstrap"]
+        tools = core + [_function_tool(desc, universe, auth_required) for desc in descs]
         tools.sort(key=lambda tool: tool.name)
         cursor = getattr(params, "cursor", None) or ""
         if not isinstance(cursor, str) or len(cursor) > 128:
