@@ -123,6 +123,16 @@ def create_onboarding_app(
     ):
         require_operator(x_operator_key)
         return runtime.get_role(role_id)
+
+    @app.get("/v1/roles/{role_id}/entry-status")
+    def get_role_entry_status(
+        role_id: str,
+        x_operator_key: str | None = Header(
+            default=None, alias="X-Operator-Key"
+        ),
+    ):
+        require_operator(x_operator_key)
+        return runtime.get_role_entry_status(universe, role_id)
     @app.patch("/v1/roles/{role_id}")
     def update_role(
         role_id: str,

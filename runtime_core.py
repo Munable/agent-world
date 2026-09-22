@@ -290,6 +290,14 @@ class WorldRuntime:
                 );
                 CREATE INDEX IF NOT EXISTS idx_identity_tokens_scope
                   ON identity_tokens(universe,role_id);
+                CREATE TABLE IF NOT EXISTS role_world_presence(
+                  universe TEXT NOT NULL,
+                  role_id TEXT NOT NULL,
+                  first_bootstrap_at REAL NOT NULL,
+                  last_bootstrap_at REAL NOT NULL,
+                  bootstrap_count INTEGER NOT NULL,
+                  PRIMARY KEY(universe,role_id)
+                );
                 """
             )
             row = c.execute(
@@ -830,6 +838,66 @@ class WorldRuntime:
                 float(row["used_at"]) if row["used_at"] is not None else None
             ),
             "used_token_id": row["used_token_id"],
+        }
+
+    def get_role_entry_status(
+        self,
+        universe: str,
+        role_id: str,
+    ) -> dict[str, Any]:
+        role = self.get_role(role_id)
+        with self._conn() as c:
+            presence = c.execute(
+                """SELECT first_bootstrap_at,last_bootstrap_at,bootstrap_count
+                   FROM role_world_presence
+                   WHERE universe=? AND role_id=?""",
+                (universe, role_id),
+            ).fetchone()
+            ticket = c.execute(
+                """SELECT ticket_id,created_at,expires_at,used_at,used_token_id
+                   FROM join_tickets
+                   WHERE universe=? AND role_id=?
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                (universe, role_id),
+            ).fetchone()
+            latest_event = int(
+                c.execute(
+                    """SELECT COALESCE(MAX(seq),0) FROM events
+                       WHERE universe=? AND recipient_role_id=?""",
+                    (universe, role_id),
+                ).fetchone()[0]
+            )
+        return {
+            "universe": universe,
+            "role_profile": role,
+            "join_ticket": (
+                {
+                    "ticket_id": ticket["ticket_id"],
+                    "created_at": float(ticket["created_at"]),
+                    "expires_at": float(ticket["expires_at"]),
+                    "used_at": (
+                        float(ticket["used_at"])
+                        if ticket["used_at"] is not None
+                        else None
+                    ),
+                    "used_token_id": ticket["used_token_id"],
+                }
+                if ticket is not None
+                else None
+            ),
+            "presence": (
+                {
+                    "first_bootstrap_at": float(presence["first_bootstrap_at"]),
+                    "last_bootstrap_at": float(presence["last_bootstrap_at"]),
+                    "bootstrap_count": int(presence["bootstrap_count"]),
+                }
+                if presence is not None
+                else None
+            ),
+            "latest_recipient_event_seq": latest_event,
+            "identity_claimed": bool(ticket and ticket["used_at"] is not None),
+            "entered_world": presence is not None,
         }
 
     def register_function(
@@ -1555,6 +1623,15 @@ class WorldRuntime:
     def bootstrap(self, universe: str, role_id: str) -> dict[str, Any]:
         now = time.time()
         with self._conn() as c:
+            c.execute(
+                """INSERT INTO role_world_presence(
+                     universe,role_id,first_bootstrap_at,last_bootstrap_at,bootstrap_count
+                   ) VALUES(?,?,?,?,1)
+                   ON CONFLICT(universe,role_id) DO UPDATE SET
+                     last_bootstrap_at=excluded.last_bootstrap_at,
+                     bootstrap_count=role_world_presence.bootstrap_count+1""",
+                (universe, role_id, now, now),
+            )
             # Bootstrap must not advertise time-expired activities as active
             # merely because no separate cleanup sweep has run yet.
             c.execute(
