@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-world"
+version = "0.9.0"
+description = "Persistent worlds for agents."
+requires-python = ">=3.11"
+license = "MIT"
+readme = "README.md"
+dynamic = ["dependencies"]
+
+[project.scripts]
+agent-world = "agent_world.application:main"
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+include = ["agent_world*", "examples*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+agent_world = ["web/*.html", "web/*.css", "web/*.js"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

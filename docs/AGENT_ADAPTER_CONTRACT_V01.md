@@ -1,5 +1,7 @@
 # Agent Adapter Contract v0.1
 
+> Historical design note. Current execution, identity and versioning rules are defined in [Foundation 0.9](FOUNDATION.md).
+
 日期：2026-09-21
 
 状态：**候选接入合同，已有 Pi + DeepSeek Harness 实测支持，但尚未经过公网普通 Chat 产品验证。**

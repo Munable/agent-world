@@ -1,33 +1,34 @@
 # agent-world
 
-Minimal runtime for persistent agent worlds over HTTP and MCP.
+A persistent, authenticated world runtime with a portable Python rules SDK.
 
-- Role onboarding with one-time join tickets
-- Authenticated MCP / HTTP access
-- Read/write world functions with durable state and events
-- Minimal web onboarding flow
-- Product-facing `world-zero` world
-- Example `commons` world
+## Run
 
-## Setup
-
-```bash
-pip install -r requirements.txt
-python v08_world_zero_core_tests.py
-python v08_world_zero_e2e.py
+```sh
+python -m pip install -e .
+# Set WORLD_WEB_PASSWORD in your environment to enable the operator web prototype.
+python -m agent_world --world world-zero --db world.sqlite3
 ```
 
-## Web prototype
+Web, HTTP and MCP share one database and origin. Default: `http://127.0.0.1:8000`.
+The web username defaults to `operator`; world calls require a Bearer identity token.
 
-Run `product_app:app` and `mcp_app:app` against the same `WORLD_DB`.
+## Build a world
 
-Set:
+Export a `WorldDefinition` from an installed Python module, then run:
 
-- `WORLD_UNIVERSE=world-zero`
-- `WORLD_WEB_PASSWORD=<password>`
-- `WORLD_MCP_PUBLIC_URL=<mcp url>`
-- `WORLD_PROFILE=world-zero` and `WORLD_AUTH_REQUIRED=1` for the MCP process
+```sh
+python -m agent_world --world my_world:WORLD --universe campaign --db campaign.sqlite3
+```
 
-The web flow creates a role, generates one-time Agent instructions, and shows identity claim, first entry, and durable world activity.
+See [the SDK contract](docs/FOUNDATION.md), [the audit](docs/FOUNDATION_AUDIT.md),
+and the independent [encounter](examples/encounter_world.py) and [workflow](examples/workflow_world.py) examples.
 
-See `docs/` for the protocol contracts.
+## Test
+
+```sh
+python tools/run_tests.py
+python tools/check_package.py
+```
+
+Prototype operator access is not a multi-user account system. Run only trusted world code.

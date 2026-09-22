@@ -7,8 +7,8 @@ import threading
 import time
 import traceback
 
-from demo_universe import install_demo_universe
-from runtime_core import (
+from agent_world.demo_universe import install_demo_universe
+from agent_world.runtime_core import (
     ActivityConflict,
     ClaimBusy,
     ClaimFenced,
@@ -457,11 +457,17 @@ def _():
     )
     retry = w.start_activity(
         "demo", "same-job", "A", "research",
-        exclusive_group="work", ttl_seconds=999,
+        exclusive_group="work", ttl_seconds=5,
     )
     assert first["replayed"] is False
     assert retry["replayed"] is True
     assert retry["expires_at"] == first["expires_at"]
+    try:
+        w.start_activity("demo", "same-job", "A", "research", exclusive_group="work", ttl_seconds=999)
+    except ActivityConflict:
+        pass
+    else:
+        raise AssertionError("changed activity TTL must be a conflicting intent")
 
 
 @test("start_activity_same_id_different_shape_conflicts")

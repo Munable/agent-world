@@ -5,8 +5,8 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
-from http_app import create_app
-from onboarding_app import create_onboarding_app
+from agent_world.http_app import create_app
+from agent_world.onboarding_app import create_onboarding_app
 
 
 def main() -> None:

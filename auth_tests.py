@@ -6,8 +6,8 @@ import time
 
 from fastapi.testclient import TestClient
 
-from http_app import create_app
-from runtime_core import InvalidIdentityToken
+from agent_world.http_app import create_app
+from agent_world.runtime_core import InvalidIdentityToken
 
 
 def expect_status(response, status: int):

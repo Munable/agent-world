@@ -71,7 +71,7 @@ function updateStatus(status) {
     claimedStatus,
     status.identity_claimed,
     status.identity_claimed
-      ? "Identity claimed " + formatTime(ticket && ticket.used_at)
+      ? "Identity claimed " + formatTime(status.identity_claimed_at)
       : "Waiting for the agent to exchange the join ticket."
   );
   setDone(
@@ -83,8 +83,8 @@ function updateStatus(status) {
   );
   setDone(
     activityStatus,
-    status.latest_recipient_event_seq > 0,
-    status.latest_recipient_event_seq > 0
+    status.world_action_count > 0,
+    status.world_action_count > 0
       ? "Durable world activity exists · latest event " + status.latest_recipient_event_seq
       : "Waiting for the role to take its first durable world action."
   );

@@ -12,6 +12,7 @@ import time
 
 import httpx
 from mcp import ClientSession
+from agent_world.runtime_contracts import CORE_TOOL_NAMES
 from mcp.client.streamable_http import streamable_http_client
 
 
@@ -142,7 +143,7 @@ async def main() -> None:
             http_a, transport_a, session_a = await open_session(token_a)
             tools = await session_a.list_tools()
             by_name = {tool.name: tool for tool in tools.tools}
-            assert len(by_name) == 8
+            assert set(by_name) == CORE_TOOL_NAMES | {'commons.board.list', 'commons.board.post', 'commons.note.send'}
             assert {
                 "commons.board.post",
                 "commons.board.list",

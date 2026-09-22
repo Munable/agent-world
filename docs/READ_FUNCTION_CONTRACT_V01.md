@@ -1,5 +1,7 @@
 # Read Function Contract v0.1
 
+> Historical design note. Current execution, identity and versioning rules are defined in [Foundation 0.9](FOUNDATION.md).
+
 Date: 2026-09-21
 
 Function Registry access is now executable semantics, not metadata only.

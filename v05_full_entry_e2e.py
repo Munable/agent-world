@@ -11,6 +11,7 @@ import time
 
 import httpx
 from mcp import ClientSession
+from agent_world.runtime_contracts import CORE_TOOL_NAMES
 from mcp.client.streamable_http import streamable_http_client
 
 
@@ -68,7 +69,7 @@ async def mcp_phase(token: str, role_id: str) -> dict:
                 init = await session.initialize()
                 tools = await session.list_tools()
                 by_name = {tool.name: tool for tool in tools.tools}
-                assert len(by_name) == 8
+                assert set(by_name) == CORE_TOOL_NAMES | {'activity.score.add', 'counter.increment', 'counter.get'}
                 assert "role_id" not in by_name["world.bootstrap"].input_schema["properties"]
                 assert "role_id" not in by_name["counter.increment"].input_schema["properties"]
                 assert "operation_id" not in by_name["counter.get"].input_schema["properties"]

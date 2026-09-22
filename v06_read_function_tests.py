@@ -4,8 +4,8 @@ import pathlib
 import sqlite3
 import tempfile
 
-from demo_universe import install_demo_universe
-from runtime_core import (
+from agent_world.demo_universe import install_demo_universe
+from agent_world.runtime_core import (
     EventSpec,
     FunctionContext,
     FunctionOutcome,

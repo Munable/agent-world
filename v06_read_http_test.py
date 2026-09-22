@@ -6,7 +6,7 @@ import tempfile
 
 from fastapi.testclient import TestClient
 
-from http_app import create_app
+from agent_world.http_app import create_app
 
 
 def main() -> None:

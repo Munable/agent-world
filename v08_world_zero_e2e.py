@@ -12,6 +12,7 @@ import time
 
 import httpx
 from mcp import ClientSession
+from agent_world.runtime_contracts import CORE_TOOL_NAMES
 from mcp.client.streamable_http import streamable_http_client
 
 
@@ -148,7 +149,7 @@ async def main() -> None:
             http_a, transport_a, session_a, init_a = await open_session(token_a)
             tools = await session_a.list_tools()
             by_name = {tool.name: tool for tool in tools.tools}
-            assert len(by_name) == 9
+            assert set(by_name) == CORE_TOOL_NAMES | {'world.list_places', 'world.leave_mark', 'world.visit', 'world.observe'}
             assert "operation_id" not in by_name["world.list_places"].input_schema["properties"]
             assert "operation_id" not in by_name["world.observe"].input_schema["properties"]
             assert "operation_id" in by_name["world.visit"].input_schema["properties"]

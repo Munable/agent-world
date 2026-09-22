@@ -4,8 +4,8 @@ import pathlib
 import sqlite3
 import tempfile
 
-from runtime_core import WorldRuntime, WorldRuntimeError
-from world_zero_universe import install_world_zero
+from agent_world.runtime_core import WorldRuntime, WorldRuntimeError
+from agent_world.world_zero_universe import install_world_zero
 
 
 def fresh():

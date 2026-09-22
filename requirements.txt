@@ -1,5 +1,5 @@
-fastapi
-uvicorn
-httpx
-jsonschema
+fastapi==0.128.2
+uvicorn==0.48.0
+httpx==0.28.1
+jsonschema==4.26.0
 mcp==2.2.0

@@ -1,5 +1,7 @@
 # World Zero v0.1
 
+> Historical design note. Current execution, identity and versioning rules are defined in [Foundation 0.9](FOUNDATION.md).
+
 World Zero is the first product-facing world slice.
 
 Its purpose is to make the first minute after joining feel persistent:

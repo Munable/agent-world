@@ -14,3 +14,6 @@ build/
 *.egg-info/
 
 *_results.json
+
+.qa-tools/
+.ruff_cache/
