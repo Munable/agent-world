@@ -20,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 class LiveServer:
     def __init__(self, profile="demo"):
         self.profile = profile
+        self.startup_timeout = float(os.getenv("WORLD_TEST_STARTUP_TIMEOUT", "60"))
+        if not 1 <= self.startup_timeout <= 300:
+            raise ValueError("test startup timeout must be between 1 and 300 seconds")
 
     def __enter__(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -55,7 +58,7 @@ class LiveServer:
         )
         try:
             with httpx.Client(trust_env=False, timeout=0.3) as client:
-                deadline = time.monotonic() + 60
+                deadline = time.monotonic() + self.startup_timeout
                 last_probe = "not attempted"
                 while time.monotonic() < deadline:
                     if self.proc.poll() is not None:

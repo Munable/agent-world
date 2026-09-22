@@ -6,6 +6,7 @@ import pathlib
 import threading
 import time
 import traceback
+from unittest.mock import patch
 
 from agent_world.demo_universe import install_demo_universe
 from agent_world.runtime_core import (
@@ -258,50 +259,52 @@ def _():
 
 @test("expired_claim_can_be_taken_over_with_higher_epoch")
 def _():
-    w, _ = fresh("13")
-    w.start_activity("demo", "job-1", "A", "research", ttl_seconds=5)
-    old = w.claim_activity("demo", "job-1", "A", "runtime-A", lease_seconds=0.08)
-    time.sleep(0.11)
-    new = w.claim_activity("demo", "job-1", "A", "runtime-B", lease_seconds=2)
-    assert old["claim_epoch"] == 1
-    assert new["claim_epoch"] == 2
+    with patch("time.time", return_value=1000.0) as clock:
+        w, _ = fresh("13")
+        w.start_activity("demo", "job-1", "A", "research", ttl_seconds=5)
+        old = w.claim_activity("demo", "job-1", "A", "runtime-A", lease_seconds=0.08)
+        clock.return_value += 0.11
+        new = w.claim_activity("demo", "job-1", "A", "runtime-B", lease_seconds=2)
+        assert old["claim_epoch"] == 1
+        assert new["claim_epoch"] == 2
 
 
 @test("stale_claim_is_fenced_before_world_state_change")
 def _():
-    w, _ = fresh("14")
-    w.start_activity("demo", "job-1", "A", "research", ttl_seconds=5)
-    old = w.claim_activity("demo", "job-1", "A", "runtime-A", lease_seconds=0.08)
-    time.sleep(0.11)
-    new = w.claim_activity("demo", "job-1", "A", "runtime-B", lease_seconds=2)
+    with patch("time.time", return_value=1000.0) as clock:
+        w, _ = fresh("14")
+        w.start_activity("demo", "job-1", "A", "research", ttl_seconds=5)
+        old = w.claim_activity("demo", "job-1", "A", "runtime-A", lease_seconds=0.08)
+        clock.return_value += 0.11
+        new = w.claim_activity("demo", "job-1", "A", "runtime-B", lease_seconds=2)
 
-    try:
-        w.invoke_function(
+        try:
+            w.invoke_function(
+                "demo",
+                "activity.score.add",
+                "A",
+                {"delta": 7},
+                operation_id="stale-submit",
+                activity_claim=old,
+            )
+        except ClaimFenced:
+            pass
+        else:
+            raise AssertionError("stale runtime mutated world state")
+
+        assert w.get_state("demo", "activity:job-1", "score", 0)["value"] == 0
+        assert w.read_changes("demo", "A", 0) == []
+
+        ok = w.invoke_function(
             "demo",
             "activity.score.add",
             "A",
             {"delta": 7},
-            operation_id="stale-submit",
-            activity_claim=old,
+            operation_id="fresh-submit",
+            activity_claim=new,
         )
-    except ClaimFenced:
-        pass
-    else:
-        raise AssertionError("stale runtime mutated world state")
-
-    assert w.get_state("demo", "activity:job-1", "score", 0)["value"] == 0
-    assert w.read_changes("demo", "A", 0) == []
-
-    ok = w.invoke_function(
-        "demo",
-        "activity.score.add",
-        "A",
-        {"delta": 7},
-        operation_id="fresh-submit",
-        activity_claim=new,
-    )
-    assert ok["result"]["score"] == 7
-    assert w.get_state("demo", "activity:job-1", "score")["value"] == 7
+        assert ok["result"]["score"] == 7
+        assert w.get_state("demo", "activity:job-1", "score")["value"] == 7
 
 
 @test("concurrent_claim_has_exactly_one_winner")
@@ -519,62 +522,65 @@ def _():
 
 @test("activity_expiry_fences_claim_before_mutation")
 def _():
-    w, _ = fresh("25")
-    w.start_activity("demo", "job", "A", "research", ttl_seconds=0.08)
-    proof = w.claim_activity("demo", "job", "A", "runtime-A", lease_seconds=2)
-    time.sleep(0.11)
-    try:
-        w.invoke_function(
-            "demo", "activity.score.add", "A", {"delta": 5},
-            operation_id="after-activity-expired", activity_claim=proof,
-        )
-    except ClaimFenced:
-        pass
-    else:
-        raise AssertionError("expired activity accepted a mutation")
-    assert w.get_state("demo", "activity:job", "score", 0)["value"] == 0
+    with patch("time.time", return_value=1000.0) as clock:
+        w, _ = fresh("25")
+        w.start_activity("demo", "job", "A", "research", ttl_seconds=0.08)
+        proof = w.claim_activity("demo", "job", "A", "runtime-A", lease_seconds=2)
+        clock.return_value += 0.11
+        try:
+            w.invoke_function(
+                "demo", "activity.score.add", "A", {"delta": 5},
+                operation_id="after-activity-expired", activity_claim=proof,
+            )
+        except ClaimFenced:
+            pass
+        else:
+            raise AssertionError("expired activity accepted a mutation")
+        assert w.get_state("demo", "activity:job", "score", 0)["value"] == 0
 
 
 @test("failed_stale_attempt_can_retry_same_operation_with_fresh_claim")
 def _():
-    w, _ = fresh("26")
-    w.start_activity("demo", "job", "A", "research", ttl_seconds=5)
-    old = w.claim_activity("demo", "job", "A", "old", lease_seconds=0.08)
-    time.sleep(0.11)
-    new_claim = w.claim_activity("demo", "job", "A", "new", lease_seconds=2)
-    try:
-        w.invoke_function(
+    with patch("time.time", return_value=1000.0) as clock:
+        w, _ = fresh("26")
+        w.start_activity("demo", "job", "A", "research", ttl_seconds=5)
+        old = w.claim_activity("demo", "job", "A", "old", lease_seconds=0.08)
+        clock.return_value += 0.11
+        new_claim = w.claim_activity("demo", "job", "A", "new", lease_seconds=2)
+        try:
+            w.invoke_function(
+                "demo", "activity.score.add", "A", {"delta": 4},
+                operation_id="retry-me", activity_claim=old,
+            )
+        except ClaimFenced:
+            pass
+        else:
+            raise AssertionError("stale attempt unexpectedly succeeded")
+        result = w.invoke_function(
             "demo", "activity.score.add", "A", {"delta": 4},
-            operation_id="retry-me", activity_claim=old,
+            operation_id="retry-me", activity_claim=new_claim,
         )
-    except ClaimFenced:
-        pass
-    else:
-        raise AssertionError("stale attempt unexpectedly succeeded")
-    result = w.invoke_function(
-        "demo", "activity.score.add", "A", {"delta": 4},
-        operation_id="retry-me", activity_claim=new_claim,
-    )
-    assert result["result"]["score"] == 4
+        assert result["result"]["score"] == 4
 
 
 @test("completed_claimed_operation_replays_after_claim_expiry")
 def _():
-    w, _ = fresh("27")
-    w.start_activity("demo", "job", "A", "research", ttl_seconds=5)
-    proof = w.claim_activity("demo", "job", "A", "runtime-A", lease_seconds=0.08)
-    first = w.invoke_function(
-        "demo", "activity.score.add", "A", {"delta": 6},
-        operation_id="done-before-expiry", activity_claim=proof,
-    )
-    time.sleep(0.11)
-    replay = w.invoke_function(
-        "demo", "activity.score.add", "A", {"delta": 6},
-        operation_id="done-before-expiry", activity_claim=proof,
-    )
-    assert replay["replayed"] is True
-    assert replay["result"] == first["result"]
-    assert w.get_state("demo", "activity:job", "score")["value"] == 6
+    with patch("time.time", return_value=1000.0) as clock:
+        w, _ = fresh("27")
+        w.start_activity("demo", "job", "A", "research", ttl_seconds=5)
+        proof = w.claim_activity("demo", "job", "A", "runtime-A", lease_seconds=0.08)
+        first = w.invoke_function(
+            "demo", "activity.score.add", "A", {"delta": 6},
+            operation_id="done-before-expiry", activity_claim=proof,
+        )
+        clock.return_value += 0.11
+        replay = w.invoke_function(
+            "demo", "activity.score.add", "A", {"delta": 6},
+            operation_id="done-before-expiry", activity_claim=proof,
+        )
+        assert replay["replayed"] is True
+        assert replay["result"] == first["result"]
+        assert w.get_state("demo", "activity:job", "score")["value"] == 6
 
 
 @test("concurrent_duplicate_invoke_across_runtime_instances_executes_once")
@@ -644,11 +650,12 @@ def _():
 
 @test("bootstrap_hides_time_expired_activity_without_external_sweep")
 def _():
-    w, _ = fresh("31")
-    w.start_activity("demo", "short-job", "A", "research", ttl_seconds=0.08)
-    time.sleep(0.11)
-    boot = w.bootstrap("demo", "A")
-    assert boot["active_activities"] == []
+    with patch("time.time", return_value=1000.0) as clock:
+        w, _ = fresh("31")
+        w.start_activity("demo", "short-job", "A", "research", ttl_seconds=0.08)
+        clock.return_value += 0.11
+        boot = w.bootstrap("demo", "A")
+        assert boot["active_activities"] == []
 
 
 def main():
