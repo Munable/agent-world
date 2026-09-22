@@ -144,6 +144,54 @@ def create_app(
     async def snapshot_view(view: str, body: dict[str, Any], request: Request):
         return await call("world.view_snapshot", {**body, "view": view}, request)
 
+    @app.get("/v1/streams")
+    async def streams(request: Request, role_id: str | None = None):
+        return await call("world.list_streams", role_args(role_id), request)
+
+    @app.post("/v1/streams/{stream}/read")
+    async def read_stream(stream: str, body: dict[str, Any], request: Request):
+        return await call("world.read_stream", {**body, "stream":stream}, request)
+
+    @app.post("/v1/streams/{stream}/wait")
+    async def wait_stream(stream: str, body: dict[str, Any], request: Request):
+        try:
+            return await gateway.wait_stream({**body,"stream":stream},request.headers.get('authorization'),
+                                             disconnected=request.is_disconnected)
+        except Exception as exc:
+            status,payload=error_response(exc)
+            return JSONResponse(payload,status_code=status)
+
+    async def public_call(method, *args, **kwargs):
+        try:
+            return await asyncio.to_thread(method,*args,**kwargs)
+        except Exception as exc:
+            status,payload=error_response(exc)
+            return JSONResponse(payload,status_code=status)
+
+    @app.get("/v1/public/views")
+    async def public_views():
+        return await public_call(runtime.list_views,universe,None)
+
+    @app.post("/v1/public/views/sync")
+    async def public_view_sync(body: dict[str, Any]):
+        from .runtime_contracts import validate
+        validate({"type":"object","properties":{"cursor":{"type":"string","maxLength":128}},
+                  "required":["cursor"],"additionalProperties":False},body)
+        return await public_call(runtime.public_view_sync,universe,body['cursor'])
+
+    @app.post("/v1/public/views/{view}/snapshot")
+    async def public_view_snapshot(view: str, body: dict[str, Any]):
+        from .runtime_contracts import validate
+        validate({"type":"object","properties":{"arguments":{"type":"object"}},"additionalProperties":False},body)
+        return await public_call(runtime.public_view_snapshot,universe,view,body.get('arguments',{}))
+
+    @app.post("/v1/public/streams/{stream}/read")
+    async def public_read_stream(stream: str, body: dict[str, Any]):
+        from .runtime_contracts import validate
+        validate({"type":"object","properties":{"cursor":{"type":"string","maxLength":2048},
+                  "limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":False},body)
+        return await public_call(runtime.read_stream,universe,stream,cursor=body.get('cursor'),limit=body.get('limit',50))
+
     @app.get("/v1/receipts/{operation_id}")
     async def receipt(operation_id: str, request: Request, role_id: str | None = None):
         return await call("world.get_receipt", {**role_args(role_id), "operation_id": operation_id}, request)

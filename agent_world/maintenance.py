@@ -14,11 +14,12 @@ async def retention_lifespan(runtime, universe):
     definition = runtime._worlds.get(universe)
     stop = threading.Event()
     thread = None
-    if definition is not None and definition.retention is not None:
+    if definition is not None and (definition.retention is not None or definition.streams):
         def run():
             while not stop.is_set():
                 try:
                     runtime.apply_retention(universe)
+                    runtime.apply_stream_retention(universe)
                 except Exception as exc:
                     logger.error("retention sweep failed (%s)", type(exc).__name__)
                 stop.wait(30)

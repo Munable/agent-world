@@ -76,9 +76,10 @@ from .runtime_journal import RuntimeJournal
 from .runtime_views import RuntimeViews
 from .runtime_timers import RuntimeTimers
 from .retention import RuntimeRetention
+from .runtime_streams import RuntimeStreams
 
 
-class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJournal, RuntimeViews, RuntimeTimers, RuntimeRetention):
+class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJournal, RuntimeViews, RuntimeTimers, RuntimeRetention, RuntimeStreams):
     def __init__(self, db_path: str | Path):
         if str(db_path) == ":memory:":
             raise ValueError("WorldRuntime requires a file-backed SQLite database")
@@ -125,7 +126,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     @staticmethod
     def _schema_script(c, script):
         c.execute("BEGIN IMMEDIATE")
-        if c.execute("PRAGMA user_version").fetchone()[0] > 4:
+        if c.execute("PRAGMA user_version").fetchone()[0] > 5:
             raise WorldVersionMismatch("database schema is newer than this runtime")
         for statement in script.split(";"):
             statement = statement.strip()
@@ -134,7 +135,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
 
     def _init_db(self) -> None:
         with self._conn() as c:
-            if c.execute("PRAGMA user_version").fetchone()[0] > 4:
+            if c.execute("PRAGMA user_version").fetchone()[0] > 5:
                 raise WorldVersionMismatch("database schema is newer than this runtime")
             self._enable_wal(c)
             self._schema_script(
@@ -298,7 +299,8 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             self._init_timers_tx(c)
             if "access_mode" not in {r["name"] for r in c.execute("PRAGMA table_info(identity_tokens)")}:
                 c.execute("ALTER TABLE identity_tokens ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'control'")
-            c.execute("PRAGMA user_version=4")
+            self._init_streams_tx(c)
+            c.execute("PRAGMA user_version=5")
             c.execute("COMMIT")
 
     @staticmethod

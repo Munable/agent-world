@@ -86,6 +86,26 @@ class FunctionContext:
             raise TimerNotFound("timer not found in this universe")
         return public_timer(row)
 
+    def stream_event_id(self, stream, key):
+        from .world_streams import event_id
+        return event_id(self.universe,self.actor_role_id,self.function_id,self.operation_id,stream,key)
+
+    def get_stream_event(self, stream, event_id):
+        """Trusted rule lookup within this universe. Transport reads enforce StreamSpec policy."""
+        identifier(stream,'stream',64); identifier(event_id,'event ID')
+        row=self.conn.execute('SELECT event_id,actor_role_id,kind,payload_json,created_at FROM stream_events WHERE universe=? AND stream=? AND event_id=?',
+                              (self.universe,stream,event_id)).fetchone()
+        if row is None:
+            return None
+        return {'event_id':row['event_id'],'actor_role_id':row['actor_role_id'],'kind':row['kind'],
+                'payload':json.loads(row['payload_json']),'occurred_at':row['created_at']}
+
+    def recent_stream_events(self, stream, limit=20):
+        identifier(stream,'stream',64); integer(limit,'stream rule lookup',1,100)
+        rows=self.conn.execute('SELECT event_id FROM stream_events WHERE universe=? AND stream=? ORDER BY seq DESC LIMIT ?',
+                               (self.universe,stream,limit)).fetchall()
+        return [self.get_stream_event(stream,row['event_id']) for row in reversed(rows)]
+
     def _check(self, scope, key, access):
         identifier(scope, "scope", 256)
         identifier(key, "state key", 256)

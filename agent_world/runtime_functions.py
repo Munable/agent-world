@@ -35,6 +35,7 @@ from .runtime_errors import (
 from .world_context import FunctionContext
 from .runtime_journal import JOURNAL_TRIGGERS
 from .world_types import FunctionOutcome, EventSpec
+from .world_streams import StreamEvent
 from .presentation import PRESENTATION_KIND, validate_cue
 
 
@@ -353,9 +354,15 @@ class RuntimeFunctions:
                 raise WorldRuntimeError("read function cannot emit durable events")
             total = 0
             for event in outcome.events:
-                if not isinstance(event, EventSpec):
-                    raise InvalidArguments("events must be EventSpec values")
-                identifier(event.recipient_role_id, "event recipient")
+                if not isinstance(event, (EventSpec,StreamEvent)):
+                    raise InvalidArguments("events must be EventSpec or StreamEvent values")
+                if isinstance(event, StreamEvent):
+                    identifier(event.stream, "stream", 64)
+                    json_text(event.payload, maximum=65536)
+                    if event.key:
+                        identifier(event.key, "event key")
+                else:
+                    identifier(event.recipient_role_id, "event recipient")
                 identifier(event.kind, "event kind")
                 if not isinstance(event.payload, dict):
                     raise InvalidArguments("event payload must be an object")
@@ -513,7 +520,11 @@ class RuntimeFunctions:
         """One effect/receipt path shared by immediate actions and durable timers."""
         transitions = self._apply_timer_commands_tx(c, ctx)
         event_seqs = []
-        for event in outcome.events:
+        publications = []
+        for index, event in enumerate(outcome.events):
+            if isinstance(event, StreamEvent):
+                publications.append(self._append_stream_event_tx(c,ctx,event,index))
+                continue
             cursor = c.execute(
                 "INSERT INTO events(universe,recipient_role_id,actor_role_id,kind,payload_json,created_at) VALUES(?,?,?,?,?,?)",
                 (ctx.universe, event.recipient_role_id, ctx.actor_role_id, event.kind,
@@ -527,11 +538,16 @@ class RuntimeFunctions:
             event_seqs=event_seqs,
         )
         self._bind_timer_transitions_tx(c, transitions, commit_seq)
+        for stream,seq,eid in publications:
+            c.execute("UPDATE stream_events SET commit_seq=? WHERE universe=? AND stream=? AND seq=?",
+                      (commit_seq,ctx.universe,stream,seq))
         receipt = {
             "commit_seq": commit_seq, "ok": True, "operation_id": ctx.operation_id,
             "function_id": ctx.function_id, "function_version": ctx.function_version,
             "result": outcome.result, "event_seqs": event_seqs, "replayed": False,
         }
+        if publications:
+            receipt["stream_event_ids"] = [p[2] for p in publications]
         if extra_receipt:
             receipt.update(extra_receipt)
         if ctx.random_draws:

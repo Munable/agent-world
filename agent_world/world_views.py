@@ -35,6 +35,8 @@ class ViewSpec:
     visible_to: Callable | None = None
     output_schema: dict | None = None
     timeline: bool = False
+    public: bool = False
+    streams: tuple[str, ...] = ()
 
     def contract(self):
         identifier(self.name, "view name")
@@ -58,6 +60,12 @@ class ViewSpec:
             raise WorldDefinitionError("timeline flag must be boolean")
         if self.timeline:
             value["timeline"] = True
+        if type(self.public) is not bool or len(self.streams)>16 or len(set(self.streams))!=len(self.streams):
+            raise WorldDefinitionError("invalid public view or stream list")
+        if self.public:
+            value["public"] = True
+        if self.streams:
+            value["streams"] = list(self.streams)
         if self.output_schema is not None:
             value["output_schema"] = self.output_schema
         return value

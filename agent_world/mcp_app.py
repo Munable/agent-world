@@ -189,7 +189,10 @@ def create_mcp_server(db_path: str | pathlib.Path, universe="demo", *, auth_requ
         try:
             authorization = request_authorization(ctx)
             args = params.arguments if params.arguments is not None else {}
-            if params.name == "world.wait_changes":
+            if params.name == "world.wait_stream":
+                event = getattr(ctx, "cancel_requested", None)
+                result = await gateway.wait_stream(args, authorization, cancelled=event.is_set if event else None)
+            elif params.name == "world.wait_changes":
                 event = getattr(ctx, "cancel_requested", None)
                 result = await gateway.wait(args, authorization, cancelled=event.is_set if event else None)
             else:

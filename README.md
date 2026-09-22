@@ -36,3 +36,5 @@ node tests/view_client.test.mjs
 Prototype operator access is not a multi-user account system. Run only trusted world code.
 
 Reference acceptance and next-world boundary: [RF1](docs/REFERENCE_GATE.md).
+
+Public observation and retained channels: [contract](docs/OBSERVATION_STREAMS.md).

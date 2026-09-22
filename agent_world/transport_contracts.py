@@ -6,6 +6,7 @@ import sqlite3
 from .identity_auth import resolve_authorization, bound_role
 from .world_views import ViewNotFound, ViewResetRequired
 from .world_timers import TimerConflict, TimerNotFound
+from .world_streams import StreamResetRequired, StreamNotFound
 from .runtime_contracts import (
     CORE_TOOL_NAMES,
     arguments_object,
@@ -62,6 +63,20 @@ CLAIM = {
 }
 
 CORE = {
+    "world.list_streams": (
+        "List shared event streams authorized for this viewer.", {}, [], True,
+    ),
+    "world.read_stream": (
+        "Read recent shared events or resume an opaque cursor; use history_cursor to look further back. Returned is not proof of understanding.",
+        {"stream": STRING, "cursor": {"type":"string","maxLength":2048},
+         "limit":{"type":"integer","minimum":1,"maximum":100}}, ["stream"], True,
+    ),
+    "world.wait_stream": (
+        "Wait up to 30 seconds on a live shared-stream cursor without polling a model.",
+        {"stream": STRING, "cursor": {"type":"string","maxLength":2048},
+         "limit":{"type":"integer","minimum":1,"maximum":100},
+         "timeout":{"type":"number","minimum":0,"maximum":30}}, ["stream","cursor"], True,
+    ),
     "world.view_timeline": (
         "Read ordered public presentation cues for an authorized view checkpoint; reset if history expired.",
         {"cursor": STRING, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, ["cursor"], True,
@@ -188,6 +203,8 @@ def function_schema(desc, *, auth_required):
 
 
 def error_response(exc: Exception):
+    if isinstance(exc, StreamResetRequired):
+        return 409, {"error":"StreamResetRequired","message":str(exc),"retryable":False,"recovery":"read_stream_recent"}
     if isinstance(exc, ViewResetRequired):
         return 409, {"error": "ViewResetRequired", "message": str(exc), "retryable": False, "recovery": "reset_view"}
     if isinstance(exc, TimerConflict):
@@ -305,6 +322,12 @@ class WorldGateway:
     def call(self, name, arguments, authorization=None):
         role, token, args = self.prepare(name, arguments, authorization)
         r, u = self.runtime, self.universe
+        if name == "world.list_streams":
+            return r.list_streams(u,role,identity_token=token)
+        if name == "world.read_stream":
+            return r.read_stream(u,args['stream'],role,identity_token=token,cursor=args.get('cursor'),limit=args.get('limit',50))
+        if name == "world.wait_stream":
+            raise InvalidArguments('stream wait requires asynchronous gateway')
         if name == "world.view_timeline":
             return r.view_timeline(u, role, args["cursor"], limit=args.get("limit", 50), identity_token=token)
         if name == "world.list_views":
@@ -397,3 +420,21 @@ class WorldGateway:
             if remaining <= 0:
                 return {**page, "timed_out": True, "cancelled": False}
             await asyncio.sleep(min(0.1, remaining))
+
+    async def wait_stream(self, arguments, authorization=None, *, disconnected=None, cancelled=None):
+        role, token, args = await asyncio.to_thread(self.prepare, 'world.wait_stream', arguments, authorization)
+        deadline=asyncio.get_running_loop().time()+args.get('timeout',5)
+        cursor=args['cursor']
+        while True:
+            page=await asyncio.to_thread(self.runtime.read_stream,self.universe,args['stream'],role,
+                                         identity_token=token,cursor=cursor,limit=args.get('limit',50))
+            if page['mode']!='live':
+                raise InvalidArguments('waiting requires a live cursor, not a history cursor')
+            if page['events']:
+                return {**page,'timed_out':False}
+            if (cancelled is not None and cancelled()) or (disconnected is not None and await disconnected()):
+                return {**page,'cancelled':True,'timed_out':False}
+            remaining=deadline-asyncio.get_running_loop().time()
+            if remaining<=0:
+                return {**page,'timed_out':True}
+            await asyncio.sleep(min(.1,remaining))

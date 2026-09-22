@@ -19,6 +19,7 @@ from .world_types import EventSpec, FunctionOutcome
 from .world_views import ViewSpec
 from .world_timers import TimerSpec
 from .retention import RetentionPolicy
+from .world_streams import StreamSpec
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ class WorldDefinition:
     views: tuple[ViewSpec, ...] = ()
     timers: tuple[TimerSpec, ...] = ()
     retention: RetentionPolicy | None = None
+    streams: tuple[StreamSpec, ...] = ()
 
     def manifest(self):
         identifier(self.world_id, "world_id")
@@ -98,6 +100,13 @@ class WorldDefinition:
             raise WorldDefinitionError("world must declare at most 64 TimerSpec values")
         if len({t.name for t in self.timers}) != len(self.timers):
             raise WorldDefinitionError("duplicate timer handler names")
+        if len(self.streams)>64 or any(not isinstance(s,StreamSpec) for s in self.streams):
+            raise WorldDefinitionError("at most 64 StreamSpec declarations are allowed")
+        if len({s.name for s in self.streams}) != len(self.streams):
+            raise WorldDefinitionError("duplicate stream declarations")
+        for view in self.views:
+            if any(name not in {s.name for s in self.streams} for name in view.streams):
+                raise WorldDefinitionError("view references undeclared stream")
         names = [f.name for f in self.functions]
         if len(names) != len(set(names)):
             raise WorldDefinitionError("duplicate function names in world definition")
@@ -122,6 +131,8 @@ class WorldDefinition:
             value["views"] = [v.contract() for v in self.views]
         if self.timers:
             value["timers"] = [t.contract() for t in self.timers]
+        if self.streams:
+            value["streams"] = [s.contract() for s in self.streams]
         if self.retention is not None:
             if not isinstance(self.retention, RetentionPolicy):
                 raise WorldDefinitionError("invalid retention policy")

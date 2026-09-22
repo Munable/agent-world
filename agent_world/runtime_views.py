@@ -16,6 +16,20 @@ VIEW_CACHE_MAX = 1024
 
 
 class RuntimeViews:
+    def _admit_viewer_tx(self, c, universe, role_id, identity_token):
+        # Public observers are not synthetic players or control credentials.
+        if role_id is None:
+            if identity_token is not None:
+                raise PermissionDenied("anonymous observation cannot borrow a role credential")
+            return None
+        return self._admit_actor_tx(c, universe, role_id, identity_token)
+
+    def public_view_snapshot(self, universe, view, arguments=None):
+        return self.view_snapshot(universe, None, view, arguments)
+
+    def public_view_sync(self, universe, cursor):
+        return self.view_sync(universe, None, cursor)
+
     def _init_views_tx(self, c):
         c.execute("""CREATE TABLE IF NOT EXISTS view_checkpoints(
             cursor_hash TEXT PRIMARY KEY, universe TEXT NOT NULL, role_id TEXT NOT NULL,
@@ -50,11 +64,13 @@ class RuntimeViews:
             raise InvalidArguments("invalid view discovery parameters")
         with self._lock, self._conn(readonly=True) as c:
             c.execute("BEGIN")
-            self._admit_actor_tx(c, universe, role_id, identity_token)
+            self._admit_viewer_tx(c, universe, role_id, identity_token)
             self._check_world_tx(c, universe)
             definition = self._worlds.get(universe)
             items = []
             for spec in sorted(definition.views if definition else (), key=lambda item: item.name):
+                if role_id is None and not spec.public:
+                    continue
                 if spec.name <= after:
                     continue
                 ctx = self._context_tx(c, universe, role_id, "view:" + spec.name, spec.version)
@@ -156,14 +172,14 @@ class RuntimeViews:
         # World reads use one read snapshot. Only the bounded derived checkpoint is written afterwards.
         with self._lock, self._conn(readonly=True) as c:
             c.execute("BEGIN")
-            identity = self._admit_actor_tx(c, universe, role_id, identity_token)
-            credential = identity["token_id"] if identity else "trusted:" + role_id
+            identity = self._admit_viewer_tx(c, universe, role_id, identity_token)
+            credential = identity["token_id"] if identity else ("public" if role_id is None else "trusted:" + role_id)
             self._check_world_tx(c, universe)
             previous = None
             if cursor is not None:
                 digest = self._view_cursor_hash(cursor)
                 previous = c.execute("SELECT * FROM view_checkpoints WHERE cursor_hash=?", (digest,)).fetchone()
-                if (previous is None or previous["universe"] != universe or previous["role_id"] != role_id
+                if (previous is None or previous["universe"] != universe or previous["role_id"] != (role_id or "")
                         or previous["credential_id"] != credential or previous["expires_at"] <= time.time()):
                     raise ViewResetRequired("observation checkpoint expired or has a different viewer; reset the view")
                 view, arguments = previous["view_name"], json.loads(previous["selector_json"])
@@ -174,6 +190,8 @@ class RuntimeViews:
                 if loaded is None or loaded.version != previous["world_version"]:
                     raise ViewResetRequired("world projection changed; take a new snapshot")
             definition, spec = self._get_view_spec(universe, view)
+            if role_id is None and not spec.public:
+                raise PermissionDenied("view is not public")
             if previous is not None and (previous["world_version"] != definition.version or previous["view_version"] != spec.version):
                 raise ViewResetRequired("view contract changed; take a new snapshot")
             validate(spec.input_schema, arguments)
@@ -190,8 +208,14 @@ class RuntimeViews:
             event_floor_row = c.execute("SELECT floor FROM event_floors WHERE universe=?", (universe,)).fetchone()
             event_seq = max(event_floor_row[0] if event_floor_row else 0, c.execute(
                 "SELECT COALESCE(MAX(seq),0) FROM events WHERE universe=?", (universe,)).fetchone()[0])
+            streams = {}
+            for name in spec.streams:
+                try:
+                    streams[name] = self._stream_anchor_tx(c,universe,name,role_id,identity_token)
+                except PermissionDenied:
+                    continue
             observed_at = time.time()
-            self._admit_actor_tx(c, universe, role_id, identity_token)
+            self._admit_viewer_tx(c, universe, role_id, identity_token)
             base = json.loads(previous["body_json"]) if previous is not None else None
         next_cursor = "awv_" + secrets.token_urlsafe(32)
         expires = observed_at + VIEW_TTL_SECONDS
@@ -201,6 +225,8 @@ class RuntimeViews:
                   "observed_at": observed_at, "expires_at": expires, "cursor": next_cursor}
         if spec.timeline:
             result["timeline_cursor"] = next_cursor
+        if streams:
+            result["streams"] = streams
         if base is None:
             result.update(kind="snapshot", snapshot=body)
         else:
@@ -208,15 +234,15 @@ class RuntimeViews:
         json_text(result)
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
-            self._admit_actor_tx(c, universe, role_id, identity_token)
+            self._admit_viewer_tx(c, universe, role_id, identity_token)
             self._check_world_tx(c, universe)
             c.execute("DELETE FROM view_checkpoints WHERE expires_at<=?", (time.time(),))
             c.execute("""INSERT INTO view_checkpoints VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                      (self._view_cursor_hash(next_cursor), universe, role_id, credential, view,
+                      (self._view_cursor_hash(next_cursor), universe, role_id or "", credential, view,
                        selector_json, definition.version, spec.version, encoded, revision, observed_at, expires, event_seq))
             # Keep the newly returned checkpoint, evict only older derived cache entries.
             for clause, params, maximum in (
-                ("universe=? AND role_id=?", (universe, role_id), VIEW_CACHE_PER_VIEWER),
+                ("universe=? AND role_id=?", (universe, role_id or ""), 256 if role_id is None else VIEW_CACHE_PER_VIEWER),
                 ("1=1", (), VIEW_CACHE_MAX),
             ):
                 c.execute("DELETE FROM view_checkpoints WHERE cursor_hash IN (SELECT cursor_hash FROM view_checkpoints WHERE "
