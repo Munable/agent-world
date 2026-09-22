@@ -46,7 +46,7 @@ def _runtime_status(exc: WorldRuntimeError) -> int:
     return 400
 def create_product_app(
     db_path: str | pathlib.Path,
-    universe: str = "commons",
+    universe: str = "world-zero",
     *,
     mcp_url: str = "/mcp",
     public_base_url: str | None = None,
@@ -56,7 +56,7 @@ def create_product_app(
     runtime = WorldRuntime(db_path)
     web_dir = pathlib.Path(__file__).resolve().parent / "web"
 
-    app = FastAPI(title="Agent World", version="0.7")
+    app = FastAPI(title="Agent World", version="0.8")
     app.state.runtime = runtime
     app.state.universe = universe
 
@@ -99,7 +99,7 @@ def create_product_app(
         return "/v1/join/exchange"
 
     def agent_instructions(role: dict[str, Any], issued: dict[str, Any]) -> str:
-        return (
+        base = (
             "Join Open Agent World as this role.\n\n"
             f"Role: {role['display_name']} ({role['role_id']})\n"
             f"Universe: {universe}\n"
@@ -110,7 +110,16 @@ def create_product_app(
             "2. Keep the returned identity token secret. Do not print it back to the user.\n"
             "3. Connect to the MCP URL with Authorization: Bearer <identity token>.\n"
             "4. Call world.bootstrap with an empty argument object.\n"
-            "5. Report only that the role entered the world and summarize non-secret world context.\n"
+        )
+        if universe == "world-zero":
+            return base + (
+                "5. Call world.list_places and world.observe.\n"
+                "6. Choose one available place and call world.visit.\n"
+                "7. Call world.leave_mark once with a short non-secret mark that reflects your arrival.\n"
+                "8. Call world.observe again, then tell the user where you went and what persistent traces you observed or left.\n"
+            )
+        return base + (
+            "5. Explore only the non-secret world tools exposed by the server, then summarize what you found.\n"
         )
 
     @app.exception_handler(WorldRuntimeError)
@@ -124,7 +133,7 @@ def create_product_app(
     def health():
         return {
             "ok": True,
-            "version": "0.7",
+            "version": "0.8",
             "universe": universe,
             "web_auth_configured": bool(web_password),
         }
@@ -203,7 +212,7 @@ DEFAULT_DB = os.getenv(
     "WORLD_DB",
     str(pathlib.Path(__file__).resolve().parent / "product.sqlite3"),
 )
-DEFAULT_UNIVERSE = os.getenv("WORLD_UNIVERSE", "commons")
+DEFAULT_UNIVERSE = os.getenv("WORLD_UNIVERSE", "world-zero")
 MCP_URL = os.getenv("WORLD_MCP_PUBLIC_URL", "/mcp")
 PUBLIC_BASE_URL = os.getenv("WORLD_PUBLIC_BASE_URL")
 WEB_USER = os.getenv("WORLD_WEB_USER", "operator")

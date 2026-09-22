@@ -13,6 +13,7 @@ const copyButton = document.querySelector("#copy-instructions");
 const expiryLabel = document.querySelector("#ticket-expiry");
 const claimedStatus = document.querySelector("#status-claimed");
 const enteredStatus = document.querySelector("#status-entered");
+const activityStatus = document.querySelector("#status-activity");
 const universeLabel = document.querySelector("#universe-label");
 
 let roleId = sessionStorage.getItem("agentWorldRoleId");
@@ -79,6 +80,13 @@ function updateStatus(status) {
     status.entered_world
       ? "Entered " + formatTime(status.presence && status.presence.first_bootstrap_at) + " · bootstrap count " + ((status.presence && status.presence.bootstrap_count) || 1)
       : "Waiting for the first authenticated bootstrap."
+  );
+  setDone(
+    activityStatus,
+    status.latest_recipient_event_seq > 0,
+    status.latest_recipient_event_seq > 0
+      ? "Durable world activity exists · latest event " + status.latest_recipient_event_seq
+      : "Waiting for the role to take its first durable world action."
   );
 }
 

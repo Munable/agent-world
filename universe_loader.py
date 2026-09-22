@@ -18,4 +18,8 @@ def get_universe_installer(profile: str) -> UniverseInstaller:
         from commons_universe import install_commons_universe
 
         return install_commons_universe
+    if normalized in {"world-zero", "world_zero", "zero"}:
+        from world_zero_universe import install_world_zero
+
+        return install_world_zero
     raise ValueError(f"unknown WORLD_PROFILE: {profile}")
