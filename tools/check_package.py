@@ -47,6 +47,8 @@ def main():
                 "assert 'installed' in str(Path(agent_world.__file__).resolve())",
                 "assert not list(Path.cwd().glob('*.sqlite3'))",
                 "assert files('agent_world').joinpath('web', 'index.html').is_file()",
+                "assert files('agent_world').joinpath('web', 'world-client.js').is_file()",
+                "from agent_world import ViewSpec",
                 "w = WorldRuntime(Path.cwd()/'package-test.sqlite3')",
                 "get_universe_installer('examples.workflow_world:WORLD')(w, 'custom')",
                 "assert w.get_world_manifest('custom')['world_id'] == 'workflow-example'",

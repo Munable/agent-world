@@ -1,6 +1,6 @@
 """A small rule-adaptation example, not an implementation of the D&D ruleset."""
 
-from agent_world import WorldDefinition, FunctionSpec, StateRule, FunctionOutcome, EventSpec
+from agent_world import WorldDefinition, FunctionSpec, StateRule, FunctionOutcome, EventSpec, ViewSpec
 from agent_world.errors import RuleViolation
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
@@ -100,9 +100,22 @@ def bootstrap(ctx):
     return {"encounter_id": encounter, "state": state}
 
 
+def scene(ctx, arguments):
+    state = ctx.get_state(scope(arguments["encounter_id"]), "state")
+    return {
+        "entities": {role: {"kind": "participant", "hp": state["hp"][role],
+                            "active": state["members"][state["turn"]] == role}
+                     for role in state["members"]},
+        "meta": {"encounter_id": arguments["encounter_id"], "round": state["round"],
+                 "actions": ["encounter.strike"] if state["members"][state["turn"]] == ctx.actor_role_id else []},
+    }
+
+
 WORLD = WorldDefinition(
     world_id="encounter-example",
     display_name="Encounter Rules Example",
+    version=2,
+    views=(ViewSpec("scene", scene, ENCOUNTER_ARGS, authorize=participant, renderer="encounter"),),
     functions=(
         FunctionSpec(
             "encounter.start",

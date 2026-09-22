@@ -1,4 +1,4 @@
-# Foundation contract 0.9
+# Foundation contract 0.10
 
 This is a versioned development contract, not a claim of production completeness.
 The runtime owns transport, identity admission, transactions, receipts and event cursors.
@@ -46,7 +46,8 @@ A hidden function needs an authorization predicate when guessing its name must a
 - server `now`, actor identity and operation identity;
 - `random_int`, with draws saved in a successful write receipt.
 
-`set_state` and `delete_state` accept `expected_version`. Tombstones preserve revision history.
+`set_state` and `delete_state` accept `expected_version`. Tombstones preserve version continuity.
+The separate state journal retains before/after contents until explicit privileged pruning.
 `list_state` uses bounded pages and scoped opaque cursors; pages across separate requests are not a frozen snapshot.
 `StateRule` matches literal scope/key prefixes. Every matching rule applies.
 Undeclared state writes fail with `strict_state=True`; an optional state policy can further restrict SDK reads/writes.
@@ -108,7 +109,15 @@ Initialization runs once. Migration, state validation, registry changes and mani
 Failure leaves prior data and version intact. Missing steps, downgrades and same-version manifest drift are rejected.
 After upgrade, an old process loaded with a previous world definition refuses new rule execution.
 Restart it with the matching package. A committed receipt can still be recovered.
-Back up real databases before upgrading; the additive runtime schema currently has version 1.
+Back up real databases before upgrading; the additive runtime schema currently has version 2.
+Existing values are journaled once as an explicit baseline; unavailable old versions are not reconstructed.
+
+## Data and observation plane
+
+Agent and browser-player intents use the same gateway, identity checks, rules and receipts.
+Optional `ViewSpec` projections serve authorized snapshots and checkpoint-relative deltas.
+State history, recipient notifications and derived view caches have separate purposes and retention.
+See [WORLD_DATA.md](WORLD_DATA.md) for the contract, client usage and remaining boundaries.
 
 ## Deployment and explicit limits
 

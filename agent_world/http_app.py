@@ -126,6 +126,20 @@ def create_app(
             "world.bootstrap", {"role_id": role_id, "include_catalog": include_catalog}, request
         )
 
+    @app.get("/v1/views")
+    async def views(request: Request, role_id: str | None = None, after: str = "",
+                    limit: int = Query(default=50, ge=1, le=64), include_schemas: bool = False):
+        return await call("world.list_views", {**role_args(role_id), "after": after,
+                          "limit": limit, "include_schemas": include_schemas}, request)
+
+    @app.post("/v1/views/sync")
+    async def sync_view(body: dict[str, Any], request: Request):
+        return await call("world.view_sync", body, request)
+
+    @app.post("/v1/views/{view}/snapshot")
+    async def snapshot_view(view: str, body: dict[str, Any], request: Request):
+        return await call("world.view_snapshot", {**body, "view": view}, request)
+
     @app.get("/v1/receipts/{operation_id}")
     async def receipt(operation_id: str, request: Request, role_id: str | None = None):
         return await call("world.get_receipt", {**role_args(role_id), "operation_id": operation_id}, request)

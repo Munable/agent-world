@@ -1,6 +1,6 @@
 """A non-game world using the same portable SDK and transaction guarantees."""
 
-from agent_world import WorldDefinition, FunctionSpec, StateRule, FunctionOutcome, EventSpec
+from agent_world import WorldDefinition, FunctionSpec, StateRule, FunctionOutcome, EventSpec, ViewSpec
 from agent_world.errors import RuleViolation
 
 ARGS = {
@@ -39,6 +39,15 @@ def complete(ctx, arguments):
     return FunctionOutcome({"task_id": arguments["task_id"], "status": "completed"})
 
 
+def tasks_view(ctx, arguments):
+    # Detail selection keeps other owners' keys and pagination metadata private.
+    task = ctx.get_state("tasks", arguments["task_id"])
+    entities = {}
+    if task is not None and task["owner"] == ctx.actor_role_id:
+        entities[arguments["task_id"]] = {"kind": "task", **task}
+    return {"entities": entities, "meta": {}}
+
+
 WORLD = WorldDefinition(
     "workflow-example",
     "Workflow Example",
@@ -52,6 +61,8 @@ WORLD = WorldDefinition(
             description="Complete a task owned by this role.",
         ),
     ),
+    version=2,
+    views=(ViewSpec("tasks", tasks_view, ARGS, renderer="task-detail"),),
     state_rules=(
         StateRule(
             "tasks",

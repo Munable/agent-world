@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 
 from .identity_auth import resolve_authorization, bound_role
+from .world_views import ViewNotFound, ViewResetRequired
 from .runtime_contracts import (
     CORE_TOOL_NAMES,
     arguments_object,
@@ -60,6 +61,20 @@ CLAIM = {
 }
 
 CORE = {
+    "world.list_views": (
+        "Discover bounded observer projections for Agent or human clients.",
+        {"after": {"type": "string", "maxLength": 128},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 64},
+         "include_schemas": {"type": "boolean"}}, [], True,
+    ),
+    "world.view_snapshot": (
+        "Read a viewer-authorized world projection and its resumable checkpoint.",
+        {"view": STRING, "arguments": {"type": "object"}}, ["view"], True,
+    ),
+    "world.view_sync": (
+        "Refresh a projected view; return ordered upserts/removals, never raw private state.",
+        {"cursor": STRING}, ["cursor"], True,
+    ),
     "world.bootstrap": (
         "Recover current identity and a bounded world snapshot, not private Agent memory.",
         {"include_catalog": {"type": "boolean"}},
@@ -168,6 +183,10 @@ def function_schema(desc, *, auth_required):
 
 
 def error_response(exc: Exception):
+    if isinstance(exc, ViewResetRequired):
+        return 409, {"error": "ViewResetRequired", "message": str(exc), "retryable": False, "recovery": "reset_view"}
+    if isinstance(exc, ViewNotFound):
+        return 404, {"error": "ViewNotFound", "message": str(exc), "retryable": False}
     if isinstance(exc, (AuthenticationRequired, InvalidIdentityToken)):
         status = 401
     elif isinstance(exc, (IdentityScopeMismatch, PermissionDenied, RoleInactive)):
@@ -277,6 +296,12 @@ class WorldGateway:
     def call(self, name, arguments, authorization=None):
         role, token, args = self.prepare(name, arguments, authorization)
         r, u = self.runtime, self.universe
+        if name == "world.list_views":
+            return r.list_views(u, role, identity_token=token, **args)
+        if name == "world.view_snapshot":
+            return r.view_snapshot(u, role, args["view"], args.get("arguments", {}), identity_token=token)
+        if name == "world.view_sync":
+            return r.view_sync(u, role, args["cursor"], identity_token=token)
         if name == "world.bootstrap":
             return r.bootstrap(
                 u,

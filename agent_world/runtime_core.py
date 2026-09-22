@@ -72,7 +72,11 @@ from .runtime_events import RuntimeEvents
 from .runtime_activities import RuntimeActivities
 
 
-class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities):
+from .runtime_journal import RuntimeJournal
+from .runtime_views import RuntimeViews
+
+
+class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJournal, RuntimeViews):
     def __init__(self, db_path: str | Path):
         if str(db_path) == ":memory:":
             raise ValueError("WorldRuntime requires a file-backed SQLite database")
@@ -119,7 +123,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities):
     @staticmethod
     def _schema_script(c, script):
         c.execute("BEGIN IMMEDIATE")
-        if c.execute("PRAGMA user_version").fetchone()[0] > 1:
+        if c.execute("PRAGMA user_version").fetchone()[0] > 2:
             raise WorldVersionMismatch("database schema is newer than this runtime")
         for statement in script.split(";"):
             statement = statement.strip()
@@ -128,7 +132,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities):
 
     def _init_db(self) -> None:
         with self._conn() as c:
-            if c.execute("PRAGMA user_version").fetchone()[0] > 1:
+            if c.execute("PRAGMA user_version").fetchone()[0] > 2:
                 raise WorldVersionMismatch("database schema is newer than this runtime")
             self._enable_wal(c)
             self._schema_script(
@@ -287,7 +291,9 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities):
             c.execute(
                 "UPDATE activities SET requested_ttl=expires_at-created_at WHERE expires_at IS NOT NULL AND requested_ttl IS NULL"
             )
-            c.execute("PRAGMA user_version=1")
+            self._init_journal_tx(c)
+            self._init_views_tx(c)
+            c.execute("PRAGMA user_version=2")
             c.execute("COMMIT")
 
     @staticmethod

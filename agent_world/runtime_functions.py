@@ -33,6 +33,7 @@ from .runtime_errors import (
     InvalidArguments,
 )
 from .world_context import FunctionContext
+from .runtime_journal import JOURNAL_TRIGGERS
 from .world_types import FunctionOutcome, EventSpec
 
 
@@ -221,6 +222,9 @@ class RuntimeFunctions:
             }:
                 return sqlite3.SQLITE_DENY
             if action in {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}:
+                if (not read_only and action == sqlite3.SQLITE_INSERT
+                        and arg1 == "state_changes" and trigger in JOURNAL_TRIGGERS):
+                    return sqlite3.SQLITE_OK
                 if read_only or arg1 != "world_state":
                     return sqlite3.SQLITE_DENY
             if action not in {
@@ -446,6 +450,7 @@ class RuntimeFunctions:
             ).fetchone()
             if old:
                 return self._replay_tx(old, function_id, arguments, activity_claim)
+            journal_marker = self._journal_marker_tx(c)
             self._check_world_tx(c, universe)
             row = c.execute(
                 "SELECT * FROM function_registry WHERE universe=? AND function_id=?", (universe, function_id)
@@ -503,7 +508,14 @@ class RuntimeFunctions:
                     ),
                 )
                 event_seqs.append(int(cursor.lastrowid))
+            commit_seq = self._record_commit_tx(
+                c, universe, journal_marker, actor_role_id=actor_role_id,
+                function_id=function_id, operation_id=operation_id,
+                world_version=self._worlds[universe].version if universe in self._worlds else None,
+                event_seqs=event_seqs,
+            )
             receipt = {
+                "commit_seq": commit_seq,
                 "ok": True,
                 "operation_id": operation_id,
                 "function_id": function_id,

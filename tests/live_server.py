@@ -36,6 +36,7 @@ class LiveServer:
         self.proc = subprocess.Popen(
             [
                 sys.executable,
+                "-u",
                 "-m",
                 "agent_world",
                 "--world",
@@ -54,17 +55,21 @@ class LiveServer:
         )
         try:
             with httpx.Client(trust_env=False, timeout=0.3) as client:
-                for _ in range(100):
+                deadline = time.monotonic() + 60
+                last_probe = "not attempted"
+                while time.monotonic() < deadline:
                     if self.proc.poll() is not None:
                         raise RuntimeError("test server exited: " + self.log_path.read_text(encoding="utf-8"))
                     try:
                         response = client.get(self.url + "/health")
+                        last_probe = f"HTTP {response.status_code}"
                         if response.status_code == 200 and response.json().get("universe") == "network":
                             return self
-                    except (httpx.HTTPError, ValueError):
-                        pass
+                    except (httpx.HTTPError, ValueError) as exc:
+                        last_probe = type(exc).__name__
                     time.sleep(0.05)
-            raise RuntimeError("test server failed to become ready")
+            details = self.log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            raise RuntimeError(f"test server readiness deadline exceeded; {last_probe}; log: {details}")
         except BaseException:
             self.__exit__(None, None, None)
             raise

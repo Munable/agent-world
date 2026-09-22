@@ -16,6 +16,7 @@ from .runtime_contracts import (
 from .runtime_errors import WorldDefinitionError, WorldVersionMismatch, SchemaRejected
 from .world_context import FunctionContext
 from .world_types import EventSpec, FunctionOutcome
+from .world_views import ViewSpec
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class WorldDefinition:
     initialize: Callable | None = None
     migrations: dict[int, Callable] = field(default_factory=dict)
     entry_instructions: str = "Discover the world functions, then inspect the current state before acting."
+    views: tuple[ViewSpec, ...] = ()
 
     def manifest(self):
         identifier(self.world_id, "world_id")
@@ -75,6 +77,10 @@ class WorldDefinition:
         integer(self.state_version, "state version", 1)
         if self.api_version != SDK_API_VERSION:
             raise WorldDefinitionError("world requires an unsupported SDK API version")
+        if len(self.views) > 64 or any(not isinstance(v, ViewSpec) for v in self.views):
+            raise WorldDefinitionError("world must declare at most 64 ViewSpec values")
+        if len({v.name for v in self.views}) != len(self.views):
+            raise WorldDefinitionError("duplicate view names")
         names = [f.name for f in self.functions]
         if len(names) != len(set(names)):
             raise WorldDefinitionError("duplicate function names in world definition")
@@ -98,6 +104,8 @@ class WorldDefinition:
             ],
             "entry_instructions": self.entry_instructions,
         }
+        if self.views:
+            value["views"] = [v.contract() for v in self.views]
         json_text(value)
         return value
 
@@ -141,6 +149,7 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
             }
             if existing and existing != {f.name for f in definition.functions}:
                 raise WorldDefinitionError("unmanaged functions already occupy this universe")
+        journal_marker = runtime._journal_marker_tx(c)
         # Migrations use only the scoped storage API and run in one transaction.
         migration_ctx = FunctionContext(
             c, universe, "system:installer", "world.migrate", definition.version, access="write"
@@ -189,6 +198,12 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
             "ON CONFLICT(universe) DO UPDATE SET version=excluded.version,manifest_json=excluded.manifest_json,state_version=excluded.state_version",
             (universe, definition.world_id, definition.version, encoded, definition.state_version),
         )
+        if old is None or old["manifest_json"] != encoded:
+            runtime._record_commit_tx(
+                c, universe, journal_marker, actor_role_id="system:installer",
+                function_id="world.install", source="migration" if old else "initialize",
+                world_version=definition.version,
+            )
     # Publish handlers only after the entire migration and registry transaction commits.
     runtime._handlers = {k: v for k, v in runtime._handlers.items() if k[0] != universe}
     runtime._function_options = {k: v for k, v in runtime._function_options.items() if k[0] != universe}
@@ -240,6 +255,7 @@ __all__ = [
     "WorldDefinition",
     "FunctionSpec",
     "StateRule",
+    "ViewSpec",
     "FunctionContext",
     "FunctionOutcome",
     "EventSpec",

@@ -1,6 +1,6 @@
 # agent-world
 
-A persistent, authenticated world runtime with a portable Python rules SDK.
+A persistent world runtime for people and agents, with a portable Python rules SDK.
 
 ## Run
 
@@ -22,13 +22,15 @@ python -m agent_world --world my_world:WORLD --universe campaign --db campaign.s
 ```
 
 See [the SDK contract](docs/FOUNDATION.md), [the audit](docs/FOUNDATION_AUDIT.md),
-and the independent [encounter](examples/encounter_world.py) and [workflow](examples/workflow_world.py) examples.
+[world data and views](docs/WORLD_DATA.md), and the independent
+[encounter](examples/encounter_world.py) and [workflow](examples/workflow_world.py) examples.
 
 ## Test
 
 ```sh
 python tools/run_tests.py
 python tools/check_package.py
+node tests/view_client.test.mjs
 ```
 
 Prototype operator access is not a multi-user account system. Run only trusted world code.
