@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+httpx
+jsonschema
+mcp==2.2.0
