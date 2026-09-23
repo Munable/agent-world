@@ -24,22 +24,31 @@ export class BubbleQueue {
     this.maxVisible=maxVisible;this.maxPending=maxPending;this.perSubject=perSubject;
     this.pending=[];this.showing=new Map();this.seen=new Set();this.dropped=0;
   }
-  push(message) {
+  push(message, now=Date.now()/1000) {
     if(!message?.id || this.seen.has(message.id)) return false;
     this.seen.add(message.id);
     if(this.seen.size>1200) this.seen.delete(this.seen.values().next().value);
     if(this.pending.length>=this.maxPending || this.pending.filter(x=>x.subject===message.subject).length>=this.perSubject) {
       ++this.dropped;return false; // The retained ledger remains the source for missed speech.
     }
+    if(message.expires_at!==undefined && (!Number.isFinite(message.expires_at) || message.expires_at<=now)) {
+      ++this.dropped;return false;
+    }
     this.pending.push(structuredClone(message));return true;
   }
   active(now) {
     for(const [subject,item] of this.showing) if(item.until<=now)this.showing.delete(subject);
+    // Expire even behind occupied slots; retained history is unaffected.
+    this.pending=this.pending.filter(message=>{
+      if(message.expires_at!==undefined && message.expires_at<=now){++this.dropped;return false;}
+      return true;
+    });
     for(let i=0;i<this.pending.length && this.showing.size<this.maxVisible;) {
       const message=this.pending[i];
       if(this.showing.has(message.subject)){++i;continue;}
       this.pending.splice(i,1);
-      this.showing.set(message.subject,{...message,started:now,until:now+Math.min(9,Math.max(4,[...(message.text||'')].length/25))});
+      const until=Math.min(message.expires_at??Infinity,now+Math.min(8,Math.max(4,[...(message.text||'')].length/25)));
+      this.showing.set(message.subject,{...message,started:now,until});
     }
     return [...this.showing.values()];
   }

@@ -20,3 +20,28 @@ queue.clear();for(let n=0;n<7;n++)queue.push({id:'x'+n,subject:'x',text:'bounded
 assert.equal(queue.pending.length,3);assert.equal(queue.dropped,4);
 ledger.clear();assert.equal(ledger.items().length,0);
 console.log('shared streams: ordering, dedup, bounded history, speaker queue, overflow, safe text PASS');
+
+// Absolute expiry is checked on ingress, dequeue and while visible.
+const expiry=new BubbleQueue({maxVisible:1});
+assert.equal(expiry.push({id:'stale',subject:'a',text:'old',expires_at:99},100),false);
+assert.equal(expiry.push({id:'bad-expiry',subject:'a',expires_at:null},100),false);
+expiry.push({id:'long',subject:'a',text:'x'.repeat(160),expires_at:108},100);
+expiry.push({id:'queued',subject:'a',text:'queued',expires_at:108},100);
+assert.equal(expiry.active(100)[0].id,'long');
+assert.deepEqual(expiry.active(110),[]); // Previously started the expired second message here.
+assert.equal(expiry.pending.length,0);
+expiry.clear();
+expiry.push({id:'near-end',subject:'a',text:'long'.repeat(100),expires_at:102},100);
+assert.equal(expiry.active(101)[0].until,102);
+assert.deepEqual(expiry.active(102),[]);
+expiry.push({id:'occupy',subject:'a',text:'x'.repeat(160),expires_at:200},103);
+expiry.push({id:'behind-full',subject:'b',text:'old',expires_at:105},103);
+assert.equal(expiry.active(103).length,1);
+expiry.active(106);assert.equal(expiry.pending.length,0);
+expiry.clear();
+expiry.push({id:'first',subject:'a',text:'one',expires_at:108},100);
+expiry.push({id:'second',subject:'a',text:'two',expires_at:108},100);
+assert.equal(expiry.active(100)[0].until,104);
+assert.equal(expiry.active(105)[0].until,108);
+assert.deepEqual(expiry.active(108),[]);
+console.log('absolute bubble expiry: ingress, delayed dequeue, clipping, occupied slots PASS');

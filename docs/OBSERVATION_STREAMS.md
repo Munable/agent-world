@@ -78,3 +78,9 @@ Schema 5 adds channel storage without changing old world manifests. Existing pri
 records are never globally republished by migration. Each world must explicitly assess any
 legacy public-history import. Control ownership, asset storage, delegated authority and
 external work remain separate problems; this fix does not prescribe an RPG or task platform.
+
+BubbleQueue accepts an optional absolute epoch-second `expires_at`. Supply the same server-time
+estimate to `push(message, now)` and `active(now)`; it rejects expired ingress, drops expired
+queued messages even behind occupied slots, and clips visible duration to that deadline.
+Messages without a deadline keep the legacy local-duration behavior. World adapters that
+require source timestamps must validate and supply them. This helper does not alter retained history.
