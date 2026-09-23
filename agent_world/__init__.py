@@ -8,7 +8,7 @@ from .world_streams import StreamSpec, StreamEvent
 from .world_timers import TimerSpec, TimerInvocation, RetryTimer
 from .world_sdk import WorldDefinition, FunctionSpec, StateRule, FunctionContext, FunctionOutcome, EventSpec
 
-__version__ = "0.13.0"
+__version__ = "0.13.1"
 __all__ = [
     "WorldRuntime",
     "WorldDefinition",

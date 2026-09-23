@@ -24,22 +24,32 @@ export class BubbleQueue {
     this.maxVisible=maxVisible;this.maxPending=maxPending;this.perSubject=perSubject;
     this.pending=[];this.showing=new Map();this.seen=new Set();this.dropped=0;
   }
-  push(message) {
+  push(message, now) {
     if(!message?.id || this.seen.has(message.id)) return false;
     this.seen.add(message.id);
     if(this.seen.size>1200) this.seen.delete(this.seen.values().next().value);
     if(this.pending.length>=this.maxPending || this.pending.filter(x=>x.subject===message.subject).length>=this.perSubject) {
       ++this.dropped;return false; // The retained ledger remains the source for missed speech.
     }
+    if(message.expires_at!==undefined && (!Number.isFinite(message.expires_at) ||
+       (Number.isFinite(now) && message.expires_at-now<1))) {++this.dropped;return false;}
     this.pending.push(structuredClone(message));return true;
   }
   active(now) {
+    if(!Number.isFinite(now)) return [];
     for(const [subject,item] of this.showing) if(item.until<=now)this.showing.delete(subject);
+    // Check every pending item, even while all visible slots are occupied.
+    this.pending=this.pending.filter(message=>{
+      const valid=message.expires_at===undefined || message.expires_at-now>=1;
+      if(!valid)++this.dropped;return valid;
+    });
     for(let i=0;i<this.pending.length && this.showing.size<this.maxVisible;) {
       const message=this.pending[i];
       if(this.showing.has(message.subject)){++i;continue;}
       this.pending.splice(i,1);
-      this.showing.set(message.subject,{...message,started:now,until:now+Math.min(9,Math.max(4,[...(message.text||'')].length/25))});
+      const duration=Math.min(8,Math.max(4,[...(message.text||'')].length/25));
+      const until=Math.min(now+duration,message.expires_at??Infinity);
+      this.showing.set(message.subject,{...message,started:now,until});
     }
     return [...this.showing.values()];
   }

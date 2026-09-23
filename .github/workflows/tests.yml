@@ -27,6 +27,7 @@ jobs:
       - run: python tools/run_tests.py
       - run: node tests/view_client.test.mjs
       - run: node tests/stream_client.test.mjs
+      - run: node tests/bubble_expiry.test.mjs
       - run: python -m pip wheel --no-deps --wheel-dir dist .
       - run: python -m pip install "setuptools>=77"
       - run: python tools/check_package.py
