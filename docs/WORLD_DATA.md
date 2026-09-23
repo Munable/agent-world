@@ -73,7 +73,7 @@ selector arguments (area, page, room, project, etc.). No whole-world dump is req
 
 - `GET /v1/views` / `world.list_views`: discover projections; schemas are opt-in.
 - `POST /v1/views/{view}/snapshot` / `world.view_snapshot`: selector arguments -> snapshot.
-- `POST /v1/views/sync` / `world.view_sync`: opaque checkpoint -> upserts/removals + new checkpoint.
+- `POST /v1/views/sync` / `world.view_sync`: opaque checkpoint -> upserts/removals + a checkpoint (which may be unchanged).
 
 Snapshot values and the internal state-history watermark are read in one database transaction.
 The public `view_revision` hashes only the visible projected body; it does not expose global
@@ -87,11 +87,28 @@ A delta can skip intermediate states; gameplay timelines need a separate world e
 
 Checkpoints bind universe, role, credential, view, selector and world/view versions.
 They survive process restart, expire after five minutes, and are bounded to 16 per viewer
-per universe / 1024 total. These are disposable derived caches, not permanent assets.
+per universe (256 for anonymous public viewers) / 1024 total. These are disposable derived caches, not permanent assets.
 Expired/evicted/mismatched checkpoints return `ViewResetRequired`; clear/reload a snapshot.
 401/403 means clear the protected view. Revocation cannot erase information already seen.
 Apply a delta only when `base_cursor` matches the displayed cursor. Ignore out-of-order
 replies; never apply a delta to another viewer or view. Resources are removed the same way.
+
+### Unchanged checkpoints (0.13.2)
+
+Every sync still recomputes the projection and rechecks authorization in a fresh read
+transaction. When the visible body is unchanged, a non-timeline view can return the
+same opaque cursor, avoiding another checkpoint write transaction. This is not a
+cached world response: observed_at and declared stream anchors are read afresh.
+Global hidden writes do not control reuse or reveal themselves through cursor rotation.
+The internal checkpoint watermark continues to describe the original baseline.
+
+The original expiry is not extended without a write. With 30 seconds or less left,
+the normal path creates a new checkpoint. Expired, evicted, version-mismatched or
+credential-mismatched cursors still require reset. Legacy recipient-timeline views
+keep their existing checkpoint-advancement path. No network exactly-once claim is made.
+Clients must not use cursor inequality as evidence of new facts or of a successful
+poll. Apply a delta when base_cursor matches, even if cursor equals base_cursor;
+use the independently retained stream cursor for events.
 
 `agent_world/web/world-client.js` provides `WorldClient` and `applyViewUpdate`.
 It keeps credentials in caller-managed memory, rejects out-of-order updates, and uses
