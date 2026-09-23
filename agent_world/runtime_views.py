@@ -217,8 +217,14 @@ class RuntimeViews:
             observed_at = time.time()
             self._admit_viewer_tx(c, universe, role_id, identity_token)
             base = json.loads(previous["body_json"]) if previous is not None else None
-        next_cursor = "awv_" + secrets.token_urlsafe(32)
-        expires = observed_at + VIEW_TTL_SECONDS
+        # Recompute and authorize above on every read. Only reuse the derived
+        # checkpoint, never a stale projection or a credential decision. Timeline
+        # checkpoints still advance their event anchor via the existing path.
+        reuse = (previous is not None and not spec.timeline
+                 and previous["body_json"] == encoded
+                 and previous["expires_at"] - observed_at > 30)
+        next_cursor = cursor if reuse else "awv_" + secrets.token_urlsafe(32)
+        expires = previous["expires_at"] if reuse else observed_at + VIEW_TTL_SECONDS
         result = {"view": view, "world_version": definition.version, "view_version": spec.version,
                   "renderer": spec.renderer, "viewer_role_id": role_id,
                   "view_revision": hashlib.sha256(encoded.encode()).hexdigest(),
@@ -232,6 +238,8 @@ class RuntimeViews:
         else:
             result.update(kind="delta", base_cursor=cursor, delta=diff_view(base, body))
         json_text(result)
+        if reuse:
+            return result
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             self._admit_viewer_tx(c, universe, role_id, identity_token)

@@ -82,3 +82,14 @@ const recovered = await gapClient.readTimeline();
 assert.equal(recovered.reset, true);
 assert.deepEqual(recovered.events, []);
 console.log("timeline client: ordered consumption and reset without fabricated replay PASS");
+// An unchanged authorized poll may retain its opaque checkpoint.
+const unchanged = {...delta, cursor: base.cursor, base_cursor: base.cursor, observed_at: 2002,
+  delta: {entities: {upsert: {}, remove: []}, resources: {upsert: {}, remove: []}, meta: base.snapshot.meta}};
+const reused = applyViewUpdate(applyViewUpdate(null, base), unchanged);
+assert.equal(reused.cursor, base.cursor);
+assert.equal(reused.observed_at, 2002);
+assert.equal(reused.snapshot.entities.door.open, false);
+const afterChange = applyViewUpdate(reused, delta);
+assert.equal(afterChange.snapshot.entities.door.open, true);
+assert.throws(() => applyViewUpdate(afterChange, unchanged), StaleViewDelta);
+console.log('view client: same-cursor empty delta and later state change PASS');
