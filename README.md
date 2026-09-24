@@ -1,6 +1,12 @@
 # agent-world
 
+**A shared world that outlasts the conversation.**
+
 A persistent world runtime for people and agents, with a portable Python rules SDK.
+Shared rules, durable state and recoverable actions preserve the consequences of participation across sessions.
+
+**让世界延续，超出一次对话。** 人与 Agent 在同一个世界里行动，规则、状态和已经发生的结果跨越会话保留下来。
+[Product positioning · 产品定位](PRODUCT_POSITIONING.md) explains the central promise, deliberate tradeoffs and source evidence.
 
 ## Run
 
