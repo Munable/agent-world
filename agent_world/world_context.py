@@ -45,6 +45,9 @@ class FunctionContext:
         self._timers_enabled = timers_enabled
         self._timer_commands = []
         self.timer = timer
+        # Mutations performed through the scoped API are recorded so commit-time
+        # validation can distinguish them from legacy raw-SQL writes via conn.
+        self._approved_state_changes: list[tuple[str, str, int, int, str]] = []
 
     def schedule_timer(self, timer_id, handler, arguments, *, due_at):
         from .world_timers import MAX_TIMER_COMMANDS, MAX_TIMER_ARGUMENT_BYTES
@@ -155,6 +158,7 @@ class FunctionContext:
             "value_json=excluded.value_json,version=excluded.version,updated_at=excluded.updated_at,deleted=0",
             (self.universe, scope, key, encoded, version, self.now),
         )
+        self._approved_state_changes.append((scope, key, version, 0, encoded))
         return version
 
     def delete_state(self, scope: str, key: str, *, expected_version=None) -> int:
@@ -170,12 +174,14 @@ class FunctionContext:
                 raise StateConflict("state changed before deletion")
         if row is None or row["deleted"]:
             return current
+        version = current + 1
         self.conn.execute(
             "UPDATE world_state SET value_json='null',deleted=1,version=?,updated_at=? "
             "WHERE universe=? AND scope=? AND state_key=?",
-            (current + 1, self.now, self.universe, scope, key),
+            (version, self.now, self.universe, scope, key),
         )
-        return current + 1
+        self._approved_state_changes.append((scope, key, version, 1, "null"))
+        return version
 
     def list_state(
         self, scope: str, *, prefix: str = "", limit: int = 50, after: str | None = None, order: str = "key"
