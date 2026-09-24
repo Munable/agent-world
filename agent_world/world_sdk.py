@@ -201,6 +201,9 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
             definition.validate_state(
                 migration_ctx, row["scope"], row["state_key"], json.loads(row["value_json"])
             )
+        runtime._validate_managed_state_changes_tx(
+            c, migration_ctx, journal_marker, definition=definition, enforce_authorizer=False
+        )
         for spec in definition.functions:
             runtime._register_function_tx(
                 c,
