@@ -114,6 +114,10 @@ def create_app(
             request,
         )
 
+    @app.get("/v1/describe")
+    async def describe(request: Request, role_id: str | None = None):
+        return await call("world.describe", role_args(role_id), request)
+
     @app.get("/v1/bootstrap")
     async def bootstrap(request: Request, role_id: str | None = None, include_catalog: bool = False):
         return await call(
