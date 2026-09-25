@@ -281,6 +281,49 @@ class WorldSDKTests(unittest.TestCase):
         with self.assertRaises(PermissionDenied):
             self.w.call_function("u", "other.write", self.a, {}, operation_id="other")
 
+    def test_state_authorizer_can_inspect_shared_state_without_legacy_connection(self):
+        shared_scope = "party:example"
+
+        def authorize(ctx, scope, key, access):
+            if ctx.function_id == "world.migrate":
+                return True
+            state = ctx.authorization_state(scope, key)
+            return state is not None and ctx.actor_role_id in state["members"]
+
+        def initialize(ctx):
+            ctx.set_state(shared_scope, "state", {"members": [self.a]})
+
+        def read_shared(ctx, args):
+            return FunctionOutcome({"state": ctx.get_state(shared_scope, "state")})
+
+        def misuse(ctx, args):
+            return FunctionOutcome({"state": ctx.authorization_state(shared_scope, "state")})
+
+        shared_schema = {
+            "type": "object",
+            "properties": {"members": {"type": "array", "items": {"type": "string"}}},
+            "required": ["members"],
+            "additionalProperties": False,
+        }
+        world = WorldDefinition(
+            "shared-policy",
+            "Shared Policy",
+            (
+                FunctionSpec("shared.read", read_shared, EMPTY, access="read"),
+                FunctionSpec("shared.misuse", misuse, EMPTY, access="read"),
+            ),
+            state_rules=(StateRule("party:", "state", shared_schema),),
+            state_authorizer=authorize,
+            initialize=initialize,
+        )
+        self.w.install_world("u", world)
+        result = self.w.call_function("u", "shared.read", self.a, {})
+        self.assertEqual(result["result"]["state"]["members"], [self.a])
+        with self.assertRaises(PermissionDenied):
+            self.w.call_function("u", "shared.read", self.b, {})
+        with self.assertRaises(PermissionDenied):
+            self.w.call_function("u", "shared.misuse", self.a, {})
+
     def test_state_listing_cursor_and_tombstone(self):
         def seed(ctx, args):
             for i in range(5):

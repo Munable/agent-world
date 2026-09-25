@@ -42,6 +42,7 @@ class FunctionContext:
         self.random_draws: list[dict[str, int]] = []
         self._state_validator = state_validator
         self._state_authorizer = state_authorizer
+        self._authorizing_state = False
         self._timers_enabled = timers_enabled
         self._timer_commands = []
         self.timer = timer
@@ -106,13 +107,33 @@ class FunctionContext:
                                (self.universe,stream,limit)).fetchall()
         return [self.get_stream_event(stream,row['event_id']) for row in reversed(rows)]
 
+    def authorization_state(self, scope: str, key: str, default: Any = None) -> Any:
+        """Read one universe-scoped state value only while state_authorizer decides access."""
+        if not self._authorizing_state:
+            raise PermissionDenied("authorization_state is only available inside state_authorizer")
+        identifier(scope, "scope", 256)
+        identifier(key, "state key", 256)
+        row = self.conn.execute(
+            "SELECT value_json,deleted FROM world_state WHERE universe=? AND scope=? AND state_key=?",
+            (self.universe, scope, key),
+        ).fetchone()
+        if row is None or row["deleted"]:
+            return default
+        return json.loads(row["value_json"])
+
     def _check(self, scope, key, access):
         identifier(scope, "scope", 256)
         identifier(key, "state key", 256)
         if access == "write" and self.access != "write":
             raise WorldRuntimeError("read function cannot modify world state")
         if self._state_authorizer is not None:
-            if self._state_authorizer(self, scope, key, access) is not True:
+            previous = self._authorizing_state
+            self._authorizing_state = True
+            try:
+                allowed = self._state_authorizer(self, scope, key, access)
+            finally:
+                self._authorizing_state = previous
+            if allowed is not True:
                 raise PermissionDenied("world state access denied")
 
     def get_state_record(self, scope: str, key: str, default: Any = None) -> dict:
