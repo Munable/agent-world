@@ -96,10 +96,16 @@ CORE = {
         {"cursor": STRING}, ["cursor"], True,
     ),
     "world.bootstrap": (
-        "Recover current identity and a bounded world snapshot, not private Agent memory.",
+        "Recover current identity and a bounded world snapshot; follow returned world_guide before choosing actions.",
         {"include_catalog": {"type": "boolean"}},
         [],
         False,
+    ),
+    "world.describe": (
+        "Read stable world metadata and world-authored entry instructions before choosing actions.",
+        {},
+        [],
+        True,
     ),
     "world.discover": (
         "Discover world functions in bounded pages; load full schemas only when needed.",
@@ -344,6 +350,8 @@ class WorldGateway:
                 include_catalog=args.get("include_catalog", False),
                 record_presence=self.auth_required,
             )
+        if name == "world.describe":
+            return r.describe_world(u, role, identity_token=token)
         if name == "world.discover":
             return r.discover_functions(u, actor_role_id=role, identity_token=token, **args)
         if name == "world.get_receipt":

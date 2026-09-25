@@ -90,6 +90,8 @@ Activity exclusivity is per role and declared group, not a global shared-resourc
 stale-epoch fencing and explicit complete/cancel. Model shared scarce resources with transactional world rules.
 
 `world.bootstrap` returns a bounded world-defined view and its `snapshot_cursor` from one transaction.
+It also points to `world.describe`, which returns stable world metadata and the world-authored
+`entry_instructions` without repeating that potentially longer guide in every bootstrap response.
 Use `world.discover` for compact, paged function discovery; request full schemas only when needed.
 The default bootstrap does not repeat all tool schemas. `include_catalog` is an explicit compatibility option.
 `world.get_changes` and `world.wait_changes` read recipient events with a bounded cursor page.

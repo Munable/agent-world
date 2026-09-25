@@ -14,6 +14,7 @@ SDK_API_VERSION = 1
 CORE_TOOL_NAMES = frozenset(
     {
         "world.bootstrap",
+        "world.describe",
         "world.list_streams",
         "world.read_stream",
         "world.wait_stream",

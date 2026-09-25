@@ -864,6 +864,40 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             ).fetchone()
         return json.loads(row["manifest_json"]) if row else None
 
+    def describe_world(self, universe, role_id, *, identity_token=None):
+        """Return the installed world's stable entry contract for an authorized role."""
+        identifier(universe, "universe")
+        with self._lock, self._conn(readonly=True) as c:
+            c.execute("BEGIN")
+            self._admit_actor_tx(c, universe, role_id, identity_token)
+            self._check_world_tx(c, universe)
+            row = c.execute(
+                "SELECT manifest_json FROM world_definitions WHERE universe=?", (universe,)
+            ).fetchone()
+            if row is None:
+                world = {"id": universe, "name": universe, "version": None, "state_version": None}
+                instructions = "Discover the world functions, then inspect the current state before acting."
+            else:
+                manifest = json.loads(row["manifest_json"])
+                world = {
+                    "id": manifest["world_id"],
+                    "name": manifest["display_name"],
+                    "version": manifest["version"],
+                    "state_version": manifest.get("state_version"),
+                    "api_version": manifest.get("api_version"),
+                }
+                instructions = manifest.get(
+                    "entry_instructions",
+                    "Discover the world functions, then inspect the current state before acting.",
+                )
+            result = {
+                "world": world,
+                "entry_instructions": instructions,
+                "discovery": {"tool": "world.discover", "include_schemas": True},
+            }
+            json_text(result)
+            return result
+
     def bootstrap(
         self, universe, role_id, *, identity_token=None, include_catalog=False, record_presence=False
     ):
@@ -930,6 +964,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 "latest_event_seq": latest,
                 "snapshot_cursor": latest,
                 "world_entry_state": entry,
+                "world_guide": {"tool": "world.describe"},
                 "discovery": {"tool": "world.discover", "include_schemas": True},
             }
             if include_catalog:

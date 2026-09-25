@@ -33,16 +33,26 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 set(by_name), CORE_TOOL_NAMES | {"counter.get", "counter.increment", "activity.score.add"}
             )
             self.assertTrue(by_name["counter.get"].annotations.read_only_hint)
+            self.assertTrue(by_name["world.describe"].annotations.read_only_hint)
             self.assertFalse(by_name["world.bootstrap"].annotations.read_only_hint)
             boot = await session.call_tool("world.bootstrap", arguments={})
             self.assertFalse(boot.is_error, boot.structured_content)
             self.assertNotIn("functions", boot.structured_content)
+            self.assertEqual(boot.structured_content["world_guide"], {"tool": "world.describe"})
             self.assertEqual(boot.structured_content["world_entry_state"]["view"]["counter"], 0)
+            described = await session.call_tool("world.describe", arguments={})
+            self.assertFalse(described.is_error, described.structured_content)
+            self.assertEqual(described.structured_content["world"]["id"], boot.structured_content["world"]["id"])
+            self.assertEqual(described.structured_content["world"]["version"], boot.structured_content["world"]["version"])
+            self.assertTrue(described.structured_content["entry_instructions"])
             result = await session.call_tool(
                 "counter.increment", arguments={"operation_id": "network-op", "arguments": {"amount": 3}}
             )
             self.assertFalse(result.is_error, result.structured_content)
             with httpx.Client(trust_env=False) as client:
+                description = client.get(self.server.url + "/v1/describe", headers=self.auth)
+                self.assertEqual(description.status_code, 200, description.text)
+                self.assertEqual(description.json(), described.structured_content)
                 receipt = client.get(self.server.url + "/v1/receipts/network-op", headers=self.auth)
                 self.assertEqual(receipt.status_code, 200, receipt.text)
                 self.assertEqual(receipt.json()["result"]["value"], 3)

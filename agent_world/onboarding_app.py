@@ -198,6 +198,7 @@ def create_onboarding_app(
                 "Store the returned identity token as a secret.",
                 "Connect to mcp.url using Authorization: Bearer <identity_token>.",
                 "Call world.bootstrap with no role_id argument.",
+                "Call world.describe and follow entry_instructions before choosing actions.",
             ],
         }
 
