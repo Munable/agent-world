@@ -1,0 +1,62 @@
+{
+  "date": "2026-09-27",
+  "branch": "review/layered-baseline-20260926",
+  "review_commit": "c16c45ea6042735312e96c69843b2293532a91f4",
+  "main_base": "f8a995467201ff26a51eb6dce644283de8e6d157",
+  "runtime_fix_commit": "12442a9",
+  "purpose": "Verify the six-layer repository reorganization without claiming untested production or long-run properties.",
+  "environment": {
+    "os": "Windows",
+    "python": "3.14.2",
+    "node": "24.13.0"
+  },
+  "repository_structure": {
+    "python_files_parsed": 91,
+    "markdown_files_checked": 21,
+    "local_markdown_links_checked": 102,
+    "broken_local_links": 0,
+    "git_diff_check": "passed",
+    "runtime_source_changed_by_six_layer_commit": false
+  },
+  "core": {
+    "command": "python tools/run_tests.py",
+    "unittest_tests": 189,
+    "unittest_result": "passed",
+    "legacy_scripts": 12,
+    "legacy_result": "passed"
+  },
+  "core_clients": {
+    "view_client": "passed",
+    "stream_client": "passed"
+  },
+  "package": {
+    "command": "python tools/check_package.py",
+    "result": "passed",
+    "wheel_version": "0.14.0",
+    "external_reference_world": "passed"
+  },
+  "companions": {
+    "lantern_hollow": {
+      "python_tests": 81,
+      "python_result": "passed",
+      "node_scripts": 4,
+      "node_result": "passed",
+      "core_mode": "editable reviewed core"
+    },
+    "ashen_vault": {
+      "python_tests": 164,
+      "python_result": "passed",
+      "node_tests_passed": 12,
+      "node_tests_skipped": 1,
+      "node_tests_failed": 0,
+      "skip_reason": "Real browser trace is produced by check_campaign_browser.py and was not replaced by a synthetic trace.",
+      "core_mode": "editable reviewed core"
+    }
+  },
+  "limitations": [
+    "No new real-browser trace was recorded.",
+    "No Linux or Python 3.11/3.13 CI matrix was rerun locally.",
+    "No long soak test, online model run, multi-host deployment, or production database migration was performed.",
+    "Passing tests are evidence for their covered contracts, not proof that every L1 product goal is implemented."
+  ]
+}

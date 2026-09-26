@@ -52,7 +52,7 @@
 Lantern Hollow 的 camera、experience_layout、presentation_client、sample_assets 四份 Node 脚本通过。presentation_client 首次直接执行缺少必需参数；按脚本约定提供本分支 `agent_world/web/stream-client.js` 路径后通过，未改该世界的测试来迎合结果。
 Ashen Vault 的 Node 测试为 12 项通过、1 项跳过。跳过项要求真实浏览器轨迹，本轮未生成该轨迹，不用合成数据代替。
 
-可复查的命令、结果摘要和核心代码指纹保存在 [验证证据](REPOSITORY_EVIDENCE_2026-09-26.json)；完整本机日志保留在隔离审计工作区，不把私密运行文件提交到仓库。
+首次代码修复的命令与指纹保存在 [2026-09-26 验证证据](REPOSITORY_EVIDENCE_2026-09-26.json)；六层重组后的最终复测保存在 [2026-09-27 验证证据](REPOSITORY_EVIDENCE_2026-09-27.json)。完整本机日志保留在隔离审计工作区，不把私密运行文件提交到仓库。
 
 ## 保留的待办与限制
 
@@ -68,3 +68,12 @@ Ashen Vault 的 Node 测试为 12 项通过、1 项跳过。跳过项要求真�
 没有移除根目录兼容入口、废弃旧回归、改变公开导入路径、拆微服务或发布新包版本。
 没有把所有世界强制套入 Activity、Timer、ViewSpec、仲裁或统一业务状态机。
 2026-09-27 对产品文档做了职责重排：产品目标语义不变，但原先混在“固定前提”里的系统不变量迁入独立 INVARIANTS，领域、架构、实现和表现也各自独立。本轮仍不是重新立项。
+
+
+## 2026-09-27 六层重组复测
+
+六层重组只改文档和仓库保护测试，没有修改 agent_world 运行源码。重组后重新执行：核心 189 项 unittest 与 12 份旧回归全部通过；两份核心 Node 客户端测试通过；wheel／独立安装／参考世界检查通过。
+
+Lantern Hollow 使用当前可编辑核心运行 81 项 Python 测试和 4 份 Node 脚本，全部通过。Ashen Vault 运行 164 项 Python 测试全部通过；Node 为 12 项通过、1 项真实浏览器轨迹检查跳过、0 失败。
+
+同时解析 91 份 Python 文件、21 份 Markdown，并检查 102 个本地 Markdown 链接，无语法或断链问题。未运行新的真实浏览器轨迹、Linux/Python 版本矩阵、长期 soak、多主机部署或生产数据库迁移，不能把这些写成已验证。

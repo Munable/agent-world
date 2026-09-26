@@ -32,7 +32,7 @@
 - tools/check_package.py：wheel、独立安装与外部参考消费者。
 - Lantern Hollow / Ashen Vault：独立仓库消费者兼容探测；它们不是通用世界模板。
 
-[2026-09-26 仓库审计](REPOSITORY_AUDIT_2026-09-26.md)记录 raw-state 缺陷复现及修复验证。[Foundation audit](FOUNDATION_AUDIT.md) 是更早的历史执行记录。历史通过不能覆盖当前失败。
+[2026-09-26 仓库审计](REPOSITORY_AUDIT_2026-09-26.md)记录 raw-state 缺陷复现及整理过程；[2026-09-27 验证证据](REPOSITORY_EVIDENCE_2026-09-27.json)记录六层重组后的最终复测。[Foundation audit](FOUNDATION_AUDIT.md) 是更早的历史执行记录。历史通过不能覆盖当前失败。
 
 ## 新证据的最低要求
 
