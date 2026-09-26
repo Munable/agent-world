@@ -1,76 +1,38 @@
-# Retention and presentation 0.12
+# 可选保留政策与表现事件
 
-## Control and observation
+复核：2026-09-26。两项能力均按需使用，不强制世界有图形界面。数据归属与缓存见 [WORLD_DATA](WORLD_DATA.md)；观察凭据和公开观察分别见 [Foundation](FOUNDATION.md)、[OBSERVATION_STREAMS](OBSERVATION_STREAMS.md)。
 
-`issue_identity_token(..., access_mode="observe")` is a trusted issuer operation.
-An observation credential reads as the specified role, subject to existing world/view policies.
-It cannot invoke writes (including replay), start/claim/renew/finish activities or record a role
-entry through bootstrap. Existing credentials migrate as `control`; rotation never upgrades
-an observer. This does not provide anonymous spectators, user registration or delegation.
-Do not put an operator credential into frontend JavaScript.
+## 数据保留
 
-## Storage classes
+`StateRule(..., history="metadata")` 只为新提交历史保存版本／变化标识，不保存前后值；`full` 是兼容默认，多个规则匹配时任一 metadata 规则抑制历史值。当前状态不变。它不是秘密擦除保证，旧历史、回执、通知、WAL 和备份可能仍保存内容。
 
-`StateRule(..., history="metadata")` retains versions and change identity but omits before/after
-values in newly committed history rows. `full` remains the compatibility default. When multiple
-matching rules apply, any metadata rule suppresses historical values. Current state is unchanged.
-This is not a secret-erasure guarantee: outcomes, notifications, old history, WAL pages, snapshots
-and backups may independently contain data. Avoid putting private model memory in the server.
-Rules should update logical actions, not write renderer frames to the database.
-
-A world can declare:
+世界可以声明：
 
 ```python
 RetentionPolicy(event_seconds=3600, event_rows=1000,
                 history_seconds=86400, history_rows=5000)
 ```
 
-The combined application runs a bounded maintenance sweep every 30 seconds only when configured,
-independently of the timer worker. `python -m agent_world.maintenance --world module:WORLD
---universe example --db world.sqlite3` runs one sweep for other deployments.
-No policy means no new automatic destructive cleanup of existing worlds.
+组合入口在配置后每 30 秒执行有界 maintenance，与 timer worker 独立。其他部署可运行 `python -m agent_world.maintenance --world module:WORLD --universe example --db world.sqlite3`。无 policy 不新增破坏性自动清理；共享流使用自己的保留合同。
 
-Cleanup removes only contiguous prefixes and advances the corresponding retention floor in
-one transaction. It is universe-scoped and bounded per sweep. Bursts can temporarily exceed
-row limits; monitor/call more sweeps if needed. Clock rollback does not create silent gaps.
-Current state, commit metadata, timer IDs and operation receipts are not deleted. This protects
-idempotency but means total database size is NOT bounded by these two policies. Receipt/asset
-archival and full backup/erasure procedures are separate production decisions.
-This is logical deletion, not secure erasure or guaranteed immediate file-size reduction.
-SQLite reference: https://www.sqlite.org/pragma.html#pragma_secure_delete
+清理在同一事务删除实例内连续前缀并推进 floor，短期突发可超过行限额。当前状态、commit metadata、timer ID 和操作回执不被此 policy 删除，因此数据库总大小没有上界保证。不能为控制容量直接删去重依据；相关设计与验证见 [OPEN_DESIGN](OPEN_DESIGN.md)。逻辑删除不是安全擦除，也不保证数据库文件立即缩小。
 
-## Public presentation cues
+## 表现信封不是公开权限
 
-`PresentationCue(cue_id, subject_id, channel, phase, name, data).event(recipient_role_id)` creates
-an ordinary EventSpec with a validated `world.presentation` envelope. No second delivery queue.
+`PresentationCue(cue_id, subject_id, channel, phase, name, data).event(recipient_role_id)` 生成普通 EventSpec，信封类型为 world.presentation。它是**按角色投递**，不会因为名为 speech 或 intent 就公开给所有人。只有显式发布到获准共享频道时才按该频道策略可见。
 
-- channels: `action`, `speech`, `intent` (publicly declared intent, not private reasoning);
-- phases: `start`, `finish`, `cancel`;
-- `cue_id` correlates a lifecycle; `subject_id` identifies its visual world object;
-- `name` and `data` are world-defined (move, speak, use an object, etc.);
-- event time and actor attribution come from the server, not the frontend.
+当前 channel 为 action / speech / intent，phase 为 start / finish / cancel。cue_id 关联生命周期；subject_id 标识世界对象；name/data 由世界定义；时间与 actor 来源由服务器记录。intent 只能是明确提交的意图字段，不是服务器推测的私人思考。
 
-The engine validates envelope/size and commits cues with state and receipt, including timer
-outcomes. The WORLD must authorize the subject, audience and lifecycle and keep any currently
-active action in its state/view. This envelope alone does not enforce a movement or dialogue
-state machine. Do not label an unobserved model process as "thinking". Visible intent is a
-statement a world rule accepted. Text remains untrusted data, never executable markup.
+Runtime 校验信封与大小并随状态和回执原子提交，包括 timer outcome。世界负责主体、受众、生命周期和 payload 的领域合法性。信封不实现移动、对话或审批状态机。文本不作为 HTML、代码或自然语言控制命令执行。
 
-A `ViewSpec(..., timeline=True)` makes public cues readable for that view. A snapshot returns
-an opaque `timeline_cursor`, anchored to the same read transaction. The browser can independently
-sync net state and drain ordered cues with `world.view_timeline` or `POST /v1/views/timeline`.
-The latter takes `cursor` and an optional `limit`, and returns ordered `events`, a new cursor,
-`base_cursor`, and `has_more`. Current view authorization is rechecked; only original recipient
-cues whose subject is currently visible in that view are returned. World-specific audiences
-are still decided by the rules, not inferred by the renderer.
+表现数据用于描述逻辑动作，不是持续写入渲染帧。当前仍在进行的业务状态必须能从获准 state/view 恢复；动画结束不触发第二次业务提交，缓存丢失不改变结果。
 
-Cursor binding includes role, credential, universe, view/selector and world version through the
-existing bounded checkpoint cache. Expiry, eviction or a retention gap returns `ViewResetRequired`.
-The client must reset to current authoritative state, cancel stale animation/bubble state and
-NOT invent missing actions. New clients do not need every past animation to reconstruct a scene.
-`WorldClient.readTimeline` drops stale concurrent replies, handles reset, and keeps the timeline
-cursor separate from net-view synchronization. No global private sequence numbers are exposed
-through this presentation endpoint. Ordinary recipient event APIs keep their existing contract.
+## 可选 timeline
 
-No art, walking frames, pathfinding algorithm, camera or rendering engine is forced into the kernel.
-Those belong to the consuming world/client. These are logical action cues, not 60 FPS frame streams.
+`ViewSpec(..., timeline=True)` 返回 opaque timeline_cursor，与快照同事务锚定。`world.view_timeline` / `POST /v1/views/timeline` 接受 cursor 和可选 limit，返回有序 events、新 cursor、base_cursor、has_more。
+
+每次读取复核当前视图权限；只返回原接收者的 cue，且 subject 当前在视图中可见。受众由世界规则决定，不由 renderer 推断；这不是匿名公开频道。
+
+检查点绑定 role、credential、universe、selector、world/view version。过期、驱逐、保留缺口需 ViewResetRequired 后重取快照，取消过期表现队列，不补造历史。WorldClient.readTimeline 与净增量同步分开维护游标，丢弃过期并发回复。此端点不暴露全局私人序列号，普通 recipient events 保持各自合同。
+
+美术、行走帧、相机、寻路和领域动画绑定由世界／客户端实现，不进入 Runtime 的必要验收范围。

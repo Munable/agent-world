@@ -1,86 +1,39 @@
-# Observation and shared streams
+# 观察与共享事件流
 
-The world is authoritative. Human players, external Agents and read-only observers may
-use different clients, but do not receive different versions of reality. An observer is
-not a synthetic player. An HTTP success, returned message, or visible role is not proof
-that a model is online, thinking, has read, or has understood anything.
+复核：2026-09-26。观察者不是伪造玩家，事件已经发布不表示外部 Agent 在线、已读、理解或完成。消息文本是不可信数据，不是 Runtime 控制指令。完整交互职责见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。
 
-## Public observation is explicit
+## 显式公开观察
 
-A `ViewSpec(public=True)` can be read without a Role Core or credential. Its projector
-receives `ctx.actor_role_id=None`; it must return only intentionally public content.
-Private views remain authenticated. Public observation cannot invoke world Actions,
-create invitations, impersonate a role, or borrow a role-scoped view checkpoint.
-No default database dump or automatic publication of recipient-private events exists.
+`ViewSpec(public=True)` 允许无角色／凭据读取。projector 的 actor_role_id 为 None，只返回故意公开的数据。私有视图仍需鉴权。匿名观察不创建 Role Core，不执行世界写函数，不借用角色私有检查点或自动公开私人事件。
 
-Routes: `/v1/public/views`, `/v1/public/views/{view}/snapshot`,
-`/v1/public/views/sync`. A world may expose these directly or implement a read-only
-product route using `public_view_snapshot` and `public_view_sync`.
+HTTP：`/v1/public/views`、`/v1/public/views/{view}/snapshot`、`/v1/public/views/sync`。世界可直接使用，或以 public_view_snapshot / public_view_sync 组合只读产品入口。
 
-## Opt-in shared event channels
+## 按需声明频道
 
-`StreamSpec(name, public=False, authorize=None, retention_seconds=86400, max_events=4096)`
-defines one world-scoped channel. Publication uses `StreamEvent(stream, kind, payload, key)`
-inside a normal FunctionOutcome. `PresentationCue.publish(stream, key=...)` is a convenience.
-State, timer effects, publication, provenance and operation receipt commit together.
-The stable event ID is based on the originating operation and publication key. Retrying
-the operation does not create another publication. Within an operation, keys must be unique.
+`StreamSpec(name, public=False, authorize=None, retention_seconds=86400, max_events=4096)` 声明一个世界内频道。规则通过 FunctionOutcome 中的 `StreamEvent(stream, kind, payload, key)` 发布；`PresentationCue.publish(stream,key=...)` 只是封装辅助。
 
-Streams provide whole-channel authorization. Use separate streams for different audiences;
-there is no row-level ACL or covert automatic merging of private events. Authorization is
-checked on every read. Publishing is an action of trusted world rules, not an anonymous
-transport endpoint. Recipient EventSpec inboxes remain separate and backward compatible.
+状态、timer 效果、发布、来源和回执同事务提交。event ID 由原操作及 publication key 确定，同一操作 key 必须唯一；重试不重复发布。发布是受信任世界规则的行为，不是匿名传输入口。
 
-`world.list_streams`, `world.read_stream`, `world.wait_stream` are available through MCP.
-HTTP uses `/v1/streams`, `/v1/streams/{name}/read`, `/v1/streams/{name}/wait`.
-Only explicitly public streams support `/v1/public/streams/{name}/read`.
-Waiting is bounded to 30 seconds, uses no model call, and does not wake a stopped chat host.
+当前授权粒度是整个频道，每次读取重新鉴权。不同受众可使用分别声明的频道，但不存在逐条 ACL、任意动态群组订阅或自动合并私信。按角色投递的 EventSpec 保持独立；不要把静态声明频道描述为完整群聊系统。
 
-## Snapshot, live cursor and history cursor are independent
+MCP：`world.list_streams` / `world.read_stream` / `world.wait_stream`。HTTP：`/v1/streams`、`/v1/streams/{name}/read`、`/v1/streams/{name}/wait`。显式 public 频道另外支持 `/v1/public/streams/{name}/read`。wait 最长 30 秒，不调用模型，不唤醒已停止宿主。
 
-A view may declare `streams=(...)`. Its snapshot captures stream live/history anchors in
-the SAME database read transaction as the view. Use that live anchor after rendering the
-snapshot; do not reset it every time the visual view changes. Otherwise concurrent events
-can be skipped between requests.
+## 快照、现场流和历史
 
-A recent read returns a bounded tail, a forward `cursor`, and a backward `history_cursor`.
-Forward pages are ordered and deduplicated by stable event ID. Backward pages load older
-retained records; do not replace the live cursor with the history page's cursor.
-Cursors are signed, scoped to world version/channel/viewer/credential, and expire. Explicit
-retention gaps return `StreamResetRequired` or `history_truncated`; they never pretend missing
-history was read. New observers can read retained public records without having been present.
-This is not permanent history, public blockchain consensus, or a semantic knowledge store.
+视图可声明 streams；快照在同一数据库读事务取得视图及流的 live/history anchors。显示快照后从该 live anchor 继续，不因每次视图更新而重置现场游标，避免跳过并发事件。
 
-Retention removes bounded contiguous prefixes, retaining the stream-local sequence floor.
-Recipient cleanup does not delete shared channels, and shared cleanup does not delete
-state, receipts or private memories. Stream payloads are capped at 64 KiB, pages at 100 events
-and 192 KiB; stream counts and retention are declared by the world.
+recent read 返回有界尾部、前向 cursor 和后向 history_cursor。前向页按稳定 event ID 去重；后向翻页只加载保留历史，不能替换现场 cursor。游标签名并绑定 world version、频道、viewer、credential，且会过期。
 
-## Client contract
+retention gap 返回 StreamResetRequired 或 history_truncated；不把缺失历史视为已读。新观察者可读取保留的公开记录，但这不是永久历史或语义知识库。缓存／流的过期不能被解释成业务自动结束。
 
-`web/stream-client.js` supplies bounded EventLedger and BubbleQueue helpers. History and
-live events stay distinguishable; history is not silently animated as if it happened now.
-Speech must queue per subject instead of replacing the previous speaker's sentence. Queue
-overflow is explicit and does not erase the retained timeline. Every body is untrusted data,
-not HTML, executable code, or a command for another Agent. Rendering is the world's concern.
-A reply relation is a world rule that points to a real retained message. The kernel does not
-force people/Agents to reply, invent intent, or prescribe a social/game workflow.
+清理删除有界连续前缀并推进频道 floor。recipient cleanup 不删除共享流，共享流清理不删除 state 或 receipts。payload 当前最多 64 KiB，每页最多 100 个事件／192 KiB。频道数及保留参数由世界声明。
 
-## Diagnostics and boundaries
+## 可选客户端与诊断
 
-SafeRequestTrace is opt-in. It generates request IDs and records normalized routes, HTTP
-status, duration and exception TYPE. It never records tokens, cookies, request/response
-bodies, raw query strings, unrecognized paths or raw error messages. Rotation is bounded.
-HTTP status is not MCP tool success; business receipts/publications remain the evidence of
-committed actions. A failed log sink must not change the outcome of a committed action.
+`web/stream-client.js` 的 EventLedger / BubbleQueue 提供有界记录、去重和表现队列。历史不伪装成现场动作，同主体发言按顺序显示；表现队列溢出不等于持久记录被删。回复关系必须由世界函数验证，不能自动推断意愿或强迫回复。
 
-Schema 5 adds channel storage without changing old world manifests. Existing private inbox
-records are never globally republished by migration. Each world must explicitly assess any
-legacy public-history import. Control ownership, asset storage, delegated authority and
-external work remain separate problems; this fix does not prescribe an RPG or task platform.
+BubbleQueue 可接收绝对 epoch-second expires_at；push/active 应使用一致的服务器时间估计，过期输入、排队项和展示期限都受检查。无 deadline 使用原本地时长。这是显示期限，不自动改变世界消息的保留或业务状态。
 
-BubbleQueue accepts an optional absolute epoch-second `expires_at`. Supply the same server-time
-estimate to `push(message, now)` and `active(now)`; it rejects expired ingress, drops expired
-queued messages even behind occupied slots, and clips visible duration to that deadline.
-Messages without a deadline keep the legacy local-duration behavior. World adapters that
-require source timestamps must validate and supply them. This helper does not alter retained history.
+SafeRequestTrace 为可选诊断，记录 request ID、规范路由、HTTP 状态、时长和异常类型；不记录 token、cookie、正文、原始 query/path 或异常正文。日志轮转有界，sink 失败不改变已提交操作。HTTP 成功不等于 MCP 工具成功，业务回执是提交证据。
+
+频道存储的数据库升级不将原有私信自动公开。旧公开历史的导入需世界自己审查。实现差距和后续设计仅在 [OPEN_DESIGN](OPEN_DESIGN.md) 维护，不在此复制功能愿望清单。
