@@ -1,114 +1,40 @@
-# Durable world time 0.11
+# 可选的持久定时事项
 
-Timers are server-owned world obligations, not sleeping Agent conversations or stored
-bearer credentials. A human UI and an Agent request the same world rules; those rules
-may register a one-shot timer in the same transaction as their state change.
+复核：2026-09-26。Timer 是服务器按世界规则执行的已提交定时事项，不是服务器里的 Agent、模型会话或代用户保存的凭据。不需要定时行为的世界可以不声明 timer。
 
-## Declare a timer
+## 声明与提交
 
-```python
-from agent_world import TimerSpec, FunctionOutcome
+`TimerSpec` 声明同步 handler、对象 input_schema、可选 output_schema / authorize、版本、重试次数和基础延迟。它不是 FunctionSpec，不可通过猜测工具名从 HTTP/MCP 直接执行。
 
-def expire(ctx, arguments):
-    ctx.set_state("effects", arguments["id"], {"active": False})
-    return FunctionOutcome({"expired": True})
+`ctx.schedule_timer(id, handler, arguments, due_at=...)` 和 `ctx.cancel_timer(id)` 在 managed write 中缓冲命令，与操作一并提交；读函数和投影不能调度。初始化和迁移可调度，未知 handler 或无效命令回滚操作。`ctx.get_timer(id)` 是世界规则的有界元数据读取，不自动公开底层队列。
 
-# WorldDefinition(..., timers=(TimerSpec("expire", expire, input_schema),))
-# In an authorized write rule:
-# ctx.schedule_timer("effect-123", "expire", {"id": "123"}, due_at=ctx.now + 60)
-```
+世界函数自行声明谁能调度、取消和查看。调度被接受后，事项不因创建者离线或凭据撤销自动消失。执行身份为 `system:timer`，ctx.timer 记录 ID、到期时间、原发起者／操作、创建时间和尝试次数。TimerSpec.authorize 在写锁下重查执行条件，state_authorizer 仍适用。是否随业务所有者状态失效由世界规则决定。
 
-`TimerSpec` defines a synchronous handler, object input schema, optional output schema,
-optional `authorize(ctx, arguments)`, version, retry budget and base retry delay.
-Timer handlers are NOT FunctionSpec tools and cannot be invoked by guessing their names
-through HTTP/MCP. They are loaded only from the trusted world package.
+## 原子性与继续执行
 
-`ctx.schedule_timer(id, handler, arguments, due_at=...)` buffers a validated command.
-`ctx.cancel_timer(id)` buffers cancellation. Both require a managed world write;
-read functions and view projections cannot use them. Initializers and migrations can
-schedule timers too. Unknown handlers or invalid commands roll back the entire operation.
-`ctx.get_timer(id)` reads bounded metadata for world rules, not a public raw queue.
-A world function must authorize its own cancellation and visibility policies.
+调度、状态、来源和原操作回执同事务提交。每次触发的状态、历史、通知、回执、后续 timer 命令及 terminal status 原子提交。多个 worker 在 SQLite 写锁下串行；提交前崩溃后回调可能重跑，但不能产生两套已提交数据库效果。外部网络、付款或文件副作用不享有该保证，不得直接混入回调。
 
-## Authority
+timer_id 在 universe 内唯一。同 ID 同意图再次调度为 no-op，完成／取消后也不重新激活；不同意图冲突，新一次发生需新 ID。取消只有在其事务先于触发提交时生效；取消已完成 timer 不撤销效果，取消未知 ID 报错，正在触发的 timer 不能取消自身。
 
-Scheduling is authorized by the initiating world Action. Once committed, the timer is a
-world obligation. It does not borrow the creator's token, and revoking that token or taking
-the creator offline does not automatically revoke the world's obligation.
-The handler runs as `system:timer`, with a frozen `ctx.timer` record containing the ID,
-due time, original initiator/operation and attempt. Existing state policies still apply.
-`TimerSpec.authorize` rechecks world preconditions at firing, under the database write lock.
-A world can explicitly reject settlement after an owner is disabled, or continue a game
-cooldown regardless. Neither behavior is silently universalized by the runtime.
-This is NOT a general "act as this user later" credential/delegation system.
+timer 固定 world ID/version 和 handler version。升级不自动重解释旧事项，版本不匹配变为 blocked；迁移可明确取消旧 ID 并创建替代项。旧进程不得执行新版世界。此合同不定义通用业务轮次或外部 Agent 调度。
 
-## Atomicity, cancellation and recovery
+## 失败、晚到和容量
 
-Scheduling, state changes, commit provenance and the originating receipt commit together.
-The timer is not visible before commit. Rule/output failure removes all of them.
-A timer's ID is unique within its universe. An identical schedule is a no-op even after
-completion/cancellation; changing its intent conflicts. Use a new ID for a new occurrence.
+RetryTimer 请求回滚后重试，指数延迟有上限，尝试预算为 1–10 次，耗尽为 failed。授权／规则拒绝为 rejected；未预期 handler 错误为 failed，原始异常正文不向客户端泄露。存储故障回滚并留待后续 sweep。
 
-Each firing runs in one short transaction. State/history/notifications, result receipt,
-follow-up timer commands and the terminal timer status commit together. Multiple workers
-serialize at the SQLite writer lock; a completed item cannot fire again.
-Crashing before commit rolls the attempt back to pending. Its callback may run again after
-restart, but only one committed set of database effects is accepted. No exactly-once claim
-is made for external network/filesystem/payment side effects; they remain forbidden here.
+一次失败不阻止其他到期事项。每次 sweep 的候选列表固定且有界，后续立即到期项不形成同一 sweep 内的无限循环。一次事务最多改变 32 个 timer，一个 universe 最多 10,000 个 pending timer。终态记录保留以防 ID 复用，未实现自动终态归档。
 
-Cancellation wins only when its transaction commits before firing. Cancelling a completed
-timer does not undo effects. Cancelling a cancelled timer is idempotent. Cancelling an
-unknown timer fails. A timer cannot cancel itself while firing.
+due_at 为有限 UTC Unix 时间戳，不是虚构游戏时间或对话轮次。worker 取得写锁后复查时钟；时钟回退可能延后执行，错误前跳也会影响到期判断。过期的一次性事项在服务恢复后处理，不捏造错过的周期。ctx.now 是执行时间，ctx.timer.due_at 是原截止时间；晚到业务结果由规则定义，不承诺硬实时。
 
-Timers pin world ID/version and handler version. Upgrading rules does not silently reinterpret
-queued work: old timers become `blocked`. An old loaded process refuses to drive a newer world.
-A migration can explicitly cancel old IDs and schedule replacements. No automatic rebind.
+## 运行边界
 
-## Failure and catch-up
-
-- `RetryTimer` explicitly requests rollback and retry, with capped exponential delay.
-- At most the configured attempts (1..10) are committed as attempts; exhaustion is `failed`.
-- A denied precondition or rule rejection becomes `rejected` without world mutations.
-- Unexpected handler errors become `failed`; arbitrary exception messages/arguments are not exposed.
-- Storage failures roll back the transaction and leave work pending for a later sweep.
-
-A failed/rejected/blocked item does not stop other due items. Per-sweep candidates are fixed
-and bounded, so an immediate follow-up or retry cannot create an unbounded same-sweep loop.
-One transaction may change at most 32 timers; one universe may hold 10,000 pending timers.
-Terminal records remain to prevent ID reuse; lifecycle transitions link to commit provenance.
-This revision does not add an automatic terminal-record purge or permanent archival service.
-
-`due_at` is a finite UTC Unix timestamp, not a wall-clock string or a per-world game tick.
-The worker rechecks the clock after acquiring the write lock. Clock rollback can delay work;
-a wrong/forward-jumping host clock can still affect due decisions. Synchronize the host clock.
-Overdue one-shot timers fire when service resumes; missed recurring periods are not fabricated.
-`ctx.now` is execution time; `ctx.timer.due_at` is the requested deadline. Rules decide how to
-handle lateness. This is not a hard real-time guarantee or a universal fairness/turn model.
-
-## Running
-
-The combined `python -m agent_world` server drives timers during its lifespan, even with
-no clients connected. `--no-timers` disables that embedded worker. `--timer-interval` controls
-polling (default one second). A deployment can instead run a separate trusted worker:
+组合入口 `python -m agent_world` 在 lifespan 内默认运行 worker，即使无客户端；`--no-timers` 可禁用，`--timer-interval` 默认一秒。也可运行独立 worker：
 
 ```sh
 python -m agent_world.timer_worker --world my_world:WORLD --universe campaign --db world.sqlite3
 python -m agent_world.timer_worker --world my_world:WORLD --universe campaign --db world.sqlite3 --once
 ```
 
-The standalone worker and the combined server must use the same world package and database.
-Only the combined server starts a worker by default; legacy standalone HTTP/MCP app factories
-need an external worker. Shutdown waits for an in-flight short rule to finish. Trusted rules
-must not hang or do model/network work inside the transaction. No background service is
-installed by importing the package or by running the conformance tests.
+worker 与服务需使用匹配的包和数据库。旧独立 HTTP/MCP factory 不默认启 worker。关闭时等待正在执行的短规则完成；受信任回调不得挂起或在事务中等待外部参与者。导入包或运行测试不会安装常驻服务。
 
-`examples/timed_worlds.py` supplies an expiring RPG effect and a workflow deadline using the
-same contract. The automated tests exercise actual HTTP/MCP, process death mid-transaction,
-concurrent workers, permission rechecks, retries, cancellation, migration and restart.
-They are deterministic conformance tests, not claims about autonomous model behavior.
-
-## Still separate
-
-External-work delivery, per-user control/delegation, asset/blob retention, public/group
-subscriptions and semantic event timelines remain independent foundation work. Timers do
-not implement those systems, wake a remote chat application, or guarantee continuous hosting.
+`examples/timed_worlds.py` 与 timer 测试覆盖规则期限、进程中断、并发 worker、权限复核、重试、取消和版本变化；这些是合同测试，不证明外部 Agent 持续在线。跨调用用户决定保存在世界状态中，不能统一改写成 timer。未决问题见 [OPEN_DESIGN](OPEN_DESIGN.md)。

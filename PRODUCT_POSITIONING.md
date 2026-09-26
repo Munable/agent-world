@@ -1,64 +1,38 @@
-# Product positioning · 产品定位
+# Agent World：产品定义
 
-Reviewed 2026-09-24 against source `247fcde003197c78a8a7d6184e3517e76b5276d9`.
-This is the positioning reference for the README and company website. Runtime contracts remain authoritative for implementation scope.
+确认日期：2026-09-26。本文定义产品目标；[Foundation](docs/FOUNDATION.md) 描述当前接口和实现边界。实现暂缺不改变产品目标，测试通过也不代表所有目标已经实现。
 
-## The center
+## 产品与固定前提
 
-**A shared world that outlasts the conversation.**
+Agent World 是世界 Runtime。独立开发者定义各世界的规则和内容；用户通过外部 Agent、代码工具或其他客户端进入世界，读取获准信息，提交结构化操作，并接续已保存的世界状态。
 
-Agent World gives people and agents somewhere to act together: a world with its own identity, rules and lasting state. A conversation may end; an accepted action still has a recorded result, and the same role can return to the state it left behind.
+1. **身份由用户持有。** 用户持有自己的身份令牌。不同客户端使用用户提供的令牌，对应同一底层用户身份与档案；令牌在各开发者的世界之间通用。这不是待决定的所有权问题。各世界的状态与行动权限分别管理，通用身份不等于无限操作权限。
+2. **Agent 始终在外部运行。** Runtime 不托管 Agent、不调用模型推理、不保存私人推理上下文，也不替离线主体发言或作决定。外部宿主决定何时运行 Agent。
+3. **服务器只执行结构化接口与规则代码。** 自然语言可以是消息或证据的文本字段，但服务器不解释其含义，不据此推断确认、授权、任务完成或裁决。
+4. **已接受的世界变化独立于会话。** 服务器保存权威状态、必要的操作回执和接续信息。外部模型故障或连接中断不撤销已经提交的操作。
+5. **世界有领域规则，Runtime 没有固定玩法。** 游戏、社交、协作等场景可以使用同一运行时；职业、地图、好友关系、任务评分不是内核必备对象。
 
-The product's value is continuity. The runtime owns the facts; models choose actions, world authors define the rules, and clients present what actually happened. This creates a useful foundation for persistent games and shared workflows without coupling their existence to one chat session.
+## 责任范围
 
-### Website copy
+| 层 | 职责 |
+| --- | --- |
+| Runtime | 身份接入、函数合同、授权检查、事务、回执、持久状态、获准观察与变化读取；按声明执行持久定时事项。 |
+| 世界开发者 | 领域数据、可执行规则、可见性、共享事项与完成条件、必要的第三方决策流程。 |
+| 外部 Agent／客户端 | 用户授权下的结构化调用、模型推理、私人记忆、连接与重试管理、显示数据。 |
+| 部署与可选基础工具 | 启停、备份、监测、适配器和可替换的表现辅助，不决定世界业务结果。 |
 
-> **A shared world that outlasts the conversation.**
-> A runtime for people and agents to act in the same persistent world. Shared rules, durable state and recoverable actions keep their consequences intact across sessions.
+第三方／群众公裁是**待设计能力**，不是被排除的需求。参与和裁决在外部进行，服务器验证结构化提交并按明确规则记录或执行结果；资格、分配和裁决成立条件尚未确定，见[待设计与待验证](docs/OPEN_DESIGN.md)。
 
-Status label: **Open-source runtime**.
+## 当前实现与目标的差异
 
-## Why this claim belongs to this project
+截至源码 `3fbb6378`，Runtime 为 0.14.0、SDK API 为 1，使用本地 SQLite 和受信任 Python 世界包。现有身份令牌绑定 `role + universe`，不同独立部署之间的统一身份验证尚未落地。它是实现缺口，不能把“每个世界一套身份”写成产品原则；本次文档整理没有改变鉴权行为。
 
-| Product decision | What it makes possible | Evidence in this source |
-| --- | --- | --- |
-| Browser and Agent actions enter the same rules and transaction path | Different clients operate on one authoritative world | [Foundation contract](docs/FOUNDATION.md), [reference transport test](tests/test_reference_transport.py) |
-| Stable roles, world state and retained operation receipts | Return to an existing role and recover committed results; retries do not repeat an accepted mutation | [Runtime execution](agent_world/runtime_functions.py), [foundation contract](docs/FOUNDATION.md) |
-| World-owned persistent timers | Accepted timed obligations can settle without a connected model or browser, while a world worker is running | [Durable time](docs/DURABLE_TIME.md), [timer runtime](agent_world/runtime_timers.py) |
-| Portable world package separated from the runtime | Village, encounter and workflow rules can use the same foundation | [Reference gate](docs/REFERENCE_GATE.md), [workflow example](examples/workflow_world.py) |
-| Authorized views and retained shared streams | People can observe accepted facts and public events without controlling a role | [Observation contract](docs/OBSERVATION_STREAMS.md) |
+公开观察、按角色私有事件、声明式共享频道、快照和缓存检查点已有实现。跨客户端恢复有测试依据，但不等于所有外部宿主都能被唤醒，也不等于长期稳定运行已经证明。当前版本不是任意不可信代码的隔离环境；分布式存储和外部系统副作用没有现成保证。
 
-These are source and existing acceptance references reviewed for copy, not fresh execution results from this positioning pass.
+## 文档与证据规则
 
-## The deliberate tradeoff
+产品目标只在本文定义；接口、数据、交互、时间各有一份现行合同。未决事项集中在 OPEN_DESIGN，实验结果注明源码与覆盖范围。旧实验记录不升级为通用产品要求。
 
-Prioritize consistent, recoverable consequences over unrestricted generated behavior. Worlds are authored trusted Python packages; their rules determine what can happen. The current local SQLite runtime favors a compact, inspectable foundation. Do not describe it as a distributed hosting platform, universal game generator or sandbox for arbitrary world code.
+灯溪镇、灰烬地城及仓库示例是验证消费者，不是所有世界的模板。新增能力应对应一个实际缺陷或明确待验证假设；不以完整游戏、美术完成度或场景数量作为 Runtime 成立的门槛。
 
-Persistence also does not imply continuous model thought. The world worker can complete an accepted timer; it cannot wake a stopped Agent host or invent that Agent's next decision. Runtime guarantees cover committed world data, not arbitrary payments, messages or other external effects.
-
-## Relationship to the worlds
-
-Agent World provides continuity and authority. [Lantern Hollow](https://github.com/Munable/agent-world-lantern-hollow) makes those properties tangible through a place people and agents can inhabit and return to. [Ashen Vault](https://github.com/Munable/agent-world-ashen-vault) uses them for explicit rules, resource choices and persistent adventure outcomes. Their maps, quests and combat systems belong to those worlds.
-
-The connection to Marine Mystique's belief in software changing reality is concrete: an intention becomes a durable, shared consequence. These projects currently demonstrate that in digital worlds; claims about physical-world execution need separate evidence.
-
-## 中文定位
-
-**让世界延续，超出一次对话。**
-
-Agent World 为人与 Agent 提供一个共同采取行动的世界：身份可以延续，规则由世界执行，结果会留下。对话结束之后，已经发生的事情仍然成立；再次进入时，同一个角色可以接着行动。
-
-它的核心是“持续性”。模型决定做什么，世界规则决定实际发生什么，客户端呈现已经发生的事实。游戏和协作流程因此可以拥有独立于聊天会话的状态。
-
-### 官网文案
-
-> **让世界延续，超出一次对话。**
-> 让人与 Agent 在同一个持久世界中行动。共同的规则、持续的状态与可恢复的操作，让每次行动的结果跨越会话保留下来。
-
-状态：**开源运行时**。
-
-### 取舍与边界
-
-优先让行动结果一致、可恢复，再扩展世界的自由度。世界作者负责规则和内容，底座负责身份、事务、回执、观察与时间。当前是基于 SQLite 的可检查底座，不能写成任意世界自动生成、分布式托管或持续自主思考平台。
-
-灯溪镇呈现“一个可以返回的地方”；灰烬地城呈现“按明确规则留下后果的选择”。两者是不同的世界产品。公司“用软件改变现实”的理念在这里对应的是：把意图变成共同可见、确实保留的数字世界事实。
+对外表述：**让世界延续，超出一次对话。** 一个供用户及其外部 Agent 接入、行动和接续状态的世界运行时。当前证据范围见[验收说明](docs/REFERENCE_GATE.md)。
