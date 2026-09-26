@@ -1,6 +1,6 @@
 # Runtime / SDK 合同
 
-文档复核：2026-09-26，源码 `3fbb6378`，Runtime 0.14.0 / SDK API 1。文档日期不是 API 版本。本整理分支在上述文档基线上修复 managed-state 校验，包版本暂不变；具体提交与验证见[本次审计](REPOSITORY_AUDIT_2026-09-26.md)。产品目标以[产品定义](../PRODUCT_POSITIONING.md)为准；本文件描述当前接口、必须遵守的规则及已知偏差，不宣称生产能力齐备。
+文档复核：2026-09-26，源码 `3fbb6378`，Runtime 0.14.0 / SDK API 1。文档日期不是 API 版本。本整理分支在上述文档基线上修复 managed-state 校验，包版本暂不变；具体提交与验证见[本次审计](REPOSITORY_AUDIT_2026-09-26.md)。产品目标见[产品目标](../PRODUCT_POSITIONING.md)，不可破坏的系统性质见[系统不变量](INVARIANTS.md)，概念边界见[领域模型](DOMAIN_MODEL.md)。本文件属于 L4，只描述 Runtime/SDK 行为合同及已知偏差，不宣称生产能力齐备。
 
 ## 结构化调用与责任
 
@@ -32,7 +32,7 @@ WORLD = WorldDefinition(
 )
 ```
 
-将其保存为可导入的 `my_world.py`，运行 `python -m agent_world --world my_world:WORLD`。`--universe` 选择隔离的数据实例，不是模块名。模块加载是受信任部署配置，不能由 Agent 的工具参数安装代码。
+WorldDefinition 由部署配置加载；universe 选择隔离的持久实例，不是规则包本身。模块加载不能由普通 Agent 工具参数动态安装代码。当前命令行形态见 [IMPLEMENTATION](IMPLEMENTATION.md)。
 
 ## 函数与状态
 
@@ -64,11 +64,11 @@ operation_id 解决传输重试，不替代业务对象唯一性。不同 ID 的
 
 产品已确定用户持有跨世界通用的身份令牌，对应统一底层身份与档案。当前代码的令牌验证仍绑定 role + universe；跨独立部署验证未完成，不能通过简单移除 universe 检查宣称实现了目标。
 
-当前 Role Core 保存稳定 role_id、display_name、avatar_ref、status 和时间字段。角色档案不包含各世界的钱、等级、关系和物品。改显示资料不应换 role_id。当前令牌前缀为 awid_，Join Ticket 为 awjt_，数据库存 SHA-256 哈希；Bearer 鉴权决定调用身份，客户端不能通过参数冒充另一角色。
+角色档案保存稳定参与身份与显示资料，不包含各世界的钱、等级、关系和物品；修改显示资料不应隐式改变参与身份。调用身份必须来自鉴权结果，客户端不能靠业务参数冒充另一角色。当前字段、token 格式与存储方式见 [IMPLEMENTATION](IMPLEMENTATION.md)。
 
-Join Ticket 是当前短期配置／交换入口，绑定 role + universe、最长配置有效期 24 小时。一次 ticket 最多发一个凭据，并可在有效期恢复同一个交换结果；不能复活已撤销、轮换或过期的凭据。撤销 ticket 不自动撤销已发凭据。角色禁用、token revoke/rotate 是分别执行的管理动作。当前角色创建、资料修改、ticket／token 发放与撤销使用操作员入口；X-Operator-Key 不进入前端。ticket 交换入口用 ticket 本身鉴权，连接包提供 universe、角色、ticket／有效期、exchange URL、MCP URL 与步骤。这是现有接入格式，不是跨世界统一验证方案。
+Join Ticket 是当前短期配置／交换机制。一次 ticket 不能产生多个相互独立的调用身份；已经撤销、轮换或过期的凭据不能被 ticket 复活，撤销 ticket 也不自动撤销此前已发凭据。角色状态、token revoke/rotate 是分别执行的管理动作。当前时限、连接包和操作员入口形态见 [IMPLEMENTATION](IMPLEMENTATION.md)；这些都不是跨世界统一验证方案。
 
-`control` 凭据可执行获准写入；`observe` 只能读取角色获准信息，不能写、重放写操作、修改活动或通过 bootstrap 记录进入。轮换保持访问模式。公开观察是另一条显式路由，不借用他人角色凭据。现有 operator key / Web Basic Auth 是管理原型，不定义最终用户所有权。轮换响应丢失目前仍需操作员介入。
+`control` 凭据可执行获准写入；`observe` 只能读取角色获准信息，不能写、重放写操作或修改活动。轮换保持访问模式。公开观察是独立的显式访问模式，不借用他人角色凭据。当前管理原型与轮换恢复缺口见 [IMPLEMENTATION](IMPLEMENTATION.md)。
 
 鉴权在事务内复核，不能忽略等写锁期间的失效。MCP 会话绑定初始化凭据，轮换后需新会话；身份来自当前消息的 HTTP request，而不是继承的会话上下文。撤销不能收回已发送的信息。
 
@@ -90,8 +90,8 @@ api_version 是 SDK API；world version 是规则／策略合同；state_version
 
 ## 可选能力与部署
 
-[世界数据](WORLD_DATA.md)、[共享流](OBSERVATION_STREAMS.md)、[定时事项](DURABLE_TIME.md)、[保留／表现](RETENTION_PRESENTATION.md) 是按需声明的能力，不强制每个世界使用全部功能。语义正确不以有地图、动画或完整游戏为前提。
+[世界数据](WORLD_DATA.md)、[共享流](OBSERVATION_STREAMS.md)、[定时事项](DURABLE_TIME.md)、[数据保留](RETENTION.md) 是 L4 中按需声明的能力，不强制每个世界使用全部功能。[交互与表现](PRESENTATION.md) 是横向表达约束，不是业务能力层。语义正确不以有地图、动画或完整游戏为前提。
 
-`python -m agent_world` 在同一 origin 提供 Web、HTTP、MCP；导入模块不创建数据库，wheel 包含 Web 资源。反向代理应配置正确的 HTTPS `--public-url`，不能关闭 Host/Origin 防护来规避配置问题。旧 module:app 入口仅作兼容，服务默认鉴权。
+传输适配器必须复用同一 Runtime 行为合同，部署不得通过关闭 Host/Origin 等边界保护来规避配置问题。当前组合入口、wheel 与兼容入口见 [IMPLEMENTATION](IMPLEMENTATION.md)。
 
-当前使用文件型 SQLite、WAL 和一个并发写者。世界包必须受信任，Python/OS 能力没有被沙箱隔离。其他实现差距、设计工作及待验证假设集中在 [OPEN_DESIGN](OPEN_DESIGN.md)，不要把它们全部变成每个世界的先决条件。
+世界规则代码当前处于受信任执行边界，不提供恶意插件隔离；具体存储和进程模型见 [IMPLEMENTATION](IMPLEMENTATION.md)，架构信任边界见 [ARCHITECTURE](ARCHITECTURE.md)。其他实现差距、设计工作及待验证假设集中在 [OPEN_DESIGN](OPEN_DESIGN.md)，不要把它们全部变成每个世界的先决条件。

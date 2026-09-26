@@ -1,6 +1,6 @@
 # 观察与共享事件流
 
-复核：2026-09-26。观察者不是伪造玩家，事件已经发布不表示外部 Agent 在线、已读、理解或完成。消息文本是不可信数据，不是 Runtime 控制指令。完整交互职责见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。
+复核：2026-09-27。本文属于 L4。观察者不是伪造玩家，事件已经发布不表示外部 Agent 在线、已读、理解或完成。消息文本是不可信数据，不是 Runtime 控制指令。概念边界见 [DOMAIN_MODEL](DOMAIN_MODEL.md)，完整交互职责见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。
 
 ## 显式公开观察
 

@@ -1,6 +1,6 @@
 # 世界数据、授权视图与缓存
 
-复核：2026-09-26，源码 `3fbb6378`。这里只定义数据与观察合同；调用见 [Foundation](FOUNDATION.md)，交互接续见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。下面的容量是当前实现参数，不是产品哲学。
+复核：2026-09-27。本文属于 L4，只定义数据、授权视图与缓存合同；调用见 [Foundation](FOUNDATION.md)，概念边界见 [DOMAIN_MODEL](DOMAIN_MODEL.md)，交互接续见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。下面的容量是当前 L6 实现参数，不是系统不变量。
 
 ## 数据归属
 
@@ -15,13 +15,13 @@
 
 被明确提交、经规则接受的公共计划或第三方意见可以成为世界数据；这不要求上传 Agent 私人记忆。服务端权威状态、某主体获准观察的内容、Agent 自己的认识是不同层次。
 
-## 当前记录结构
+## 状态、历史与通知语义
 
-`world_state` 保存当前值与删除墓碑版本。`state_changes` / `world_commits` 保存可保留的前后状态与提交来源。`events` 是单独保留的接收者通知，不包含每一次状态变化；共享频道另见 [OBSERVATION_STREAMS](OBSERVATION_STREAMS.md)。
+当前权威状态、可保留的状态历史和接收者通知是三种不同数据职责，不能互相代替。通知不必包含每一次状态变化；共享频道另见 [OBSERVATION_STREAMS](OBSERVATION_STREAMS.md)。当前 SQLite 表映射见 [IMPLEMENTATION](IMPLEMENTATION.md)。
 
-SQLite triggers 记录状态写入，包括没有通知的变化。失败事务不留下本次状态、历史或回执；重放返回原提交引用。直接特权 SQL 可产生历史，但不捏造 actor/commit 来源。禁止原地改状态键身份，需 delete/create。跨 universe 写入受提交检查；本整理分支的 managed raw-write 重校验及其边界见 Foundation，不能推广为任意特权 SQL 的保证。
+失败事务不能留下本次状态、历史或回执；已提交重放返回原提交引用。状态键身份不能通过一次普通值更新偷偷改变，跨 universe 写入必须受提交边界约束。本整理分支的 managed raw-write 重校验及其技术边界见 [Foundation](FOUNDATION.md) 和 [IMPLEMENTATION](IMPLEMENTATION.md)，不能推广成特权存储操作的通用保证。
 
-原始历史是服务端管理数据，没有向 Agent 开放的全库历史 HTTP/MCP。`read_state_history` / `prune_state_history` 仅为受信任操作。一次提交最多 512 条状态变化、2 MiB 前后内容总量；单次历史页也有大小限制。历史仅覆盖 world_state，不自动覆盖全部身份、活动或外部文件。
+原始状态历史属于服务端管理数据，不自动成为普通 Agent 可读取的全库审计接口。历史只覆盖声明的世界状态职责，不自动覆盖身份、活动或外部文件。当前提交与历史页的大小上限属于可观察实现合同，具体数值由对应 API／测试维护。
 
 通知清理不删当前状态，历史清理不替代备份。需要跨清理周期接续的事项必须在当前状态中保留足够信息，或通过明确业务规则终止；不能因视图过期而静默完成或遗忘。数据生命周期未决项集中在 [OPEN_DESIGN](OPEN_DESIGN.md)。
 
