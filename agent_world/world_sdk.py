@@ -201,6 +201,11 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
             definition.validate_state(
                 migration_ctx, row["scope"], row["state_key"], json.loads(row["value_json"])
             )
+        # Migrations may pass through old/intermediate schemas; final live values
+        # were validated above. Journal structure and version checks still apply.
+        runtime._validate_managed_state_changes_tx(
+            c, migration_ctx, journal_marker, definition=definition, enforce_authorizer=False, validate_values=False
+        )
         for spec in definition.functions:
             runtime._register_function_tx(
                 c,

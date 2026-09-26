@@ -240,6 +240,69 @@ class WorldSDKTests(unittest.TestCase):
         with self.assertRaises(ReceiptNotFound):
             self.w.get_receipt("u", self.a, "bad")
 
+    def test_legacy_raw_sql_cannot_bypass_managed_state_schema(self):
+        def raw(ctx, args):
+            ctx.conn.execute(
+                "UPDATE world_state SET value_json=?,version=version+1,updated_at=? "
+                "WHERE universe=? AND scope='world' AND state_key='count'",
+                (json.dumps("bad"), ctx.now, ctx.universe),
+            )
+            return FunctionOutcome({})
+
+        world = replace(self.definition(), functions=(FunctionSpec("raw.bad", raw, EMPTY),))
+        self.w.install_world("u", world)
+        revision = self.w.read_state_history("u")["latest_revision"]
+        with self.assertRaises(SchemaRejected):
+            self.w.call_function("u", "raw.bad", self.a, {}, operation_id="raw-bad")
+        self.assertEqual(self.w.get_state("u", "world", "count")["value"], 1)
+        self.assertEqual(self.w.read_state_history("u")["latest_revision"], revision)
+        with self.assertRaises(ReceiptNotFound):
+            self.w.get_receipt("u", self.a, "raw-bad")
+
+    def test_valid_legacy_raw_sql_remains_compatible_in_managed_world(self):
+        def raw(ctx, args):
+            ctx.conn.execute(
+                "UPDATE world_state SET value_json='2',version=version+1,updated_at=? "
+                "WHERE universe=? AND scope='world' AND state_key='count'",
+                (ctx.now, ctx.universe),
+            )
+            return FunctionOutcome({"ok": True})
+
+        world = replace(self.definition(), functions=(FunctionSpec("raw.good", raw, EMPTY),))
+        self.w.install_world("u", world)
+        result = self.w.call_function("u", "raw.good", self.a, {}, operation_id="raw-good")
+        self.assertTrue(result["result"]["ok"])
+        self.assertEqual(self.w.get_state("u", "world", "count")["value"], 2)
+
+    def test_legacy_raw_sql_cannot_bypass_managed_state_authorizer(self):
+        def own(ctx, scope, key, access):
+            return scope == "role:" + ctx.actor_role_id
+
+        def raw(ctx, args):
+            ctx.conn.execute(
+                "INSERT INTO world_state(universe,scope,state_key,value_json,version,updated_at,deleted) "
+                "VALUES(?,?,?,?,1,?,0)",
+                (ctx.universe, "role:" + self.b, "value", "1", ctx.now),
+            )
+            return FunctionOutcome({})
+
+        world = WorldDefinition(
+            "policy-raw",
+            "Policy Raw",
+            (FunctionSpec("raw.other", raw, EMPTY),),
+            state_rules=(StateRule("role:", "value", {"type": "integer"}),),
+            state_authorizer=own,
+        )
+        self.w.install_world("u", world)
+        with self.assertRaises(PermissionDenied):
+            self.w.call_function("u", "raw.other", self.a, {}, operation_id="raw-other")
+        with self.w._conn(readonly=True) as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM world_state WHERE universe=? AND scope=? AND state_key='value'",
+                ("u", "role:" + self.b),
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
     def test_state_policy_and_discovery_visibility(self):
         def hidden(ctx, args):
             return FunctionOutcome({"ok": True})

@@ -63,16 +63,19 @@ async def main() -> None:
             ready = False
             for _ in range(60):
                 try:
-                    r = httpx.get(URL, timeout=0.2)
+                    r = httpx.get(URL, timeout=0.2, trust_env=False)
                     if r.status_code == 401:
                         ready = True
                         break
                 except Exception:
                     pass
                 time.sleep(0.1)
-            assert ready, "authenticated MCP server did not become ready"
+            if not ready:
+                details = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+                raise AssertionError(f"authenticated MCP server did not become ready; exit={proc.poll()}; log: {details}")
 
             async with httpx.AsyncClient(
+                trust_env=False,
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=5.0,
             ) as http_client:

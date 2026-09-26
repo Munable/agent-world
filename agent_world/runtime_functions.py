@@ -31,9 +31,10 @@ from .runtime_errors import (
     WorldVersionMismatch,
     WorldDefinitionError,
     InvalidArguments,
+    SchemaRejected,
 )
 from .world_context import FunctionContext
-from .runtime_journal import JOURNAL_TRIGGERS
+from .runtime_journal import JOURNAL_TRIGGERS, MAX_COMMIT_CHANGES
 from .world_types import FunctionOutcome, EventSpec
 from .world_streams import StreamEvent
 from .presentation import PRESENTATION_KIND, validate_cue
@@ -253,6 +254,66 @@ class RuntimeFunctions:
             raise
         finally:
             c.set_authorizer(None)
+
+    def _validate_managed_state_changes_tx(
+        self, c, ctx, marker, *, definition=None, enforce_authorizer=True, validate_values=True
+    ):
+        """Revalidate legacy raw-SQL state writes before a managed-world commit."""
+        definition = definition or self._worlds.get(ctx.universe)
+        if definition is None:
+            return
+        approved = list(ctx._approved_state_changes)
+        rows = c.execute(
+            "SELECT universe,scope,state_key,kind,before_version,value_json,version,deleted "
+            "FROM state_changes WHERE seq>? ORDER BY seq LIMIT ?",
+            (marker, MAX_COMMIT_CHANGES + 1),
+        ).fetchall()
+        if len(rows) > MAX_COMMIT_CHANGES:
+            raise InvalidArguments("world transaction exceeds its state change budget")
+        for row in rows:
+            if row["universe"] != ctx.universe:
+                raise PermissionDenied("a world transaction cannot change another universe")
+            scope = identifier(row["scope"], "scope", 256)
+            key = identifier(row["state_key"], "state key", 256)
+            before_version = integer(row["before_version"], "previous state version", 0)
+            version = integer(row["version"], "state version", 1)
+            if version != before_version + 1:
+                raise SchemaRejected("managed world state versions must advance exactly once per change")
+            deleted = row["deleted"]
+            if type(deleted) is not int or deleted not in {0, 1}:
+                raise SchemaRejected("managed world state deletion marker is invalid")
+            encoded = row["value_json"]
+            if not isinstance(encoded, str):
+                raise SchemaRejected("managed world state must contain JSON text")
+            try:
+                value = json.loads(encoded)
+            except (TypeError, ValueError) as exc:
+                raise SchemaRejected("managed world state contains invalid JSON") from exc
+            if deleted:
+                if value is not None:
+                    raise SchemaRejected("deleted managed world state must store null")
+            elif validate_values:
+                definition.validate_state(ctx, scope, key, value)
+            signature = (scope, key, version, deleted, encoded)
+            if signature in approved:
+                approved.remove(signature)
+                continue
+            policy = definition.state_authorizer if enforce_authorizer else None
+            if policy is not None:
+                previous = ctx._state_authorizer
+                previous_authorizing = ctx._authorizing_state
+                previous_access = ctx.access
+                ctx.access = "read"
+                ctx._state_authorizer = None
+                ctx._authorizing_state = True
+                try:
+                    allowed = self._run_user_code(c, policy, ctx, scope, key, "write", read_only=True)
+                finally:
+                    ctx._state_authorizer = previous
+                    ctx._authorizing_state = previous_authorizing
+                    ctx.access = previous_access
+                if allowed is not True:
+                    raise PermissionDenied("world state access denied")
 
     def _authorize_function_tx(self, c, ctx, arguments):
         options = self._function_options.get((ctx.universe, ctx.function_id, ctx.function_version), {})
@@ -518,6 +579,7 @@ class RuntimeFunctions:
     def _commit_outcome_tx(self, c, ctx, outcome, arguments, *, journal_marker,
                            activity_id=None, source="action", extra_receipt=None):
         """One effect/receipt path shared by immediate actions and durable timers."""
+        self._validate_managed_state_changes_tx(c, ctx, journal_marker)
         transitions = self._apply_timer_commands_tx(c, ctx)
         event_seqs = []
         publications = []
