@@ -18,6 +18,12 @@ python -m agent_world --world my_world:WORLD --universe campaign --db campaign.s
 
 Web、HTTP、MCP 使用同一数据库和 origin，默认 `http://127.0.0.1:8000`。Web 默认用户名为 `operator`；世界调用使用 Bearer 身份凭据。操作员入口只是当前管理工具，不定义用户身份的所有权。只加载受信任世界代码。
 
+## 先读这三处
+
+[产品定义](PRODUCT_POSITIONING.md) → [分层基线与仓库入口](docs/BASELINE.md) → [本次盘点与验证](docs/REPOSITORY_AUDIT_2026-09-26.md)。维护改动遵守 [AGENTS.md](AGENTS.md)。
+
+原则、模型、合同、实现是四种职责，测试跨层使用；目录不按四层机械拆分。
+
 ## 现行文档
 
 | 文档 | 唯一职责 |
@@ -39,6 +45,7 @@ Web、HTTP、MCP 使用同一数据库和 origin，默认 `http://127.0.0.1:8000
 python tools/run_tests.py
 python tools/check_package.py
 node tests/view_client.test.mjs
+node tests/stream_client.test.mjs
 ```
 
 日常开发优先本地或可控机器。纯文档变更只做内容、链接和差异检查；不为它反复运行计费 CI。功能测试通过不等于长期运行或外部 Agent 协作逻辑已经全部验证。

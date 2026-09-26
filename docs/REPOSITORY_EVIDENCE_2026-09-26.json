@@ -1,0 +1,114 @@
+{
+  "date": "2026-09-26",
+  "base_commit": "f8a995467201ff26a51eb6dce644283de8e6d157",
+  "platform": "Windows",
+  "python": "3.14.2",
+  "node": "v24.13.0",
+  "core": {
+    "command": "python tools/run_tests.py",
+    "returncode": 0,
+    "foundation_tests": 189,
+    "legacy_scripts": [
+      "v02_core_tests.py",
+      "auth_tests.py",
+      "v05_onboarding_core_tests.py",
+      "v05_onboarding_api_tests.py",
+      "v06_read_function_tests.py",
+      "v06_read_http_test.py",
+      "mcp_auth_integration.py",
+      "v05_full_entry_e2e.py",
+      "v06_commons_e2e.py",
+      "v07_product_flow_test.py",
+      "v08_world_zero_core_tests.py",
+      "v08_world_zero_e2e.py"
+    ],
+    "output": "New foundation suite\n----------------------------------------------------------------------\nRan 189 tests in 45.606s\n\nOK\nv02_core_tests.py\nauth_tests.py\nv05_onboarding_core_tests.py\nv05_onboarding_api_tests.py\nv06_read_function_tests.py\nv06_read_http_test.py\nmcp_auth_integration.py\nv05_full_entry_e2e.py\nv06_commons_e2e.py\nv07_product_flow_test.py\nv08_world_zero_core_tests.py\nv08_world_zero_e2e.py\n{\n  \"foundation\": \"passed\",\n  \"legacy_suites\": {\n    \"v02_core_tests.py\": \"passed\",\n    \"auth_tests.py\": \"passed\",\n    \"v05_onboarding_core_tests.py\": \"passed\",\n    \"v05_onboarding_api_tests.py\": \"passed\",\n    \"v06_read_function_tests.py\": \"passed\",\n    \"v06_read_http_test.py\": \"passed\",\n    \"mcp_auth_integration.py\": \"passed\",\n    \"v05_full_entry_e2e.py\": \"passed\",\n    \"v06_commons_e2e.py\": \"passed\",\n    \"v07_product_flow_test.py\": \"passed\",\n    \"v08_world_zero_core_tests.py\": \"passed\",\n    \"v08_world_zero_e2e.py\": \"passed\"\n  }\n}\n"
+  },
+  "core_clients_and_package": [
+    {
+      "name": "view-client",
+      "returncode": 0
+    },
+    {
+      "name": "stream-client",
+      "returncode": 0
+    },
+    {
+      "name": "build-setup",
+      "returncode": 0
+    },
+    {
+      "name": "package",
+      "returncode": 0
+    }
+  ],
+  "companion_python": [
+    {
+      "repository": "lantern-hollow",
+      "tests": 81,
+      "returncode": 0
+    },
+    {
+      "repository": "ashen-vault",
+      "tests": 164,
+      "returncode": 0
+    }
+  ],
+  "companion_mode": "Editable reviewed core, not a reinstall of each pinned dependency. Companion source and pins unchanged.",
+  "companion_node": [
+    {
+      "repository": "lantern-hollow",
+      "script": "tests/camera.test.mjs",
+      "runtime_stream_client_argument": false,
+      "returncode": 0,
+      "output": "camera inverse, bounds, pan/follow and zoom PASS\n"
+    },
+    {
+      "repository": "lantern-hollow",
+      "script": "tests/experience_layout.test.mjs",
+      "runtime_stream_client_argument": false,
+      "returncode": 0,
+      "output": "shared sprite layout/hit and bounded nonoverlap bubble placement PASS\n"
+    },
+    {
+      "repository": "lantern-hollow",
+      "script": "tests/presentation_client.test.mjs",
+      "runtime_stream_client_argument": true,
+      "returncode": 0,
+      "output": "presentation: monotonic clock, source attribution, history boundary, absolute expiry PASS\n"
+    },
+    {
+      "repository": "lantern-hollow",
+      "script": "tests/sample_assets.test.mjs",
+      "runtime_stream_client_argument": false,
+      "returncode": 0,
+      "output": "sample assets: required frames, bounds, paths and semantic clip priority PASS\n"
+    },
+    {
+      "repository": "ashen-vault",
+      "script": "tests/campaign_player.test.mjs",
+      "runtime_stream_client_argument": false,
+      "returncode": 0,
+      "output": "✔ moving placeholder follows confirmed path rather than teleporting early (0.9772ms)\n✔ swapping skins never changes authoritative facts (0.5359ms)\n✔ duplicate cue does not apply a result twice (0.1784ms)\n✔ missing causal step rejects the batch before modifying state (0.2641ms)\n✔ an invalid first causal parent is not silently accepted (0.1286ms)\n✔ unknown semantic binding is an error, not a fake success (0.0828ms)\n✔ invalid asset data cannot become executable color or shape code (0.1385ms)\n✔ old events restore final facts without animating historical rewards (0.1041ms)\n✔ bounded backlog snaps once and does not run an unbounded queue (0.6503ms)\n✔ a miss has no damage interpolation or hit text (0.1769ms)\n✔ reaction attack precedes resumed movement (0.1599ms)\n﹣ real browser trace has the same final facts with both resource packs (1.2545ms) # Real browser trace is produced by check_campaign_browser.py; not replaced by a synthetic trace.\n✔ class-specific ability feedback is not mislabeled as Action Surge (0.1482ms)\nℹ tests 13\nℹ suites 0\nℹ pass 12\nℹ fail 0\nℹ cancelled 0\nℹ skipped 1\nℹ todo 0\nℹ duration_ms 7.3717\n"
+    }
+  ],
+  "source_sha256_normalized_utf8_lf": {
+    "agent_world/runtime_functions.py": "d05c1ece3257370563cbdac63070bbea117d4f34c16106bc75cbf4b55e273a27",
+    "agent_world/world_context.py": "25919883a1adbef5fed2d1171b39f7ad907128e44a7e11cafdc085f4c611e053",
+    "agent_world/world_sdk.py": "85546c9cff320ffe4e2695b214a95a29847028fccac0ee92684aa0529d947ae4",
+    "mcp_auth_integration.py": "e1c8fb94e60cc57f4e6045f41aba379a5dd4573a94ff1db4aae1943c2895fb59",
+    "tests/test_architecture_boundaries.py": "1082a791a854ef371c51038ee5613f065ae1b5e97875613e3544400bef302a3d",
+    "tests/test_managed_state_boundary.py": "49c4c542074f1bce2c2bdcaf3f5506df80c8f8d4ecd88fd31ce7f2fec2efef75",
+    "tests/test_world_sdk.py": "c8ee53cc806b45aa694397cf7035ca997fbc8703f4b203ef70285753c66c6e12",
+    "v05_full_entry_e2e.py": "2df88281cfdd7ba6751e1fc3235a6e1e6193621b15f9713c479cdd651faf1305",
+    "v06_commons_e2e.py": "65687b22fdd4289be7f721bbd77202304708d101b32012c3a5d528d7a3a5c93d",
+    "v07_product_flow_test.py": "db4f51fae788eb71c16d54062331fdec85fbede9a90f04374e1856c7427fecb3",
+    "v08_world_zero_e2e.py": "2ab3a65045c6bb51758abeef7810e2b22b6090a77b3df1f3687979c8763e096e"
+  },
+  "limitations": [
+    "Windows Python 3.14 only; CI OS/Python matrix not rerun",
+    "No online model, long soak, new browser capture, deployment or production database migration",
+    "Ashen Vault Node real-browser-trace case skipped; 12 passed and 1 skipped",
+    "Static import and regression-name checks do not prove semantic correctness"
+  ]
+}

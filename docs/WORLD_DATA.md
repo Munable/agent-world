@@ -19,7 +19,7 @@
 
 `world_state` 保存当前值与删除墓碑版本。`state_changes` / `world_commits` 保存可保留的前后状态与提交来源。`events` 是单独保留的接收者通知，不包含每一次状态变化；共享频道另见 [OBSERVATION_STREAMS](OBSERVATION_STREAMS.md)。
 
-SQLite triggers 记录状态写入，包括没有通知的变化。失败事务不留下本次状态、历史或回执；重放返回原提交引用。直接特权 SQL 可产生历史，但不捏造 actor/commit 来源。禁止原地改状态键身份，需 delete/create。跨 universe 写入受提交检查；legacy raw SQL 的 schema／授权缺口见 Foundation，不能混为同一项保证。
+SQLite triggers 记录状态写入，包括没有通知的变化。失败事务不留下本次状态、历史或回执；重放返回原提交引用。直接特权 SQL 可产生历史，但不捏造 actor/commit 来源。禁止原地改状态键身份，需 delete/create。跨 universe 写入受提交检查；本整理分支的 managed raw-write 重校验及其边界见 Foundation，不能推广为任意特权 SQL 的保证。
 
 原始历史是服务端管理数据，没有向 Agent 开放的全库历史 HTTP/MCP。`read_state_history` / `prune_state_history` 仅为受信任操作。一次提交最多 512 条状态变化、2 MiB 前后内容总量；单次历史页也有大小限制。历史仅覆盖 world_state，不自动覆盖全部身份、活动或外部文件。
 

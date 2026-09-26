@@ -24,6 +24,8 @@
 
 [Foundation audit](FOUNDATION_AUDIT.md) 是 2026-09-22 的历史执行记录。早期 Pi / DeepSeek Harness / OpenCode 的版本、观察结果及限制保留在 [2026-09-21 原始接入记录](https://github.com/Munable/agent-world/blob/3fbb6378d9edcfa8b58a5d1d09c610037bf4c2f6/docs/AGENT_ADAPTER_CONTRACT_V01.md)。它们不是当前全部宿主的兼容性承诺，也不代表本轮重新运行过测试。
 
+[2026-09-26 仓库审计](REPOSITORY_AUDIT_2026-09-26.md)记录本次实测结果及失败，不能用历史通过结果覆盖当前失败。
+
 ## 新实验的最小要求
 
 每项实验写明一个可被否定的假设、最小场景、接受与失败条件、源码版本及实际输出。优先复用现有示例；没有覆盖的新交互才加最小夹具。测试数、地图数、法术数都不直接证明 Runtime 完整。

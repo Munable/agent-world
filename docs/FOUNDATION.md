@@ -1,6 +1,6 @@
 # Runtime / SDK 合同
 
-文档复核：2026-09-26，源码 `3fbb6378`，Runtime 0.14.0 / SDK API 1。文档日期不是 API 版本。产品目标以[产品定义](../PRODUCT_POSITIONING.md)为准；本文件描述当前接口、必须遵守的规则及已知偏差，不宣称生产能力齐备。
+文档复核：2026-09-26，源码 `3fbb6378`，Runtime 0.14.0 / SDK API 1。文档日期不是 API 版本。本整理分支在上述文档基线上修复 managed-state 校验，包版本暂不变；具体提交与验证见[本次审计](REPOSITORY_AUDIT_2026-09-26.md)。产品目标以[产品定义](../PRODUCT_POSITIONING.md)为准；本文件描述当前接口、必须遵守的规则及已知偏差，不宣称生产能力齐备。
 
 ## 结构化调用与责任
 
@@ -44,7 +44,9 @@ WORLD = WorldDefinition(
 
 `state_authorizer` 控制 SDK 读写；需要读取权限依据时，可在该回调内调用 `authorization_state(scope,key)`。它只允许在授权回调执行期间使用，普通函数直接调用被拒绝。它不内置 Party、Group 或成员资格语义。
 
-**已知实现偏差：** legacy `ctx.conn` 仍可绕过上述 SDK schema / state_authorizer。历史修复后的重新校验与三条回归测试不在本次源码基线中。不能宣称任意 raw SQL 都受同样验证；此项需单独修复，而不是放宽应有合同。它也不是对外开放任意 SQL 的接口。世界代码受信任，不是恶意插件沙箱。
+**本整理分支的修复：** managed WorldDefinition 的普通操作和 timer 在提交前重校验状态变化，恢复 legacy `ctx.conn` 写入的 schema、版本及 state_authorizer 检查。SDK 已经获准的写入不在事后重复授权；raw 写入的授权回调支持 `authorization_state`，且按只读方式执行。初始化／迁移按最终存活状态验证目标 schema，允许合法的中间数据形状。修复前复现、回归范围与未覆盖项见[本次审计](REPOSITORY_AUDIT_2026-09-26.md)。
+
+`ctx.conn` 仍是受信任、不可移植的兼容入口，不是任意 SQL 与 SDK 全面等价的承诺，也不是对外 SQL 接口或恶意 Python 插件沙箱。特权管理连接、直接文件操作及未声明 WorldDefinition 的旧注册路径不属于此 managed-write 校验范围。
 
 ## 事务、重试与业务完成
 
