@@ -48,7 +48,7 @@ def start_server(module: str, port: int, env: dict[str, str], log_name: str):
 def wait_ready(url: str, expected: set[int]) -> None:
     for _ in range(80):
         try:
-            response = httpx.get(url, timeout=0.25)
+            response = httpx.get(url, timeout=0.25, trust_env=False)
             if response.status_code in expected:
                 return
         except Exception:
@@ -63,6 +63,7 @@ def create_role_and_token(name: str, operator_headers: dict[str, str]):
         headers=operator_headers,
         json={"display_name": name},
         timeout=5,
+        trust_env=False,
     )
     role_response.raise_for_status()
     role = role_response.json()
@@ -72,6 +73,7 @@ def create_role_and_token(name: str, operator_headers: dict[str, str]):
         headers=operator_headers,
         json={"role_id": role["role_id"], "ttl_seconds": 60},
         timeout=5,
+        trust_env=False,
     )
     ticket_response.raise_for_status()
     ticket = ticket_response.json()["join"]["ticket"]
@@ -80,6 +82,7 @@ def create_role_and_token(name: str, operator_headers: dict[str, str]):
         ONBOARD + "/v1/join/exchange",
         json={"ticket": ticket},
         timeout=5,
+        trust_env=False,
     )
     exchange.raise_for_status()
     token = exchange.json()["identity"]["token"]
@@ -88,6 +91,7 @@ async def open_session(token: str):
     http_client = httpx.AsyncClient(
         headers={"Authorization": f"Bearer {token}"},
         timeout=10.0,
+        trust_env=False,
     )
     transport = streamable_http_client(MCP_URL, http_client=http_client)
     read_stream, write_stream = await transport.__aenter__()

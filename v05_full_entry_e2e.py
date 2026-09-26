@@ -47,7 +47,7 @@ def start_server(module: str, port: int, env: dict[str, str], log_name: str):
 def wait_ready(url: str, expected: set[int]) -> None:
     for _ in range(80):
         try:
-            response = httpx.get(url, timeout=0.25)
+            response = httpx.get(url, timeout=0.25, trust_env=False)
             if response.status_code in expected:
                 return
         except Exception:
@@ -60,6 +60,7 @@ async def mcp_phase(token: str, role_id: str) -> dict:
     async with httpx.AsyncClient(
         headers={"Authorization": f"Bearer {token}"},
         timeout=10.0,
+        trust_env=False,
     ) as http_client:
         async with streamable_http_client(
             MCP_URL,
@@ -105,6 +106,7 @@ async def recovery_phase(token: str, role_id: str, expected_seq: int) -> None:
     async with httpx.AsyncClient(
         headers={"Authorization": f"Bearer {token}"},
         timeout=10.0,
+        trust_env=False,
     ) as http_client:
         async with streamable_http_client(
             MCP_URL,
@@ -159,6 +161,7 @@ async def main() -> None:
                 headers=op_headers,
                 json={"display_name": "E2E Walker", "avatar_ref": "avatar://e2e"},
                 timeout=5,
+                trust_env=False,
             )
             role_response.raise_for_status()
             role = role_response.json()
@@ -167,6 +170,7 @@ async def main() -> None:
                 headers=op_headers,
                 json={"role_id": role["role_id"], "ttl_seconds": 60},
                 timeout=5,
+                trust_env=False,
             )
             package_response.raise_for_status()
             package = package_response.json()
@@ -177,6 +181,7 @@ async def main() -> None:
                 ONBOARD + "/v1/join/exchange",
                 json={"ticket": ticket},
                 timeout=5,
+                trust_env=False,
             )
             lost.raise_for_status()
             # Deliberately ignore lost.json().
@@ -185,6 +190,7 @@ async def main() -> None:
                 ONBOARD + "/v1/join/exchange",
                 json={"ticket": ticket},
                 timeout=5,
+                trust_env=False,
             )
             recovered.raise_for_status()
             identity_package = recovered.json()

@@ -1,0 +1,718 @@
+{
+  "base_commit": "f8a995467201ff26a51eb6dce644283de8e6d157",
+  "scope": "All baseline tracked paths inventoried. Python syntax/imports inspected; semantic review focused on authority, state commits, migrations, timers, adapters and document consistency. Not a proof of every code path.",
+  "baseline_file_count": 114,
+  "groups": {
+    "packaging-and-repository-config": 6,
+    "documentation": 13,
+    "legacy-entrypoints-and-regressions": 26,
+    "runtime-and-bundled-consumers": 44,
+    "world-examples": 4,
+    "tests": 19,
+    "verification-tools": 2
+  },
+  "companions": [
+    {
+      "repository": "Munable/agent-world-lantern-hollow",
+      "commit": "24184b1c3829f2bb3470477a9cfb0264c484ddeb",
+      "declared_dependencies": [
+        "agent-world @ git+https://github.com/Munable/agent-world.git@7d3609853db34f3402754bd0860fee96115a9de1"
+      ],
+      "modified": false
+    },
+    {
+      "repository": "Munable/agent-world-ashen-vault",
+      "commit": "bd9de74c640629cce8d0d50eccb87a5b9c351168",
+      "declared_dependencies": [
+        "agent-world @ git+https://github.com/Munable/agent-world.git@b65ddabea74b75a387e90ebcadcba0df680588cf"
+      ],
+      "modified": false
+    }
+  ],
+  "files": [
+    {
+      "path": ".gitattributes",
+      "blob": "904b38d9b381931e89ebf0c5b14761ae1a307477",
+      "bytes": 118,
+      "group": "packaging-and-repository-config"
+    },
+    {
+      "path": ".github/workflows/tests.yml",
+      "blob": "cfed083d9ea5c669b85de1b5ced1ffc8c3bcb6a3",
+      "bytes": 995,
+      "group": "packaging-and-repository-config"
+    },
+    {
+      "path": ".gitignore",
+      "blob": "bcca112f87015f244a1fb8c6999f048f72013cdd",
+      "bytes": 174,
+      "group": "packaging-and-repository-config"
+    },
+    {
+      "path": "LICENSE",
+      "blob": "0032c2c59d0b36325d700cf957e98903f568d55c",
+      "bytes": 1064,
+      "group": "packaging-and-repository-config"
+    },
+    {
+      "path": "PRODUCT_POSITIONING.md",
+      "blob": "97da9533c694b202d986f22b4e2e25efaf597138",
+      "bytes": 3948,
+      "group": "documentation"
+    },
+    {
+      "path": "README.md",
+      "blob": "b6cabf06730f1aa20e69abd975f0da37ee0b1010",
+      "bytes": 2688,
+      "group": "documentation"
+    },
+    {
+      "path": "adapter_integration.py",
+      "blob": "b933b4b33b4838da0a45cc7bfc86448c74c16b3b",
+      "bytes": 11388,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "agent_world/__init__.py",
+      "blob": "c901e17cf7f5a9613c1c9193321f9e3e32c93c96",
+      "bytes": 800,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/__main__.py",
+      "blob": "317a0bd1f504f6d74984ea13f511f9b06a6bd5ff",
+      "bytes": 69,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/application.py",
+      "blob": "3397e9139e8107b2b84d335097041cea88e7bb8d",
+      "bytes": 4243,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/asgi_lifecycle.py",
+      "blob": "8a19a209cd37f572be4bccb5df7b46fc6acebb61",
+      "bytes": 549,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/builtin_worlds.py",
+      "blob": "cb500fce6f08d3646f5b4482f21dfc0e2e57f71a",
+      "bytes": 2305,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/commons_universe.py",
+      "blob": "0d76c24aaffecb0c8adbdbea9b734cbf80eea2a1",
+      "bytes": 4673,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/demo_universe.py",
+      "blob": "e0f76d6741f9e85acf1c7e168325b5f493c77095",
+      "bytes": 3575,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/diagnostics.py",
+      "blob": "76375cb26539a265b02b8006db29156bf5ddfb9f",
+      "bytes": 3146,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/errors.py",
+      "blob": "3689129988696d73b4d9b0f0abe212a49a9e5df7",
+      "bytes": 257,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/http_app.py",
+      "blob": "22f0e149e0ae18e903eda6381186116036810984",
+      "bytes": 11477,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/identity_admin.py",
+      "blob": "7f48480dd7c5806d8e7726244c2d481a7da11e2a",
+      "bytes": 1585,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/identity_auth.py",
+      "blob": "7b62f5fb54b08e3580041fbbf345ec70b8c57ea2",
+      "bytes": 1471,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/maintenance.py",
+      "blob": "83fb5fcfe09db6c977922bfe0e0b15bbed01de37",
+      "bytes": 1785,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/mcp_app.py",
+      "blob": "29281d0cf70f808d58fcaa6e3260d1a6f485b185",
+      "bytes": 10571,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/onboarding_app.py",
+      "blob": "27f1bf9a06e78e07d14c5d41ba6454c2cff60362",
+      "bytes": 9234,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/presentation.py",
+      "blob": "22cd188e73f723b43942a8033df94c5463478fc2",
+      "bytes": 1551,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/product_app.py",
+      "blob": "0e4f40f6301fc330c7eba6e7a7ce0d87ab280f03",
+      "bytes": 8189,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/retention.py",
+      "blob": "005f04b9975e1d7cb3a357fe6ee5c1c6cd7c2c63",
+      "bytes": 3380,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_activities.py",
+      "blob": "5478319355e27564fc79726ae75432c94cc9e707",
+      "bytes": 13646,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_contracts.py",
+      "blob": "38bb3b029e4755d83a7a763af6d01fac71a32fb5",
+      "bytes": 5764,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_core.py",
+      "blob": "0a07918a9ecb637808242b1d16f734e4ef3a066f",
+      "bytes": 44109,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_errors.py",
+      "blob": "2c3a4845dda19970b4c41ce1dfca7a476eb48f61",
+      "bytes": 1683,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_events.py",
+      "blob": "2f7f0e24d06fbe5c1789c811d0cace06b400b015",
+      "bytes": 4858,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_functions.py",
+      "blob": "1128578176a22999be5a6f42434450f9ee05fd6b",
+      "bytes": 27261,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_journal.py",
+      "blob": "50b862d32113e85ecd88972c8dbf3492333989f8",
+      "bytes": 9492,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_streams.py",
+      "blob": "4ba13d947266041fdf7eac3d68f5be305e4adf41",
+      "bytes": 10482,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_timers.py",
+      "blob": "88741e96a15b406fcf164a48d5f2a6d7b7911d3c",
+      "bytes": 14813,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/runtime_views.py",
+      "blob": "5e1fc3d91297c06edc9e74a14e88c972ef387f5c",
+      "bytes": 16212,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/timer_worker.py",
+      "blob": "7a4c089fe5eb7f6ee9545aa6edbb425bc5b2bcd5",
+      "bytes": 3413,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/transport_contracts.py",
+      "blob": "5c02a073db44903da5c6587e84349eb3755b06f5",
+      "bytes": 18393,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/universe_loader.py",
+      "blob": "fbb99611ce1e2aa23c0f54f237da57481eb8adff",
+      "bytes": 1416,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/web/app.js",
+      "blob": "03bd91b4c82896943dd0a1455fc91ca3b402bf9b",
+      "bytes": 6130,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/web/index.html",
+      "blob": "0f868d6f7e20fdb66ba76b40dcf5deb083d74cb1",
+      "bytes": 3799,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/web/stream-client.js",
+      "blob": "26b3cc637c58503e09e4ee624518d0a8c7ff3ffb",
+      "bytes": 2735,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/web/styles.css",
+      "blob": "982ba38a9b263bad65d832333ad6cac5c04814ee",
+      "bytes": 4812,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/web/world-client.js",
+      "blob": "0c57a3f3cd2819acceac22ac2acd8923de86099f",
+      "bytes": 6205,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/web_safety.py",
+      "blob": "e8adf828db97af23286fb9548fc0345d80271a56",
+      "bytes": 1335,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/world_context.py",
+      "blob": "ff170a0b3a1685b586397d0356c286132acd9a3e",
+      "bytes": 13840,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/world_sdk.py",
+      "blob": "17436e0867fb91837064771ad5aa65f9120ccce4",
+      "bytes": 12752,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/world_streams.py",
+      "blob": "794b2b7ae12bac454bec4ed007503565b2e58dd9",
+      "bytes": 1834,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/world_timers.py",
+      "blob": "3625705213e39650a9a530256b1dd25725fa5aac",
+      "bytes": 2643,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/world_types.py",
+      "blob": "bb0d15a01b6822db145cd8bcbef967cab87d4783",
+      "bytes": 319,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/world_views.py",
+      "blob": "9c9d026ef77cfdd97cddf23a30677662ec6fdbc2",
+      "bytes": 5568,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "agent_world/world_zero_universe.py",
+      "blob": "417eb250fe891fa54aca40f5dd9a67c26d657934",
+      "bytes": 6550,
+      "group": "runtime-and-bundled-consumers"
+    },
+    {
+      "path": "application.py",
+      "blob": "75e68b26ed1afb26b0c35dc07f07827df41d978c",
+      "bytes": 174,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "auth_tests.py",
+      "blob": "d2fed43f6ace585331858c58cd3043f367e97192",
+      "bytes": 3724,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "commons_universe.py",
+      "blob": "107dcd445009aaa98b317e6a02323bd54dca145e",
+      "bytes": 140,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "demo_universe.py",
+      "blob": "46f6e4626a867176cdf43d996691fc67cd428994",
+      "bytes": 137,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "docs/AGENT_INTERACTION.md",
+      "blob": "0f5d172d32bdeb8b3aea9893185e986c5a62c477",
+      "bytes": 5008,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/COMMONS_WORLD_V01.md",
+      "blob": "2cbdf6bfcffc2637741b91343ad49042d22a6b24",
+      "bytes": 1670,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/DURABLE_TIME.md",
+      "blob": "3b02d5093d8455ceca379c3187e15b0134876c4b",
+      "bytes": 4245,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/FOUNDATION.md",
+      "blob": "976332908bcc3a53ed9a0128a6195de83b913d26",
+      "bytes": 9668,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/FOUNDATION_AUDIT.md",
+      "blob": "d683ba40993a9dedb63c4ac6467a9631c5dd5f86",
+      "bytes": 4569,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/OBSERVATION_STREAMS.md",
+      "blob": "f64f35aaab47df137a100625ec8a80bcd46c0488",
+      "bytes": 4045,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/OPEN_DESIGN.md",
+      "blob": "41480f0af64e5d8a640b17a0e3d2bb736ac80770",
+      "bytes": 3804,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/REFERENCE_GATE.md",
+      "blob": "3c62c0fbf22834ca3b04936227c9367490b79bc8",
+      "bytes": 3021,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/RETENTION_PRESENTATION.md",
+      "blob": "a3e9649dd41debb183d868d386a5255938373286",
+      "bytes": 3576,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/WORLD_DATA.md",
+      "blob": "e375854e786c88e0e568a5a94cb42e2dc53082c6",
+      "bytes": 5798,
+      "group": "documentation"
+    },
+    {
+      "path": "docs/WORLD_ZERO_V01.md",
+      "blob": "60923489468b49dbf2d273f08f1c7b981ccb07de",
+      "bytes": 1544,
+      "group": "documentation"
+    },
+    {
+      "path": "examples/__init__.py",
+      "blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "bytes": 0,
+      "group": "world-examples"
+    },
+    {
+      "path": "examples/encounter_world.py",
+      "blob": "5ff311036179d65e3816964f01edc84e745b96c8",
+      "bytes": 6782,
+      "group": "world-examples"
+    },
+    {
+      "path": "examples/timed_worlds.py",
+      "blob": "7e6b5c092753d7050434b45c8ee3f3084f146445",
+      "bytes": 3447,
+      "group": "world-examples"
+    },
+    {
+      "path": "examples/workflow_world.py",
+      "blob": "a0ee1e97a743b2de64a00776ef00e036b1bc1e90",
+      "bytes": 2607,
+      "group": "world-examples"
+    },
+    {
+      "path": "http_app.py",
+      "blob": "ee82bd29c82ab1b8bf78e46423ac4701b40e6c2a",
+      "bytes": 132,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "identity_admin.py",
+      "blob": "dd30d5df522ecb4f43bc3eb531efc2ef935c956e",
+      "bytes": 177,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "identity_auth.py",
+      "blob": "0bd5faca611b11fd34a1a9c5c63b250d1b70a319",
+      "bytes": 137,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "mcp_app.py",
+      "blob": "1a073307b3748bd1065c89262c767ad5de370306",
+      "bytes": 131,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "mcp_auth_integration.py",
+      "blob": "077e5b9cce3aeadf3306ea18050cecbb5cc65ab5",
+      "bytes": 6633,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "mcp_wait_transport_test.py",
+      "blob": "a7c628fed8a337addbf54361d77e1c555d73f9de",
+      "bytes": 4528,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "onboarding_app.py",
+      "blob": "bec867f387e438a7f675d1595c9c771039b9e81b",
+      "bytes": 138,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "product_app.py",
+      "blob": "206b5ff828e9dc43a32011b4d5fed5c18f427b15",
+      "bytes": 135,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "pyproject.toml",
+      "blob": "0ec5934d36d24ef02c172a5c0eeeff4d5ae7c366",
+      "bytes": 656,
+      "group": "packaging-and-repository-config"
+    },
+    {
+      "path": "requirements.txt",
+      "blob": "6f0d229ad42404520f2871b60fe4db5fe49458d6",
+      "bytes": 77,
+      "group": "packaging-and-repository-config"
+    },
+    {
+      "path": "runtime_core.py",
+      "blob": "6e47439b084327dd479740e541aded0b24b4621a",
+      "bytes": 136,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "tests/__init__.py",
+      "blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "bytes": 0,
+      "group": "tests"
+    },
+    {
+      "path": "tests/fixtures/__init__.py",
+      "blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+      "bytes": 0,
+      "group": "tests"
+    },
+    {
+      "path": "tests/fixtures/reference_acceptance.py",
+      "blob": "73644c47a0a16e428f52b11420385829caf38c3b",
+      "bytes": 4585,
+      "group": "tests"
+    },
+    {
+      "path": "tests/fixtures/reference_world.py",
+      "blob": "21728438aeba6e485e25dedfd2cd03d0f3abc4fc",
+      "bytes": 3927,
+      "group": "tests"
+    },
+    {
+      "path": "tests/live_server.py",
+      "blob": "cecdda467641f57bc555b9bfaa2816504757cf1b",
+      "bytes": 5341,
+      "group": "tests"
+    },
+    {
+      "path": "tests/stream_client.test.mjs",
+      "blob": "321e2bd25f243fb49bbaa6e03bbd2a94e94a3ce6",
+      "bytes": 2991,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_foundation.py",
+      "blob": "9f73d763289296d53732466b81723a8e59c19500",
+      "bytes": 16012,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_observer_transport.py",
+      "blob": "8df3d8ecbce050bc6b1b7ba49684476b438e961b",
+      "bytes": 4714,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_reference_boundary.py",
+      "blob": "b623a2dc6151382c30b5919f7cfbbf9082977513",
+      "bytes": 14060,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_reference_transport.py",
+      "blob": "40f6a7b5a1c19ba27e9fb8b60a3ccab28a1388e5",
+      "bytes": 3564,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_shared_observation.py",
+      "blob": "1df374964595a47a215dbdcccb354c680411f8bb",
+      "bytes": 11085,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_timer_transport.py",
+      "blob": "0da6f70b6c5a32ba9684ea48c83f6eb37a50bc34",
+      "bytes": 4768,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_timers.py",
+      "blob": "9dfbe9ae65cb3d2a3275c792a8477c39552c41fd",
+      "bytes": 21359,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_transport.py",
+      "blob": "0ba6a3e207576f4cc4f78b73326976d68b2d6561",
+      "bytes": 13997,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_view_checkpoint_reuse.py",
+      "blob": "696afa6db75004faab271f9fecf45fc3704725ba",
+      "bytes": 6907,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_view_transport.py",
+      "blob": "fa36e4d95606086eb099183fcdff9e5499702fb2",
+      "bytes": 6406,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_world_data.py",
+      "blob": "b060a8446eb0d4b65c7d06732255826703319948",
+      "bytes": 17698,
+      "group": "tests"
+    },
+    {
+      "path": "tests/test_world_sdk.py",
+      "blob": "94d3dd7da5867f36502d31dfbf0d55afcee26f5e",
+      "bytes": 19826,
+      "group": "tests"
+    },
+    {
+      "path": "tests/view_client.test.mjs",
+      "blob": "9de4686dd895d7bdd8067ad371d1aaf13f172921",
+      "bytes": 5898,
+      "group": "tests"
+    },
+    {
+      "path": "tools/check_package.py",
+      "blob": "4f5655d165ab17fe546aa39990710f6777ee046a",
+      "bytes": 3046,
+      "group": "verification-tools"
+    },
+    {
+      "path": "tools/run_tests.py",
+      "blob": "a1ef7b6f1aaba46eddee8a9490346bea8ec1b95f",
+      "bytes": 2464,
+      "group": "verification-tools"
+    },
+    {
+      "path": "universe_loader.py",
+      "blob": "72bcc023ec148dd27c0c6ec99f8778c8c083ac97",
+      "bytes": 139,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v02_core_tests.py",
+      "blob": "71838071f38da507e586ff980f9dfaadced4a619",
+      "bytes": 22567,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v05_full_entry_e2e.py",
+      "blob": "561acff0a2b78e0677b44e0c744176e7a6da1551",
+      "bytes": 8291,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v05_onboarding_api_tests.py",
+      "blob": "028d4a00fad468857695c4583c0443285c218a18",
+      "bytes": 5220,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v05_onboarding_core_tests.py",
+      "blob": "579439500dbb59172487f28c3d3f3cb71ddddf8d",
+      "bytes": 7827,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v06_commons_e2e.py",
+      "blob": "fe21c9028a762c54c808dca256eee505fce0c4e5",
+      "bytes": 10949,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v06_read_function_tests.py",
+      "blob": "e765ff83c019f44fe09532dd5be5af8a9f3c3d0a",
+      "bytes": 6095,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v06_read_http_test.py",
+      "blob": "bf31cf8b38673e011112e01a8aab9954ffd4cdea",
+      "bytes": 2087,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v07_product_flow_test.py",
+      "blob": "be8d8e402a977bc2f3c51ccc32755d7429005297",
+      "bytes": 6785,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v08_world_zero_core_tests.py",
+      "blob": "0cbb47d0c16d2c8a8cd5a214bcf4791e1a272a04",
+      "bytes": 5001,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "v08_world_zero_e2e.py",
+      "blob": "57749c5d1df741a7e5c2d422a38654faf182ad81",
+      "bytes": 11547,
+      "group": "legacy-entrypoints-and-regressions"
+    },
+    {
+      "path": "world_zero_universe.py",
+      "blob": "ef4f99eedfb980053492cb617c78c9f427a90ac8",
+      "bytes": 143,
+      "group": "legacy-entrypoints-and-regressions"
+    }
+  ]
+}

@@ -44,7 +44,7 @@ def start_server(module: str, port: int, env: dict[str, str], log_name: str):
 def wait_ready(url: str, expected: set[int]) -> None:
     for _ in range(80):
         try:
-            response = httpx.get(url, timeout=0.25)
+            response = httpx.get(url, timeout=0.25, trust_env=False)
             if response.status_code in expected:
                 return
         except Exception:
@@ -60,6 +60,7 @@ def create_role_and_token(
         auth=auth,
         json={"display_name": name},
         timeout=5,
+        trust_env=False,
     )
     role_response.raise_for_status()
     role = role_response.json()
@@ -69,6 +70,7 @@ def create_role_and_token(
         auth=auth,
         json={"ttl_seconds": 60},
         timeout=5,
+        trust_env=False,
     )
     package_response.raise_for_status()
     package = package_response.json()
@@ -83,6 +85,7 @@ def create_role_and_token(
         WEB + "/v1/join/exchange",
         json={"ticket": ticket},
         timeout=5,
+        trust_env=False,
     )
     exchange.raise_for_status()
     token = exchange.json()["identity"]["token"]
@@ -93,6 +96,7 @@ async def open_session(token: str):
     http_client = httpx.AsyncClient(
         headers={"Authorization": f"Bearer {token}"},
         timeout=10,
+        trust_env=False,
     )
     transport = streamable_http_client(MCP_URL, http_client=http_client)
     read_stream, write_stream = await transport.__aenter__()
@@ -206,6 +210,7 @@ async def main() -> None:
                 WEB + f"/api/roles/{role_a['role_id']}/status",
                 auth=auth,
                 timeout=5,
+                trust_env=False,
             ).json()
             assert status_a["entered_world"] is True
             assert status_a["latest_recipient_event_seq"] > 0

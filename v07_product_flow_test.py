@@ -42,7 +42,7 @@ def start_server(module: str, port: int, env: dict[str, str], log_name: str):
 def wait_ready(url: str, expected: set[int]) -> None:
     for _ in range(80):
         try:
-            response = httpx.get(url, timeout=0.25)
+            response = httpx.get(url, timeout=0.25, trust_env=False)
             if response.status_code in expected:
                 return
         except Exception:
@@ -77,14 +77,14 @@ async def main() -> None:
             wait_ready(WEB + "/health", {200})
             wait_ready(MCP_URL, {401})
 
-            assert httpx.get(WEB + "/", timeout=5).status_code == 401
+            assert httpx.get(WEB + "/", timeout=5, trust_env=False).status_code == 401
             auth = httpx.BasicAuth(WEB_USER, WEB_PASSWORD)
-            page = httpx.get(WEB + "/", auth=auth, timeout=5)
+            page = httpx.get(WEB + "/", auth=auth, timeout=5, trust_env=False)
             assert page.status_code == 200
             assert "Give your agent a place to exist." in page.text
             assert "Create a role" in page.text
 
-            script = httpx.get(WEB + "/static/app.js", timeout=5)
+            script = httpx.get(WEB + "/static/app.js", timeout=5, trust_env=False)
             assert script.status_code == 200
             assert "entered_world" in script.text
             role_response = httpx.post(
@@ -92,6 +92,7 @@ async def main() -> None:
                 auth=auth,
                 json={"display_name": "Lantern", "avatar_ref": "avatar://lantern"},
                 timeout=5,
+                trust_env=False,
             )
             role_response.raise_for_status()
             role = role_response.json()
@@ -100,6 +101,7 @@ async def main() -> None:
                 WEB + f"/api/roles/{role['role_id']}/status",
                 auth=auth,
                 timeout=5,
+                trust_env=False,
             )
             status_before.raise_for_status()
             assert status_before.json()["identity_claimed"] is False
@@ -110,6 +112,7 @@ async def main() -> None:
                 auth=auth,
                 json={"ttl_seconds": 60},
                 timeout=5,
+                trust_env=False,
             )
             package_response.raise_for_status()
             package = package_response.json()
@@ -126,6 +129,7 @@ async def main() -> None:
                 WEB + "/v1/join/exchange",
                 json={"ticket": ticket},
                 timeout=5,
+                trust_env=False,
             )
             exchange.raise_for_status()
             identity = exchange.json()["identity"]
@@ -134,6 +138,7 @@ async def main() -> None:
                 WEB + f"/api/roles/{role['role_id']}/status",
                 auth=auth,
                 timeout=5,
+                trust_env=False,
             ).json()
             assert claimed["identity_claimed"] is True
             assert claimed["entered_world"] is False
@@ -141,6 +146,7 @@ async def main() -> None:
             async with httpx.AsyncClient(
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10,
+                trust_env=False,
             ) as mcp_http:
                 async with streamable_http_client(
                     MCP_URL, http_client=mcp_http
@@ -159,6 +165,7 @@ async def main() -> None:
                 WEB + f"/api/roles/{role['role_id']}/status",
                 auth=auth,
                 timeout=5,
+                trust_env=False,
             ).json()
             assert entered["identity_claimed"] is True
             assert entered["entered_world"] is True
