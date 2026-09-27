@@ -1,103 +1,166 @@
 # L6：当前实现
 
-复核：2026-09-27。本文描述 **当前 0.14.0 / SDK API 1 实际采用的技术选择和代码落点**。这里的事实可以随重构改变，不得反向覆盖 [系统不变量](INVARIANTS.md) 或 [行为合同](FOUNDATION.md)。
+复核：2026-09-27。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
-## 当前技术形态
+## 版本与运行形态
 
-- Python 3.11+ 包，当前版本 0.14.0。
-- 本地 SQLite 文件存储，WAL 模式，一个并发写者。
-- 受信任 Python WorldDefinition 包在 Runtime 进程中同步执行。
-- python -m agent_world 组合 Web、HTTP、MCP、timer worker 和保留维护；也可按模块单独运行部分入口。
-- HTTP/MCP 共享 WorldGateway 与 Runtime 路径，不维护两套世界规则。
-- 当前身份令牌仍绑定 role + universe；跨独立部署的统一底层身份验证尚未实现。
-- Runtime 不调用模型，也没有后台 Agent 执行器。
+- Python package：`agent-world` 0.14.0，要求 Python 3.11+。
+- Runtime protocol 常量：0.13；SDK API：1。
+- 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
+- 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
+- World Definition 以受信任、同步 Python 回调在 Runtime 进程内执行。
+- 组合入口可同时挂载 Web 产品原型、HTTP API、MCP、timer worker 和 retention maintenance。
+- Runtime 本身不调用模型，也没有用户 Agent 执行器。
 
-## 模块地图
+## L3 语义到当前代码的映射
 
-| 模块组 | 当前文件 |
+| 语义概念 | 当前实现映射 |
 | --- | --- |
-| Runtime 组合核心 | runtime_core.py |
-| 写入／调用 | runtime_functions.py、world_context.py |
-| 状态历史／提交 | runtime_journal.py |
-| 事件 | runtime_events.py |
-| 活动租约 | runtime_activities.py |
-| 授权视图 | runtime_views.py、world_views.py |
-| 共享流 | runtime_streams.py、world_streams.py |
-| 持久时间 | runtime_timers.py、world_timers.py、timer_worker.py |
-| 保留 | retention.py、maintenance.py |
-| SDK 声明 | world_sdk.py、world_types.py |
-| 表现辅助 | presentation.py、web/stream-client.js |
-| 合同／错误 | runtime_contracts.py、runtime_errors.py |
-| 结构化网关 | transport_contracts.py |
-| HTTP / MCP | http_app.py、mcp_app.py |
-| 身份解析与管理 | identity_auth.py、identity_admin.py、onboarding_app.py、product_app.py |
-| 应用组合／加载 | application.py、universe_loader.py、builtin_worlds.py |
-| Web 客户端原型 | agent_world/web/ |
-| 内置世界消费者 | demo_universe.py、commons_universe.py、world_zero_universe.py |
-| 外部示例消费者 | examples/ 以及独立 Lantern Hollow / Ashen Vault 仓库 |
+| User Identity | 尚无跨独立部署最终原语；当前以 `roles` 中稳定 profile + world-scoped credential 逼近。 |
+| Participant Profile | `roles` / Role Core；在同一数据库内不属于某个单独 universe。 |
+| Credential | `identity_tokens`；当前绑定 `role_id + universe`，access mode 为 `control` / `observe`。 |
+| World Definition | `WorldDefinition`。 |
+| World Instance | `universe` 字符串及所有按 universe 分区的持久记录。 |
+| Query / Command | `FunctionSpec(access="read" / "write")`。 |
+| State Fact | `world_state` + `StateRule` / state_authorizer。 |
+| Operation | 调用方 `operation_id`，持久化到 `operations.idempotency_key`。 |
+| Receipt | `operations.receipt_json`。 |
+| Commit | `world_commits` 及关联 `state_changes`。 |
+| Notification Event | `events` / `EventSpec`。 |
+| Shared Stream | `StreamSpec` / `StreamEvent` / `stream_events`。 |
+| View | `ViewSpec` / `view_checkpoints`。 |
+| Sync Position | recipient event seq、signed stream cursor、opaque view checkpoint。 |
+| Control Lease | `activities` + `activity_claims`。 |
+| Scheduled Effect | `TimerSpec` / `world_timers` / `timer_transitions`，执行 actor 为 `system:timer`。 |
+| Presentation | `PresentationCue`，event kind 为 `world.presentation`。 |
 
-根目录短同名模块与旧脚本目前仍承担兼容／回归用途；不为了目录整齐擅自删除公开入口。
+## Identity 当前状态
 
-## 当前持久记录
+`roles` 在一个 Runtime 数据库内保存稳定 `role_id`、display name、avatar ref、status 与时间字段。`role_world_presence` 单独记录某 Role 是否进入过某 universe。
 
-当前代码创建的主要 SQLite 表包括：
+`identity_tokens` 与 `join_tickets` 都绑定 `role_id + universe`。这意味着同一个 Role profile 可以在同一数据库的多个 universe 中复用，但 **同一个当前 bearer token 不能跨 universe 使用，更不能自动跨独立部署验证**。这就是 G2 仍为部分实现的原因。
 
-- roles、role_world_presence、identity_tokens、join_tickets
-- world_definitions、function_registry、world_state
-- operations、world_commits、state_changes、state_history_floors
-- events、event_floors
-- activities、activity_claims
-- world_timers、timer_transitions
-- stream_events、stream_heads
-- view_checkpoints
-- runtime_meta
+当前 identity token 使用 `awid_` 前缀，Join Ticket 使用 `awjt_`，数据库保存 token hash。Join Ticket 最长允许 24 小时配置有效期；一次 ticket 只恢复／发放同一个凭据结果。credential rotate 丢失响应时仍缺少完整自助恢复合同。
 
-这些表是 L6 的实现选择，不是 L3 领域模型的同义词。例如 operations 表存在不代表任何世界业务对象都必须叫 Operation；view_checkpoints 也不代表 checkpoint 是业务确认。
+## 主要模块地图
 
-## 公共 Python SDK
+| 责任 | 当前模块 |
+| --- | --- |
+| 包入口／CLI | `__init__.py`、`__main__.py`、`application.py` |
+| 应用生命周期／加载 | `asgi_lifecycle.py`、`universe_loader.py`、`builtin_worlds.py` |
+| Runtime 组合与 identity core | `runtime_core.py` |
+| Command / Query 执行 | `runtime_functions.py`、`world_context.py` |
+| 状态 journal / commit | `runtime_journal.py` |
+| 定向通知 | `runtime_events.py` |
+| Control Lease | `runtime_activities.py` |
+| View | `runtime_views.py`、`world_views.py` |
+| Shared Stream | `runtime_streams.py`、`world_streams.py` |
+| Scheduled Effect | `runtime_timers.py`、`world_timers.py`、`timer_worker.py` |
+| Retention | `retention.py`、`maintenance.py` |
+| 作者 SDK 声明 | `world_sdk.py`、`world_types.py` |
+| Presentation | `presentation.py`、`web/stream-client.js` |
+| 共享 schema / errors | `runtime_contracts.py`、`runtime_errors.py`、`errors.py` |
+| Gateway | `transport_contracts.py` |
+| HTTP / MCP adapters | `http_app.py`、`mcp_app.py` |
+| Identity / onboarding adapters | `identity_auth.py`、`identity_admin.py`、`onboarding_app.py`、`product_app.py` |
+| Web 安全／诊断 | `web_safety.py`、`diagnostics.py` |
+| Web prototype | `agent_world/web/` |
+| 仓库内 demo/test consumers | `demo_universe.py`、`commons_universe.py`、`world_zero_universe.py`、`examples/` |
 
-当前包公开 WorldRuntime、WorldDefinition、FunctionSpec、StateRule、RetentionPolicy、PresentationCue、StreamSpec、StreamEvent、ViewSpec、TimerSpec、TimerInvocation、RetryTimer、FunctionContext、FunctionOutcome 和 EventSpec。
+仓库内 demo、示例和后来另建的测试世界都不是架构来源。它们只在实际执行的兼容测试范围内提供证据。
 
-公开类型的存在只表示当前 SDK 可用能力；可选类型不是每个世界的强制对象。
+## 当前 SQLite schema
 
-## 当前已知差距
+当前 schema `user_version` 为 5。主要表：
 
-1. 产品要求用户持有跨世界通用身份；当前 token 验证仍绑定单个 universe，独立部署的统一验证没有落地。
-2. 通用的多方共同事项／确认／完成协议仍未定稿；具体世界可以用现有函数与状态实现，但 Runtime 不应声称已有统一对话状态机。
-3. 第三方／群众公裁尚无正式领域模型与行为合同。
-4. 外部网络、付款、文件等副作用没有与 SQLite 事务统一的 exactly-once 保证。
-5. 长期运行、多主机真实 Agent 协作、完整浏览器视觉轨迹和全部 CI 平台组合仍需要继续验证。
+- identity / entry：`roles`、`role_world_presence`、`identity_tokens`、`join_tickets`。
+- world registry：`world_definitions`、`function_registry`。
+- current state / operations：`world_state`、`operations`。
+- commit journal：`world_commits`、`state_changes`、`state_history_floors`。
+- recipient events：`events`、`event_floors`。
+- coordination：`activities`、`activity_claims`。
+- timers：`world_timers`、`timer_transitions`。
+- shared streams：`stream_events`、`stream_heads`。
+- view cache：`view_checkpoints`。
+- runtime metadata：`runtime_meta`。
 
-待决策项只在 [OPEN_DESIGN](OPEN_DESIGN.md) 维护；已知实现缺口不能通过修改上层定义“消失”。
+表名只是 L6 存储选择，不等于 L3 概念必须一一对应。
 
-## 当前分支的状态校验修复
+## 当前公共 Python SDK
 
-本整理分支恢复了 managed WorldDefinition 在提交前对 legacy raw-state 写入的 schema、版本和 state_authorizer 校验，并适配 authorization_state 与迁移最终状态语义。范围和限制见 [FOUNDATION](FOUNDATION.md) 及带日期的仓库审计。
+`agent_world.__all__` 当前导出：WorldRuntime、WorldDefinition、FunctionSpec、StateRule、RetentionPolicy、PresentationCue、StreamSpec、StreamEvent、ViewSpec、TimerSpec、TimerInvocation、RetryTimer、FunctionContext、FunctionOutcome、EventSpec。
 
-这项修复仍不把受信任 Python 代码变成恶意插件沙箱，也不承诺特权管理连接、直接文件修改或任意外部副作用享有同样边界。
+WorldDefinition 当前可声明 functions、state rules、state authorizer、bootstrap/initialize/migrations、views、timers、retention、streams 等；这些可选能力不是所有世界的必选模型。
 
-实现事实变化时优先更新本文；只有行为语义、领域模型、不变量或产品目标真的改变时，才继续向上修改对应层。
+## 当前 core tool surface
 
-## 身份与接入实现细节
+固定 core tools 当前包括：
 
-当前 Role Core 字段包括 role_id、display_name、avatar_ref、status 与时间字段。身份 token 使用 awid_ 前缀，Join Ticket 使用 awjt_ 前缀，数据库保存 token 哈希而非明文。
+- entry/discovery：`world.bootstrap`、`world.describe`、`world.discover`。
+- receipt：`world.get_receipt`。
+- recipient events：`world.get_changes`、`world.wait_changes`。
+- activities：`world.start_activity`、`world.claim_activity`、`world.renew_claim`、`world.finish_activity`。
+- views：`world.list_views`、`world.view_snapshot`、`world.view_sync`、`world.view_timeline`。
+- streams：`world.list_streams`、`world.read_stream`、`world.wait_stream`。
 
-Join Ticket 当前绑定 role + universe，配置的最长有效期为 24 小时；一次 ticket 最多发一个凭据，并可在有效期内恢复同一个交换结果。角色创建、资料修改、ticket/token 发放与撤销目前由操作员入口负责。
+WorldDefinition 中声明的 functions 另外动态映射为可调用 world tools。HTTP adapter 映射到同一 Gateway 语义；完整 route 以 `http_app.py` 为代码事实。
 
-当前 access mode 为 control / observe：control 可以调用获准写函数，observe 只能读取获准信息。现有 operator key / Web Basic Auth 只是管理原型。
+## 当前 HTTP / 产品入口
 
-MCP 会话绑定初始化凭据，凭据轮换后需新会话。轮换响应丢失的完整自助恢复尚未实现。
+HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。产品／onboarding adapter 另外提供 role、join ticket、token rotate/revoke 与 join exchange。
 
-## 当前接口与运行入口
+这些路径是当前 L6 表面，不应被 L1-L3 当成概念定义。
 
-- python -m agent_world：组合 Web、HTTP、MCP、timer worker 与 maintenance。
-- python -m agent_world.timer_worker：可独立运行 timer worker。
-- python -m agent_world.maintenance：可独立执行一次有界保留清理。
-- Web / HTTP / MCP 在组合入口中使用同一 origin；公开 URL 和 Host/Origin 防护由部署配置。
-- world.get_receipt 对应当前 HTTP receipt 查询入口；view、stream 也分别有 HTTP 与 MCP 映射。具体路径以 transport_contracts.py / http_app.py 为准，不能从某个 adapter 复制第二套业务语义。
+## 当前关键上限
 
-## 当前可见限制
+| 项目 | 当前值／范围 |
+| --- | --- |
+| structured arguments | 64 KiB |
+| 单个 state value | 256 KiB |
+| result / event batch budget | 256 KiB；单次 outcome 最多 128 events |
+| managed state changes per commit | 512；历史前后内容合计 2 MiB |
+| history page payload | 1 MiB |
+| WorldDefinition declarations | views ≤64，timer handlers ≤64，streams ≤64 |
+| View | ≤256 entities、≤64 resources、总 payload 96 KiB |
+| View checkpoint | TTL 300s；每 viewer/universe 16；全局 1024 |
+| Stream | read page ≤100 events，page payload 192 KiB；cursor lifetime 86400s |
+| Stream declaration | retention ≤365d，max_events ≤100000 |
+| wait | 当前最大 30s |
+| timer commands per transaction | 32 |
+| timer argument payload | 64 KiB |
+| pending timers per universe | 10000 |
+| timer retries | max_attempts 1..10，retry delay ≤86400s |
+| retention config | event/history seconds ≤315360000；row limits ≤10000000 |
 
-现有实现包含多项有界限制，例如一次 managed 提交的状态变化数量与历史体积、view entity/resource 规模、checkpoint 数量与寿命、stream payload/page 大小、wait 最长时间、一次 timer 事务变化数及 pending timer 数。
+这些数值可能同时具有“当前公共行为限制”和“实现容量保护”两种性质。修改前需要判断是否会改变 L4 客户端可观察合同。
 
-这些限制中，凡是会决定客户端请求是否有效的值属于 L4 可观察合同；内部缓存布局和表结构属于 L6。修改数值时先判断它究竟是公共行为限制还是纯实现调优，不能一概当成“内部参数”。
+## worker 与 maintenance
+
+组合入口默认 timer poll interval 1s，可关闭；TimerWorker 默认 batch 25，interval 最低 0.05s。Retention maintenance 在世界声明 retention 或 streams 时启动后台线程，当前每 30s sweep 一次。
+
+也可以分别运行 timer worker 和 retention maintenance CLI。导入 package 本身不会安装常驻系统服务。
+
+## Presentation 当前映射
+
+`PresentationCue` schema version 为 1，channel 当前为 `action / speech / intent`，phase 为 `start / finish / cancel`，单 cue payload 上限 16 KiB。它可以生成定向 EventSpec 或发布为 StreamEvent。
+
+timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当前可见的 presentation events。这个机制是表现辅助，不是业务动作状态机。
+
+## Legacy raw connection 与信任边界
+
+`FunctionContext.conn` 仍是 legacy escape hatch，不属于可移植 World SDK。SQLite authorizer 会禁止 world callback 自行控制事务、ATTACH/PRAGMA，并限制写入；managed WorldDefinition 在提交前还会重校验 raw state write 的 universe、版本、schema 与 state authorization。
+
+但是 **legacy raw connection 不是行级安全沙箱**：受信任 world callback 可以直接执行 SQL 读取，而且整个 Python World Package 本来就在 Runtime 进程／OS 权限内。当前架构因此只承诺受支持接口的业务隔离，不承诺对恶意 World Package 的机密隔离。
+
+如果未来要承载互不信任的第三方世界代码，必须改变 L5 信任／进程／存储架构，而不是继续给 `ctx.conn` 周围补字符串检查。
+
+## 当前已知实现差距
+
+1. **G2 跨世界身份只部分实现。** 当前 token 仍绑定单 universe，独立部署缺少统一验证／信任架构。
+2. **共同事项没有通用模型。** Runtime 提供状态、Receipt、事件等底座，但没有统一 Request/Response/Confirmation/Completion 对象。
+3. **第三方／群众公裁未实现通用模型或合同。**
+4. **credential rotate 未知结果恢复仍不完整。**
+5. **外部系统副作用没有与 Runtime store 统一的 exactly-once / delivery contract。**
+6. **legacy raw connection 增加了世界代码与 SQLite 内部结构的耦合。** 即使在受信任代码模型下，也值得逐步减少可移植世界对它的依赖。
+
+长期 soak、浏览器轨迹、更多平台矩阵属于验证缺口而不是 L6 功能缺口，统一记录在 [REFERENCE_GATE](REFERENCE_GATE.md)。未决设计见 [OPEN_DESIGN](OPEN_DESIGN.md)。
