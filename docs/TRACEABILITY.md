@@ -15,7 +15,7 @@
 | I4 Runtime 不冒充用户／Agent | External Agent / Client、System Actor、Scheduled Effect | **已实现架构边界** | `tests/test_timers.py` 覆盖定时事项离线执行与不保存用户 token；系统行为与用户行为来源区分。 |
 | I5 提交事实独立于会话 | Commit、Receipt、authoritative state | **已实现核心机制** | receipt 恢复、进程重启、状态持久化测试存在；网络外部副作用不在该保证内。 |
 | I6 同一 Runtime 提交无半成品 | L4 原子提交；事务执行核心 | **有强回归覆盖** | `test_write_cannot_commit_partially`、output/schema failure、timer retry/rollback、history rollback 等。 |
-| I7 未知结果不靠猜测 | Operation + Receipt | **已实现核心写操作语义** | receipt 恢复与同 ID replay 测试存在；身份 token 轮换丢响应仍是已知缺口。 |
+| I7 未知结果不靠猜测 | Operation + Receipt + structured recovery error | **已实现核心写操作语义** | receipt 恢复与同 ID replay 测试存在；`test_error_contract.py`、`test_structured_error_transport.py` 验证 HTTP/MCP 保留 recovery/retry/details。Capability Harness 还验证重启后 replay；identity token rotate 丢响应仍是已知缺口。 |
 | I8 派生观察不创造事实 | View、Stream、Sync Position、Presentation 横轴 | **已实现主要边界** | view/stream/client tests 覆盖缓存、乱序、撤权、retention gap；具体 UI 仍需按世界正确命名业务状态。 |
 | I9 world instance 默认隔离 | World Instance、instance-scoped state/action | **支持接口层已实现；不是敌对代码安全沙箱** | `test_world_instances_are_isolated`、cross-universe write 回归存在。受信任 Python world code 与 legacy raw connection 不提供恶意租户机密隔离。 |
 | I10 Runtime 领域中立 | Domain Object 由世界定义；核心不含固定玩法 | **当前代码结构基本符合** | architecture boundary test 防止 core 反向依赖示例／adapter；有限示例只能证明未立即耦合，不能证明未来不会退化。 |

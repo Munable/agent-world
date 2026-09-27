@@ -111,6 +111,18 @@ README 只提供现行入口。本记录不宣称社交能力已经补齐、跨�
 
 实际验证：10 份修改文档的 UTF-8、112 处相对链接与章节锚点、10 个唯一固定版本外部来源链接的格式检查、6 组来源／候选／待执行验收对应检查及 git diff --check 均通过；原有正式条款保留检查通过，唯一删除是将首轮变更记录标题明确为历史记录。外部来源链接已通过 GitHub 读取或首轮核对，不把本轮格式检查冒充线上可达性测试。功能、真实宿主、对方服务、长期运行及用户试点均未执行；不触发纯文档计费 CI。
 
+## 第三轮采纳结果：Runtime 能力而非社交内核
+
+本轮基于深校验分支与前两轮参考文档合并后的代码基线，真正落地的是 **EF-05 的跨领域部分**，以及用于避免“两名 Agent 故事测试”过度收窄的 Runtime Capability Harness。实现提交固定为 `ef19dd42a7c4cbef2b6eb96ee946184745f4233a`。
+
+已采纳并实现：Runtime error 可以携带 `recovery`、`retry_after_seconds` 和有界 JSON `details`；HTTP/MCP 对同一异常保留一致结构化语义；HTTP 可把 retry hint 映射成 `Retry-After`。这借鉴了 EigenFlux 将限额、恢复条件和重试提示保持为结构化客户端信息的做法，但没有复制其 PM 错误码、具体次数、好友例外或内容 fingerprint 防重。
+
+已新增确定性多参与者 Harness：当前用 6 个动态身份验证 1→N、N→1 并发、N→N、凭据撤销、同 Operation 重放和 Runtime 重启恢复。它只消费公共 Runtime 能力，不添加社交固有原语，因此可继续用于协作、资源竞争、广播等非社交能力验证。
+
+EF-01、EF-04、EF-06 本轮主要确认其思想与我方已有 bootstrap/discover、wait/stream/snapshot/reset、身份／授权投影边界相容，并补入现行文档与测试策略；没有因为参考项目存在 WebSocket、单 stream、特定 Agent Home 或多服务栈就新增依赖。EF-02/03 仍留给首个社交 Reference Application 作为领域候选，不声称已经实现会话、好友、屏蔽或联系预算。
+
+实际验证：新针对性测试 8 个通过；正式 `tools/run_tests.py` 的 197 个核心 unittest 与 12 个历史兼容脚本通过；package check 和两份 Node 客户端合同测试通过。没有执行 EigenFlux 自己的测试、线上服务调用、真实多宿主 Agent、长期 soak 或真实用户试点，不能把本轮结果外推成这些证据。
+
 ## 可追溯来源
 
 以下是已核对官方资料的固定源码入口；各文档中的旧日期和示例不自动代表全部当前实现。

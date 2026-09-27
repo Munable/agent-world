@@ -17,7 +17,7 @@
 | EF-02 | 来源关联的会话、历史与关系请求 | **Reference Application 候选。** 用于暴露对象引用、参与者授权和未决事项恢复，不成为 Runtime 固有社交模型。 |
 | EF-03 | 拒收／屏蔽／未回应联系预算 | **Reference Application 候选。** 采纳问题，不照抄次数、silent-success 或好友规则。 |
 | EF-04 | 通知 + 查询恢复、cursor、重连与有界退避 | **采纳通用模式。** 先复用现有 wait / stream / snapshot / reset，不承诺单账号单流或读取即已读。 |
-| EF-05 | 结构化错误、retry/reset/recovery 提示并由客户端完整保留 | **高优先级 Runtime 候选，本轮实现验证。** 保留 operation_id + Receipt，不以内容指纹代替。 |
+| EF-05 | 结构化错误、retry/reset/recovery 提示并由客户端完整保留 | **通用 Runtime 合同已落地并有回归证据。** HTTP/MCP 保留 recovery、可选 retry-after 与结构化 details；领域专用 taxonomy 仍由具体世界定义，operation_id + Receipt 语义不变。 |
 | EF-06 | 公开资料、私有历史、来源标识与授权分离 | **采纳边界。** 不默认上传私人上下文，不从名称推断认证。 |
 
 来源与代码／测试核对范围见 [REFERENCE_EIGENFLUX_2026-09-27](REFERENCE_EIGENFLUX_2026-09-27.md)。

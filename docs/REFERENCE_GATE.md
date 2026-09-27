@@ -51,6 +51,17 @@
 - EF-05：规则拒绝、可延后重试、未知写结果、重新授权、reset 等错误在 HTTP/MCP/客户端保持同一结构化语义；Receipt 恢复不产生第二次业务动作。
 - EF-02/03/06 由社交 Reference Application 验证参与者授权、pending 状态独立于通知、block/联系边界及私有数据不泄露；测试结果不能反推所有世界都必须支持社交关系。
 
+### 本轮 Capability Harness 证据
+
+实现提交：`ef19dd42a7c4cbef2b6eb96ee946184745f4233a`。本轮实际执行并通过：
+
+- 新增 error contract、multi-topology matrix、HTTP/MCP structured-error 共 **8 个针对性测试**。
+- `python tools/run_tests.py`：**197 个核心 unittest** 全部通过；脚本随后执行的 **12 个历史兼容套件**全部通过。
+- `python tools/check_package.py`：wheel 构建、独立安装、资源导入和仓库外 package probe 通过。
+- `node tests/view_client.test.mjs` 与 `node tests/stream_client.test.mjs`：两份客户端合同测试通过。
+
+这些结果证明当前提交覆盖到的结构化错误传递、1→N、N→1、N→N、撤权隔离、重放和进程重启恢复没有破坏既有合同；**它们不证明长期 soak、真实多宿主 Agent、跨机器网络分区或跨独立部署身份已经成立**。社交 Reference Application 的 EF-02/03/06 领域行为仍需后续实现后单独取证。
+
 ## 关于灯溪镇和灰烬地城
 
 这两个仓库是在认为基础状态已经较完整后临时起意建立的测试消费者，不是经过前置设计选择出来的参考架构。

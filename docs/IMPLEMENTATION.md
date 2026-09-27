@@ -154,6 +154,25 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 
 如果未来要承载互不信任的第三方世界代码，必须改变 L5 信任／进程／存储架构，而不是继续给 `ctx.conn` 周围补字符串检查。
 
+## 结构化错误与 Capability Harness
+
+实现提交 `ef19dd42a7c4cbef2b6eb96ee946184745f4233a` 增加通用结构化恢复错误合同：
+
+- `runtime_errors.py` 的 `WorldRuntimeError` 可携带可选 `recovery`、`retry_after_seconds` 与 `details`；显式 `retryable` 必须是 boolean。
+- `details` 当前要求为 JSON object，递归深度有界，序列化后最多 8 KiB；非有限数字、非字符串 key 和任意 Python 对象会在构造错误时被拒绝。
+- `transport_contracts.py` 将相同字段映射到 HTTP/MCP 结构化错误；未知内部异常仍被清洗为通用 `InternalError`。
+- HTTP 在存在 `retry_after_seconds` 时额外发送整数秒 `Retry-After`；401 仍只在鉴权错误路径发送 `WWW-Authenticate: Bearer`。
+- 常见恢复提示已覆盖缺少／失效身份、scope 不匹配、无效输入、Join Ticket 失效、函数版本／发现变化、observe/control 不匹配和 StorageBusy；世界规则也可在 `RuleViolation` 等 Runtime error 上附带安全的恢复元数据。
+
+本轮同时增加 `tests/capability_harness.py` 和 `tests/fixtures/capability_matrix_world.py`。它们是 **确定性的 Runtime 测试基础设施，不是新的 Reference Application 或领域模型**。当前矩阵用 6 个动态参与者覆盖：
+
+- 1→N 定向 fan-out，并验证同 Operation 重放与 Runtime 重启后 Receipt／事件仍可恢复。
+- N→1 并发 fan-in，验证多个写者向同一目标聚合且非目标主体不能读取私有聚合。
+- N→N mesh，验证多主体同时 fan-out；撤销其中一个凭据后，该主体立即失效而其他主体继续运行。
+- HTTP/MCP 对同一个带 recovery/retry/details 的规则错误保持结构化语义一致。
+
+这批 fixture 不创建 Conversation、Friend、Party 或其他产品对象，因此不能反向定义 Runtime 领域模型。以后新增拓扑／故障组合时优先扩展 Harness，而不是为每个实验重新造一个大场景。
+
 ## 当前已知实现差距
 
 1. **G2 跨世界身份只部分实现。** 当前 token 仍绑定单 universe，独立部署缺少统一验证／信任架构。
