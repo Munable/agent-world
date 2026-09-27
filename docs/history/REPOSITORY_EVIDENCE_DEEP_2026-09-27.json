@@ -1,8 +1,8 @@
 {
   "date": "2026-09-27",
   "branch": "review/layered-baseline-20260926",
-  "validated_runtime_test_snapshot": "efe72dbaa52c57638991089b2f307e640aeacdc9",
-  "purpose": "Deep validation of the six-layer design after demoting ad-hoc companion worlds from architectural evidence.",
+  "validated_runtime_test_snapshot": "6f222602d720b5b6fed76e415ae89784716903ef",
+  "purpose": "Deep validation of the six-layer design, including demotion of ad-hoc companion worlds and removal of reference-world authority naming from active package/capability probes.",
   "environment": {
     "os": "Windows",
     "python": "3.14.2",
@@ -28,8 +28,8 @@
     "command": "python tools/check_package.py",
     "result": "passed",
     "package_version": "0.14.0",
-    "external_fixture": "minimal repository-external WorldDefinition package fixture",
-    "note": "This fixture validates packaging/public SDK boundaries; it is not a product reference world."
+    "external_fixture": "repository-external package integration probe",
+    "note": "The package probe validates wheel/public SDK and selected optional-capability composition outside the checkout; it is not a product or architectural reference world."
   },
   "repository_structure": {
     "python_files_parsed": 91,
@@ -40,7 +40,7 @@
     "git_diff_check": "passed"
   },
   "post_validation_changes": {
-    "scope": "G2 wording strengthened, L3 relationships added, historical docs moved under docs/history, current evidence links updated",
+    "scope": "Only this evidence JSON is being updated after the validated 6f22260 code/test/tool snapshot.",
     "runtime_tests_tools_diff_against_validated_snapshot_bytes": 0
   },
   "ad_hoc_companion_worlds": {
@@ -58,5 +58,12 @@
     "No cross-deployment identity implementation or verification.",
     "No production database migration.",
     "Passing contract tests do not prove arbitrary-domain generality or completion of L1 goals."
-  ]
+  ],
+  "active_probe_naming": {
+    "package_probe_world": "tests/fixtures/package_probe_world.py",
+    "package_probe_acceptance": "tests/fixtures/package_probe_acceptance.py",
+    "capability_boundaries": "tests/test_capability_boundaries.py",
+    "capability_transport": "tests/test_capability_transport.py",
+    "reference_or_conformance_authority_terms_in_active_tests_tools": 0
+  }
 }
