@@ -39,3 +39,9 @@ cursor 必须绑定 Stream、World Instance、viewer／credential 和相关版�
 对话回复关系、确认关系和事项完成必须由世界 Domain Object 与 Command 规则验证，不能只根据相邻消息或自然语言文本推断。
 
 当前 Stream/View 类型、tool/HTTP 映射、payload/page 上限、client helper 与诊断实现见 [IMPLEMENTATION](IMPLEMENTATION.md)。
+
+## EigenFlux 参考建议
+
+学习“低延迟通知 + 持久查询恢复 + 游标续接 + 有界退避”的组合，而不直接复制 WebSocket 或单账号单连接策略。现有 read / wait、Snapshot、stream cursor 与 reset 仍是首选基础；通知丢失或宿主长时间离线后，应能从权威状态／受保留流恢复当前可恢复事实。
+
+Capability Harness 需覆盖 1→1、1→N、N→1、N→N、多消费者速度差、后加入、完全离线、重复／乱序、权限撤回和 cursor 过期。不同客户端的同步位置不自动等于主体已读或业务完成；是否需要共享 ACK 必须由具体领域显式建模。

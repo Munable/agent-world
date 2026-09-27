@@ -70,3 +70,9 @@
 - Scheduled Effect ≠ Agent，也不代表用户在执行时重新作出了决定。
 
 第三方／群众公裁若最终成为通用能力，再根据实际机制决定 Case、Evidence、Reviewer、Decision 等是否进入正式领域模型；在 [OPEN_DESIGN](OPEN_DESIGN.md) 定稿前不预占概念。
+
+## EigenFlux 参考建议
+
+这些概念用于首个社交 Reference Application 的 L3 设计验证，**不成为 Runtime 内置领域对象**：公开内容／回应、私有会话／消息、关系请求／关系、联系偏好／屏蔽、待处理事项／通知。候选的价值在于逼出身份归因、对象引用、授权投影、未决事项持久化和恢复语义；若以后其他领域出现同样需求，再评估是否抽取更通用的 Request / Response / Pending Item 等模型。
+
+参考 EigenFlux 时保留一个关键区分：通知只是发现入口，关系请求或会话本身是业务事实；清除通知不能结束 pending 事项。交叉申请、关闭、撤回、屏蔽后的关系变化等仍由具体 Reference Application 定义，不能直接变成 Runtime 规则。

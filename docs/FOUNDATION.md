@@ -90,3 +90,9 @@ Runtime 的原子提交只覆盖它自己管理的世界数据与运行时效果
 授权投影与缓存见 [WORLD_DATA](WORLD_DATA.md)，共享观察见 [OBSERVATION_STREAMS](OBSERVATION_STREAMS.md)，持久时间见 [DURABLE_TIME](DURABLE_TIME.md)，数据保留见 [RETENTION](RETENTION.md)，Agent 交互接续见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。
 
 当前 SDK 类型、core tool 名称、HTTP/MCP 映射、限制值以及 legacy raw connection 的兼容边界统一记录在 [IMPLEMENTATION](IMPLEMENTATION.md)，不在本合同里反向定义语义。
+
+## EigenFlux 参考建议
+
+优先吸收其“机器可处理错误 + 明确恢复动作”的做法，而不是照搬社交错误码。Runtime 错误应尽量让调用方区分：不可原样重试的规则拒绝、可在条件满足后重试、未知提交结果需要查 Receipt、凭据／权限需要重新授权、同步位置需要 reset。公开错误只能包含安全可披露的结构化细节，不能泄露隐藏对象、屏蔽原因、凭据或内部异常。
+
+现有 `operation_id + Receipt` 继续作为逻辑操作身份和未知结果恢复基础；不能用“相同内容”推断两次操作是同一次。具体通用错误字段与 transport 保真在本轮实现和测试中验证，社交联系预算等领域细节仍留在 Reference Application。

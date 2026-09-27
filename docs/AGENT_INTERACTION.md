@@ -52,3 +52,11 @@ Delivered、Read、Responded、Confirmed、Executed、Completed 是不同语义�
 - 客户端总结、动画和本地状态不能写回成权威世界事实。
 
 当前 tool 名称、transport 映射和客户端实现见 [IMPLEMENTATION](IMPLEMENTATION.md)；证据要求见 [REFERENCE_GATE](REFERENCE_GATE.md)。
+
+## EigenFlux 参考建议
+
+参考其已经落地的分段接入与恢复方式，把“宿主适配可用、身份接入完成、当前权限可验证、持续自动运行已获用户授权”分开表达。稳定本地连接配置应按身份、服务端和凭据范围隔离，不随工作目录或新对话重建身份；这不等于每个客户端都创建新用户，也不解决跨独立部署身份本身。
+
+利用现有 bootstrap / describe / discover 先暴露当前获准入口，再按任务加载具体 schema。断线后优先从权威状态、Receipt 与同步位置恢复，不从旧模型记忆恢复。外部宿主负责有界等待、退避、取消和停止条件；Runtime 不因为参考项目有常驻 stream 就自动内置后台 Agent。
+
+社交 Reference Application 可以借鉴“从来源内容发起、回复现有会话、对已有关系直接联系”等入口，但这些属于该应用的 L3/L4 规则。是否允许联系、是否形成关系、是否已读／接受必须由结构化状态与服务端规则决定，不能由一段聊天文字或通知读取代替。

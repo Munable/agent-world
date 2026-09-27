@@ -2,6 +2,26 @@
 
 更新：2026-09-27。这里不是第七层。每个未决项都标明真正归属；候选方案在决定前不具有现行合同地位。
 
+## 当前处理顺序
+
+1. **先验证 Runtime 能力面，而不是固定两人故事。** 建立可编排 Capability Harness，覆盖单主体、多主体、1→N 广播、N→1 汇聚、N→N、并发竞争、离线／后加入、撤权、重连和恢复。
+2. **并行维护一个社交 Reference Application。** 它用于真实消费 Runtime、暴露 API／恢复／权限缺口，不定义产品本体，也不把 Conversation / Friend / Block 强塞进 Runtime。
+3. **缺口先分类。** Reference Application 自己的领域问题留在应用；已有 Runtime 能力可解决的就正确使用；只有跨领域通用且当前无法可靠表达的问题才进入 Runtime。
+4. 跨世界身份、第三方／群众公裁、外部副作用交付等长期问题继续按各自层级推进，不被首个 Reference Application 的范围覆盖或取消。
+
+## EigenFlux 参考采纳清单
+
+| 编号 | 借鉴点 | 当前取舍 |
+| --- | --- | --- |
+| EF-01 | 分段接入、稳定本地配置、初次接入与恢复分流 | **采纳方向。** 用于 Agent/adapter 合同；不复制其 CLI 或每 Agent 一套用户身份。 |
+| EF-02 | 来源关联的会话、历史与关系请求 | **Reference Application 候选。** 用于暴露对象引用、参与者授权和未决事项恢复，不成为 Runtime 固有社交模型。 |
+| EF-03 | 拒收／屏蔽／未回应联系预算 | **Reference Application 候选。** 采纳问题，不照抄次数、silent-success 或好友规则。 |
+| EF-04 | 通知 + 查询恢复、cursor、重连与有界退避 | **采纳通用模式。** 先复用现有 wait / stream / snapshot / reset，不承诺单账号单流或读取即已读。 |
+| EF-05 | 结构化错误、retry/reset/recovery 提示并由客户端完整保留 | **高优先级 Runtime 候选，本轮实现验证。** 保留 operation_id + Receipt，不以内容指纹代替。 |
+| EF-06 | 公开资料、私有历史、来源标识与授权分离 | **采纳边界。** 不默认上传私人上下文，不从名称推断认证。 |
+
+来源与代码／测试核对范围见 [REFERENCE_EIGENFLUX_2026-09-27](REFERENCE_EIGENFLUX_2026-09-27.md)。
+
 ## 1. 跨世界身份架构
 
 **归属：L2 身份不变量 + L3 身份模型 + L4 凭据／撤销合同 + L5 信任架构。优先级高。**
