@@ -54,6 +54,6 @@ Bootstrap defaults to a bounded world view, not a full function catalog.
 Strict envelopes reject previously tolerated malformed/coerced values. Activity TTL is now part of retry identity.
 Authenticated MCP sessions cannot switch credentials; clients initialize a new session after token rotation.
 
-See [the contract](FOUNDATION.md) for trust, transaction, retention and deployment boundaries.
+See [the contract](../FOUNDATION.md) for trust, transaction, retention and deployment boundaries.
 No claim is made of arbitrary plugin sandboxing, production user-account ownership, high availability,
 full D&D rule coverage or exactly-once external side effects.

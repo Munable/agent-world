@@ -54,7 +54,7 @@
 
 ## 当前历史证据
 
-[2026-09-26 仓库审计](REPOSITORY_AUDIT_2026-09-26.md)记录 raw-state 缺陷复现及第一次整理；[2026-09-27 验证证据](REPOSITORY_EVIDENCE_2026-09-27.json)记录上一轮六层重组前后的本地复测。历史结果不能覆盖新提交后的失败。
+[2026-09-26 仓库审计](history/REPOSITORY_AUDIT_2026-09-26.md)记录 raw-state 缺陷复现及第一次整理；[2026-09-27 早期六层验证证据](history/REPOSITORY_EVIDENCE_2026-09-27.json)记录上一轮六层重组前后的本地复测；[本次深层复核证据](history/REPOSITORY_EVIDENCE_DEEP_2026-09-27.json)记录六层纯化、证据降级和最终核心复测。历史结果不能覆盖新提交后的失败。
 
 Foundation audit 和更早的 Agent harness 记录只保留历史上下文，不自动升级成当前兼容承诺。
 

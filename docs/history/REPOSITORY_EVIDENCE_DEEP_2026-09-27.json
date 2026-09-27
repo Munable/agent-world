@@ -1,0 +1,62 @@
+{
+  "date": "2026-09-27",
+  "branch": "review/layered-baseline-20260926",
+  "validated_runtime_test_snapshot": "efe72dbaa52c57638991089b2f307e640aeacdc9",
+  "purpose": "Deep validation of the six-layer design after demoting ad-hoc companion worlds from architectural evidence.",
+  "environment": {
+    "os": "Windows",
+    "python": "3.14.2",
+    "node": "24.13.0"
+  },
+  "core": {
+    "command": "python tools/run_tests.py",
+    "unittest_tests": 189,
+    "unittest_result": "passed",
+    "legacy_scripts": 12,
+    "legacy_result": "passed"
+  },
+  "targeted_guards": {
+    "command": "python -m unittest tests.test_architecture_boundaries tests.test_regression_guards -v",
+    "tests": 3,
+    "result": "passed"
+  },
+  "clients": {
+    "view_client": "passed",
+    "stream_client": "passed"
+  },
+  "package": {
+    "command": "python tools/check_package.py",
+    "result": "passed",
+    "package_version": "0.14.0",
+    "external_fixture": "minimal repository-external WorldDefinition package fixture",
+    "note": "This fixture validates packaging/public SDK boundaries; it is not a product reference world."
+  },
+  "repository_structure": {
+    "python_files_parsed": 91,
+    "markdown_files_checked": 24,
+    "local_markdown_links_checked": 83,
+    "json_files_checked": 4,
+    "broken_local_links": 0,
+    "git_diff_check": "passed"
+  },
+  "post_validation_changes": {
+    "scope": "G2 wording strengthened, L3 relationships added, historical docs moved under docs/history, current evidence links updated",
+    "runtime_tests_tools_diff_against_validated_snapshot_bytes": 0
+  },
+  "ad_hoc_companion_worlds": {
+    "rerun": false,
+    "names": [
+      "Lantern Hollow",
+      "Ashen Vault"
+    ],
+    "reason": "They are historical ad-hoc compatibility probes, not required acceptance gates or architectural evidence. No current falsifiable hypothesis required rerunning them."
+  },
+  "limitations": [
+    "No new long soak test.",
+    "No real multi-host external Agent run.",
+    "No Linux or Python 3.11/3.13 matrix rerun in this deep review.",
+    "No cross-deployment identity implementation or verification.",
+    "No production database migration.",
+    "Passing contract tests do not prove arbitrary-domain generality or completion of L1 goals."
+  ]
+}

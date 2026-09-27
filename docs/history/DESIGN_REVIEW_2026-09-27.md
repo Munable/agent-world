@@ -47,3 +47,18 @@ G2 的当前缺口需要 L3/L4/L5 共同设计：跨独立部署如何验证同�
 ## 验证纪律
 
 本轮文档和静态架构测试之后，仍必须重新运行核心 unittest、package check、核心 Node client tests 与文档／链接检查。临时外部测试世界不是必跑项；除非有具体假设需要它们反证。
+
+## 实际验证结果
+
+深层复核后的核心验证已经执行，而不是只写了验证计划：
+
+- `python tools/run_tests.py`：189 项核心 unittest 通过；12 份保留旧回归脚本全部通过。
+- `tests/test_architecture_boundaries.py` 与 `tests/test_regression_guards.py` 单独运行：3 项通过。
+- `node tests/view_client.test.mjs`、`node tests/stream_client.test.mjs`：通过。
+- `python tools/check_package.py`：wheel 构建、独立安装、静态资源与最小仓库外 WorldDefinition fixture 通过。
+- 静态结构：91 个 Python 文件解析通过；24 份 Markdown、83 个本地链接、4 个 JSON 检查通过；`git diff --check` 通过。
+- 最后一轮 G2 加固、L3 关系补充和历史归档之后，`agent_world/`、`tests/`、`tools/` 相对完整测试快照 `efe72db` 的 diff 为 0 字节。
+
+本轮**没有**重新运行灯溪镇／灰烬地城；这是刻意的证据边界调整，不是漏测。它们没有具体待反驳假设，因此继续运行只会制造“测试很多所以架构靠谱”的错觉。
+
+本轮仍没有新的长期 soak、真实多宿主 Agent、Linux/Python 版本矩阵、跨独立部署身份或生产数据库迁移证据。详细机器可读记录见 [深层复核证据](REPOSITORY_EVIDENCE_DEEP_2026-09-27.json)。

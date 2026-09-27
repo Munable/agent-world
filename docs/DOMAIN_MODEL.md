@@ -48,6 +48,16 @@
 | Control Lease | 某些需要排他控制的过程使用的有限租约与 fencing；不是所有对话或角色的全局 busy。 |
 | Scheduled Effect | 已提交、将在将来由 System Actor 按世界规则执行的持久事项；它不是后台 Agent。 |
 
+## 核心关系
+
+- 一个 User Identity 关联稳定的 Participant Profile，并控制一个或多个可撤销 Credential；世界自己的角色属性、关系和资产仍属于该 World Instance 的 Domain Object / State Fact。
+- Credential 的作用是把一次调用可靠归因给某个 Principal；External Agent / Client 只是使用用户授权代表 Principal 发起调用，不因此成为新的权威主体。
+- 一个 World Definition 可以产生多个相互隔离的 World Instance；规则身份和持久实例身份不能混为一谈。
+- Principal 在某个 World Instance 中执行 Query 或 Command。Command 由 Operation 表示可重试意图，并在成功时形成 Commit 与 Receipt。
+- Commit 可以改变 State Fact，并产生 Notification Event、Shared Stream 发布或 Scheduled Effect；这些派生结果仍必须属于同一个已声明提交语义。
+- View 从当前 State Fact 和当前权限派生；Sync Position 只帮助继续读取 View / Stream / Notification，不进入业务完成语义。
+- Control Lease 只在特定 Command 需要排他控制时参与 fencing，不是 Principal 的永久状态。
+
 ## 必须保持的非等价关系
 
 - World Definition ≠ World Instance。

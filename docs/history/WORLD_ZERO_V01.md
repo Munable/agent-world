@@ -1,6 +1,6 @@
 # World Zero v0.1
 
-> Historical design note. Current execution, identity and versioning rules are defined in [current Foundation contract](FOUNDATION.md).
+> Historical design note. Current execution, identity and versioning rules are defined in [current Foundation contract](../FOUNDATION.md).
 
 World Zero is the first product-facing world slice.
 

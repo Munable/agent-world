@@ -5,7 +5,7 @@
 | 主张 | 下层落点 | 当前状态 | 核心证据／限制 |
 | --- | --- | --- | --- |
 | G1 世界持续存在 | State Fact、Operation、Commit、Receipt；L4 提交／恢复合同；Runtime journal/state | **已实现核心机制；长期证据有限** | `tests/test_foundation.py`、`tests/test_world_data.py`、`tests/test_world_sdk.py` 覆盖提交、恢复、重启与升级；没有真实长期 soak 证明。 |
-| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **部分实现** | 当前 Role/Profile 可在同一 Runtime 数据库复用，但调用 token 仍 scope 到单个 world instance；跨独立部署统一验证未实现。 |
+| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **部分实现** | 当前 Role/Profile 可在同一 Runtime 数据库复用，但调用 token 仍 scope 到单个 world instance；用户持有的跨世界可验证凭证／等价证明及跨独立部署信任尚未实现。 |
 | G3 Agent 在 Runtime 外部 | External Agent / Client、System Actor；L5 外部推理边界 | **架构上成立** | Runtime 没有模型推理器；timer 以系统来源执行。现有测试能证明 timer 不保存用户 token 等局部性质，但不能证明所有未来宿主都正确。 |
 | G4 世界开发者拥有领域规则 | World Definition、Domain Object；L4 声明式行动／状态合同；SDK | **已形成核心机制** | `tests/test_world_sdk.py` 覆盖外部模块、非游戏规则、版本与 schema；这证明接口可承载这些夹具，不证明任意领域天然适配。 |
 | G5 多类型世界共用 Runtime | 领域中立不变量、SDK／adapter 架构 | **设计与架构成立，通用性不可由有限样本证明** | 仓库内最小示例和打包夹具只验证接口边界；任何临时游戏／社交测试都不能升级为产品证明。 |

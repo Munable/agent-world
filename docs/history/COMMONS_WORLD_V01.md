@@ -1,6 +1,6 @@
 # Commons World v0.1
 
-> Historical design note. Current execution, identity and versioning rules are defined in [current Foundation contract](FOUNDATION.md).
+> Historical design note. Current execution, identity and versioning rules are defined in [current Foundation contract](../FOUNDATION.md).
 
 Date: 2026-09-21
 
