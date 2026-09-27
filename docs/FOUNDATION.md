@@ -1,97 +1,92 @@
-# Runtime / SDK 合同
+# L4：Runtime 核心行为合同
 
-文档复核：2026-09-26，源码 `3fbb6378`，Runtime 0.14.0 / SDK API 1。文档日期不是 API 版本。本整理分支在上述文档基线上修复 managed-state 校验，包版本暂不变；具体提交与验证见[本次审计](REPOSITORY_AUDIT_2026-09-26.md)。产品目标见[产品目标](../PRODUCT_POSITIONING.md)，不可破坏的系统性质见[系统不变量](INVARIANTS.md)，概念边界见[领域模型](DOMAIN_MODEL.md)。本文件属于 L4，只描述 Runtime/SDK 行为合同及已知偏差，不宣称生产能力齐备。
+复核：2026-09-27。本文定义 **跨具体语言、数据库和传输仍应保持的 Runtime 行为语义**。L1-L3 见 [产品目标](../PRODUCT_POSITIONING.md)、[系统不变量](INVARIANTS.md)、[领域模型](DOMAIN_MODEL.md)；当前 Python/SQLite/API 映射见 [L6 当前实现](IMPLEMENTATION.md)。
 
-## 结构化调用与责任
+## 声明式调用
 
-HTTP / MCP 使用同一函数注册表和执行路径。外部调用指定函数及符合其 schema 的 JSON 对象参数，身份由鉴权提供。服务器执行授权和规则代码，不解释消息文本来推断确认、同意或裁决；任意 JSON 字段也不能绕过函数合同。第三方裁决尚待设计，见 [OPEN_DESIGN](OPEN_DESIGN.md)。
+世界必须显式声明可读取的 Query 和可改变世界的 Command，包括输入结构、输出约束及必要的授权规则。调用者提交的是“要调用哪个声明动作 + 结构化参数”，而不是让 Runtime 从任意文本猜测该做什么。
 
-世界包提供领域规则、数据 schema、授权策略和恢复视图。Runtime 不托管 Agent；模型推理、私人计划和记忆在外部。世界函数、权限钩子、初始化和迁移都是同步的受信任 Python 回调，不得在事务中等待模型、网络或用户输入。
+自然语言可以出现在参数、消息或证据中，但任何字段即使叫 confirmed、approved 或 completed，也只有在对应 Command 的身份、授权、前置状态和世界规则全部成立后，才能形成相应世界事实。
 
-## 最小世界包
+动作是否对某调用者可发现，与该调用者是否获准执行是两件事。隐藏目录项不能替代真正的执行授权。
 
-```python
-from agent_world import WorldDefinition, FunctionSpec, StateRule, FunctionOutcome
+## 权限链
 
-EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
+一次调用至少经过四类独立判断：
 
-def advance(ctx, arguments):
-    record = ctx.get_state_record("world", "count", 0)
-    value = record["value"] + 1
-    ctx.set_state("world", "count", value, expected_version=record["version"])
-    return FunctionOutcome({"value": value})
+1. **调用归因**：当前请求代表哪个 Principal。
+2. **访问模式**：该凭据是否允许读／写这一类行为。
+3. **动作授权**：该 Principal 是否有资格执行这个 Query / Command。
+4. **状态／业务规则**：目标对象的当前状态是否允许这次变化，以及具体状态数据是否可读写。
 
-def snapshot(ctx):
-    return {"count": ctx.get_state("world", "count", 0)}
+动作授权、可见性投影、状态授权等判断必须是无持久副作用的读取；不能一边“检查是否允许”一边偷偷修改世界。
 
-WORLD = WorldDefinition(
-    world_id="counter-world", display_name="Counter World",
-    functions=(FunctionSpec("counter.advance", advance, EMPTY),),
-    state_rules=(StateRule("world", "count", {"type": "integer"}),),
-    bootstrap=snapshot,
-)
-```
+## Query 合同
 
-WorldDefinition 由部署配置加载；universe 选择隔离的持久实例，不是规则包本身。模块加载不能由普通 Agent 工具参数动态安装代码。当前命令行形态见 [IMPLEMENTATION](IMPLEMENTATION.md)。
+Query 只读取获准事实，不产生 Runtime 管理的持久状态变化、持久通知、共享发布或未来执行事项。读取结果可以依赖当前世界事实和当前授权，但不得通过读取动作暗中推进业务流程。
 
-## 函数与状态
+Query 与 Command 必须是明确不同的调用语义；不能把写动作伪装成读动作来绕开 operation identity、回执或提交规则。
 
-`FunctionSpec` 声明 name、version、对象 input_schema、可选 output_schema、read/write、handler，以及可选 `authorize(ctx, arguments)` / `visible_to(ctx)`。授权必须精确返回 `True`。隐藏函数不等于拒绝调用；执行权限须由 authorize 检查。
+## Command 与提交合同
 
-`FunctionContext` 的可移植接口按 universe 限定：状态的 get/get_record/set/delete/list，公开角色档案 `get_role`、实例内 `get_activity`，`now`、actor/operation 身份及 `random_int`。持久时间与共享流接口见各自合同。
+每个 Command 必须有稳定的 Operation identity，用于识别“这是同一个意图的重试”，而不是把网络重试误当成新业务动作。
 
-`set_state` / `delete_state` 支持 `expected_version`。删除保留墓碑版本，避免旧版本操作因重建对象而误入。`list_state` 有界分页，不保证跨请求的冻结快照。`StateRule` 按 scope/key 的字面前缀匹配，所有匹配规则都适用；`strict_state=True` 拒绝未声明的 SDK 写入。
+同一个 Principal 在同一个 World Instance 中使用同一 Operation identity 重试同一意图时，应返回已提交结果而不是再次执行；若同一 Operation identity 被拿来表示不同意图，应明确冲突。
 
-`state_authorizer` 控制 SDK 读写；需要读取权限依据时，可在该回调内调用 `authorization_state(scope,key)`。它只允许在授权回调执行期间使用，普通函数直接调用被拒绝。它不内置 Party、Group 或成员资格语义。
+一次正常 Command 的语义顺序是：
 
-**本整理分支的修复：** managed WorldDefinition 的普通操作和 timer 在提交前重校验状态变化，恢复 legacy `ctx.conn` 写入的 schema、版本及 state_authorizer 检查。SDK 已经获准的写入不在事后重复授权；raw 写入的授权回调支持 `authorization_state`，且按只读方式执行。初始化／迁移按最终存活状态验证目标 schema，允许合法的中间数据形状。修复前复现、回归范围与未覆盖项见[本次审计](REPOSITORY_AUDIT_2026-09-26.md)。
+1. 解析调用主体并检查凭据。
+2. 找到声明的 Command，检查版本与结构化参数。
+3. 检查动作授权和必要的控制租约。
+4. 执行世界规则，产生候选状态变化及 Runtime 管理效果。
+5. 校验输出、状态 schema、状态授权以及附带效果。
+6. 在提交前再次确认会影响提交资格的身份／租约仍有效。
+7. 将属于这次提交的权威状态、Receipt、通知、共享发布和持久定时命令一起提交，或全部回滚。
 
-`ctx.conn` 仍是受信任、不可移植的兼容入口，不是任意 SQL 与 SDK 全面等价的承诺，也不是对外 SQL 接口或恶意 Python 插件沙箱。特权管理连接、直接文件操作及未声明 WorldDefinition 的旧注册路径不属于此 managed-write 校验范围。
+输入、授权、规则、输出或提交校验失败时，不能留下这次 Command 的局部世界事实。
 
-## 事务、重试与业务完成
+## 状态合同
 
-读函数不需要 operation_id，不创建回执或事件，不使用写活动 claim，并在物理只读连接中运行。写入必须通过写函数；输入、输出、事件或 SDK 校验失败回滚事务。回调提供的连接禁止事务控制、ATTACH、PRAGMA 及凭据表写入。读结果包含 ok、function_id、function_version、result 和 read_only=true，不创建写回执。
+世界状态是按 World Instance 隔离的版本化权威事实。世界可以声明哪些状态键允许存在、它们的结构以及谁能读取／写入。
 
-写操作的 operation_id 在 actor + universe 内唯一。同函数、参数及活动目标重试返回已提交回执，改变意图则冲突；同一活动的 claim epoch 变化不改变原操作身份。成功提交的随机取值进入回执，重放不重掷。
+需要并发保护时，写入可以要求“我看到的旧版本仍然成立”；若实际版本已经变化，应拒绝旧写入，而不是静默覆盖。删除也必须推进版本身份，不能让删除后重建把旧操作伪装成仍然新鲜。
 
-`world.get_receipt` / `GET /v1/receipts/{operation_id}` 可在原函数移除后恢复原结果。响应丢失或请求取消不证明回滚；回执暂不存在也不证明一个在途请求以后不能提交。只重试原 operation_id，不用新 ID 处理未知结果。
+状态 schema、状态授权和动作授权相互补充：通过一个检查不能绕过另一个检查。
 
-operation_id 解决传输重试，不替代业务对象唯一性。不同 ID 的请求是否重复领取、重复确认，由世界函数按业务对象和当前状态检查。事务回执只描述该次提交，不自动等于跨多次调用的事项已经结束；后续进展从获准状态／事件读取，不篡改旧回执。
+## 重试、未知结果与业务完成
 
-保证仅覆盖本地 SQLite 提交及保留的回执。网络、付款、文件等外部副作用不在该事务保证中，不得直接混入世界回调；需要独立的交付合同。
+调用超时、连接断开或客户端取消，只说明调用方没有得到完整响应，不证明服务器回滚。调用方应先用原 Operation identity 查询持久提交结果，必要时只重试同一意图。
 
-## 身份：目标与当前实现
+Receipt 只证明一个 Operation 的提交结果。跨多次调用的请求、交易、确认、案件或任务是否完成，由相应 Domain Object 的世界状态决定；Receipt 不能自动升级成“整个事项结束”。
 
-产品已确定用户持有跨世界通用的身份令牌，对应统一底层身份与档案。当前代码的令牌验证仍绑定 role + universe；跨独立部署验证未完成，不能通过简单移除 universe 检查宣称实现了目标。
+Committed result 的重放必须返回原提交结果，而不是重新运行世界规则或重新抽取随机结果。
 
-角色档案保存稳定参与身份与显示资料，不包含各世界的钱、等级、关系和物品；修改显示资料不应隐式改变参与身份。调用身份必须来自鉴权结果，客户端不能靠业务参数冒充另一角色。当前字段、token 格式与存储方式见 [IMPLEMENTATION](IMPLEMENTATION.md)。
+## 身份与撤销
 
-Join Ticket 是当前短期配置／交换机制。一次 ticket 不能产生多个相互独立的调用身份；已经撤销、轮换或过期的凭据不能被 ticket 复活，撤销 ticket 也不自动撤销此前已发凭据。角色状态、token revoke/rotate 是分别执行的管理动作。当前时限、连接包和操作员入口形态见 [IMPLEMENTATION](IMPLEMENTATION.md)；这些都不是跨世界统一验证方案。
+调用身份来自鉴权边界，而不是客户端在业务参数里声称“我是某人”。身份成立后，世界仍必须独立判断动作资格。
 
-`control` 凭据可执行获准写入；`observe` 只能读取角色获准信息，不能写、重放写操作或修改活动。轮换保持访问模式。公开观察是独立的显式访问模式，不借用他人角色凭据。当前管理原型与轮换恢复缺口见 [IMPLEMENTATION](IMPLEMENTATION.md)。
+若凭据、主体状态或控制租约在 Command 等待提交期间失效，Runtime 必须在提交前重新检查会影响提交资格的条件；已经失效的主体不能因为先排到队列就晚提交成功。
 
-鉴权在事务内复核，不能忽略等写锁期间的失效。MCP 会话绑定初始化凭据，轮换后需新会话；身份来自当前消息的 HTTP request，而不是继承的会话上下文。撤销不能收回已发送的信息。
+跨世界统一身份仍是产品目标但未完整实现；当前凭据形式与范围见 [IMPLEMENTATION](IMPLEMENTATION.md)。
 
-## 接入、活动与恢复
+## 可选控制租约
 
-`world.bootstrap` 返回有界世界视图及同事务取得的 snapshot_cursor，并指向 `world.describe` 的作者入口说明。`world.discover` 分页发现函数，按需取 schema；不要求每次 bootstrap 重复完整目录。
+只有确实需要排他控制的长过程才使用 Control Lease。租约必须有限期并带 fencing，使接管后的旧持有者无法继续提交受保护动作。
 
-`world.get_changes` / `world.wait_changes` 读取按角色投递的有界事件页；wait 最长 30 秒、可取消，跨进程依靠持久数据检查。它不启动远端 Agent。过期游标明确报错；当前事实由 bootstrap / view 恢复，已清理的历史不能重建。具体交互接续责任见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。
-
-Activity 只用于声明需要排他控制的过程。`world.claim_activity` / `world.renew_claim` / `world.finish_activity` 提供有限租约和递增 epoch，拒绝过期控制者；不是全局角色 busy，也不是共享资源锁。一般发消息或读取不需要强制创建活动、领租约或等待另一方。
+Control Lease 不是全局角色 busy，也不是对话必须轮流发言的机制。普通消息、读操作和不需要排他的业务不应被迫使用租约。
 
 ## 版本与升级
 
-api_version 是 SDK API；world version 是规则／策略合同；state_version 是持久数据 schema；function version 是函数描述合同；view version 是投影合同。不要以文档修改代替代码版本变更。
+世界规则、持久状态结构、动作合同和授权投影都必须有可识别的版本边界。会改变已有语义的规则不能在不改变相应版本的情况下静默替换。
 
-规则／策略改变须提升 world version，描述改变须提升 function version，read/write 模式变化须换函数 ID。需要数据迁移时提升 state_version 并提供所有中间 `migrations={target_version: callback}`。
+持久状态需要迁移时，迁移必须显式、按序并与目标版本安装一起原子提交。迁移失败应保留旧的可运行状态；旧运行代码不能在不知道新规则的情况下继续执行新版本世界。
 
-初始化只执行一次。迁移、现存状态验证、注册表及 manifest 原子提交，失败保留旧版本；缺失步骤、降级、同版本 manifest 漂移被拒绝。旧进程拒绝执行新版世界规则，但保留回执仍能取回。真实库升级前做可恢复备份。旧数据只能作为明确 baseline，不能捏造此前历史。
+## Runtime 原子性之外
 
-## 可选能力与部署
+Runtime 的原子提交只覆盖它自己管理的世界数据与运行时效果。付款、外部网络写入、文件系统、副作用 API 等不能因为发生在一个世界回调里就获得同样的 exactly-once 保证；需要此类能力时必须设计单独的交付、幂等或补偿合同。
 
-[世界数据](WORLD_DATA.md)、[共享流](OBSERVATION_STREAMS.md)、[定时事项](DURABLE_TIME.md)、[数据保留](RETENTION.md) 是 L4 中按需声明的能力，不强制每个世界使用全部功能。[交互与表现](PRESENTATION.md) 是横向表达约束，不是业务能力层。语义正确不以有地图、动画或完整游戏为前提。
+## 可选能力
 
-传输适配器必须复用同一 Runtime 行为合同，部署不得通过关闭 Host/Origin 等边界保护来规避配置问题。当前组合入口、wheel 与兼容入口见 [IMPLEMENTATION](IMPLEMENTATION.md)。
+授权投影与缓存见 [WORLD_DATA](WORLD_DATA.md)，共享观察见 [OBSERVATION_STREAMS](OBSERVATION_STREAMS.md)，持久时间见 [DURABLE_TIME](DURABLE_TIME.md)，数据保留见 [RETENTION](RETENTION.md)，Agent 交互接续见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。
 
-世界规则代码当前处于受信任执行边界，不提供恶意插件隔离；具体存储和进程模型见 [IMPLEMENTATION](IMPLEMENTATION.md)，架构信任边界见 [ARCHITECTURE](ARCHITECTURE.md)。其他实现差距、设计工作及待验证假设集中在 [OPEN_DESIGN](OPEN_DESIGN.md)，不要把它们全部变成每个世界的先决条件。
+当前 SDK 类型、core tool 名称、HTTP/MCP 映射、限制值以及 legacy raw connection 的兼容边界统一记录在 [IMPLEMENTATION](IMPLEMENTATION.md)，不在本合同里反向定义语义。

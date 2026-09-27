@@ -1,27 +1,33 @@
 # L4：数据保留合同
 
-复核：2026-09-27。本文只定义历史／通知数据的保留与清理行为。表现语义已独立到 [PRESENTATION](PRESENTATION.md)；数据归属与缓存见 [WORLD_DATA](WORLD_DATA.md)。
+复核：2026-09-27。本文定义数据何时可以清理，以及清理后哪些语义必须继续成立。保留策略不能靠“数据库太大了”临时决定，因为去重、恢复和未决事项可能依赖历史数据。
 
-## 状态历史与通知保留
+## 数据职责先于清理策略
 
-StateRule 的 history="metadata" 只为新提交历史保存版本／变化标识，不保存前后值；full 是兼容默认。多个规则匹配时任一 metadata 规则抑制历史值，当前状态本身不因此改变。
+当前 State Fact、Operation/Receipt、未决 Domain Object、状态历史、定向通知和 Shared Stream 是不同职责的数据。即使底层存储把它们放在同一个数据库，也不能使用同一条删除规则。
 
-这不是秘密擦除保证：旧历史、回执、通知、存储日志、数据库副本和备份可能仍保存内容。逻辑删除也不保证物理存储立即缩小。
+世界可以选择只为某些状态变化保留完整前后内容，或只保留变化元数据；这只影响可保留历史，不改变当前 State Fact。
 
-世界可以声明 RetentionPolicy，包括 event_seconds、event_rows、history_seconds 和 history_rows。没有 policy 时，Runtime 不新增破坏性自动清理。
-
-保留清理必须是有界、显式配置的维护行为，并与 timer 语义独立。当前周期和命令入口见 [IMPLEMENTATION](IMPLEMENTATION.md)。
+删除应用层历史不等于秘密安全擦除。备份、存储日志、复制品或已经发送给客户端的数据可能继续存在。
 
 ## 清理边界
 
-清理在同一事务删除实例内连续前缀并推进 floor，短期突发可以暂时超过行数限制。当前状态、commit metadata、timer ID 和 operation receipt 不由此 policy 删除，因此该 policy **不提供数据库总大小上界**。
+没有显式保留策略时，Runtime 不应凭默认猜测执行破坏性自动清理。
 
-去重、未知结果恢复或仍在进行的业务事项所需数据不能为了省空间被直接清除。跨保留周期仍有效的事项必须在当前权威状态中保存足够信息，或由明确业务规则进入终态。
+清理必须是有界、可恢复推理的维护行为。清理历史／通知不能删除当前世界事实，也不能删除仍承担幂等、未知结果恢复或未决业务接续责任的数据。
 
-共享 StreamSpec 有自己的 retention_seconds / max_events 合同；共享流清理与 recipient events、state、receipts 分离。不同数据用途不能因为都叫“历史”就共用一个删除语义。
+跨清理周期仍然有效的业务事项必须在当前权威状态或其他明确持久对象中保存足够信息；不能只靠已经计划清理的通知历史继续。
 
-## 未决问题
+不同观察渠道可以有各自保留政策。清理定向通知不应偷偷清理 Shared Stream，清理 Stream 也不应删除 Receipt 或 State Fact。
 
-回执、commit metadata、终态 timer ID 等长期增长后的压缩／归档策略尚未统一确定。应先验证增长、恢复和旧 operation 重放，再定义安全过期规则，见 [OPEN_DESIGN](OPEN_DESIGN.md)。
+## 清理后的读取语义
 
-保留策略属于行为合同，不是存储技术本身；未来更换 SQLite 也必须维持已经承诺的恢复和去重语义。
+如果客户端请求的历史已经被清理，系统必须明确返回“历史不可再继续／需要重新建立基线”等结果。缺失历史不能自动解释成已读、已处理、已确认或业务结束。
+
+重新建立基线只能恢复当前可知事实，不能捏造被清理的完整过去。
+
+## 尚未定稿
+
+长期运行后，Receipt、commit metadata、终态 Scheduled Effect identity 等如何安全压缩／归档仍未定稿。必须先明确旧 Operation 的重放与未知结果恢复语义，再决定何时允许彻底过期，见 [OPEN_DESIGN](OPEN_DESIGN.md)。
+
+当前保留声明、维护入口、默认周期和底层表见 [IMPLEMENTATION](IMPLEMENTATION.md)。

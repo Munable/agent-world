@@ -1,40 +1,43 @@
-# 可选的持久定时事项
+# L4：持久定时事项合同
 
-复核：2026-09-27。本文属于 L4。Timer 是服务器按世界规则执行的已提交定时事项，不是服务器里的 Agent、模型会话或代用户保存的凭据。不需要定时行为的世界可以不声明 timer；概念边界见 [DOMAIN_MODEL](DOMAIN_MODEL.md)。
+复核：2026-09-27。Scheduled Effect 是世界已提交、将在未来由明确 System Actor 执行的事项。它不是后台 Agent、模型会话，也不是替离线用户重新作决定。
 
-## 声明与提交
+## 声明、调度与取消
 
-`TimerSpec` 声明同步 handler、对象 input_schema、可选 output_schema / authorize、版本、重试次数和基础延迟。它不是 FunctionSpec，不可通过猜测工具名从 HTTP/MCP 直接执行。
+世界必须预先声明可执行的定时处理规则及其输入、版本、授权和失败策略。普通外部调用者不能通过猜名字直接执行内部定时处理器。
 
-`ctx.schedule_timer(id, handler, arguments, due_at=...)` 和 `ctx.cancel_timer(id)` 在 managed write 中缓冲命令，与操作一并提交；读函数和投影不能调度。初始化和迁移可调度，未知 handler 或无效命令回滚操作。`ctx.get_timer(id)` 是世界规则的有界元数据读取，不自动公开底层队列。
+调度或取消必须发生在获准的世界写入中，并与产生它的世界变化一起提交；创建动作回滚时，不应留下孤立定时事项。
 
-世界函数自行声明谁能调度、取消和查看。调度被接受后，事项不因创建者离线或凭据撤销自动消失。执行身份为 `system:timer`，ctx.timer 记录 ID、到期时间、原发起者／操作、创建时间和尝试次数。TimerSpec.authorize 在写锁下重查执行条件，state_authorizer 仍适用。是否随业务所有者状态失效由世界规则决定。
+调度者决定“未来要按这个规则执行”的意图在创建时已经提交。执行时使用明确的 System Actor 来源，并保留原始发起者／Operation 等必要 provenance，但不能把执行时刻伪装成用户又作了一次新决定。
 
-## 原子性与继续执行
+世界规则决定谁可以创建、取消、查看定时事项，以及创建者之后失效时该事项是否仍应执行。
 
-调度、状态、来源和原操作回执同事务提交。每次触发的状态、历史、通知、回执、后续 timer 命令及 terminal status 原子提交。多个 worker 在 SQLite 写锁下串行；提交前崩溃后回调可能重跑，但不能产生两套已提交数据库效果。外部网络、付款或文件副作用不享有该保证，不得直接混入回调。
+## 执行与原子性
 
-timer_id 在 universe 内唯一。同 ID 同意图再次调度为 no-op，完成／取消后也不重新激活；不同意图冲突，新一次发生需新 ID。取消只有在其事务先于触发提交时生效；取消已完成 timer 不撤销效果，取消未知 ID 报错，正在触发的 timer 不能取消自身。
+到期执行必须重新检查当前世界版本、处理规则版本以及声明的执行授权。已经不适用于当前世界的旧事项不能被新代码静默重解释。
 
-timer 固定 world ID/version 和 handler version。升级不自动重解释旧事项，版本不匹配变为 blocked；迁移可明确取消旧 ID 并创建替代项。旧进程不得执行新版世界。此合同不定义通用业务轮次或外部 Agent 调度。
+一次触发产生的 Runtime 管理状态、Receipt、通知、后续 Scheduled Effect 等必须形成一个原子提交。执行在提交前崩溃时可以重跑，但最终不能产生两套已经提交的数据库效果。
 
-## 失败、晚到和容量
+外部付款、网络写入和文件副作用不享受这层原子性，仍需独立交付合同。
 
-RetryTimer 请求回滚后重试，指数延迟有上限，尝试预算为 1–10 次，耗尽为 failed。授权／规则拒绝为 rejected；未预期 handler 错误为 failed，原始异常正文不向客户端泄露。存储故障回滚并留待后续 sweep。
+## identity、重复与取消
 
-一次失败不阻止其他到期事项。每次 sweep 的候选列表固定且有界，后续立即到期项不形成同一 sweep 内的无限循环。一次事务最多改变 32 个 timer，一个 universe 最多 10,000 个 pending timer。终态记录保留以防 ID 复用，未实现自动终态归档。
+Scheduled Effect identity 在 World Instance 内必须稳定。同一 identity 重复调度同一意图应当幂等；拿同一 identity 改成不同意图应冲突。已经完成或取消的 identity 不应被无意复活。
 
-due_at 为有限 UTC Unix 时间戳，不是虚构游戏时间或对话轮次。worker 取得写锁后复查时钟；时钟回退可能延后执行，错误前跳也会影响到期判断。过期的一次性事项在服务恢复后处理，不捏造错过的周期。ctx.now 是执行时间，ctx.timer.due_at 是原截止时间；晚到业务结果由规则定义，不承诺硬实时。
+取消只有在取消提交先于触发提交时才阻止执行。取消已完成事项不能倒转已提交世界事实；触发中的事项也不能通过自我取消制造部分提交。
 
-## 运行边界
+## 失败与重试
 
-组合入口 `python -m agent_world` 在 lifespan 内默认运行 worker，即使无客户端；`--no-timers` 可禁用，`--timer-interval` 默认一秒。也可运行独立 worker：
+可重试失败必须回滚本次候选效果，再根据声明策略安排以后重试。授权／规则明确拒绝和未预期处理器故障应有可区分终态；错误详情不能泄露不应公开的内部数据。
 
-```sh
-python -m agent_world.timer_worker --world my_world:WORLD --universe campaign --db world.sqlite3
-python -m agent_world.timer_worker --world my_world:WORLD --universe campaign --db world.sqlite3 --once
-```
+重试必须有预算和延迟边界，单次调度 sweep 也必须有容量边界，避免一个立即重排的事项在同一循环里无限自激。
 
-worker 与服务需使用匹配的包和数据库。旧独立 HTTP/MCP factory 不默认启 worker。关闭时等待正在执行的短规则完成；受信任回调不得挂起或在事务中等待外部参与者。导入包或运行测试不会安装常驻服务。
+某个坏事项失败不应阻塞其他独立到期事项。
 
-`examples/timed_worlds.py` 与 timer 测试覆盖规则期限、进程中断、并发 worker、权限复核、重试、取消和版本变化；这些是合同测试，不证明外部 Agent 持续在线。跨调用用户决定保存在世界状态中，不能统一改写成 timer。未决问题见 [OPEN_DESIGN](OPEN_DESIGN.md)。
+## 时间与晚到
+
+due time 是执行不得早于的现实时间约束，不是虚构游戏时间或对话轮次。服务停机后恢复时，可以补执行已经过期的一次性事项，但不能伪造本来不存在的周期执行。
+
+时钟回退／前跳和服务晚到都会影响实际触发时间；具体世界必须定义“晚到是否仍有业务意义”，Runtime 不承诺硬实时。
+
+当前声明类型、retry/capacity 数值、worker 命令、存储表及 System Actor 标识见 [IMPLEMENTATION](IMPLEMENTATION.md)。
