@@ -48,7 +48,33 @@ L1/G2 已确定：用户控制底层身份，并应能向彼此独立的世界�
 - Participant Profile 哪些字段属于用户可携带资料，哪些永远是各世界本地事实。
 - 是否需要第三方 issuer / recovery authority；若需要，其信任范围必须显式。
 
-上述候选 **尚未实现，也不是最终协议选择**。下一步应先做最小 proof + 两个独立 world deployment 的验证实验，再决定正式 L3/L4 schema。
+上述候选 **尚未进入 Runtime 正式合同，也不是最终协议选择**。
+
+### 当前实验结果
+
+仓库当前用 `experiments/cross_world_identity.py` 对这个候选做了可删除的垂直实验，验证代码不属于稳定 `agent_world` package API。
+
+已经得到的证据：
+
+- 用户根身份使用 Ed25519 非对称密钥；根私钥只留在用户侧实验对象，世界只收到公钥、签名、delegation 和 proof。
+- 根身份可签发面向具体 device / Agent Host 公钥的 delegation，并限制 audience、能力和有效期。
+- 世界签发一次性 challenge；device 对 challenge + delegation identity 做 proof-of-possession，challenge 绑定 deployment + universe audience，并防重放、过期和签名篡改。
+- 两个不同 Python 进程、不同 Runtime DB、不同 identity DB 能验证同一个 root identity；两边创建各自本地 Participant Profile，role_id 可以不同。
+- 每个世界仍签发自己的 world-local bearer credential；即使 universe 名字相同，A 的 bearer 不能在 B 使用。
+- verifier 重启或更换 device / Agent Host 后，只要 root delegation 仍有效，就能回到该世界原有本地 Profile，而不是创建新的底层身份映射。
+- root 签名的 delegation revocation 到达某个世界后，会阻止该 delegation 再签发本地 credential，并撤销该世界已从它签发的本地 credential。
+- root rotation 当前采用 old root + new root 双签名连续性证明；两个世界可独立接受 rotation、保持各自原本 role/profile，并拒绝旧 root 的后续 delegation。实验可选择在 rotation 时撤销旧 root 已签出的本地 credential。
+
+实验也明确暴露了尚未解决的问题：
+
+1. **跨世界可关联性。** 当前实验的 `root_id` 是根公钥哈希，因此不同世界可以直接关联同一用户。这证明“同一身份”很简单，但隐私并不好；pairwise / selective-disclosure identity 仍需设计。
+2. **root 丢失恢复。** 当前 rotation 需要 old root 与 new root 双签名，只解决主动轮换，不解决旧根私钥已经丢失或被盗后的身份恢复。是否需要 recovery authority / social recovery / 多设备阈值仍未定。
+3. **撤销传播。** revocation 是可验证的，但不会凭空同步到所有独立部署。实验明确证明：只通知 A 时，B 仍继续承认旧 delegation，直到 B 也收到撤销证明。传播／新鲜度合同仍需设计。
+4. **部署内跨存储原子性。** 实验故意把 identity verifier store 与 Runtime DB 分开，因此“身份映射／delegation provenance”与“本地 bearer 发放”不是同一数据库事务；当前仅做失败补偿。正式实现要么并入 Identity Core 的同一提交边界，要么设计明确的 delivery / compensation 机制。
+5. **协议与密钥托管。** 当前 JSON canonicalization、标识格式和 Ed25519 只是候选实验；没有确定标准化 credential 格式、硬件密钥／系统 keychain、用户 consent UX 或第三方 issuer。
+6. **本地授权仍然独立。** 实验只证明身份连续性和本地 credential 发放，不证明某用户在新世界有任何业务权限；这一点反而符合 I3。
+
+下一步不是继续加更多身份功能，而是根据这些实验结果决定：正式 Root Identity / Delegation / Challenge Proof 是否进入 L3/L4，以及撤销传播、pairwise identity 和 root recovery 哪个先成为下一条可证伪假设。
 
 ## 2. 共同事项的接续模型
 

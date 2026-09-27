@@ -11,7 +11,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_TOP_LEVEL = {
     "fastapi", "starlette", "uvicorn", "httpx", "mcp",
-    "tests", "examples",
+    "tests", "examples", "experiments",
 }
 ADAPTERS_AND_CONSUMERS = {
     "application", "http_app", "mcp_app", "product_app", "onboarding_app",
@@ -56,6 +56,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertTrue(forbidden_imports("from . import http_app\n"))
         self.assertTrue(forbidden_imports("from agent_world.product_app import create_product_app\n"))
         self.assertTrue(forbidden_imports("import examples.workflow_world\n"))
+        self.assertTrue(forbidden_imports("import experiments.cross_world_identity\n"))
         self.assertEqual(forbidden_imports("from .world_context import FunctionContext\n"), [])
 
 

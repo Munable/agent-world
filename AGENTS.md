@@ -44,7 +44,7 @@
 
 一次改动的最小记录：**影响层、原因、行为影响、实际验证、未验证项。** 普通 L6 修复不需要复制修改所有上层文档。
 
-本地默认运行 `python tools/run_tests.py`；客户端变更运行两份 Node 测试；发布／包边界变更运行 `python tools/check_package.py`。纯文档变更检查内容、链接和 diff。
+本地默认先安装 `requirements-experiments.txt`，再运行 `python tools/run_tests.py`；客户端变更运行两份 Node 测试；发布／包边界变更运行 `python tools/check_package.py`。纯文档变更检查内容、链接和 diff。
 
 不得把未执行、跳过、失败、环境受阻或历史结果写成当前通过，也不得把固定脚本称作真实自主 Agent 或长期运行证明。
 

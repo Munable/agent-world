@@ -171,6 +171,20 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 
 这批 fixture 不创建 Conversation、Friend、Party 或其他产品对象，因此不能反向定义 Runtime 领域模型。以后新增拓扑／故障组合时优先扩展 Harness，而不是为每个实验重新造一个大场景。
 
+## 当前跨世界身份实验
+
+仓库当前保留 `experiments/cross_world_identity.py` 与 `experiments/cross_world_identity_cli.py` 作为 **可删除实验消费者**。它们不属于 `agent_world` package，也不改变当前 Runtime protocol / SDK。
+
+实验使用 Ed25519：
+
+- user-held root key 只在实验客户端侧存在；
+- root 签发 audience-bound device delegation；
+- world verifier 发一次性 challenge 并验证 device proof-of-possession；
+- 验证成功后只调用现有 `WorldRuntime.create_role` / `issue_identity_token` 建立本地 profile 与 world-scoped credential；
+- 两个独立进程和独立数据库没有共享 bearer state。
+
+实验的密码学依赖放在 `requirements-experiments.txt`，不会进入 `agent-world` 的运行时依赖。当前实验额外使用 sidecar identity DB，因此不是正式 Identity Core；它已经暴露“identity provenance 与 Runtime credential store 跨存储非原子”这一集成问题，正式方案必须重新选择提交边界。
+
 ## 当前明确实现差距
 
 1. **G2 跨世界身份只部分实现。** 当前 token 仍绑定单 universe，独立部署缺少用户持有、可验证的根身份证明与世界本地授权衔接。

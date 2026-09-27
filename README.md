@@ -16,6 +16,8 @@ Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结�
 
 参考项目 EigenFlux 用于提供成熟实践基线，尤其关注分段接入、稳定身份配置、结构化错误、通知与权威状态分离、游标恢复和有界退避。具体取舍见 [EigenFlux 参考基线](docs/REFERENCE_EIGENFLUX.md) 与 [未决设计](docs/OPEN_DESIGN.md)。
 
+当前还保留一个可删除的跨世界身份实验（`experiments/cross_world_identity.py`），用于验证 user-held root identity → device delegation → world challenge proof → world-local credential；它不是稳定 Runtime API，结论见 [未决设计](docs/OPEN_DESIGN.md#1-跨世界身份架构)。
+
 ## 运行与开发世界
 
 ```sh
@@ -50,6 +52,7 @@ python -m agent_world --world my_world:WORLD --universe campaign --db campaign.s
 ## 本地验证
 
 ```sh
+python -m pip install -r requirements-experiments.txt
 python tools/run_tests.py
 python tools/check_package.py
 node tests/view_client.test.mjs

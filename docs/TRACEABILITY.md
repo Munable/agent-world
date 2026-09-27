@@ -5,7 +5,7 @@
 | 主张 | 下层落点 | 当前状态 | 核心证据／限制 |
 | --- | --- | --- | --- |
 | G1 世界持续存在 | State Fact、Operation、Commit、Receipt；L4 提交／恢复合同；Runtime journal/state | **已实现核心机制；长期证据有限** | `tests/test_foundation.py`、`tests/test_world_data.py`、`tests/test_world_sdk.py` 覆盖提交、恢复、重启与升级；没有真实长期 soak 证明。 |
-| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **部分实现** | 当前 Role/Profile 可在同一 Runtime 数据库复用，但调用 token 仍 scope 到单个 world instance；用户持有的跨世界可验证凭证／等价证明及跨独立部署信任尚未实现。 |
+| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **正式 Runtime 仍未实现；候选架构实验已通过** | `tests/test_cross_world_identity.py` 已用独立进程／数据库验证 user-held Ed25519 root → device delegation → world challenge proof → world-local credential；同一 root 可映射两边本地 profile，A bearer 在 B 无效。pairwise privacy、root 丢失恢复、revocation propagation 与正式 Identity Core 集成仍未解决。 |
 | G3 Agent 在 Runtime 外部 | External Agent / Client、System Actor；L5 外部推理边界 | **架构上成立** | Runtime 没有模型推理器；timer 以系统来源执行。现有测试能证明 timer 不保存用户 token 等局部性质，但不能证明所有未来宿主都正确。 |
 | G4 世界开发者拥有领域规则 | World Definition、Domain Object；L4 声明式行动／状态合同；SDK | **已形成核心机制** | `tests/test_world_sdk.py` 覆盖外部模块、非游戏规则、版本与 schema；这证明接口可承载这些夹具，不证明任意领域天然适配。 |
 | G5 多类型世界共用 Runtime | 领域中立不变量、SDK／adapter 架构 | **设计与架构成立，通用性不可由有限样本证明** | 仓库内最小示例和打包夹具只验证接口边界；任何临时游戏／社交测试都不能升级为产品证明。 |
@@ -27,12 +27,12 @@
 | 能力 | 当前状态 | 主要判断 |
 | --- | --- | --- |
 | Principal 归因与 world-scoped Credential | **已实现并有强回归** | Bearer credential 绑定 role + world instance；observe/control、撤权、过期与 session 绑定已有测试。 |
-| 跨独立部署 User Identity | **架构缺口** | 当前 Role 只在同一 Runtime 数据库稳定；还没有用户持有、不同部署可验证的身份证明。 |
+| 跨独立部署 User Identity | **候选架构已通过最小实验；正式能力仍缺** | 两个独立进程／数据库可验证同一 user-held root，并各发本地 credential；实验仍暴露全局标识可关联、root 丢失恢复、撤销传播与跨存储原子性问题。 |
 | 世界本地授权 | **已实现并有强回归** | Function authorization、state authorization、credential access mode 分离。 |
 | State / schema / CAS / journal | **已实现并有强回归** | 当前状态、版本、删除 tombstone、历史 journal、schema 与授权均有合同测试。 |
 | 原子 Command / Commit | **已实现并有强回归** | 状态、Receipt、Event、Stream、Timer 等受管效果在同一提交边界成立或回滚。 |
 | Operation / Receipt / 未知结果恢复 | **已实现核心机制** | 同 operation_id 重放、响应丢失恢复、重启后 receipt 恢复成立。 |
-| Credential rotation 未知结果恢复 | **本轮补齐** | rotate 要求 operation_id，并持久化 rotation receipt；不保存 replacement token 明文，可重建同一结果。 |
+| Credential rotation 未知结果恢复 | **已实现** | rotate 要求 operation_id，并持久化 rotation receipt；不保存 replacement token 明文，可重建同一结果。 |
 | Notification Event / bounded wait | **已实现** | 定向事件、分页、cursor、bounded wait、取消与唤醒有测试。 |
 | Shared Stream | **已实现可选能力** | 有序发布、授权、cursor、历史截断/reset 与客户端去重已有覆盖。 |
 | View / Snapshot / Sync / Timeline | **已实现可选能力** | 授权投影、增量同步、checkpoint、retention gap、乱序客户端处理已有覆盖。 |
