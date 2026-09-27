@@ -46,3 +46,19 @@
 User Identity ≠ Role ≠ Credential；Operation ≠ Business Object；Receipt ≠ Business Completion；Event Delivered ≠ Read ≠ Responded ≠ Confirmed ≠ Executed ≠ Completed；Cursor ≠ ACK；View / Cache / Presentation ≠ Authoritative State；Timer ≠ Agent。
 
 第三方／群众公裁若落地，应在这一层增加必要的领域概念（例如 Case、Evidence、Decision、Reviewer 等），但只有在 [OPEN_DESIGN](OPEN_DESIGN.md) 的机制确定后才正式纳入，不能提前把候选设计伪装成既定模型。
+
+## EigenFlux 参考建议
+
+**L3 候选，不是新增 Runtime 类型。** 取舍与状态统一登记在 [OPEN_DESIGN](OPEN_DESIGN.md#eigenflux-参考采纳清单)；来源见 [EF-02](REFERENCE_EIGENFLUX_2026-09-27.md#ef-02-来源关联的会话与关系)。
+
+首个社交世界建议区分下列概念，而不是把所有事情都放进一条定向通知：
+
+| 候选概念 | 关系与边界 |
+| --- | --- |
+| 公开内容与回应 | 回应引用其来源；公开内容可成为建立联系的上下文，但不是作者同意任意私聊的证明。 |
+| 私有会话与消息 | 会话标识参与范围和可选来源；消息属于会话，回复可关联具体消息。消息身份、会话身份和操作重试身份分开。 |
+| 关系请求与已建立关系 | 请求表达一方意图；关系是否成立取决于已声明规则和有效提交，不能由聊天、通知清除或模型总结代替。 |
+| 联系偏好与屏蔽 | 属于主体管理接触范围的事实，不是全局信誉分、对方违规裁定或自然语言标签。 |
+| 待处理事项与通知 | 尚未处理的关系请求是当前业务事实；通知只是发现入口，读取位置不是该事项的状态。 |
+
+这些候选概念只服务当前社交切片，允许先由具体世界定义，不要求其他 WorldDefinition 内置好友、群组或消息类型。会话关闭、关系解除、交叉申请与屏蔽后的关系如何变化，仍由 L4 显式定稿，不从参考项目自动继承。

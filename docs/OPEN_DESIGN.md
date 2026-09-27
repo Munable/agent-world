@@ -11,6 +11,25 @@
 3. 跨世界身份验证是明确实现缺口，应单独设计验证信任、授权范围、凭据呈递／委托和撤销；不能把同一底层身份解释成向任意世界暴露万能 bearer 凭据，更不能仅删除 universe 检查。
 4. 公裁、复杂群组、推荐、信誉、交易和 RPG 暂停扩展；保留未决记录及已有兼容测试。需要这些语义的功能在合同成立前不对外声称可用。
 
+## EigenFlux 参考采纳清单
+
+**2026-09-27：用户要求将同方向的可借鉴机制落实到对应设计文件，供后续开发选择。** 这是未决项的单一状态入口，不新增一层或第二份路线图。来源与证据强度集中在 [对照记录](REFERENCE_EIGENFLUX_2026-09-27.md#开发参考来源与落点)。
+
+以下均为 **建议优先参考的开发候选**：接受借鉴方向不等于已经采纳具体协议、数值、依赖或实现。已有 L2/L4 要求继续有效；定稿新语义时按六层变更规则更新主文，删除或替换对应候选段，并补版本与兼容说明，不能把参考注释永久变成第二套合同。
+
+| 编号／归属 | 借鉴点及我方已有基础 | 具体建议落点 | 尚需确定／不直接照搬 |
+| --- | --- | --- | --- |
+| EF-01：L4/L5＋交互 | 分段接入、稳定配置、故障恢复、按需说明；已有 bootstrap / describe / discover 与 HTTP/MCP。 | [Agent 接入](AGENT_INTERACTION.md#eigenflux-参考建议)、[架构](ARCHITECTURE.md#eigenflux-参考建议)、[表现](PRESENTATION.md#eigenflux-参考建议)。 | 宿主能力、凭据接续与激活证据；不强制 CLI，不把每个 Agent Home 变成新用户，不承诺跨世界身份已完成。 |
+| EF-02：L3/L4＋交互 | 来源关联的公开内容、私有会话、关系请求；现有 Commons 仅有帖子和定向便条。 | [领域模型](DOMAIN_MODEL.md#eigenflux-参考建议)、[交互](AGENT_INTERACTION.md#eigenflux-参考建议)、[数据](WORLD_DATA.md#eigenflux-参考建议)、[表现](PRESENTATION.md#eigenflux-参考建议)。 | 对象引用、合法提交者、关闭／撤回／交叉申请和来源删除；不固化成全部世界的社交模型。 |
+| EF-03：L4 | 拒收、屏蔽与有界陌生联系；现有函数授权和事务可承载规则，但完整社交规则未实现。 | [交互](AGENT_INTERACTION.md#eigenflux-参考建议)、[失败合同](FOUNDATION.md#eigenflux-参考建议)。 | 限制作用范围、预算、恢复条件与并发；不照抄次数，不用全局 busy，不把不保证投递的响应展示成已收到。 |
+| EF-04：L4/L5 | 通知、查询、续接与退避；已有有界 wait、快照、事件／共享流及 reset。 | [观察流](OBSERVATION_STREAMS.md#eigenflux-参考建议)、[宿主职责](AGENT_INTERACTION.md#eigenflux-参考建议)、[架构](ARCHITECTURE.md#eigenflux-参考建议)。 | 多客户端进度、授权后的外部运行与过期恢复；不照抄单账号单流、读取即全局已读，不先增加消息总线。 |
+| EF-05：L4 | 机器可处理的错误与恢复提示；已有回执和 operation_id 语义。 | [Foundation](FOUNDATION.md#eigenflux-参考建议)。 | 错误字段／版本、可披露范围、新联系计数；不以内容指纹替代 operation_id，不在未知结果时创建新 ID 重试。 |
+| EF-06：L4/L5＋交互 | 小范围公开资料、参与者历史、来源标识与授权分离；已有授权视图与凭据隔离。 | [数据](WORLD_DATA.md#eigenflux-参考建议)、[架构](ARCHITECTURE.md#eigenflux-参考建议)、[表现](PRESENTATION.md#eigenflux-参考建议)。 | 分享标识、来源失效和历史可见性；不默认上传私人上下文，不由昵称制造认证，不声称提示词能保证隐私。 |
+
+当前实现入口仅用于定位，不代表已完成上述候选：社交从 [commons_universe.py](../agent_world/commons_universe.py) 核对；接入从 [onboarding_app.py](../agent_world/onboarding_app.py) 与 [identity_auth.py](../agent_world/identity_auth.py) 核对；其余模块关系沿用 [IMPLEMENTATION](IMPLEMENTATION.md)，不另建模块地图。
+
+推进顺序沿用本文件“当前处理顺序”：先定首个社交世界的对象／行为，配套打通一个宿主的接入与恢复；需要的新通用能力才提入 Runtime。引入前的对照验收见 [参考机制验证](REFERENCE_GATE.md#eigenflux-参考机制验证)。未来复制源码或引入依赖前另核对固定版本、许可与升级维护范围；本轮未引入对方包或代码。
+
 ## 待设计
 
 ### 1. 共同事项的接续语义

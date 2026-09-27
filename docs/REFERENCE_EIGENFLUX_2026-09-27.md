@@ -49,13 +49,65 @@ Commons 当前提供 `commons.board.post`、`commons.board.list`、`commons.note
 
 跨世界身份与轮换丢响应恢复仍是明确缺口；前者不能靠移除 universe 检查修复，后者不能靠文案承诺恢复。具体工作仅在 OPEN_DESIGN 维护，不在此复制第二份路线图。
 
-## 本次变更
+## 首轮范围收敛记录
 
 L1：在 PRODUCT_POSITIONING 明确社交优先阶段范围，暂停新增 RPG。L2：未修改。L3/L4：未发布新模型或 API，仅在 OPEN_DESIGN 列出社交切片需先解决的问题。L5/L6：未修改代码、存储、鉴权或依赖。证据横轴：新增明确标注为目标的社交验收场景。
 
 README 只提供现行入口。本记录不宣称社交能力已经补齐、跨世界身份已经实现或真实 Agent 联调已经通过。
 
 本次验证限于文档内容、相对链接与 git diff 检查；不以纯文档变更重跑计费 CI，没有重新执行功能、长期运行或真实外部 Agent 测试。独立游戏仓库、真实数据库、凭据和运行进程未改动。
+
+## 开发参考来源与落点
+
+第二轮起点为我方 `e33a2adb079cab3fc7df7d79df28a9dedbcc4415`，在同一社交收敛分支继续，不覆盖首轮范围决定。2026-09-27 再次核对对方 main 仍指向 `3a3612d1ca78b62508f2863b51f88728d9e1d188`；以下来源都固定到该提交，不随上游 main 漂移。
+
+官方 README 声明仓库是线上服务使用的生产代码，并列出多种宿主接入；这支持把它作为已有落地实践的参考，而不是只有概念的设想。推广、多宿主支持、仓库活跃和测试文件存在，不能单独证明真实活跃用户规模、用户测试结果、生产事故率或长期可靠性。本轮没有取得这些运行数据，也未安装、注册、调用其线上消息接口或执行其测试。
+
+证据分开标记为“官方文档说明”“已读代码分支”“已读测试定义（未运行）”。下面记录借鉴依据，不维护第二份候选状态；取舍和当前状态只见 [OPEN_DESIGN](OPEN_DESIGN.md#eigenflux-参考采纳清单)。
+
+### EF-01 接入分段与身份接续
+
+来源：[install.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/install.md)、[Communication Skill](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/SKILL.md) 与 [README](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/README.md)。证据：官方文档说明，未验证安装器或任何宿主实际激活。
+
+可借鉴：只配置当前宿主，稳定隔离本地身份／配置，分别检查安装与激活，初次接入与恢复分流，按需加载通信说明；安装不等于同意自动任务。落点：[AGENT_INTERACTION](AGENT_INTERACTION.md#eigenflux-参考建议)、[ARCHITECTURE](ARCHITECTURE.md#eigenflux-参考建议)、[PRESENTATION](PRESENTATION.md#eigenflux-参考建议)。我方保留用户底层身份目标，不把每个宿主隔离目录直接等同于独立用户身份。
+
+### EF-02 来源关联的会话与关系
+
+来源：[message.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/references/message.md)、[relations.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/references/relations.md)、[PM handler](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/rpc/pm/handler.go)。证据：前两者是文档；已读 handler 的 SendPM、来源建会话与会话回复入口，核对服务端来源路由、参与者检查及会话／消息写入分支，没有完整审计关系子系统。
+
+可借鉴：公开内容、现有会话与好友直聊分别定位；消息和会话分配稳定标识；关系请求可单独查询和处理。关系文档明确指出：通知被清除不等于请求被处理，口头表示接受／拒绝不替代 handle 操作。落点：[DOMAIN_MODEL](DOMAIN_MODEL.md#eigenflux-参考建议)、[AGENT_INTERACTION](AGENT_INTERACTION.md#eigenflux-参考建议)、[WORLD_DATA](WORLD_DATA.md#eigenflux-参考建议)、[PRESENTATION](PRESENTATION.md#eigenflux-参考建议)。其交叉申请自动接受、关闭规则与共享 topic 状态不自动成为我方合同。
+
+### EF-03 拒收与联系预算
+
+来源：[message.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/references/message.md)、[relations.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/references/relations.md)、[PM handler](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/rpc/pm/handler.go)。证据：文档列出拒收、破冰限制和屏蔽；已读代码确认来源可用性、拒收和屏蔽分支，检索定位了 PM_WAITING_FOR_PEER_REPLY 分支，未执行并发或依赖失效测试。
+
+可借鉴：可拒绝陌生联系，未回应时限制继续打扰，失败给出等待／停止线索。落点：[AGENT_INTERACTION](AGENT_INTERACTION.md#eigenflux-参考建议)、[FOUNDATION](FOUNDATION.md#eigenflux-参考建议)。不把具体次数、好友豁免、忽略检查错误的实现细节或屏蔽时的 silent success 直接搬入我方；服务器执行规则与 UI 如实表达仍须我方验证。
+
+### EF-04 增量通知与断线恢复
+
+来源：[stream.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/references/stream.md)、[message.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/references/message.md)。证据：官方文档说明；未核验 WebSocket 故障恢复实现或多设备运行表现。
+
+可借鉴：推送提供低延迟提示，查询提供补取入口，保存续接位置，重连使用有上限退避。落点：[OBSERVATION_STREAMS](OBSERVATION_STREAMS.md#eigenflux-参考建议)、[AGENT_INTERACTION](AGENT_INTERACTION.md#eigenflux-参考建议)、[ARCHITECTURE](ARCHITECTURE.md#eigenflux-参考建议)。我方优先复用已有有界 wait，不照搬单账号单流、读取即已读或固定时间参数，也不承诺无限历史补齐。
+
+### EF-05 可处理错误与重试
+
+来源：[message.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/references/message.md)、[PM handler](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/rpc/pm/handler.go)、[msg_error_test.go](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/cli/cmd/msg_error_test.go)。证据：已读文档、发送防重代码入口及测试 TestFormatMessageSendErrorPreservesStructuredDetails 的定义；测试未运行，不能据此宣称通过。
+
+可借鉴：业务错误附带可用的范围、恢复条件或重试提示，客户端保留结构化错误。落点：[FOUNDATION](FOUNDATION.md#eigenflux-参考建议)。测试定义具体检查了错误码、重试时间和会话明细的保留，比仅写“遇错重试”更有参考价值；我方仍以 operation_id 与回执定义未知结果恢复，不照搬按内容指纹去重。
+
+### EF-06 数据可见性与来源标识
+
+来源：[message.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/references/message.md)、[relations.md](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/references/relations.md)、[Communication Skill](https://github.com/phronesis-io/eigenflux/blob/3a3612d1ca78b62508f2863b51f88728d9e1d188/skills/ef-communication/SKILL.md)。证据：官方操作文档及行为提示；未完整审计历史读取 ACL、身份标记来源或客户端出站隐私。
+
+可借鉴：公开联系标识与内部标识区分，私信历史仅向参与者提供，来源标记不由昵称推断；通知或对方要求不等于操作授权。落点：[WORLD_DATA](WORLD_DATA.md#eigenflux-参考建议)、[ARCHITECTURE](ARCHITECTURE.md#eigenflux-参考建议)、[PRESENTATION](PRESENTATION.md#eigenflux-参考建议)。我方不把被验证来源的内容视为必然正确，不允许官方消息越过用户授权，也不以提示词宣传不可泄漏保证。
+
+## 第二轮变更与验证
+
+本轮将建议分别写入 L3 领域模型、L4 接入／调用／数据／观察合同旁的候选章节、L5 架构和交互表现文档；候选状态统一在 OPEN_DESIGN，EF-V1 至 EF-V6 的待执行验收统一在 REFERENCE_GATE。本记录仅补来源和取舍依据，没有再新增文档文件或平行路线图。
+
+行为影响：未修改 L1 产品范围、L2 不变量、现行正式合同、代码、依赖、存储、接口版本或运行配置。没有把候选消息 schema、错误字段、联系预算或宿主能力写成已经实现。需要新语义时先在对应层定稿并更新版本／兼容说明；Commons、游戏示例及既有测试不删除。
+
+实际验证：10 份修改文档的 UTF-8、112 处相对链接与章节锚点、10 个唯一固定版本外部来源链接的格式检查、6 组来源／候选／待执行验收对应检查及 git diff --check 均通过；原有正式条款保留检查通过，唯一删除是将首轮变更记录标题明确为历史记录。外部来源链接已通过 GitHub 读取或首轮核对，不把本轮格式检查冒充线上可达性测试。功能、真实宿主、对方服务、长期运行及用户试点均未执行；不触发纯文档计费 CI。
 
 ## 可追溯来源
 
