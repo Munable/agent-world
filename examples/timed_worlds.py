@@ -1,4 +1,4 @@
-"""Two small conformance worlds: an expiring RPG effect and a workflow deadline."""
+"""Two small timer examples used to exercise different domain shapes; not reference worlds."""
 from agent_world import WorldDefinition, FunctionSpec, FunctionOutcome, StateRule, ViewSpec, TimerSpec
 from agent_world.errors import RuleViolation
 

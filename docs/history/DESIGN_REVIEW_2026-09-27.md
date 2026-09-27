@@ -55,7 +55,7 @@ G2 的当前缺口需要 L3/L4/L5 共同设计：跨独立部署如何验证同�
 - `python tools/run_tests.py`：189 项核心 unittest 通过；12 份保留旧回归脚本全部通过。
 - `tests/test_architecture_boundaries.py` 与 `tests/test_regression_guards.py` 单独运行：3 项通过。
 - `node tests/view_client.test.mjs`、`node tests/stream_client.test.mjs`：通过。
-- `python tools/check_package.py`：wheel 构建、独立安装、静态资源与最小仓库外 WorldDefinition fixture 通过。
+- `python tools/check_package.py`：wheel 构建、独立安装、静态资源与仓库外 package integration probe 通过；该 probe 不是参考世界。
 - 静态结构：91 个 Python 文件解析通过；24 份 Markdown、83 个本地链接、4 个 JSON 检查通过；`git diff --check` 通过。
 - 最后一轮 G2 加固、L3 关系补充和历史归档之后，`agent_world/`、`tests/`、`tools/` 相对完整测试快照 `efe72db` 的 diff 为 0 字节。
 

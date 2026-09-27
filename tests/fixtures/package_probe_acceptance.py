@@ -11,7 +11,7 @@ from agent_world import WorldRuntime
 from agent_world.world_sdk import install_world
 from agent_world.application import create_application
 from fastapi.testclient import TestClient
-from reference_world import WORLD
+from package_probe_world import WORLD
 
 BASE = Path.cwd().resolve()
 EXPECTED = sys.argv[1]
@@ -19,15 +19,15 @@ assert version("agent-world") == EXPECTED
 assert "installed" in str(Path(agent_world.__file__).resolve())
 assert not (BASE / "agent_world").exists(), "the external project must not contain a copied kernel"
 
-DB = BASE / "reference.sqlite3"
+DB = BASE / "package-probe.sqlite3"
 runtime = WorldRuntime(DB)
-install_world(runtime, "reference", WORLD)
+install_world(runtime, "probe", WORLD)
 role = runtime.create_role("Visitor")
-identity = runtime.issue_identity_token("reference", role["role_id"])
-observer = runtime.issue_identity_token("reference", role["role_id"], access_mode="observe")
+identity = runtime.issue_identity_token("probe", role["role_id"])
+observer = runtime.issue_identity_token("probe", role["role_id"], access_mode="observe")
 auth = {"Authorization": "Bearer " + identity["token"]}
 view_auth = {"Authorization": "Bearer " + observer["token"]}
-app = create_application(DB, world_profile="reference_world:WORLD", universe="reference", timers_enabled=False)
+app = create_application(DB, world_profile="package_probe_world:WORLD", universe="probe", timers_enabled=False)
 with TestClient(app) as client:
     snapshot = client.post("/v1/views/scene/snapshot", headers=view_auth, json={})
     assert snapshot.status_code == 200, snapshot.text
@@ -41,9 +41,9 @@ with TestClient(app) as client:
     assert replay.json()["commit_seq"] == accepted.json()["commit_seq"]
     # A fresh host instance recovers the timer using the installed external module.
     restarted = WorldRuntime(DB)
-    install_world(restarted, "reference", WORLD)
+    install_world(restarted, "probe", WORLD)
     with patch("time.time", return_value=time.time() + 10):
-        assert restarted.run_due_timers("reference")["count"] == 1
+        assert restarted.run_due_timers("probe")["count"] == 1
     timeline = client.post("/v1/views/timeline", headers=view_auth, json={"cursor": cursor})
     assert timeline.status_code == 200, timeline.text
     assert [e["cue"]["phase"] for e in timeline.json()["events"]] == ["start", "finish"]
@@ -57,11 +57,11 @@ with TestClient(app) as client:
     bubbles = client.post("/v1/views/timeline", headers=view_auth, json={"cursor": current["timeline_cursor"]}).json()
     assert [e["cue"]["channel"] for e in bubbles["events"]] == ["intent", "speech"]
     with patch("time.time", return_value=time.time() + 100000):
-        removed = restarted.apply_retention("reference")
+        removed = restarted.apply_retention("probe")
     assert removed["configured"]
     with restarted._conn(readonly=True) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM events WHERE universe='reference'").fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM state_changes WHERE universe='reference'").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM events WHERE universe='probe'").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM state_changes WHERE universe='probe'").fetchone()[0] == 0
     gap = client.post("/v1/views/timeline", headers=view_auth, json={"cursor": current["timeline_cursor"]})
     assert gap.status_code == 409 and gap.json()["recovery"] == "reset_view"
     receipt = client.get("/v1/receipts/one", headers=auth)
@@ -69,6 +69,6 @@ with TestClient(app) as client:
     assert client.post("/v1/functions/character.move/invoke", headers=auth, json=request).json()["replayed"] is True
     runtime.revoke_identity_token(observer["token_id"])
     assert client.post("/v1/views/scene/snapshot", headers=view_auth, json={}).status_code == 401
-print(json.dumps({"external_world": "passed", "copied_kernel": False, "package_version": EXPECTED,
+print(json.dumps({"package_probe": "passed", "copied_kernel": False, "package_version": EXPECTED,
                   "control_and_observe": True, "timer_restart": True, "ordered_cues": True,
                   "public_bubbles": True, "retention_gap_recovery": True}))

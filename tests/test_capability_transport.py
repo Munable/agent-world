@@ -7,9 +7,9 @@ from agent_world import WorldRuntime
 from tests.live_server import LiveServer
 
 
-class ReferenceTransportTests(unittest.IsolatedAsyncioTestCase):
+class CapabilityTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_player_agent_observer_and_timed_timeline(self):
-        with LiveServer("tests.fixtures.reference_world:WORLD") as server:
+        with LiveServer("tests.fixtures.package_probe_world:WORLD") as server:
             role, identity = server.role("Player")
             runtime = WorldRuntime(server.db)
             observer = runtime.issue_identity_token("network", role["role_id"], access_mode="observe")

@@ -54,20 +54,20 @@ def main():
                 "w = WorldRuntime(Path.cwd()/'package-test.sqlite3')",
                 "get_universe_installer('examples.workflow_world:WORLD')(w, 'custom')",
                 "assert w.get_world_manifest('custom')['world_id'] == 'workflow-example'",
-                "print('WHEEL_IMPORTS_ASSETS_EXTERNAL_WORLD_OK')",
+                "print('WHEEL_IMPORTS_ASSETS_PACKAGE_PROBE_OK')",
             ]
         )
         subprocess.run([sys.executable, "-c", code], cwd=base, env=env, check=True)
         project = base / "independent-world"
         project.mkdir()
-        for name in ("reference_world.py", "reference_acceptance.py"):
+        for name in ("package_probe_world.py", "package_probe_acceptance.py"):
             shutil.copy2(ROOT / "tests" / "fixtures" / name, project / name)
         import tomllib
         expected = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
         (project / "pyproject.toml").write_text(
-            '[project]\nname="reference-world-probe"\nversion="0.0.0"\ndependencies=["agent-world==' + expected + '"]\n',
+            '[project]\nname="agent-world-package-probe"\nversion="0.0.0"\ndependencies=["agent-world==' + expected + '"]\n',
             encoding="utf-8")
-        subprocess.run([sys.executable, "reference_acceptance.py", expected], cwd=project, env=env, check=True)
+        subprocess.run([sys.executable, "package_probe_acceptance.py", expected], cwd=project, env=env, check=True)
 
 
 if __name__ == "__main__":

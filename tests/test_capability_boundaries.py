@@ -33,7 +33,7 @@ def projection(ctx, args):
     return {"entities": {} if value.get("hidden") else {"actor": value}, "meta": {}}
 
 
-WORLD = WorldDefinition("reference-check", "Reference Check",
+WORLD = WorldDefinition("capability-check", "Capability Check",
     (FunctionSpec("actor.move", action, ARGS), FunctionSpec("actor.look", look, EMPTY, access="read")),
     state_rules=(StateRule("public", "", {"type": "object"}),
                  StateRule("temporary", "", {"type": "object"}, history="metadata")),

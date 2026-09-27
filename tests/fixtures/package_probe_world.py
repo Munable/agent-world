@@ -1,4 +1,4 @@
-"""A conformance world. Copied alone into a separate project for wheel acceptance."""
+"""Package integration probe. Exercises optional public capabilities without defining product requirements."""
 from agent_world import (WorldDefinition, FunctionSpec, StateRule, FunctionOutcome, ViewSpec,
                          TimerSpec, PresentationCue, RetentionPolicy)
 from agent_world.errors import RuleViolation
@@ -63,7 +63,7 @@ def scene(ctx, args):
     return {"entities": {ctx.actor_role_id: {"kind": "character", **state}}, "meta": {}}
 
 
-WORLD = WorldDefinition("reference-acceptance", "Reference Acceptance",
+WORLD = WorldDefinition("package-probe", "Package Probe",
     functions=(FunctionSpec("character.move", move, MOVE), FunctionSpec("character.cancel", cancel, EMPTY),
                FunctionSpec("character.express", express, TEXT)),
     state_rules=(StateRule("role:", "position", {"type": "object"}, history="metadata"),),
