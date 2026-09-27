@@ -67,7 +67,7 @@
 | Web prototype | `agent_world/web/` |
 | 仓库内 demo/test consumers | `demo_universe.py`、`commons_universe.py`、`world_zero_universe.py`、`examples/` |
 
-仓库内 demo、示例和后来另建的测试世界都不是架构来源。它们只在实际执行的兼容测试范围内提供证据。
+仓库内 demo、示例和 Reference Application 都不是架构来源。只有仍被当前测试执行的场景才提供当前证据；失去当前用途的消费者直接删除。
 
 ## 当前 SQLite schema
 
@@ -146,17 +146,17 @@ HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/de
 
 timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当前可见的 presentation events。这个机制是表现辅助，不是业务动作状态机。
 
-## Legacy raw connection 与信任边界
+## Raw connection escape hatch 与信任边界
 
-`FunctionContext.conn` 仍是 legacy escape hatch，不属于可移植 World SDK。SQLite authorizer 会禁止 world callback 自行控制事务、ATTACH/PRAGMA，并限制写入；managed WorldDefinition 在提交前还会重校验 raw state write 的 universe、版本、schema 与 state authorization。
+`FunctionContext.conn` 当前仍是直接 SQLite escape hatch，不属于推荐的可移植 World SDK 表面。SQLite authorizer 会禁止 world callback 自行控制事务、ATTACH/PRAGMA，并限制写入；managed WorldDefinition 在提交前还会重校验 raw state write 的 universe、版本、schema 与 state authorization。
 
-但是 **legacy raw connection 不是行级安全沙箱**：受信任 world callback 可以直接执行 SQL 读取，而且整个 Python World Package 本来就在 Runtime 进程／OS 权限内。当前架构因此只承诺受支持接口的业务隔离，不承诺对恶意 World Package 的机密隔离。
+但是 **raw connection escape hatch 不是行级安全沙箱**：受信任 world callback 可以直接执行 SQL 读取，而且整个 Python World Package 本来就在 Runtime 进程／OS 权限内。当前架构因此只承诺受支持接口的业务隔离，不承诺对恶意 World Package 的机密隔离。
 
 如果未来要承载互不信任的第三方世界代码，必须改变 L5 信任／进程／存储架构，而不是继续给 `ctx.conn` 周围补字符串检查。
 
 ## 结构化错误与 Capability Harness
 
-实现提交 `ef19dd42a7c4cbef2b6eb96ee946184745f4233a` 增加通用结构化恢复错误合同：
+当前实现包含通用结构化恢复错误合同：
 
 - `runtime_errors.py` 的 `WorldRuntimeError` 可携带可选 `recovery`、`retry_after_seconds` 与 `details`；显式 `retryable` 必须是 boolean。
 - `details` 当前要求为 JSON object，递归深度有界，序列化后最多 8 KiB；非有限数字、非字符串 key 和任意 Python 对象会在构造错误时被拒绝。
@@ -164,7 +164,7 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 - HTTP 在存在 `retry_after_seconds` 时额外发送整数秒 `Retry-After`；401 仍只在鉴权错误路径发送 `WWW-Authenticate: Bearer`。
 - 常见恢复提示已覆盖缺少／失效身份、scope 不匹配、无效输入、Join Ticket 失效、函数版本／发现变化、observe/control 不匹配和 StorageBusy；世界规则也可在 `RuleViolation` 等 Runtime error 上附带安全的恢复元数据。
 
-本轮同时增加 `tests/capability_harness.py` 和 `tests/fixtures/capability_matrix_world.py`。它们是 **确定性的 Runtime 测试基础设施，不是新的 Reference Application 或领域模型**。当前矩阵用 6 个动态参与者覆盖：
+当前仓库使用 `tests/capability_harness.py` 和 `tests/fixtures/capability_matrix_world.py`。它们是 **确定性的 Runtime 测试基础设施，不是新的 Reference Application 或领域模型**。当前矩阵用 6 个动态参与者覆盖：
 
 - 1→N 定向 fan-out，并验证同 Operation 重放与 Runtime 重启后 Receipt／事件仍可恢复。
 - N→1 并发 fan-in，验证多个写者向同一目标聚合且非目标主体不能读取私有聚合。
@@ -180,6 +180,6 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 3. **第三方／群众公裁未实现通用模型或合同。**
 4. **credential rotate 未知结果恢复仍不完整。**
 5. **外部系统副作用没有与 Runtime store 统一的 exactly-once / delivery contract。**
-6. **legacy raw connection 增加了世界代码与 SQLite 内部结构的耦合。** 即使在受信任代码模型下，也值得逐步减少可移植世界对它的依赖。
+6. **raw connection escape hatch 增加了世界代码与 SQLite 内部结构的耦合。** 当前没有兼容承诺要求保留它；应评估是否直接移除公开访问，而不是把它长期固化。
 
 长期 soak、浏览器轨迹、更多平台矩阵属于验证缺口而不是 L6 功能缺口，统一记录在 [REFERENCE_GATE](REFERENCE_GATE.md)。未决设计见 [OPEN_DESIGN](OPEN_DESIGN.md)。

@@ -429,7 +429,7 @@ class WorldSDKTests(unittest.TestCase):
                 "u", "undeclared", 1, "undeclared", EMPTY, lambda c, a: FunctionOutcome({})
             )
 
-    def test_v08_database_upgrades_without_losing_identity_state_or_receipts(self):
+    def test_database_upgrade_preserves_identity_state_and_receipts(self):
         import hashlib
 
         legacy = Path(self.temp.name) / "legacy.sqlite3"

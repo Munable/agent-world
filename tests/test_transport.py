@@ -167,6 +167,33 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             boot = await session.call_tool("world.bootstrap", arguments={})
             self.assertFalse(boot.is_error, boot.structured_content)
 
+    async def test_wait_changes_wakes_for_committed_event(self):
+        async with self.server.session(self.identity) as (session, _):
+            current = await session.call_tool("world.get_changes", arguments={})
+            self.assertFalse(current.is_error, current.structured_content)
+            cursor = current.structured_content["next_cursor"]
+            waiting = asyncio.create_task(
+                session.call_tool(
+                    "world.wait_changes",
+                    arguments={"after": cursor, "timeout": 2},
+                )
+            )
+            await asyncio.sleep(0.05)
+            with httpx.Client(trust_env=False) as client:
+                response = client.post(
+                    self.server.url + "/v1/functions/counter.increment/invoke",
+                    headers=self.auth,
+                    json={
+                        "operation_id": "wake-" + self.role["role_id"],
+                        "arguments": {"amount": 1},
+                    },
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+            result = await asyncio.wait_for(waiting, timeout=3)
+            self.assertFalse(result.is_error, result.structured_content)
+            self.assertFalse(result.structured_content["timed_out"])
+            self.assertTrue(result.structured_content["events"])
+
     async def test_new_core_activity_lifecycle_via_mcp(self):
         async with self.server.session(self.identity) as (session, _):
             start = await session.call_tool(

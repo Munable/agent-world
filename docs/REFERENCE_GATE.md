@@ -1,6 +1,6 @@
 # 验证证据横轴
 
-复核：2026-09-27。验证只回答 **某条 L1-L6 声明在什么源码、环境和场景下得到什么证据**。测试不是 L7，也不能因为一个测试世界需要某功能，就反向创建产品要求。
+复核：2026-09-27。验证只回答 **某条 L1-L6 声明在什么源码、环境和场景下得到什么证据**。测试不是 L7，也不能因为一个测试消费者需要某功能，就反向创建产品要求。
 
 关键主张当前状态见 [TRACEABILITY](TRACEABILITY.md)。
 
@@ -8,11 +8,11 @@
 
 | 范围 | 检查什么 |
 | --- | --- |
-| 核心 unittest | Query/Command、原子提交、Receipt、身份／授权、state、迁移、view、stream、timer、retention 等 Runtime 合同。 |
-| 已复现回归保护 | 已经真实出现过的 schema/authorization/版本等缺陷不能被无声删除测试。 |
+| 当前 unittest | Query/Command、原子提交、Receipt、身份／授权、state、迁移、view、stream、timer、retention、结构化错误等 Runtime 合同。 |
+| 当前回归保护 | 仍属于现行合同的 schema / authorization / version / recovery 等缺陷不能被无声删除测试。 |
 | 架构静态边界 | Runtime/SDK 不反向 import adapter、UI、示例世界或测试代码。 |
-| 核心客户端测试 | snapshot/delta、乱序、stream 去重、表现队列等客户端合同。 |
-| package check | wheel 能构建、安装、导入资源，并由一个仓库外 package integration probe 组合使用公开 SDK。 |
+| 客户端合同测试 | snapshot/delta、乱序、stream 去重、表现队列等客户端行为。 |
+| package check | wheel 能构建、独立安装、导入资源，并由 checkout 外的 package probe 组合使用公开 SDK。 |
 
 这些检查也只证明自己的覆盖范围。单次全绿不是长期运行、任意世界通用性或生产安全性的证明。
 
@@ -21,59 +21,56 @@
 | 证据 | 可以说明 | 不能说明 |
 | --- | --- | --- |
 | 单元／合同回归 | 某个明确语义在当前代码下成立。 | 整个产品已经完成。 |
-| 仓库外 package integration probe | 安装包、公开 import 与若干可选能力可以在 checkout 外组合使用。 | 它不是参考世界，也不能证明开发者体验、复杂领域或长期运行天然成立。 |
-| 历史 E2E 脚本 | 当时那条完整适配路径没有立即断裂。 | 真实外部 Agent 长期行为、未来版本兼容或全部平台。 |
-| 临时大场景／独立测试世界 | 某个具体组合在某次运行中的兼容性。 | 核心方向正确、某功能应该成为 Runtime 必备抽象。 |
-| 浏览器视觉／轨迹 | 特定 UI 组合的呈现和最终事实是否一致。 | 服务器合同本身正确。 |
+| 当前 transport / integration 测试 | 当前 HTTP/MCP、身份和进程边界在被测路径中成立。 | 真实外部 Agent 长期行为或全部平台。 |
+| checkout 外 package probe | 安装包、公开 import 与若干可选能力可以脱离源码目录组合使用。 | 它不是 Reference Application，也不能证明复杂领域天然适配。 |
+| Capability Harness | 多参与者拓扑、并发、撤权、重放、恢复等明确能力组合成立。 | 某个具体产品体验已经合理。 |
+| Reference Application | 一组真实领域规则能够消费 Runtime，并可暴露通用缺口。 | 该领域对象应该进入 Runtime。 |
+| 浏览器视觉／轨迹 | 特定 UI 组合的呈现和最终事实一致。 | 服务器合同本身正确。 |
 | soak / 长期运行 | 积累、恢复、保留、timer、升级组合是否出现时间相关问题。 | 未覆盖的业务语义。 |
 
-## Runtime Capability Harness 与 Reference Application 验证
+## Runtime Capability Harness
 
-验证不固定为“两名 Agent 对话”。底层能力应按拓扑与故障维度组合：
+验证不固定为“两名 Agent 对话”。底层能力按拓扑与故障维度组合：
 
 | 维度 | 至少覆盖 |
 | --- | --- |
-| 参与者拓扑 | 1 个主体、1→1、1→N 广播、N→1 汇聚、N→N、多个权限组。 |
+| 参与者拓扑 | 1 个主体、1→1、1→N、N→1、N→N、多个权限组。 |
 | 写入／竞争 | 单写、不同 scope 并发、同对象竞争、事务回滚、同 ID 重放、未知结果恢复。 |
 | 观察 | 多消费者、快慢消费者、后加入、离线后恢复、重复／乱序、cursor 过期。 |
 | 身份／权限 | observe/control、撤权、凭据失效、错误身份、跨 world instance 拒绝。 |
 | 时间／保留 | timeout、timer、通知清理、状态／历史保留边界、进程重启。 |
-| transport | HTTP/MCP 语义一致、多个 session／client、取消与恢复。 |
+| transport | HTTP/MCP 语义一致、多个 session/client、取消、唤醒与恢复。 |
 
-确定性协议客户端负责精确复现与断言；真实外部 Agent 只用于验证发现、理解、宿主接续和真实使用体验，不能替代底层确定性测试。
+确定性协议客户端负责精确复现与断言；真实外部 Agent 只用于验证发现、理解、宿主接续和实际使用体验，不能替代底层确定性测试。
 
-社交 Reference Application 是第一个现实消费者：它可以验证公开发布、关联回应、私有会话、关系／拒收等具体流程，但它的对象和规则不自动上升为 Runtime 要求。每个从 Reference Application 提升的 Runtime 能力必须写明：为什么它跨领域通用、现有能力为什么不足、最小反例是什么。
+## Reference Application 验证
 
-### EigenFlux 机制验证重点
+社交是第一个现实消费者之一，可以验证公开发布、关联回应、私有会话、关系／拒收等具体流程，但它的对象和规则不自动上升为 Runtime 要求。
 
-- EF-01：接入中断后从同一授权身份继续；安装存在、激活、授权、自动运行四种状态不混淆。
-- EF-04：通知丢失、客户端停机、cursor 过期、多客户端并行后，仍能从权威状态／合法同步点恢复；停止或撤权后不继续无限重连。
-- EF-05：规则拒绝、可延后重试、未知写结果、重新授权、reset 等错误在 HTTP/MCP/客户端保持同一结构化语义；Receipt 恢复不产生第二次业务动作。
-- EF-02/03/06 由社交 Reference Application 验证参与者授权、pending 状态独立于通知、block/联系边界及私有数据不泄露；测试结果不能反推所有世界都必须支持社交关系。
+任何从 Reference Application 提升的 Runtime 能力都必须回答：
 
-### 本轮 Capability Harness 证据
+1. 它在什么非本应用场景中同样成立？
+2. 现有 Runtime 能力为什么不足？
+3. 最小可复现反例是什么？
+4. 引入新原语后如何验证不会把领域规则塞进核心？
 
-实现提交：`ef19dd42a7c4cbef2b6eb96ee946184745f4233a`。本轮实际执行并通过：
+EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFLUX.md)。
 
-- 新增 error contract、multi-topology matrix、HTTP/MCP structured-error 共 **8 个针对性测试**。
-- `python tools/run_tests.py`：**197 个核心 unittest** 全部通过；脚本随后执行的 **12 个历史兼容套件**全部通过。
-- `python tools/check_package.py`：wheel 构建、独立安装、资源导入和仓库外 package probe 通过。
-- `node tests/view_client.test.mjs` 与 `node tests/stream_client.test.mjs`：两份客户端合同测试通过。
+## 当前必须保留的证据
 
-这些结果证明当前提交覆盖到的结构化错误传递、1→N、N→1、N→N、撤权隔离、重放和进程重启恢复没有破坏既有合同；**它们不证明长期 soak、真实多宿主 Agent、跨机器网络分区或跨独立部署身份已经成立**。社交 Reference Application 的 EF-02/03/06 领域行为仍需后续实现后单独取证。
+当前仓库不保存阶段编号测试或旧审计快照。某个过去出现过的缺陷如果仍对应现行合同，就把最小断言保留在当前命名的测试文件中。
 
-## 关于灯溪镇和灰烬地城
+当前关键证据入口包括：
 
-这两个仓库是在认为基础状态已经较完整后临时起意建立的测试消费者，不是经过前置设计选择出来的参考架构。
+- `tests/test_foundation.py`：事务、Operation/Receipt、身份、Join Ticket、撤权、并发与基础恢复。
+- `tests/test_transport.py`：HTTP/MCP 同源语义、会话身份绑定、wait/cancel/wakeup、跨 transport replay。
+- `tests/test_error_contract.py`、`tests/test_structured_error_transport.py`：结构化 recovery / retry / details 及 HTTP/MCP 保真。
+- `tests/test_runtime_capability_matrix.py`：1→N、N→1、N→N、撤权、重放和重启恢复。
+- view / stream / timer / world-data / SDK 测试：各自现行能力合同。
+- `tools/check_package.py`：当前 package 构建与 checkout 外 probe。
+- 两份 Node 客户端测试：当前 View / Stream 客户端合同。
 
-它们的历史测试结果继续保存在审计证据中，因为删除事实没有意义；但从现在开始：
-
-- 它们 **不是** Runtime 必需验收门槛。
-- 它们 **不是** 产品需求来源或领域模型来源。
-- 它们 **不是** “Runtime 已经通用”的证明。
-- 只有当未来某个具体兼容假设恰好适合用它们反证时，才有必要再运行。
-
-同样原则适用于任何以后临时创建的大场景。
+当前清理后的代码树已重新执行：`python tools/run_tests.py` 共 **201 个 unittest 全部通过**；`python tools/check_package.py` 通过 wheel 构建、独立安装与 checkout 外 package probe；`node tests/view_client.test.mjs` 与 `node tests/stream_client.test.mjs` 均通过。这个数字只描述当前树，不作为未来提交的永久成绩单。
 
 ## 新实验最低要求
 
@@ -85,12 +82,8 @@
 4. 什么结果算失败，而不只是“跑起来了”。
 5. 源码版本、环境、实际输出和未覆盖项。
 
-优先补最小回归；只有交互性质无法被小夹具表达时，才增加更大消费者。
+优先补最小回归；只有交互性质无法被小夹具表达时，才增加更大消费者。失去当前验证用途的实验材料直接删除，过去内容由 Git 历史保存。
 
-## 当前历史证据
+## 当前仍缺的验证
 
-[2026-09-26 仓库审计](history/REPOSITORY_AUDIT_2026-09-26.md)记录 raw-state 缺陷复现及第一次整理；[2026-09-27 早期六层验证证据](history/REPOSITORY_EVIDENCE_2026-09-27.json)记录上一轮六层重组前后的本地复测；[本次深层复核证据](history/REPOSITORY_EVIDENCE_DEEP_2026-09-27.json)记录六层纯化、证据降级和最终核心复测。历史结果不能覆盖新提交后的失败。
-
-Foundation audit 和更早的 Agent harness 记录只保留历史上下文，不自动升级成当前兼容承诺。
-
-长期 soak、Linux/Python 版本矩阵、真实多宿主 Agent、跨独立部署身份和生产数据库迁移仍需要独立证据。
+长期 soak、Linux/Python 版本矩阵、真实多宿主 Agent、跨机器网络分区、跨独立部署身份、生产数据库迁移和真实用户使用仍需要独立证据。

@@ -89,7 +89,7 @@ Runtime 的原子提交只覆盖它自己管理的世界数据与运行时效果
 
 授权投影与缓存见 [WORLD_DATA](WORLD_DATA.md)，共享观察见 [OBSERVATION_STREAMS](OBSERVATION_STREAMS.md)，持久时间见 [DURABLE_TIME](DURABLE_TIME.md)，数据保留见 [RETENTION](RETENTION.md)，Agent 交互接续见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。
 
-当前 SDK 类型、core tool 名称、HTTP/MCP 映射、限制值以及 legacy raw connection 的兼容边界统一记录在 [IMPLEMENTATION](IMPLEMENTATION.md)，不在本合同里反向定义语义。
+当前 SDK 类型、core tool 名称、HTTP/MCP 映射、限制值以及 raw connection escape hatch 的技术边界统一记录在 [IMPLEMENTATION](IMPLEMENTATION.md)，不在本合同里反向定义语义。
 
 ## EigenFlux 参考建议
 

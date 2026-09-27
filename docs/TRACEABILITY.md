@@ -17,13 +17,13 @@
 | I6 同一 Runtime 提交无半成品 | L4 原子提交；事务执行核心 | **有强回归覆盖** | `test_write_cannot_commit_partially`、output/schema failure、timer retry/rollback、history rollback 等。 |
 | I7 未知结果不靠猜测 | Operation + Receipt + structured recovery error | **已实现核心写操作语义** | receipt 恢复与同 ID replay 测试存在；`test_error_contract.py`、`test_structured_error_transport.py` 验证 HTTP/MCP 保留 recovery/retry/details。Capability Harness 还验证重启后 replay；identity token rotate 丢响应仍是已知缺口。 |
 | I8 派生观察不创造事实 | View、Stream、Sync Position、Presentation 横轴 | **已实现主要边界** | view/stream/client tests 覆盖缓存、乱序、撤权、retention gap；具体 UI 仍需按世界正确命名业务状态。 |
-| I9 world instance 默认隔离 | World Instance、instance-scoped state/action | **支持接口层已实现；不是敌对代码安全沙箱** | `test_world_instances_are_isolated`、cross-universe write 回归存在。受信任 Python world code 与 legacy raw connection 不提供恶意租户机密隔离。 |
+| I9 world instance 默认隔离 | World Instance、instance-scoped state/action | **支持接口层已实现；不是敌对代码安全沙箱** | `test_world_instances_are_isolated`、cross-universe write 回归存在。受信任 Python world code 与当前 raw connection escape hatch 不提供恶意租户机密隔离。 |
 | I10 Runtime 领域中立 | Domain Object 由世界定义；核心不含固定玩法 | **当前代码结构基本符合** | architecture boundary test 防止 core 反向依赖示例／adapter；有限示例只能证明未立即耦合，不能证明未来不会退化。 |
 
 ## 证据使用规则
 
 1. 核心单元／合同测试验证具体 Runtime 行为；它们是主要回归证据。
 2. `tools/check_package.py` 中的仓库外 package integration probe 只验证打包、导入与若干公共能力组合边界；它不是参考世界。
-3. 灯溪镇、灰烬地城等后来临时创建的项目只保留为历史兼容性探针。它们不是需求来源、不是架构来源，也不是 Runtime 通用性的必要验收门槛。
+3. 临时创建的外部项目只有在仍验证当前假设时才保留；失去当前用途就删除，不作为需求来源、架构来源或 Runtime 通用性的必要验收门槛。
 4. 一条 L1/L2 主张没有直接测试并不等于它无效；应明确区分“设计要求”“实现状态”和“验证状态”。
 5. 任何新测试消费者都必须先说明它想反驳哪条具体假设；不能先造一个大场景，再从它碰巧需要的功能反推核心必须增加抽象。

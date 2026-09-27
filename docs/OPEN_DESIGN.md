@@ -20,7 +20,7 @@
 | EF-05 | 结构化错误、retry/reset/recovery 提示并由客户端完整保留 | **通用 Runtime 合同已落地并有回归证据。** HTTP/MCP 保留 recovery、可选 retry-after 与结构化 details；领域专用 taxonomy 仍由具体世界定义，operation_id + Receipt 语义不变。 |
 | EF-06 | 公开资料、私有历史、来源标识与授权分离 | **采纳边界。** 不默认上传私人上下文，不从名称推断认证。 |
 
-来源与代码／测试核对范围见 [REFERENCE_EIGENFLUX_2026-09-27](REFERENCE_EIGENFLUX_2026-09-27.md)。
+来源与代码／测试核对范围见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFLUX.md)。
 
 ## 1. 跨世界身份架构
 
@@ -65,11 +65,11 @@ L1/G2 已确定：用户控制底层身份，并应持有可跨不同世界验�
 
 Receipt、commit metadata、未决事项、终态 Scheduled Effect identity 等长期增长后的压缩／归档还没有统一合同。必须先确定旧 Operation 重放、未知结果恢复和业务终态语义，再决定何时可以明确过期。
 
-## 5. World Package 信任与 legacy raw connection
+## 5. World Package 信任与 raw connection escape hatch
 
 **归属：L5 + L6。**
 
-当前 World Package 是部署方信任的 Python 代码，`FunctionContext.conn` 是 legacy escape hatch。它不提供敌对租户隔离，也让世界代码知道 SQLite 内部结构。
+当前 World Package 是部署方信任的 Python 代码，`FunctionContext.conn` 仍暴露直接 SQLite escape hatch。它不提供敌对租户隔离，也让世界代码知道 SQLite 内部结构。
 
 短期目标是继续保证 managed state write 不绕过 schema／authorization，并减少新世界对 raw connection 的依赖。若未来产品要托管互不信任的第三方世界代码，需要重新设计进程、权限、资源限制和存储隔离，而不是把现有业务 scope 描述成沙箱。
 
@@ -82,9 +82,9 @@ Receipt、commit metadata、未决事项、终态 Scheduled Effect identity 等�
 | 通用共同事项辅助 | L3/L4 | 尚未决定是否值得提取为 Runtime 模型。 |
 | 第三方／群众公裁 | L3/L4 | 概念和成立规则未定稿。 |
 | 外部副作用交付 | L4/L5 | 没有通用 outbox / delivery / compensation contract。 |
-| legacy raw connection | L6 | 兼容入口仍存在，新世界不应依赖其内部 SQL 形状。 |
+| raw connection escape hatch | L6 | 当前仍存在，但没有历史兼容承诺要求保留；应决定直接移除还是收缩为纯内部实现。 |
 
-managed raw-state write 的 schema／authorization 回退已在本分支复现并修复，不再列为未完成项；范围见 [IMPLEMENTATION](IMPLEMENTATION.md) 和历史审计。
+managed raw-state write 当前仍经过 schema／authorization 重校验；该直接连接路径本身是否继续存在，按本文件的 raw connection 项单独处理。
 
 ## 待验证
 

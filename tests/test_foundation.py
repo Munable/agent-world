@@ -22,12 +22,15 @@ from agent_world.errors import (
     IdentityScopeMismatch,
     InvalidArguments,
     InvalidIdentityToken,
+    JoinTicketConsumed,
+    JoinTicketExpired,
     JoinTicketInvalid,
     OperationConflict,
     PermissionDenied,
     ReceiptNotFound,
     RegistryConflict,
     ResultRejected,
+    RoleInactive,
     RoleInvalid,
     StateConflict,
     WorldRuntimeError,
@@ -325,6 +328,76 @@ class FoundationTests(unittest.TestCase):
         self.w.revoke_join_ticket(ticket["ticket_id"])
         with self.assertRaises(JoinTicketInvalid):
             self.w.exchange_join_ticket(ticket["ticket"])
+
+    def test_join_ticket_exchange_is_concurrent_safe_and_secrets_are_hashed(self):
+        get_universe_installer("demo")(self.w, "u")
+        ticket = self.w.issue_join_ticket("u", self.role, ttl_seconds=60)
+        with self.w._conn(readonly=True) as conn:
+            stored_ticket_hash = conn.execute(
+                "SELECT ticket_hash FROM join_tickets WHERE ticket_id=?",
+                (ticket["ticket_id"],),
+            ).fetchone()[0]
+        self.assertNotEqual(stored_ticket_hash, ticket["ticket"])
+        self.assertNotIn(ticket["ticket"], stored_ticket_hash)
+
+        def exchange(_):
+            local = WorldRuntime(self.path)
+            result = local.exchange_join_ticket(ticket["ticket"])
+            return result["replayed"], result["token_id"], result["token"]
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            rows = list(pool.map(exchange, range(8)))
+
+        self.assertEqual(sum(not replayed for replayed, _, _ in rows), 1)
+        self.assertEqual(len({token_id for _, token_id, _ in rows}), 1)
+        self.assertEqual(len({token for _, _, token in rows}), 1)
+
+        token_id = rows[0][1]
+        token = rows[0][2]
+        with self.w._conn(readonly=True) as conn:
+            stored_token_hash = conn.execute(
+                "SELECT token_hash FROM identity_tokens WHERE token_id=?",
+                (token_id,),
+            ).fetchone()[0]
+        self.assertNotEqual(stored_token_hash, token)
+        self.assertNotIn(token, stored_token_hash)
+
+    def test_identity_rotation_revokes_old_token_and_ticket_cannot_resurrect_it(self):
+        get_universe_installer("demo")(self.w, "u")
+        ticket = self.w.issue_join_ticket("u", self.role)
+        first = self.w.exchange_join_ticket(ticket["ticket"])
+        second = self.w.rotate_identity_token(first["token_id"], ttl_seconds=60)
+
+        self.assertEqual(second["rotated_from_token_id"], first["token_id"])
+        self.assertNotEqual(second["token"], first["token"])
+        with self.assertRaises(InvalidIdentityToken):
+            self.w.resolve_identity_token(first["token"])
+        self.assertEqual(
+            self.w.resolve_identity_token(second["token"])["token_id"],
+            second["token_id"],
+        )
+        with self.assertRaises(JoinTicketConsumed):
+            self.w.exchange_join_ticket(ticket["ticket"])
+
+    def test_expired_ticket_and_disabled_role_do_not_authenticate(self):
+        get_universe_installer("demo")(self.w, "u")
+        expired = self.w.issue_join_ticket("u", self.role, ttl_seconds=0.02)
+        time.sleep(0.04)
+        with self.assertRaises(JoinTicketExpired):
+            self.w.exchange_join_ticket(expired["ticket"])
+
+        live = self.w.issue_join_ticket("u", self.role, ttl_seconds=60)
+        self.w.set_role_status(self.role, "disabled")
+        with self.assertRaises(RoleInactive):
+            self.w.exchange_join_ticket(live["ticket"])
+
+        self.w.set_role_status(self.role, "active")
+        identity = self.w.exchange_join_ticket(
+            self.w.issue_join_ticket("u", self.role)["ticket"]
+        )
+        self.w.set_role_status(self.role, "disabled")
+        with self.assertRaises(InvalidIdentityToken):
+            self.w.resolve_identity_token(identity["token"])
 
     def test_status_does_not_confuse_incoming_event_with_action(self):
         ticket = self.w.issue_join_ticket("u", self.role)

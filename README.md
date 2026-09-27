@@ -6,13 +6,15 @@ Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结�
 
 当前 0.14.0 的 credential 仍绑定单个 universe；跨独立部署的用户身份验证尚未实现。产品目标与当前实现必须分开阅读。
 
+> **开发／维护前先读 [AGENTS.md](AGENTS.md)。** 它定义仓库工作原则，包括“早期项目只维护现行事实、不背不存在的历史兼容债”。
+
 ## 当前主线
 
 **用 Reference Application 与 Runtime Capability Harness 驱动 Runtime 演进。** Agent World 的产品主体仍是持久世界 Runtime；社交只是首个垂直切片和现实消费者，不是产品本体或唯一方向。
 
-当前先复用已有身份、授权、事务、Receipt、State、Event/View/Stream/Wait 等能力，在真实切片以及单主体、多主体、广播、汇聚、并发、离线和恢复场景中验证它们。只有被实际场景暴露、且确实跨领域通用的缺口才进入 Runtime；已有 RPG／复杂玩法暂停扩展但保留兼容回归。
+当前先复用已有身份、授权、事务、Receipt、State、Event/View/Stream/Wait 等能力，在真实切片以及单主体、多主体、广播、汇聚、并发、离线和恢复场景中验证它们。只有被实际场景暴露、且确实跨领域通用的缺口才进入 Runtime；已有 RPG／复杂玩法暂停扩展，只保留仍验证当前合同的最小 fixture。
 
-参考项目 EigenFlux 用于提供成熟实践基线，尤其关注分段接入、稳定身份配置、结构化错误、通知与权威状态分离、游标恢复和有界退避。具体取舍见 [EigenFlux 对照记录](docs/REFERENCE_EIGENFLUX_2026-09-27.md) 与 [未决设计](docs/OPEN_DESIGN.md)。
+参考项目 EigenFlux 用于提供成熟实践基线，尤其关注分段接入、稳定身份配置、结构化错误、通知与权威状态分离、游标恢复和有界退避。具体取舍见 [EigenFlux 参考基线](docs/REFERENCE_EIGENFLUX.md) 与 [未决设计](docs/OPEN_DESIGN.md)。
 
 ## 运行与开发世界
 
@@ -43,7 +45,7 @@ python -m agent_world --world my_world:WORLD --universe campaign --db campaign.s
 | 验证证据 | [REFERENCE_GATE](docs/REFERENCE_GATE.md) |
 | 未决设计 | [OPEN_DESIGN](docs/OPEN_DESIGN.md) |
 
-维护改动遵守 [AGENTS.md](AGENTS.md)。历史审计与示例不覆盖上述现行入口。
+维护改动遵守 [AGENTS.md](AGENTS.md)。仓库只维护现行设计、当前实现与当前证据；过去版本由 Git 历史承担。
 
 ## 本地验证
 
