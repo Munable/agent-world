@@ -1,7 +1,6 @@
 {
   "date": "2026-09-27",
   "branch": "review/layered-baseline-20260926",
-  "validated_runtime_test_snapshot": "6f222602d720b5b6fed76e415ae89784716903ef",
   "purpose": "Deep validation of the six-layer design, including demotion of ad-hoc companion worlds and removal of reference-world authority naming from active package/capability probes.",
   "environment": {
     "os": "Windows",
@@ -40,8 +39,8 @@
     "git_diff_check": "passed"
   },
   "post_validation_changes": {
-    "scope": "Only this evidence JSON is being updated after the validated 6f22260 code/test/tool snapshot.",
-    "runtime_tests_tools_diff_against_validated_snapshot_bytes": 0
+    "scope": "The final follow-up only updates historical review/evidence documents with completed GitHub Actions results; runtime, tests, tools and examples are unchanged from CI snapshot 9e6a097.",
+    "code_tests_tools_examples_diff_against_ci_snapshot_bytes": 0
   },
   "ad_hoc_companion_worlds": {
     "rerun": false,
@@ -54,7 +53,7 @@
   "limitations": [
     "No new long soak test.",
     "No real multi-host external Agent run.",
-    "No Linux or Python 3.11/3.13 matrix rerun in this deep review.",
+    "CI covered Ubuntu Python 3.11/3.13 and Windows Python 3.13, but not every supported OS/runtime combination.",
     "No cross-deployment identity implementation or verification.",
     "No production database migration.",
     "Passing contract tests do not prove arbitrary-domain generality or completion of L1 goals."
@@ -65,5 +64,38 @@
     "capability_boundaries": "tests/test_capability_boundaries.py",
     "capability_transport": "tests/test_capability_transport.py",
     "reference_or_conformance_authority_terms_in_active_tests_tools": 0
+  },
+  "local_validated_snapshot": "6f222602d720b5b6fed76e415ae89784716903ef",
+  "ci_validated_snapshot": "9e6a097a34c1b45341c217e90d1190434891e949",
+  "github_actions": {
+    "run_id": 36292656416,
+    "workflow": "tests",
+    "result": "passed",
+    "matrix": [
+      {
+        "os": "ubuntu-latest",
+        "python": "3.11",
+        "result": "passed"
+      },
+      {
+        "os": "ubuntu-latest",
+        "python": "3.13",
+        "result": "passed"
+      },
+      {
+        "os": "windows-latest",
+        "python": "3.13",
+        "result": "passed"
+      }
+    ],
+    "steps_per_matrix": [
+      "python -m pip install .",
+      "python tools/run_tests.py",
+      "node tests/view_client.test.mjs",
+      "node tests/stream_client.test.mjs",
+      "python -m pip wheel --no-deps --wheel-dir dist .",
+      "python tools/check_package.py"
+    ],
+    "note": "All three matrices completed successfully on CI snapshot 9e6a097."
   }
 }

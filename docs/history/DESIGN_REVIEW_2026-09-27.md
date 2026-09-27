@@ -57,8 +57,9 @@ G2 的当前缺口需要 L3/L4/L5 共同设计：跨独立部署如何验证同�
 - `node tests/view_client.test.mjs`、`node tests/stream_client.test.mjs`：通过。
 - `python tools/check_package.py`：wheel 构建、独立安装、静态资源与仓库外 package integration probe 通过；该 probe 不是参考世界。
 - 静态结构：91 个 Python 文件解析通过；24 份 Markdown、83 个本地链接、4 个 JSON 检查通过；`git diff --check` 通过。
-- 最后一轮 G2 加固、L3 关系补充和历史归档之后，`agent_world/`、`tests/`、`tools/` 相对完整测试快照 `efe72db` 的 diff 为 0 字节。
+- `reference/conformance` 权威命名已从活动测试／工具移除；package/capability probe 改名后重新跑完整核心、Node 与 wheel/package 验证，验证快照为 `6f22260`。
+- GitHub Actions 对 `9e6a097` 完成三矩阵整链验证：Ubuntu/Python 3.11、Ubuntu/Python 3.13、Windows/Python 3.13 全部成功；每个矩阵都执行安装、核心测试、两份 Node、wheel 和 package probe。
 
 本轮**没有**重新运行灯溪镇／灰烬地城；这是刻意的证据边界调整，不是漏测。它们没有具体待反驳假设，因此继续运行只会制造“测试很多所以架构靠谱”的错觉。
 
-本轮仍没有新的长期 soak、真实多宿主 Agent、Linux/Python 版本矩阵、跨独立部署身份或生产数据库迁移证据。详细机器可读记录见 [深层复核证据](REPOSITORY_EVIDENCE_DEEP_2026-09-27.json)。
+本轮仍没有新的长期 soak、真实多宿主 Agent、跨独立部署身份或生产数据库迁移证据。CI 已覆盖 Linux 3.11/3.13 与 Windows 3.13，但这也不等于全部运行环境都已验证。详细机器可读记录见 [深层复核证据](REPOSITORY_EVIDENCE_DEEP_2026-09-27.json)。
