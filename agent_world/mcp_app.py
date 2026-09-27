@@ -35,7 +35,12 @@ class BearerIdentityMiddleware:
                 await self._reject(
                     send,
                     400,
-                    {"error": "InvalidArguments", "message": "duplicate authentication or session header"},
+                    {
+                        "error": "InvalidArguments",
+                        "message": "duplicate authentication or session header",
+                        "retryable": False,
+                        "recovery": "fix_request",
+                    },
                 )
                 return
         headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
@@ -51,7 +56,14 @@ class BearerIdentityMiddleware:
                 binding = self.sessions.get(sid)
                 if binding is None:
                     await self._reject(
-                        send, 404, {"error": "SessionExpired", "message": "initialize a new MCP session"}
+                        send,
+                        404,
+                        {
+                            "error": "SessionExpired",
+                            "message": "initialize a new MCP session",
+                            "retryable": False,
+                            "recovery": "initialize_session",
+                        },
                     )
                     return
                 if binding[0] != identity["token_id"]:
@@ -59,7 +71,14 @@ class BearerIdentityMiddleware:
                 self.sessions[sid] = (binding[0], now)
             elif len(self.sessions) >= self.max_sessions:
                 await self._reject(
-                    send, 503, {"error": "SessionCapacity", "message": "session limit reached"}
+                    send,
+                    503,
+                    {
+                        "error": "SessionCapacity",
+                        "message": "session limit reached",
+                        "retryable": True,
+                        "recovery": "retry_session_later",
+                    },
                 )
                 return
         except Exception as exc:
@@ -82,15 +101,22 @@ class BearerIdentityMiddleware:
         await self.app(scope, receive, bound_send)
 
     async def _reject(self, send, status, payload):
+        headers = [
+            (b"content-type", b"application/json"),
+            (b"cache-control", b"no-store"),
+        ]
+        if status == 401:
+            headers.append((b"www-authenticate", b"Bearer"))
+        retry_after = payload.get("retry_after_seconds")
+        if retry_after is not None:
+            import math
+
+            headers.append((b"retry-after", str(max(0, math.ceil(float(retry_after)))).encode("ascii")))
         await send(
             {
                 "type": "http.response.start",
                 "status": status,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (b"cache-control", b"no-store"),
-                    (b"www-authenticate", b"Bearer"),
-                ],
+                "headers": headers,
             }
         )
         await send({"type": "http.response.body", "body": json.dumps(payload).encode()})

@@ -208,17 +208,40 @@ def function_schema(desc, *, auth_required):
     return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
 
 
+def _error_payload(
+    error: str,
+    message: str,
+    *,
+    retryable: bool,
+    recovery=None,
+    retry_after_seconds=None,
+    details=None,
+):
+    payload = {"error": error, "message": message, "retryable": bool(retryable)}
+    if recovery:
+        payload["recovery"] = recovery
+    if retry_after_seconds is not None:
+        payload["retry_after_seconds"] = retry_after_seconds
+    if details is not None:
+        payload["details"] = details
+    return payload
+
+
 def error_response(exc: Exception):
     if isinstance(exc, StreamResetRequired):
-        return 409, {"error":"StreamResetRequired","message":str(exc),"retryable":False,"recovery":"read_stream_recent"}
+        return 409, _error_payload(
+            "StreamResetRequired", str(exc), retryable=False, recovery="read_stream_recent"
+        )
     if isinstance(exc, ViewResetRequired):
-        return 409, {"error": "ViewResetRequired", "message": str(exc), "retryable": False, "recovery": "reset_view"}
+        return 409, _error_payload(
+            "ViewResetRequired", str(exc), retryable=False, recovery="reset_view"
+        )
     if isinstance(exc, TimerConflict):
-        return 409, {"error": "TimerConflict", "message": str(exc), "retryable": False}
+        return 409, _error_payload("TimerConflict", str(exc), retryable=False)
     if isinstance(exc, TimerNotFound):
-        return 404, {"error": "TimerNotFound", "message": str(exc), "retryable": False}
+        return 404, _error_payload("TimerNotFound", str(exc), retryable=False)
     if isinstance(exc, ViewNotFound):
-        return 404, {"error": "ViewNotFound", "message": str(exc), "retryable": False}
+        return 404, _error_payload("ViewNotFound", str(exc), retryable=False)
     if isinstance(exc, (AuthenticationRequired, InvalidIdentityToken)):
         status = 401
     elif isinstance(exc, (IdentityScopeMismatch, PermissionDenied, RoleInactive)):
@@ -253,13 +276,20 @@ def error_response(exc: Exception):
     ):
         exc, status = StorageBusy("world storage is busy; retry the same operation_id"), 503
     else:
-        return 500, {
-            "error": "InternalError",
-            "message": "world request failed; inspect server logs",
-            "retryable": False,
-            "recovery": "query_receipt_before_retry",
-        }
-    payload = {"error": type(exc).__name__, "message": str(exc), "retryable": bool(exc.retryable)}
+        return 500, _error_payload(
+            "InternalError",
+            "world request failed; inspect server logs",
+            retryable=False,
+            recovery="query_receipt_before_retry",
+        )
+    payload = _error_payload(
+        type(exc).__name__,
+        str(exc),
+        retryable=bool(exc.retryable),
+        recovery=getattr(exc, "recovery", None),
+        retry_after_seconds=getattr(exc, "retry_after_seconds", None),
+        details=getattr(exc, "details", None),
+    )
     if isinstance(exc, CursorExpired):
         payload.update(recovery="bootstrap", event_floor=getattr(exc, "event_floor", None))
     if isinstance(exc, ReceiptNotFound):

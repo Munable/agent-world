@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import pathlib
 from typing import Any
@@ -16,6 +17,14 @@ from .transport_contracts import WorldGateway, error_response
 from .universe_loader import get_universe_installer
 
 logger = logging.getLogger(__name__)
+
+
+def _error_headers(status, payload):
+    headers = {"WWW-Authenticate": "Bearer"} if status == 401 else {}
+    retry_after = payload.get("retry_after_seconds")
+    if retry_after is not None:
+        headers["Retry-After"] = str(max(0, math.ceil(float(retry_after))))
+    return headers
 
 
 def create_app(
@@ -43,15 +52,16 @@ def create_app(
     @app.exception_handler(WorldRuntimeError)
     async def world_error_handler(request: Request, exc: WorldRuntimeError):
         status, payload = error_response(exc)
-        headers = {"WWW-Authenticate": "Bearer"} if status == 401 else {}
-        return JSONResponse(payload, status_code=status, headers=headers)
+        return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
 
     @app.exception_handler(RequestValidationError)
     async def request_error_handler(request: Request, exc: RequestValidationError):
-        return JSONResponse(
-            {"error": "InvalidArguments", "message": "invalid request shape", "retryable": False},
-            status_code=422,
+        from .runtime_errors import InvalidArguments
+
+        status, payload = error_response(
+            InvalidArguments("invalid request shape", recovery="fix_request")
         )
+        return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
 
     async def call(name, args, request):
         try:
@@ -60,9 +70,7 @@ def create_app(
             status, payload = error_response(exc)
             if status == 500:
                 logger.error("world request failed: %s", type(exc).__name__)
-            return JSONResponse(
-                payload, status_code=status, headers={"WWW-Authenticate": "Bearer"} if status == 401 else {}
-            )
+            return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
 
     def role_args(role_id):
         return {} if role_id is None else {"role_id": role_id}
@@ -163,14 +171,14 @@ def create_app(
                                              disconnected=request.is_disconnected)
         except Exception as exc:
             status,payload=error_response(exc)
-            return JSONResponse(payload,status_code=status)
+            return JSONResponse(payload,status_code=status,headers=_error_headers(status,payload))
 
     async def public_call(method, *args, **kwargs):
         try:
             return await asyncio.to_thread(method,*args,**kwargs)
         except Exception as exc:
             status,payload=error_response(exc)
-            return JSONResponse(payload,status_code=status)
+            return JSONResponse(payload,status_code=status,headers=_error_headers(status,payload))
 
     @app.get("/v1/public/views")
     async def public_views():
@@ -255,7 +263,7 @@ def create_app(
             )
         except Exception as exc:
             status, payload = error_response(exc)
-            return JSONResponse(payload, status_code=status)
+            return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
 
     return app
 
