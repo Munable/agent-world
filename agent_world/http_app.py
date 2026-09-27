@@ -132,12 +132,6 @@ def create_app(
             "world.bootstrap", {**role_args(role_id), "include_catalog": include_catalog}, request
         )
 
-    @app.get("/v1/bootstrap/{role_id}")
-    async def bootstrap_legacy(role_id: str, request: Request, include_catalog: bool = False):
-        return await call(
-            "world.bootstrap", {"role_id": role_id, "include_catalog": include_catalog}, request
-        )
-
     @app.get("/v1/views")
     async def views(request: Request, role_id: str | None = None, after: str = "",
                     limit: int = Query(default=50, ge=1, le=64), include_schemas: bool = False):

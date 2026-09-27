@@ -12,7 +12,7 @@ EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 
 
 def raw_count(ctx, value="2", version_step=1):
-    ctx.conn.execute(
+    ctx._conn.execute(
         "UPDATE world_state SET value_json=?,version=version+?,updated_at=? "
         "WHERE universe=? AND scope='world' AND state_key='count'",
         (value, version_step, ctx.now, ctx.universe),
@@ -79,7 +79,7 @@ class ManagedStateBoundaryTests(unittest.TestCase):
 
     def test_undeclared_raw_state_is_rejected(self):
         def undeclared(ctx, args):
-            ctx.conn.execute("INSERT INTO world_state VALUES(?,?,?,?,?,?,?)",
+            ctx._conn.execute("INSERT INTO world_state VALUES(?,?,?,?,?,?,?)",
                              (ctx.universe, "unknown", "key", "1", 1, ctx.now, 0))
             return FunctionOutcome({})
         self.w.install_world("u", self.definition(undeclared))
@@ -100,7 +100,7 @@ class ManagedStateBoundaryTests(unittest.TestCase):
 
     def test_raw_initialization_bad_version_rolls_back_manifest(self):
         def initialize(ctx):
-            ctx.conn.execute("INSERT INTO world_state VALUES(?,?,?,?,?,?,?)",
+            ctx._conn.execute("INSERT INTO world_state VALUES(?,?,?,?,?,?,?)",
                              (ctx.universe, "world", "count", "1", 7, ctx.now, 0))
         definition = replace(self.definition(lambda c, a: raw_count(c)), initialize=initialize)
         with self.assertRaises(SchemaRejected):

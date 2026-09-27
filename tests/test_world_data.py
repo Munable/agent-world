@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from contextlib import closing
 import concurrent.futures
 import json
 from pathlib import Path
-import sqlite3
 import tempfile
 import threading
 import unittest
@@ -140,9 +138,9 @@ class DataTests(unittest.TestCase):
                                    (self.runtime._view_cursor_hash(snap["cursor"]),)).fetchone()
         self.assertEqual(checkpoint[0], seq)
 
-    def test_raw_sql_is_journaled_but_cannot_forge_history(self):
+    def test_internal_sql_is_journaled_but_cannot_forge_history(self):
         def raw(ctx, args):
-            ctx.conn.execute("UPDATE world_state SET value_json='{}',version=version+1 WHERE universe=?", (ctx.universe,))
+            ctx._conn.execute("UPDATE world_state SET value_json='{}',version=version+1 WHERE universe=?", (ctx.universe,))
             return FunctionOutcome({})
         other = WorldRuntime(Path(self.temp.name) / "raw.sqlite3")
         other.register_function("raw", "raw.change", 1, "", EMPTY, raw)
@@ -151,16 +149,16 @@ class DataTests(unittest.TestCase):
         other.call_function("raw", "raw.change", "A", {}, operation_id="raw")
         self.assertEqual(len(other.read_state_history("raw")["changes"]), 2)
         def forge(ctx, args):
-            ctx.conn.execute("DELETE FROM state_changes")
+            ctx._conn.execute("DELETE FROM state_changes")
             return FunctionOutcome({})
         other.register_function("raw", "raw.forge", 1, "", EMPTY, forge)
         with self.assertRaises(WorldRuntimeError):
             other.call_function("raw", "raw.forge", "A", {}, operation_id="forge")
         self.assertEqual(len(other.read_state_history("raw")["changes"]), 2)
 
-    def test_cross_universe_raw_write_rolls_back(self):
+    def test_cross_universe_internal_write_rolls_back(self):
         def wrong(ctx, args):
-            ctx.conn.execute("INSERT INTO world_state VALUES('other','x','x','{}',1,0,0)")
+            ctx._conn.execute("INSERT INTO world_state VALUES('other','x','x','{}',1,0,0)")
             return FunctionOutcome({})
         other = WorldRuntime(Path(self.temp.name) / "wrong.sqlite3")
         other.register_function("u", "raw.wrong", 1, "", EMPTY, wrong)
@@ -335,21 +333,6 @@ class DataTests(unittest.TestCase):
             self.runtime.call_function("u", "object.many", self.a, {}, operation_id="too-many", identity_token=self.ta)
         self.assertEqual(self.history(), [])
         self.assertEqual(self.count("world_commits"), before)
-
-    def test_legacy_baseline_is_explicit_and_not_repeated(self):
-        legacy = Path(self.temp.name) / "old.sqlite3"
-        with closing(sqlite3.connect(legacy)) as c:
-            c.execute("CREATE TABLE world_state(universe TEXT,scope TEXT,state_key TEXT,value_json TEXT,version INTEGER,updated_at REAL,PRIMARY KEY(universe,scope,state_key))")
-            c.execute("INSERT INTO world_state VALUES('old','s','k','42',7,0)")
-            c.commit()
-        runtime = WorldRuntime(legacy)
-        rows = runtime.read_state_history("old")["changes"]
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["kind"], "baseline")
-        self.assertEqual(rows[0]["version"], 7)
-        self.assertIsNone(rows[0]["before"])
-        runtime = WorldRuntime(legacy)
-        self.assertEqual(len(runtime.read_state_history("old")["changes"]), 1)
 
 
 if __name__ == "__main__":

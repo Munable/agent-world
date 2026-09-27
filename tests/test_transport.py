@@ -101,6 +101,30 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(result.is_error)
 
+    async def test_authenticated_requests_reject_supplied_role_id_and_old_bootstrap_route(self):
+        with httpx.Client(trust_env=False) as client:
+            same_role = client.get(
+                self.server.url + "/v1/bootstrap",
+                headers=self.auth,
+                params={"role_id": self.role["role_id"]},
+            )
+            self.assertEqual(same_role.status_code, 422, same_role.text)
+            self.assertEqual(same_role.json()["error"], "InvalidArguments")
+
+            removed = client.get(
+                self.server.url + f"/v1/bootstrap/{self.role['role_id']}",
+                headers=self.auth,
+            )
+            self.assertEqual(removed.status_code, 404, removed.text)
+
+        async with self.server.session(self.identity) as (session, _):
+            supplied = await session.call_tool(
+                "world.bootstrap",
+                arguments={"role_id": self.role["role_id"]},
+            )
+            self.assertTrue(supplied.is_error)
+            self.assertEqual(supplied.structured_content["error"], "InvalidArguments")
+
     async def test_mcp_session_bound_to_credential_not_just_role_name(self):
         _, other = self.server.role("Other")
         async with self.server.session(self.identity) as (session, captured):

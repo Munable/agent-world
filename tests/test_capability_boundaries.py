@@ -90,7 +90,9 @@ class BoundaryTests(unittest.TestCase):
         self.assertFalse(self.w.get_role_entry_status("u", self.a)["entered_world"])
 
     def test_rotation_preserves_observer_restriction(self):
-        rotated = self.w.rotate_identity_token(self.observe["token_id"])
+        rotated = self.w.rotate_identity_token(
+            self.observe["token_id"], operation_id="rotate-observer"
+        )
         self.assertEqual(rotated["access_mode"], "observe")
         with self.assertRaises(PermissionDenied): self.move(token=rotated)
         with self.assertRaises(InvalidIdentityToken): self.snap(self.observe)
@@ -136,11 +138,11 @@ class BoundaryTests(unittest.TestCase):
             self.assertEqual(c.execute("SELECT COUNT(*) FROM events WHERE universe='other'").fetchone()[0], 1)
 
     def test_no_retention_policy_never_silently_deletes(self):
-        install_world(self.w, "legacy", replace(WORLD, retention=None))
-        self.w.call_function("legacy", "actor.move", self.a, {"phase": "start"}, operation_id="legacy")
+        install_world(self.w, "unconfigured", replace(WORLD, retention=None))
+        self.w.call_function("unconfigured", "actor.move", self.a, {"phase": "start"}, operation_id="move")
         self.clock.return_value = 99999
-        self.assertFalse(self.w.apply_retention("legacy")["configured"])
-        self.assertEqual(len(self.w.read_changes("legacy", self.a)), 1)
+        self.assertFalse(self.w.apply_retention("unconfigured")["configured"])
+        self.assertEqual(len(self.w.read_changes("unconfigured", self.a)), 1)
 
     def test_zero_retention_and_invalid_policy(self):
         with self.assertRaises(WorldRuntimeError):

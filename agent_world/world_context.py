@@ -30,7 +30,7 @@ class FunctionContext:
         timers_enabled=False,
         timer=None,
     ):
-        self.conn = conn  # Legacy escape hatch; not part of the portable World SDK.
+        self._conn = conn  # Internal transaction handle; not part of the World SDK.
         self.universe = universe
         self.actor_role_id = actor_role_id
         self.function_id = function_id
@@ -47,7 +47,7 @@ class FunctionContext:
         self._timer_commands = []
         self.timer = timer
         # Mutations performed through the scoped API are recorded so commit-time
-        # validation can distinguish them from legacy raw-SQL writes via conn.
+        # validation can distinguish them from unexpected direct internal writes.
         self._approved_state_changes: list[tuple[str, str, int, int, str]] = []
 
     def schedule_timer(self, timer_id, handler, arguments, *, due_at):
@@ -84,7 +84,7 @@ class FunctionContext:
         from .world_timers import TimerNotFound, public_timer
 
         identifier(timer_id, "timer_id")
-        row = self.conn.execute("SELECT * FROM world_timers WHERE universe=? AND timer_id=?",
+        row = self._conn.execute("SELECT * FROM world_timers WHERE universe=? AND timer_id=?",
                                 (self.universe, timer_id)).fetchone()
         if row is None:
             raise TimerNotFound("timer not found in this universe")
@@ -97,7 +97,7 @@ class FunctionContext:
     def get_stream_event(self, stream, event_id):
         """Trusted rule lookup within this universe. Transport reads enforce StreamSpec policy."""
         identifier(stream,'stream',64); identifier(event_id,'event ID')
-        row=self.conn.execute('SELECT event_id,actor_role_id,kind,payload_json,created_at FROM stream_events WHERE universe=? AND stream=? AND event_id=?',
+        row=self._conn.execute('SELECT event_id,actor_role_id,kind,payload_json,created_at FROM stream_events WHERE universe=? AND stream=? AND event_id=?',
                               (self.universe,stream,event_id)).fetchone()
         if row is None:
             return None
@@ -106,7 +106,7 @@ class FunctionContext:
 
     def recent_stream_events(self, stream, limit=20):
         identifier(stream,'stream',64); integer(limit,'stream rule lookup',1,100)
-        rows=self.conn.execute('SELECT event_id FROM stream_events WHERE universe=? AND stream=? ORDER BY seq DESC LIMIT ?',
+        rows=self._conn.execute('SELECT event_id FROM stream_events WHERE universe=? AND stream=? ORDER BY seq DESC LIMIT ?',
                                (self.universe,stream,limit)).fetchall()
         return [self.get_stream_event(stream,row['event_id']) for row in reversed(rows)]
 
@@ -116,7 +116,7 @@ class FunctionContext:
             raise PermissionDenied("authorization_state is only available inside state_authorizer")
         identifier(scope, "scope", 256)
         identifier(key, "state key", 256)
-        row = self.conn.execute(
+        row = self._conn.execute(
             "SELECT value_json,deleted FROM world_state WHERE universe=? AND scope=? AND state_key=?",
             (self.universe, scope, key),
         ).fetchone()
@@ -141,7 +141,7 @@ class FunctionContext:
 
     def get_state_record(self, scope: str, key: str, default: Any = None) -> dict:
         self._check(scope, key, "read")
-        row = self.conn.execute(
+        row = self._conn.execute(
             "SELECT value_json,version,updated_at,deleted FROM world_state "
             "WHERE universe=? AND scope=? AND state_key=?",
             (self.universe, scope, key),
@@ -163,7 +163,7 @@ class FunctionContext:
         encoded = json_text(value, maximum=MAX_STATE_BYTES)
         if self._state_validator is not None:
             self._state_validator(self, scope, key, value)
-        row = self.conn.execute(
+        row = self._conn.execute(
             "SELECT version FROM world_state WHERE universe=? AND scope=? AND state_key=?",
             (self.universe, scope, key),
         ).fetchone()
@@ -173,7 +173,7 @@ class FunctionContext:
             if current != expected_version:
                 raise StateConflict(f"expected state version {expected_version}, current is {current}")
         version = current + 1
-        self.conn.execute(
+        self._conn.execute(
             "INSERT INTO world_state(universe,scope,state_key,value_json,version,updated_at,deleted) "
             "VALUES(?,?,?,?,?,?,0) ON CONFLICT(universe,scope,state_key) DO UPDATE SET "
             "value_json=excluded.value_json,version=excluded.version,updated_at=excluded.updated_at,deleted=0",
@@ -184,7 +184,7 @@ class FunctionContext:
 
     def delete_state(self, scope: str, key: str, *, expected_version=None) -> int:
         self._check(scope, key, "write")
-        row = self.conn.execute(
+        row = self._conn.execute(
             "SELECT version,deleted FROM world_state WHERE universe=? AND scope=? AND state_key=?",
             (self.universe, scope, key),
         ).fetchone()
@@ -196,7 +196,7 @@ class FunctionContext:
         if row is None or row["deleted"]:
             return current
         version = current + 1
-        self.conn.execute(
+        self._conn.execute(
             "UPDATE world_state SET value_json='null',deleted=1,version=?,updated_at=? "
             "WHERE universe=? AND scope=? AND state_key=?",
             (version, self.now, self.universe, scope, key),
@@ -240,7 +240,7 @@ class FunctionContext:
                 raise InvalidArguments("invalid or differently scoped state cursor") from exc
         ordering = "state_key" if order == "key" else "updated_at DESC,state_key DESC"
         sql = "SELECT state_key,value_json,version,updated_at FROM world_state WHERE " + " AND ".join(clauses)
-        rows = self.conn.execute(sql + " ORDER BY " + ordering + " LIMIT ?", (*params, limit + 1)).fetchall()
+        rows = self._conn.execute(sql + " ORDER BY " + ordering + " LIMIT ?", (*params, limit + 1)).fetchall()
         more = len(rows) > limit
         items = []
         for row in rows[:limit]:
@@ -269,7 +269,7 @@ class FunctionContext:
 
     def get_role(self, role_id: str | None = None) -> dict:
         role_id = self.actor_role_id if role_id is None else identifier(role_id, "role_id")
-        row = self.conn.execute(
+        row = self._conn.execute(
             "SELECT role_id,display_name,avatar_ref,status,created_at,updated_at FROM roles WHERE role_id=?",
             (role_id,),
         ).fetchone()
@@ -281,7 +281,7 @@ class FunctionContext:
         from .runtime_errors import ActivityNotFound
 
         identifier(activity_id, "activity_id")
-        row = self.conn.execute(
+        row = self._conn.execute(
             "SELECT activity_id,role_id,kind,exclusive_group,status,expires_at,created_at FROM activities "
             "WHERE universe=? AND activity_id=?",
             (self.universe, activity_id),

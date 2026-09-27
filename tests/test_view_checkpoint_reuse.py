@@ -97,7 +97,7 @@ class CheckpointReuseTests(unittest.TestCase):
         self.assertEqual(len(events),1)
         self.assertEqual(events[0]['payload']['data']['text'],'hello')
         self.assertNotEqual(result['streams']['shared']['cursor'],old)
-    def test_legacy_timeline_checkpoint_still_advances(self):
+    def test_timeline_checkpoint_advances_on_empty_sync(self):
         snap=self.w.view_snapshot('u',self.role,'timeline',identity_token=self.cred['token'])
         update=self.w.view_sync('u',self.role,snap['cursor'],identity_token=self.cred['token'])
         self.assertNotEqual(update['cursor'],snap['cursor'])

@@ -100,8 +100,8 @@ class FoundationTests(unittest.TestCase):
 
     def test_read_cannot_disable_guard(self):
         def bad(ctx, args):
-            ctx.conn.execute("PRAGMA query_only=OFF")
-            ctx.conn.execute("DELETE FROM roles")
+            ctx._conn.execute("PRAGMA query_only=OFF")
+            ctx._conn.execute("DELETE FROM roles")
             return FunctionOutcome({})
 
         self.register("bad.read", bad, "read")
@@ -112,7 +112,7 @@ class FoundationTests(unittest.TestCase):
     def test_write_cannot_commit_partially(self):
         def bad(ctx, args):
             ctx.set_state("s", "k", 1)
-            ctx.conn.execute("COMMIT")
+            ctx._conn.execute("COMMIT")
             return FunctionOutcome({})
 
         self.register("bad.commit", bad)
@@ -196,7 +196,7 @@ class FoundationTests(unittest.TestCase):
 
     def test_authorization_callback_cannot_write(self):
         def policy(ctx, args):
-            ctx.conn.execute("DELETE FROM roles")
+            ctx._conn.execute("DELETE FROM roles")
             return True
 
         self.register("bad.policy", authorize=policy)
@@ -366,7 +366,9 @@ class FoundationTests(unittest.TestCase):
         get_universe_installer("demo")(self.w, "u")
         ticket = self.w.issue_join_ticket("u", self.role)
         first = self.w.exchange_join_ticket(ticket["ticket"])
-        second = self.w.rotate_identity_token(first["token_id"], ttl_seconds=60)
+        second = self.w.rotate_identity_token(
+            first["token_id"], operation_id="rotate-identity", ttl_seconds=60
+        )
 
         self.assertEqual(second["rotated_from_token_id"], first["token_id"])
         self.assertNotEqual(second["token"], first["token"])
@@ -378,6 +380,54 @@ class FoundationTests(unittest.TestCase):
         )
         with self.assertRaises(JoinTicketConsumed):
             self.w.exchange_join_ticket(ticket["ticket"])
+
+    def test_identity_rotation_unknown_result_recovers_by_operation_id(self):
+        get_universe_installer("demo")(self.w, "u")
+        source = self.w.issue_identity_token("u", self.role)
+        first = self.w.rotate_identity_token(
+            source["token_id"],
+            operation_id="rotate-recover",
+            ttl_seconds=60,
+        )
+        self.assertFalse(first["replayed"])
+
+        restarted = WorldRuntime(self.path)
+        get_universe_installer("demo")(restarted, "u")
+        recovered = restarted.get_identity_token_rotation("u", "rotate-recover")
+        self.assertTrue(recovered["replayed"])
+        self.assertEqual(recovered["token_id"], first["token_id"])
+        self.assertEqual(recovered["token"], first["token"])
+
+        replay = restarted.rotate_identity_token(
+            source["token_id"],
+            operation_id="rotate-recover",
+            ttl_seconds=60,
+        )
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["token_id"], first["token_id"])
+        self.assertEqual(replay["token"], first["token"])
+
+        with self.assertRaises(OperationConflict):
+            restarted.rotate_identity_token(
+                source["token_id"],
+                operation_id="rotate-recover",
+                ttl_seconds=120,
+            )
+        other = restarted.issue_identity_token("u", self.role)
+        with self.assertRaises(OperationConflict):
+            restarted.rotate_identity_token(
+                other["token_id"],
+                operation_id="rotate-recover",
+                ttl_seconds=60,
+            )
+
+        with restarted._conn(readonly=True) as conn:
+            row = conn.execute(
+                "SELECT * FROM identity_token_rotations WHERE universe=? AND operation_id=?",
+                ("u", "rotate-recover"),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertNotIn(first["token"], repr(tuple(row)))
 
     def test_expired_ticket_and_disabled_role_do_not_authenticate(self):
         get_universe_installer("demo")(self.w, "u")

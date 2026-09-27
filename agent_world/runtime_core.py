@@ -126,7 +126,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     @staticmethod
     def _schema_script(c, script):
         c.execute("BEGIN IMMEDIATE")
-        if c.execute("PRAGMA user_version").fetchone()[0] > 5:
+        if c.execute("PRAGMA user_version").fetchone()[0] > 6:
             raise WorldVersionMismatch("database schema is newer than this runtime")
         for statement in script.split(";"):
             statement = statement.strip()
@@ -135,7 +135,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
 
     def _init_db(self) -> None:
         with self._conn() as c:
-            if c.execute("PRAGMA user_version").fetchone()[0] > 5:
+            if c.execute("PRAGMA user_version").fetchone()[0] > 6:
                 raise WorldVersionMismatch("database schema is newer than this runtime")
             self._enable_wal(c)
             self._schema_script(
@@ -246,6 +246,19 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 );
                 CREATE INDEX IF NOT EXISTS idx_identity_tokens_scope
                   ON identity_tokens(universe,role_id);
+                CREATE TABLE IF NOT EXISTS identity_token_rotations(
+                  universe TEXT NOT NULL,
+                  operation_id TEXT NOT NULL,
+                  source_token_id TEXT NOT NULL,
+                  role_id TEXT NOT NULL,
+                  request_hash TEXT NOT NULL,
+                  replacement_token_id TEXT NOT NULL,
+                  derivation_version INTEGER NOT NULL,
+                  created_at REAL NOT NULL,
+                  PRIMARY KEY(universe,operation_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_identity_token_rotations_source
+                  ON identity_token_rotations(universe,source_token_id,created_at);
                 CREATE TABLE IF NOT EXISTS role_world_presence(
                   universe TEXT NOT NULL,
                   role_id TEXT NOT NULL,
@@ -300,7 +313,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             if "access_mode" not in {r["name"] for r in c.execute("PRAGMA table_info(identity_tokens)")}:
                 c.execute("ALTER TABLE identity_tokens ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'control'")
             self._init_streams_tx(c)
-            c.execute("PRAGMA user_version=5")
+            c.execute("PRAGMA user_version=6")
             c.execute("COMMIT")
 
     @staticmethod
@@ -450,6 +463,24 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         ).hexdigest()
         return "awid_" + digest
 
+    def _identity_token_from_rotation(
+        self,
+        conn: sqlite3.Connection,
+        source_token_id: str,
+        operation_id: str,
+        universe: str,
+        role_id: str,
+    ) -> str:
+        message = "\x00".join(
+            ["rotate-identity-v1", source_token_id, operation_id, universe, role_id]
+        ).encode("utf-8")
+        digest = hmac.new(
+            self._identity_secret(conn),
+            message,
+            hashlib.sha256,
+        ).hexdigest()
+        return "awid_" + digest
+
     def _issue_identity_token_tx(
         self,
         conn: sqlite3.Connection,
@@ -579,18 +610,68 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             "revoked_at": (float(row["revoked_at"]) if row["revoked_at"] is not None else None),
         }
 
+    def _identity_rotation_result_tx(self, c, rotation, *, replayed: bool) -> dict[str, Any]:
+        if int(rotation["derivation_version"]) != 1:
+            raise WorldVersionMismatch("unsupported identity rotation derivation version")
+        token = self._identity_token_from_rotation(
+            c,
+            rotation["source_token_id"],
+            rotation["operation_id"],
+            rotation["universe"],
+            rotation["role_id"],
+        )
+        replacement = c.execute(
+            """SELECT token_id,token_hash,universe,role_id,created_at,expires_at,access_mode
+               FROM identity_tokens WHERE token_id=?""",
+            (rotation["replacement_token_id"],),
+        ).fetchone()
+        if replacement is None or replacement["token_hash"] != self._identity_token_hash(token):
+            raise WorldRuntimeError("identity rotation receipt does not match its replacement credential")
+        return {
+            "token_id": replacement["token_id"],
+            "token": token,
+            "universe": replacement["universe"],
+            "role_id": replacement["role_id"],
+            "created_at": float(replacement["created_at"]),
+            "expires_at": (
+                float(replacement["expires_at"]) if replacement["expires_at"] is not None else None
+            ),
+            "access_mode": replacement["access_mode"],
+            "rotated_from_token_id": rotation["source_token_id"],
+            "operation_id": rotation["operation_id"],
+            "replayed": replayed,
+        }
+
+    def get_identity_token_rotation(self, universe: str, operation_id: str) -> dict[str, Any]:
+        identifier(universe, "universe")
+        identifier(operation_id, "operation_id")
+        with self._conn(readonly=True) as c:
+            row = c.execute(
+                """SELECT universe,operation_id,source_token_id,role_id,request_hash,
+                          replacement_token_id,derivation_version,created_at
+                   FROM identity_token_rotations WHERE universe=? AND operation_id=?""",
+                (universe, operation_id),
+            ).fetchone()
+            if row is None:
+                raise ReceiptNotFound("no committed identity rotation with this operation_id")
+            return self._identity_rotation_result_tx(c, row, replayed=True)
+
     def rotate_identity_token(
         self,
         token_id: str,
         *,
+        operation_id: str,
         ttl_seconds: float | None = None,
         expected_universe: str | None = None,
     ) -> dict[str, Any]:
-        now = time.time()
+        identifier(token_id, "token_id")
+        identifier(operation_id, "operation_id")
+        if ttl_seconds is not None:
+            ttl_seconds = duration(ttl_seconds, "identity ttl_seconds", 315360000)
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             try:
-                row = c.execute(
+                source = c.execute(
                     """SELECT t.universe,t.role_id,t.revoked_at,t.access_mode,
                               r.status AS role_status
                        FROM identity_tokens t
@@ -598,30 +679,85 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                        WHERE t.token_id=?""",
                     (token_id,),
                 ).fetchone()
-                if row is None or row["revoked_at"] is not None:
-                    raise InvalidIdentityToken("identity token is invalid or revoked")
-                if row["role_status"] is not None and row["role_status"] != "active":
-                    raise InvalidIdentityToken("role is disabled")
-                if expected_universe is not None and row["universe"] != expected_universe:
+                if source is None:
+                    raise InvalidIdentityToken("identity token not found")
+                if expected_universe is not None and source["universe"] != expected_universe:
                     raise IdentityScopeMismatch("identity token belongs to another universe")
+
+                request_hash = self._sha256(
+                    {"source_token_id": token_id, "ttl_seconds": ttl_seconds}
+                )
+                existing = c.execute(
+                    """SELECT universe,operation_id,source_token_id,role_id,request_hash,
+                              replacement_token_id,derivation_version,created_at
+                       FROM identity_token_rotations
+                       WHERE universe=? AND operation_id=?""",
+                    (source["universe"], operation_id),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        existing["source_token_id"] != token_id
+                        or existing["request_hash"] != request_hash
+                    ):
+                        raise OperationConflict(
+                            "operation_id already identifies a different identity rotation"
+                        )
+                    result = self._identity_rotation_result_tx(c, existing, replayed=True)
+                    c.execute("COMMIT")
+                    return result
+
+                if source["revoked_at"] is not None:
+                    raise InvalidIdentityToken("identity token is invalid or revoked")
+                if source["role_status"] is not None and source["role_status"] != "active":
+                    raise InvalidIdentityToken("role is disabled")
+
                 now = time.time()
+                token = self._identity_token_from_rotation(
+                    c,
+                    token_id,
+                    operation_id,
+                    source["universe"],
+                    source["role_id"],
+                )
                 replacement = self._issue_identity_token_tx(
                     c,
-                    row["universe"],
-                    row["role_id"],
+                    source["universe"],
+                    source["role_id"],
                     ttl_seconds=ttl_seconds,
                     now=now,
-                    access_mode=row["access_mode"],
+                    token_override=token,
+                    access_mode=source["access_mode"],
                 )
                 c.execute(
                     "UPDATE identity_tokens SET revoked_at=? WHERE token_id=?",
                     (now, token_id),
                 )
+                c.execute(
+                    """INSERT INTO identity_token_rotations(
+                         universe,operation_id,source_token_id,role_id,request_hash,
+                         replacement_token_id,derivation_version,created_at
+                       ) VALUES(?,?,?,?,?,?,1,?)""",
+                    (
+                        source["universe"],
+                        operation_id,
+                        token_id,
+                        source["role_id"],
+                        request_hash,
+                        replacement["token_id"],
+                        now,
+                    ),
+                )
                 c.execute("COMMIT")
             except Exception:
-                c.execute("ROLLBACK")
+                if c.in_transaction:
+                    c.execute("ROLLBACK")
                 raise
-        replacement["rotated_from_token_id"] = token_id
+
+        replacement.update(
+            rotated_from_token_id=token_id,
+            operation_id=operation_id,
+            replayed=False,
+        )
         return replacement
 
     @staticmethod

@@ -314,10 +314,12 @@ class WorldGateway:
         supplied_role = arguments.get("role_id")
         if supplied_role is not None:
             identifier(supplied_role, "role_id")
+        if self.auth_required and supplied_role is not None:
+            if identity is not None and supplied_role != identity["role_id"]:
+                raise IdentityScopeMismatch("request role_id does not match authenticated identity")
+            raise InvalidArguments("authenticated requests must omit role_id")
         role = bound_role(identity, supplied_role, auth_required=self.auth_required)
         args = dict(arguments)
-        if self.auth_required:
-            args.pop("role_id", None)  # Matching legacy role is tolerated but not advertised.
         if name in CORE:
             validate(core_schema(name, auth_required=self.auth_required), args)
         else:

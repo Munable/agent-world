@@ -15,10 +15,36 @@
 | I4 Runtime 不冒充用户／Agent | External Agent / Client、System Actor、Scheduled Effect | **已实现架构边界** | `tests/test_timers.py` 覆盖定时事项离线执行与不保存用户 token；系统行为与用户行为来源区分。 |
 | I5 提交事实独立于会话 | Commit、Receipt、authoritative state | **已实现核心机制** | receipt 恢复、进程重启、状态持久化测试存在；网络外部副作用不在该保证内。 |
 | I6 同一 Runtime 提交无半成品 | L4 原子提交；事务执行核心 | **有强回归覆盖** | `test_write_cannot_commit_partially`、output/schema failure、timer retry/rollback、history rollback 等。 |
-| I7 未知结果不靠猜测 | Operation + Receipt + structured recovery error | **已实现核心写操作语义** | receipt 恢复与同 ID replay 测试存在；`test_error_contract.py`、`test_structured_error_transport.py` 验证 HTTP/MCP 保留 recovery/retry/details。Capability Harness 还验证重启后 replay；identity token rotate 丢响应仍是已知缺口。 |
+| I7 未知结果不靠猜测 | Operation + Receipt + structured recovery error + credential rotation receipt | **已实现核心写操作语义** | 普通 Command receipt、同 ID replay、结构化 recovery 均有回归；identity token rotation 现在也以 operation_id 持久化恢复映射，可在响应丢失或 Runtime 重启后恢复同一 replacement credential。 |
 | I8 派生观察不创造事实 | View、Stream、Sync Position、Presentation 横轴 | **已实现主要边界** | view/stream/client tests 覆盖缓存、乱序、撤权、retention gap；具体 UI 仍需按世界正确命名业务状态。 |
-| I9 world instance 默认隔离 | World Instance、instance-scoped state/action | **支持接口层已实现；不是敌对代码安全沙箱** | `test_world_instances_are_isolated`、cross-universe write 回归存在。受信任 Python world code 与当前 raw connection escape hatch 不提供恶意租户机密隔离。 |
+| I9 world instance 默认隔离 | World Instance、instance-scoped state/action | **支持接口层已实现；不是敌对代码安全沙箱** | `test_world_instances_are_isolated`、cross-universe write 回归存在。FunctionContext 不再公开数据库连接；但受信任 Python World Package 仍与 Runtime 同进程，因此这不是恶意租户沙箱。 |
 | I10 Runtime 领域中立 | Domain Object 由世界定义；核心不含固定玩法 | **当前代码结构基本符合** | architecture boundary test 防止 core 反向依赖示例／adapter；有限示例只能证明未立即耦合，不能证明未来不会退化。 |
+
+## Runtime 能力矩阵
+
+本表只描述当前能力和缺口，不把“测试覆盖较少”误写成“功能不存在”。
+
+| 能力 | 当前状态 | 主要判断 |
+| --- | --- | --- |
+| Principal 归因与 world-scoped Credential | **已实现并有强回归** | Bearer credential 绑定 role + world instance；observe/control、撤权、过期与 session 绑定已有测试。 |
+| 跨独立部署 User Identity | **架构缺口** | 当前 Role 只在同一 Runtime 数据库稳定；还没有用户持有、不同部署可验证的身份证明。 |
+| 世界本地授权 | **已实现并有强回归** | Function authorization、state authorization、credential access mode 分离。 |
+| State / schema / CAS / journal | **已实现并有强回归** | 当前状态、版本、删除 tombstone、历史 journal、schema 与授权均有合同测试。 |
+| 原子 Command / Commit | **已实现并有强回归** | 状态、Receipt、Event、Stream、Timer 等受管效果在同一提交边界成立或回滚。 |
+| Operation / Receipt / 未知结果恢复 | **已实现核心机制** | 同 operation_id 重放、响应丢失恢复、重启后 receipt 恢复成立。 |
+| Credential rotation 未知结果恢复 | **本轮补齐** | rotate 要求 operation_id，并持久化 rotation receipt；不保存 replacement token 明文，可重建同一结果。 |
+| Notification Event / bounded wait | **已实现** | 定向事件、分页、cursor、bounded wait、取消与唤醒有测试。 |
+| Shared Stream | **已实现可选能力** | 有序发布、授权、cursor、历史截断/reset 与客户端去重已有覆盖。 |
+| View / Snapshot / Sync / Timeline | **已实现可选能力** | 授权投影、增量同步、checkpoint、retention gap、乱序客户端处理已有覆盖。 |
+| Control Lease / fencing | **已实现可选能力** | claim/renew/finish、过期与 stale runtime fencing 有测试；不作为所有行为前提。 |
+| Scheduled Effect / Timer | **已实现可选能力** | 持久 timer、离线 owner、retry/rollback、重启与 retention 有覆盖。 |
+| Retention | **已实现机制；长期策略仍需验证** | event/history/stream 保留与 gap recovery 已实现；长期压缩与真实增长仍需 soak。 |
+| 结构化错误与恢复提示 | **已实现** | recovery / retry_after / details 经 HTTP/MCP 保真。 |
+| HTTP / MCP 统一 Gateway | **已实现主要合同** | 同函数、同错误、receipt replay、identity/session 边界有跨 transport 测试。 |
+| 多参与者拓扑验证 | **已有基础 Harness** | 1→N、N→1、N→N、并发、撤权、重启恢复已覆盖；更大规模与网络分区仍待验证。 |
+| 外部系统副作用交付 | **明确缺口** | Runtime 事务不能给支付、第三方 API、文件等外部写入提供 exactly-once；尚无通用 outbox/delivery/compensation 合同。 |
+| 通用 Request/Response/Confirmation 模型 | **未证明需要** | 先由 Reference Application 验证；当前 State + Operation + Receipt + Event 足以承载具体世界流程。 |
+| 真实多宿主 Agent / 长期运行 | **验证缺口** | 不等于 Runtime 功能缺失；需要真实宿主、网络故障与 soak 证据。 |
 
 ## 证据使用规则
 

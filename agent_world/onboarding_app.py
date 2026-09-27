@@ -53,6 +53,7 @@ class ExchangeJoinTicketRequest(StrictModel):
 
 
 class RotateTokenRequest(StrictModel):
+    operation_id: str = Field(min_length=1, max_length=128)
     ttl_seconds: float | None = Field(default=None, gt=0)
 
 
@@ -80,7 +81,7 @@ def create_onboarding_app(
     identity_ttl_seconds: float | None = None,
 ) -> FastAPI:
     runtime = WorldRuntime(db_path)
-    app = FastAPI(title="Agent World Onboarding", version="0.5")
+    app = FastAPI(title="Agent World Onboarding", version="0.6")
     app.state.runtime = runtime
     app.state.universe = universe
     add_web_safety(app)
@@ -110,7 +111,7 @@ def create_onboarding_app(
     def health():
         return {
             "ok": True,
-            "version": "0.5",
+            "version": "0.6",
             "universe": universe,
             "operator_configured": bool(operator_key),
         }
@@ -240,9 +241,18 @@ def create_onboarding_app(
         require_operator(x_operator_key)
         return runtime.rotate_identity_token(
             token_id,
+            operation_id=body.operation_id,
             ttl_seconds=body.ttl_seconds,
             expected_universe=universe,
         )
+
+    @app.get("/v1/identity-token-rotations/{operation_id}")
+    def get_identity_token_rotation(
+        operation_id: str,
+        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+    ):
+        require_operator(x_operator_key)
+        return runtime.get_identity_token_rotation(universe, operation_id)
 
     @app.delete("/v1/identity-tokens/{token_id}")
     def revoke_identity_token(

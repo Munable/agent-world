@@ -4,8 +4,8 @@
 
 ## 版本与运行形态
 
-- Python package：`agent-world` 0.14.0，要求 Python 3.11+。
-- Runtime protocol 常量：0.13；SDK API：1。
+- Python package：`agent-world` 0.15.0，要求 Python 3.11+。
+- Runtime protocol 常量：0.14；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
 - World Definition 以受信任、同步 Python 回调在 Runtime 进程内执行。
@@ -40,7 +40,7 @@
 
 `identity_tokens` 与 `join_tickets` 都绑定 `role_id + universe`。这意味着同一个 Role profile 可以在同一数据库的多个 universe 中复用，但 **同一个当前 bearer token 不能跨 universe 使用，更不能自动跨独立部署验证**。这就是 G2 仍为部分实现的原因。
 
-当前 identity token 使用 `awid_` 前缀，Join Ticket 使用 `awjt_`，数据库保存 token hash。Join Ticket 最长允许 24 小时配置有效期；一次 ticket 只恢复／发放同一个凭据结果。credential rotate 丢失响应时仍缺少完整自助恢复合同。
+当前 identity token 使用 `awid_` 前缀，Join Ticket 使用 `awjt_`，数据库保存 token hash。Join Ticket 最长允许 24 小时配置有效期；一次 ticket 只恢复／发放同一个凭据结果。identity token rotation 现在要求稳定 `operation_id`，`identity_token_rotations` 保存恢复映射而不保存 replacement token 明文；相同操作可在响应丢失或 Runtime 重启后恢复同一凭据。
 
 ## 主要模块地图
 
@@ -71,9 +71,9 @@
 
 ## 当前 SQLite schema
 
-当前 schema `user_version` 为 5。主要表：
+当前 schema `user_version` 为 6。主要表：
 
-- identity / entry：`roles`、`role_world_presence`、`identity_tokens`、`join_tickets`。
+- identity / entry：`roles`、`role_world_presence`、`identity_tokens`、`join_tickets`、`identity_token_rotations`。
 - world registry：`world_definitions`、`function_registry`。
 - current state / operations：`world_state`、`operations`。
 - commit journal：`world_commits`、`state_changes`、`state_history_floors`。
@@ -90,7 +90,7 @@
 
 `agent_world.__all__` 当前导出：WorldRuntime、WorldDefinition、FunctionSpec、StateRule、RetentionPolicy、PresentationCue、StreamSpec、StreamEvent、ViewSpec、TimerSpec、TimerInvocation、RetryTimer、FunctionContext、FunctionOutcome、EventSpec。
 
-WorldDefinition 当前可声明 functions、state rules、state authorizer、bootstrap/initialize/migrations、views、timers、retention、streams 等；这些可选能力不是所有世界的必选模型。
+WorldDefinition 当前可声明 functions、state rules、state authorizer、bootstrap/initialize/migrations、views、timers、retention、streams 等；这些可选能力不是所有世界的必选模型。FunctionContext 对世界作者暴露受管 state / timer / stream / role 等 helper，不再暴露公共数据库连接。
 
 ## 当前 core tool surface
 
@@ -107,7 +107,7 @@ WorldDefinition 中声明的 functions 另外动态映射为可调用 world tool
 
 ## 当前 HTTP / 产品入口
 
-HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。产品／onboarding adapter 另外提供 role、join ticket、token rotate/revoke 与 join exchange。
+HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。产品／onboarding adapter 另外提供 role、join ticket、带 operation_id 的 token rotate/revoke、rotation receipt 查询与 join exchange。鉴权请求的主体只来自 credential，`role_id` 不属于鉴权调用参数。
 
 这些路径是当前 L6 表面，不应被 L1-L3 当成概念定义。
 
@@ -146,13 +146,11 @@ HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/de
 
 timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当前可见的 presentation events。这个机制是表现辅助，不是业务动作状态机。
 
-## Raw connection escape hatch 与信任边界
+## World Package 数据访问边界
 
-`FunctionContext.conn` 当前仍是直接 SQLite escape hatch，不属于推荐的可移植 World SDK 表面。SQLite authorizer 会禁止 world callback 自行控制事务、ATTACH/PRAGMA，并限制写入；managed WorldDefinition 在提交前还会重校验 raw state write 的 universe、版本、schema 与 state authorization。
+`FunctionContext` 不再公开数据库连接。World Package 的受支持数据路径是声明过的 state / timer / stream / role helper；实现内部仍持有私有 transaction handle 以完成这些操作，但它不是 SDK 合同。
 
-但是 **raw connection escape hatch 不是行级安全沙箱**：受信任 world callback 可以直接执行 SQL 读取，而且整个 Python World Package 本来就在 Runtime 进程／OS 权限内。当前架构因此只承诺受支持接口的业务隔离，不承诺对恶意 World Package 的机密隔离。
-
-如果未来要承载互不信任的第三方世界代码，必须改变 L5 信任／进程／存储架构，而不是继续给 `ctx.conn` 周围补字符串检查。
+当前 World Package 仍是部署方信任、与 Runtime 同进程执行的 Python 代码，因此这项收缩只是减少数据库形状耦合，并 **不把当前架构升级成恶意插件沙箱**。若未来要执行互不信任的第三方世界代码，仍需要独立的进程／权限／存储或真正的沙箱边界。
 
 ## 结构化错误与 Capability Harness
 
@@ -173,13 +171,11 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 
 这批 fixture 不创建 Conversation、Friend、Party 或其他产品对象，因此不能反向定义 Runtime 领域模型。以后新增拓扑／故障组合时优先扩展 Harness，而不是为每个实验重新造一个大场景。
 
-## 当前已知实现差距
+## 当前明确实现差距
 
-1. **G2 跨世界身份只部分实现。** 当前 token 仍绑定单 universe，独立部署缺少统一验证／信任架构。
-2. **共同事项没有通用模型。** Runtime 提供状态、Receipt、事件等底座，但没有统一 Request/Response/Confirmation/Completion 对象。
-3. **第三方／群众公裁未实现通用模型或合同。**
-4. **credential rotate 未知结果恢复仍不完整。**
-5. **外部系统副作用没有与 Runtime store 统一的 exactly-once / delivery contract。**
-6. **raw connection escape hatch 增加了世界代码与 SQLite 内部结构的耦合。** 当前没有兼容承诺要求保留它；应评估是否直接移除公开访问，而不是把它长期固化。
+1. **G2 跨世界身份只部分实现。** 当前 token 仍绑定单 universe，独立部署缺少用户持有、可验证的根身份证明与世界本地授权衔接。
+2. **外部系统副作用交付没有通用合同。** Runtime store 内部提交不能自动覆盖支付、第三方 API、文件等外部写入；尚无统一 outbox / delivery / compensation 能力。
 
-长期 soak、浏览器轨迹、更多平台矩阵属于验证缺口而不是 L6 功能缺口，统一记录在 [REFERENCE_GATE](REFERENCE_GATE.md)。未决设计见 [OPEN_DESIGN](OPEN_DESIGN.md)。
+共同事项模型、第三方／群众公裁等仍属于 [OPEN_DESIGN](OPEN_DESIGN.md) 的产品／领域设计问题，不能因为“尚未实现”就假装它们已经被证明应该进入 Runtime。
+
+长期 soak、浏览器轨迹、更多平台矩阵属于验证缺口而不是 L6 功能缺口，统一记录在 [REFERENCE_GATE](REFERENCE_GATE.md)。

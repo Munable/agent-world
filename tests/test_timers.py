@@ -342,10 +342,10 @@ class TimerTests(unittest.TestCase):
             self.w.call_function("u", "bad", self.role, {}, operation_id="bad")
         self.assertEqual(self.count("world_timers"), 0)
 
-    def test_raw_queue_mutation_is_rejected(self):
+    def test_internal_queue_mutation_is_rejected(self):
         self.arm()
         def raw(ctx, args):
-            ctx.conn.execute("DELETE FROM world_timers")
+            ctx._conn.execute("DELETE FROM world_timers")
             return FunctionOutcome({})
         install_world(self.w, "u", replace(WORLD, version=2, functions=(FunctionSpec("bad", raw, EMPTY),)))
         with self.assertRaises(WorldRuntimeError):
@@ -408,7 +408,7 @@ class TimerTests(unittest.TestCase):
     def test_bad_sql_in_one_handler_does_not_starve_other_timers(self):
         def bad_sql(ctx, args):
             if args.get("fail"):
-                ctx.conn.execute("SELECT no_such_column FROM no_such_table")
+                ctx._conn.execute("SELECT no_such_column FROM no_such_table")
             return finish(ctx, args)
         install_world(self.w, "u", replace(WORLD, version=2, timers=(TimerSpec("finish", bad_sql, TIMER_ARGS),)))
         self.arm("a", due=0, fail=True)

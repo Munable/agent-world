@@ -258,7 +258,7 @@ class RuntimeFunctions:
     def _validate_managed_state_changes_tx(
         self, c, ctx, marker, *, definition=None, enforce_authorizer=True, validate_values=True
     ):
-        """Revalidate legacy raw-SQL state writes before a managed-world commit."""
+        """Revalidate any direct internal state writes before a managed-world commit."""
         definition = definition or self._worlds.get(ctx.universe)
         if definition is None:
             return
@@ -485,9 +485,6 @@ class RuntimeFunctions:
         receipt = json.loads(row["receipt_json"])
         target = activity_claim.get("activity_id") if activity_claim else None
         previous_target = row["activity_id"]
-        # Legacy receipts predating activity_id metadata can identify their target in the result.
-        if previous_target is None and target is not None:
-            previous_target = receipt.get("result", {}).get("activity_id")
         if previous_target != target:
             raise OperationConflict("operation_id was used for a different activity")
         receipt["replayed"] = True

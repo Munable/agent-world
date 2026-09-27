@@ -26,18 +26,29 @@
 
 **归属：L2 身份不变量 + L3 身份模型 + L4 凭据／撤销合同 + L5 信任架构。优先级高。**
 
-L1/G2 已确定：用户控制底层身份，并应持有可跨不同世界验证该身份的凭证或等价证明；各世界仍分别授权。当前代码只有同一数据库内稳定 Role profile，bearer token 仍绑定单 universe，因此这不只是“删一个 universe 检查”的实现任务。
+L1/G2 已确定：用户控制底层身份，并应能向彼此独立的世界证明“这是同一个底层身份”，而各世界仍分别决定本地授权。当前 Role 只在同一 Runtime 数据库稳定，world-scoped bearer token 只证明某个世界内的调用资格，因此不能靠删除 universe 检查解决。
 
-需要明确：
+### 当前优先候选：用户持有根身份 + 世界本地调用凭据
 
-- 跨独立开发者／部署时，什么标识表示“同一个底层用户身份”。
-- 用户实际持有什么可跨世界证明身份的凭证或密钥；世界验证什么，而不是要求每个世界重新创建账号。
-- 信任根如何建立：共同 issuer、公钥／用户签名、联邦信任或其他机制尚未选择。
-- credential scope、最小披露、世界间可关联性和隐私边界。
-- revoke、rotate、丢响应恢复、设备更换和被盗凭据处理。
-- 世界自己的权限如何继续保持本地，避免“全局身份”变成“全局万能权限”。
+建议下一轮按以下结构做最小原型，而不是发一枚跨世界万能 bearer：
 
-在这些问题定稿前，当前 universe-scoped token 只能算过渡实现。
+1. **User-held Root Identity**：用户持有非对称根密钥或等价的可验证身份证明；Runtime／世界不持有用户根私钥。
+2. **Device / Agent Delegation**：具体设备或 Agent Host 使用由根身份明确委托、可限期／撤销的证明代表用户发起接入，避免把根私钥直接交给每个 Agent。
+3. **World Verification**：世界通过 challenge / proof-of-possession 验证根身份或有效委托，并把它映射到本世界的 Participant Profile。
+4. **World-local Credential**：验证身份后仍由该世界发放自己 scope 的调用凭据；身份成立不自动授予任何世界动作权限。
+
+这个结构能同时满足“同一用户跨世界可验证”和“各世界权限独立”，也不要求不同世界共享数据库或互相信任对方发出的 bearer token。
+
+仍需定稿：
+
+- 根身份采用什么标准／编码以及标识是否直接由公钥派生。
+- 是否默认允许不同世界关联同一全局标识，还是支持 pairwise / selective-disclosure 标识以降低跨世界跟踪。
+- 根密钥丢失、轮换、恢复与设备撤销怎样建立连续身份，而不是创建一个新用户。
+- 委托凭证的 scope、有效期、撤销发现与宿主 UX。
+- Participant Profile 哪些字段属于用户可携带资料，哪些永远是各世界本地事实。
+- 是否需要第三方 issuer / recovery authority；若需要，其信任范围必须显式。
+
+上述候选 **尚未实现，也不是最终协议选择**。下一步应先做最小 proof + 两个独立 world deployment 的验证实验，再决定正式 L3/L4 schema。
 
 ## 2. 共同事项的接续模型
 
@@ -65,26 +76,14 @@ L1/G2 已确定：用户控制底层身份，并应持有可跨不同世界验�
 
 Receipt、commit metadata、未决事项、终态 Scheduled Effect identity 等长期增长后的压缩／归档还没有统一合同。必须先确定旧 Operation 重放、未知结果恢复和业务终态语义，再决定何时可以明确过期。
 
-## 5. World Package 信任与 raw connection escape hatch
-
-**归属：L5 + L6。**
-
-当前 World Package 是部署方信任的 Python 代码，`FunctionContext.conn` 仍暴露直接 SQLite escape hatch。它不提供敌对租户隔离，也让世界代码知道 SQLite 内部结构。
-
-短期目标是继续保证 managed state write 不绕过 schema／authorization，并减少新世界对 raw connection 的依赖。若未来产品要托管互不信任的第三方世界代码，需要重新设计进程、权限、资源限制和存储隔离，而不是把现有业务 scope 描述成沙箱。
-
-## 明确实现缺口
+## 当前缺口状态
 
 | 项目 | 归属 | 当前状态 |
 | --- | --- | --- |
-| 跨世界身份 | L5/L6 相对 G2/I3 | 未定最终信任架构；当前 token universe-scoped。 |
-| credential rotate 丢响应恢复 | L4/L6 | 目前仍可能需要 operator 介入。 |
-| 通用共同事项辅助 | L3/L4 | 尚未决定是否值得提取为 Runtime 模型。 |
-| 第三方／群众公裁 | L3/L4 | 概念和成立规则未定稿。 |
-| 外部副作用交付 | L4/L5 | 没有通用 outbox / delivery / compensation contract。 |
-| raw connection escape hatch | L6 | 当前仍存在，但没有历史兼容承诺要求保留；应决定直接移除还是收缩为纯内部实现。 |
-
-managed raw-state write 当前仍经过 schema／authorization 重校验；该直接连接路径本身是否继续存在，按本文件的 raw connection 项单独处理。
+| 跨世界身份 | L2-L6 | **已确认 Runtime/产品根缺口。** 当前只有 world-scoped credential；候选架构见本文件第 1 节。 |
+| 外部副作用交付 | L4/L5 | **已确认边界缺口。** 需要外部写入时尚无通用 outbox / delivery / compensation contract。 |
+| 通用共同事项辅助 | L3/L4 | **未证明需要进入 Runtime。** 继续由 Reference Application 验证。 |
+| 第三方／群众公裁 | L3/L4 | **产品方向未定稿。** 先设计成立规则，不算 Runtime 当前缺原语。 |
 
 ## 待验证
 
@@ -92,7 +91,7 @@ managed raw-state write 当前仍经过 schema／authorization 重校验；该�
 
 长期运行需要继续观察连续操作、事件保留、未决事项、timer 积压、重启、多次升级、备份恢复和存储增长。缓存／表现仍需覆盖过期、驱逐、权限变化、乱序响应和换客户端。
 
-灯溪镇、灰烬地城等临时消费者不再承担“证明 Runtime 方向正确”的职责。只有当某个新实验明确针对一条可被反驳的假设时，才值得继续投入。
+临时消费者不承担“证明 Runtime 方向正确”的职责。只有当某个实验明确针对一条可被反驳的假设时，才值得继续投入；失去当前用途就删除。
 
 ## 暂不作为当前前提
 

@@ -67,6 +67,8 @@ Committed result 的重放必须返回原提交结果，而不是重新运行世
 
 若凭据、主体状态或控制租约在 Command 等待提交期间失效，Runtime 必须在提交前重新检查会影响提交资格的条件；已经失效的主体不能因为先排到队列就晚提交成功。
 
+会让当前凭据失效并产生 replacement credential 的变更同样必须遵守 I7：调用方需要稳定 operation identity 或等价持久恢复证据，使“服务端已经轮换但响应丢失”能够恢复同一结果，而不是只能人工重置或再创建另一枚凭据。重放同一 rotation operation 必须返回同一 replacement credential；同一 operation identity 不能被用于不同轮换意图。
+
 跨世界统一身份仍是产品目标但未完整实现；当前凭据形式与范围见 [IMPLEMENTATION](IMPLEMENTATION.md)。
 
 ## 可选控制租约
@@ -89,7 +91,7 @@ Runtime 的原子提交只覆盖它自己管理的世界数据与运行时效果
 
 授权投影与缓存见 [WORLD_DATA](WORLD_DATA.md)，共享观察见 [OBSERVATION_STREAMS](OBSERVATION_STREAMS.md)，持久时间见 [DURABLE_TIME](DURABLE_TIME.md)，数据保留见 [RETENTION](RETENTION.md)，Agent 交互接续见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。
 
-当前 SDK 类型、core tool 名称、HTTP/MCP 映射、限制值以及 raw connection escape hatch 的技术边界统一记录在 [IMPLEMENTATION](IMPLEMENTATION.md)，不在本合同里反向定义语义。
+当前 SDK 类型、core tool 名称、HTTP/MCP 映射、限制值以及 World Package 数据访问边界统一记录在 [IMPLEMENTATION](IMPLEMENTATION.md)，不在本合同里反向定义语义。
 
 ## EigenFlux 参考建议
 

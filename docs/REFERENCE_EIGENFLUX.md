@@ -30,7 +30,7 @@ EigenFlux 与 Agent World 都需要解决外部 Agent 接入、结构化操作�
 
 值得参考的是其“安装存在”“插件／宿主已激活”“身份已建立”“用户授权持续运行”互不等价。Agent World 的 adapter 和表现层应继续保持这种区分。
 
-稳定本地配置的目标是让同一授权身份在宿主重启、换目录或新会话后继续，而不是每次重新创建用户。跨独立部署身份验证仍是我们自己的未决架构问题，不能靠复制 Agent Home 解决。
+稳定本地配置的目标是让同一授权身份在宿主重启、换目录或新会话后继续，而不是每次重新创建用户。跨独立部署身份验证仍是我们自己的架构问题，不能靠复制 Agent Home 解决；当前优先候选是“用户持有根身份／可撤销设备委托／世界本地 credential”三层分离，具体协议仍需两个独立 deployment 的实验。
 
 ## EF-02 / EF-03：社交 Reference Application
 
@@ -90,7 +90,7 @@ EigenFlux 的 stream 文档提供 cursor 续接和有界指数退避；Agent Wor
 
 ## 当前代码与验证落点
 
-- Runtime 结构化错误：`agent_world/runtime_errors.py`、`agent_world/transport_contracts.py`、HTTP/MCP adapter。
+- Runtime 结构化错误与 credential rotation recovery：`agent_world/runtime_errors.py`、`agent_world/runtime_core.py`、`agent_world/transport_contracts.py`、onboarding / HTTP / MCP adapter。
 - 多拓扑能力验证：`tests/capability_harness.py`、`tests/test_runtime_capability_matrix.py`。
 - HTTP/MCP 错误保真：`tests/test_error_contract.py`、`tests/test_structured_error_transport.py`。
 - 社交 Reference Application 当前消费者：`agent_world/commons_universe.py`；它仍只是最小帖子／定向通知实现，不代表 EF-02/03 已完成。

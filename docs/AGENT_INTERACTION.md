@@ -46,6 +46,7 @@ Delivered、Read、Responded、Confirmed、Executed、Completed 是不同语义�
 ## Adapter / 客户端最低责任
 
 - 同一业务意图重试时保留原 Operation identity，新动作使用新身份。
+- 凭据轮换也保留稳定 operation_id；若响应丢失，先恢复 rotation receipt 或重放同一轮换操作，不能因为旧凭据已失效就另造一枚未知的新凭据。
 - 区分传输失败、模型失败、世界拒绝和已提交业务结果。
 - 忠实返回世界错误，不用“看起来成功”的 UI 掩盖拒绝。
 - 对缓存和异步响应执行身份、版本与顺序校验，拒绝过期／乱序结果。

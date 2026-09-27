@@ -227,6 +227,18 @@ class WorldSDKTests(unittest.TestCase):
             self.w.install_world("u", second)
         self.assertEqual(self.w.get_world_manifest("u")["version"], 1)
 
+    def test_function_context_does_not_expose_database_connection(self):
+        def inspect(ctx, args):
+            return FunctionOutcome({"has_public_conn": hasattr(ctx, "conn")})
+
+        world = replace(
+            self.definition(),
+            functions=(FunctionSpec("inspect", inspect, EMPTY, access="read"),),
+        )
+        self.w.install_world("u", world)
+        result = self.w.call_function("u", "inspect", self.a, {})
+        self.assertFalse(result["result"]["has_public_conn"])
+
     def test_declared_state_schema_enforced_in_transaction(self):
         def invalid(ctx, args):
             ctx.set_state("world", "count", "bad")
@@ -240,9 +252,9 @@ class WorldSDKTests(unittest.TestCase):
         with self.assertRaises(ReceiptNotFound):
             self.w.get_receipt("u", self.a, "bad")
 
-    def test_legacy_raw_sql_cannot_bypass_managed_state_schema(self):
+    def test_internal_sql_cannot_bypass_managed_state_schema(self):
         def raw(ctx, args):
-            ctx.conn.execute(
+            ctx._conn.execute(
                 "UPDATE world_state SET value_json=?,version=version+1,updated_at=? "
                 "WHERE universe=? AND scope='world' AND state_key='count'",
                 (json.dumps("bad"), ctx.now, ctx.universe),
@@ -259,9 +271,9 @@ class WorldSDKTests(unittest.TestCase):
         with self.assertRaises(ReceiptNotFound):
             self.w.get_receipt("u", self.a, "raw-bad")
 
-    def test_valid_legacy_raw_sql_remains_compatible_in_managed_world(self):
+    def test_commit_validator_accepts_valid_internal_state_write(self):
         def raw(ctx, args):
-            ctx.conn.execute(
+            ctx._conn.execute(
                 "UPDATE world_state SET value_json='2',version=version+1,updated_at=? "
                 "WHERE universe=? AND scope='world' AND state_key='count'",
                 (ctx.now, ctx.universe),
@@ -274,12 +286,12 @@ class WorldSDKTests(unittest.TestCase):
         self.assertTrue(result["result"]["ok"])
         self.assertEqual(self.w.get_state("u", "world", "count")["value"], 2)
 
-    def test_legacy_raw_sql_cannot_bypass_managed_state_authorizer(self):
+    def test_internal_sql_cannot_bypass_managed_state_authorizer(self):
         def own(ctx, scope, key, access):
             return scope == "role:" + ctx.actor_role_id
 
         def raw(ctx, args):
-            ctx.conn.execute(
+            ctx._conn.execute(
                 "INSERT INTO world_state(universe,scope,state_key,value_json,version,updated_at,deleted) "
                 "VALUES(?,?,?,?,1,?,0)",
                 (ctx.universe, "role:" + self.b, "value", "1", ctx.now),
@@ -344,7 +356,7 @@ class WorldSDKTests(unittest.TestCase):
         with self.assertRaises(PermissionDenied):
             self.w.call_function("u", "other.write", self.a, {}, operation_id="other")
 
-    def test_state_authorizer_can_inspect_shared_state_without_legacy_connection(self):
+    def test_state_authorizer_uses_authorization_state_api(self):
         shared_scope = "party:example"
 
         def authorize(ctx, scope, key, access):
@@ -428,66 +440,6 @@ class WorldSDKTests(unittest.TestCase):
             self.w.register_function(
                 "u", "undeclared", 1, "undeclared", EMPTY, lambda c, a: FunctionOutcome({})
             )
-
-    def test_database_upgrade_preserves_identity_state_and_receipts(self):
-        import hashlib
-
-        legacy = Path(self.temp.name) / "legacy.sqlite3"
-        token = "awid_" + "legacy-test-credential-not-production"
-        receipt = {
-            "ok": True,
-            "operation_id": "already-done",
-            "function_id": "counter.increment",
-            "function_version": 1,
-            "result": {"value": 5, "state_version": 7},
-            "event_seqs": [],
-            "replayed": False,
-        }
-        intent = {"function_id": "counter.increment", "arguments": {"amount": 1}}
-        with closing(sqlite3.connect(legacy)) as c:
-            c.executescript("""
-                CREATE TABLE world_state(universe TEXT NOT NULL,scope TEXT NOT NULL,state_key TEXT NOT NULL,
-                    value_json TEXT NOT NULL,version INTEGER NOT NULL,updated_at REAL NOT NULL,PRIMARY KEY(universe,scope,state_key));
-                CREATE TABLE roles(role_id TEXT PRIMARY KEY,display_name TEXT NOT NULL,avatar_ref TEXT,
-                    status TEXT NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL);
-                CREATE TABLE identity_tokens(token_id TEXT PRIMARY KEY,token_hash TEXT NOT NULL UNIQUE,universe TEXT NOT NULL,
-                    role_id TEXT NOT NULL,created_at REAL NOT NULL,expires_at REAL,revoked_at REAL);
-                CREATE TABLE operations(universe TEXT NOT NULL,actor_role_id TEXT NOT NULL,idempotency_key TEXT NOT NULL,
-                    function_id TEXT NOT NULL,function_version INTEGER NOT NULL,args_hash TEXT NOT NULL,
-                    receipt_json TEXT NOT NULL,created_at REAL NOT NULL,PRIMARY KEY(universe,actor_role_id,idempotency_key));
-                INSERT INTO roles VALUES('legacy-role','Legacy',NULL,'active',1,1);
-                INSERT INTO world_state VALUES('legacy','role:legacy-role','counter','5',7,1);
-            """)
-            c.execute(
-                "INSERT INTO identity_tokens VALUES('old-id',?,'legacy','legacy-role',1,NULL,NULL)",
-                (hashlib.sha256(token.encode()).hexdigest(),),
-            )
-            c.execute(
-                "INSERT INTO operations VALUES('legacy','legacy-role','already-done','counter.increment',1,?,?,1)",
-                (
-                    hashlib.sha256(
-                        json.dumps(intent, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest(),
-                    json.dumps(receipt),
-                ),
-            )
-            c.commit()
-        upgraded = WorldRuntime(legacy)
-        get_universe_installer("demo")(upgraded, "legacy")
-        self.assertEqual(upgraded.resolve_identity_token(token)["role_id"], "legacy-role")
-        self.assertEqual(upgraded.get_state("legacy", "role:legacy-role", "counter")["version"], 7)
-        replay = upgraded.call_function(
-            "legacy",
-            "counter.increment",
-            "legacy-role",
-            {"amount": 1},
-            operation_id="already-done",
-            identity_token=token,
-        )
-        self.assertTrue(replay["replayed"])
-        self.assertEqual(replay["result"]["value"], 5)
-        boot = upgraded.bootstrap("legacy", "legacy-role", identity_token=token)
-        self.assertEqual(boot["world_entry_state"]["view"]["counter"], 5)
 
     def test_concurrent_database_initialization_and_schema_guard(self):
         fresh = Path(self.temp.name) / "concurrent.sqlite3"

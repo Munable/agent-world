@@ -1,7 +1,7 @@
-"""Repository guard for already reproduced critical regressions.
+"""Repository guard for current critical contract coverage.
 
 This does not prove behavior; the named tests still execute normally. It only makes
-accidental deletion of the known regression coverage visible.
+accidental deletion of current contract coverage visible.
 """
 
 from pathlib import Path
@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 EXPECTED = {
     "test_world_sdk.py": {
-        "test_legacy_raw_sql_cannot_bypass_managed_state_schema",
-        "test_legacy_raw_sql_cannot_bypass_managed_state_authorizer",
-        "test_state_authorizer_can_inspect_shared_state_without_legacy_connection",
+        "test_internal_sql_cannot_bypass_managed_state_schema",
+        "test_internal_sql_cannot_bypass_managed_state_authorizer",
+        "test_state_authorizer_uses_authorization_state_api",
     },
     "test_managed_state_boundary.py": {
         "test_sdk_self_revocation_is_not_reauthorized_after_the_write",
