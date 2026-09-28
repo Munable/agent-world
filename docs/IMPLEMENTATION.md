@@ -4,8 +4,8 @@
 
 ## 版本与运行形态
 
-- Python package：`agent-world` 0.15.0，要求 Python 3.11+。
-- Runtime protocol 常量：0.14；SDK API：1。
+- Python package：`agent-world` 0.16.0，要求 Python 3.11+。
+- Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
 - World Definition 以受信任、同步 Python 回调在 Runtime 进程内执行。
@@ -16,9 +16,9 @@
 
 | 语义概念 | 当前实现映射 |
 | --- | --- |
-| User Identity | 尚无跨独立部署最终原语；当前以 `roles` 中稳定 profile + world-scoped credential 逼近。 |
-| Participant Profile | `roles` / Role Core；在同一数据库内不属于某个单独 universe。 |
-| Credential | `identity_tokens`；当前绑定 `role_id + universe`，access mode 为 `control` / `observe`。 |
+| User Identity | Ed25519 身份公钥；同一公钥跨世界表示同一底层身份。Runtime 通过 challenge signature 验证私钥持有。 |
+| Participant Profile | `identity_keys(universe, public_key) → role_id` 映射到 `roles`；同一公钥在不同 World Instance 可拥有不同本地档案。 |
+| Credential | `identity_tokens`；在持钥证明后由世界签发并绑定 `role_id + universe`，access mode 为 `control` / `observe`。它不是 User Identity 密钥。 |
 | World Definition | `WorldDefinition`。 |
 | World Instance | `universe` 字符串及所有按 universe 分区的持久记录。 |
 | Query / Command | `FunctionSpec(access="read" / "write")`。 |
@@ -36,11 +36,17 @@
 
 ## Identity 当前状态
 
-`roles` 在一个 Runtime 数据库内保存稳定 `role_id`、display name、avatar ref、status 与时间字段。`role_world_presence` 单独记录某 Role 是否进入过某 universe。
+User Identity 的现行根事实是 Ed25519 公钥。客户端先调用 key identity challenge 接口；Runtime 返回一次性 nonce 和要签名的精确字节串。客户端用对应私钥签名后提交，Runtime 验签成功才承认“当前调用者持有这把身份密钥”。
 
-`identity_tokens` 与 `join_tickets` 都绑定 `role_id + universe`。这意味着同一个 Role profile 可以在同一数据库的多个 universe 中复用，但 **同一个当前 bearer token 不能跨 universe 使用，更不能自动跨独立部署验证**。这就是 G2 仍为部分实现的原因。
+`identity_keys` 按 `universe + public_key` 保存本世界映射。世界第一次见到某公钥时，在同一 SQLite 写事务里创建新的 `roles` 档案、保存映射并签发本地 `identity_tokens` Credential；以后同一公钥再次完成持钥证明时回到原来的本地 role。不同公钥永远创建新的 User Identity / 本地档案，不存在换钥继承、身份合并或密钥找回映射。
 
-当前 identity token 使用 `awid_` 前缀，Join Ticket 使用 `awjt_`，数据库保存 token hash。Join Ticket 最长允许 24 小时配置有效期；一次 ticket 只恢复／发放同一个凭据结果。identity token rotation 现在要求稳定 `operation_id`，`identity_token_rotations` 保存恢复映射而不保存 replacement token 明文；相同操作可在响应丢失或 Runtime 重启后恢复同一凭据。
+Participant Profile 完全由世界本地保存。身份公钥不会携带 display name、avatar、资产、关系或其他世界档案；同一公钥在 World A 与 World B 可以对应不同 `role_id`、不同本地资料和不同业务权限。
+
+`identity_key_challenges` 保存短期 challenge、public key、过期时间和已签发的本地 token id。相同 challenge 在网络响应丢失后可重放并恢复同一个 world-local Credential；challenge 不能把身份映射到另一公钥。当前身份 challenge 最长 300 秒。
+
+当前 world-local identity token 使用 `awid_` 前缀并只绑定 `role_id + universe`；不同世界不能互相接受 bearer token。Token revoke / rotate 只管理本地 Credential，不改变 User Identity 公钥。Join Ticket 仍是 operator 管理的本地角色接入工具，不定义 User Identity。
+
+**密钥丢失没有恢复路径。** 没有原私钥就不能再次完成该公钥的持钥证明；旧本地档案可以作为历史事实保留，但对该用户而言成为不可再控制的死档。Runtime 当前没有、也不计划隐式提供密钥恢复、换钥继承或人工“认人”接口。
 
 ## 主要模块地图
 
@@ -71,9 +77,9 @@
 
 ## 当前 SQLite schema
 
-当前 schema `user_version` 为 6。主要表：
+当前 schema `user_version` 为 7。主要表：
 
-- identity / entry：`roles`、`role_world_presence`、`identity_tokens`、`join_tickets`、`identity_token_rotations`。
+- identity / entry：`roles`、`identity_keys`、`identity_key_challenges`、`role_world_presence`、`identity_tokens`、`join_tickets`、`identity_token_rotations`。
 - world registry：`world_definitions`、`function_registry`。
 - current state / operations：`world_state`、`operations`。
 - commit journal：`world_commits`、`state_changes`、`state_history_floors`。
@@ -107,7 +113,7 @@ WorldDefinition 中声明的 functions 另外动态映射为可调用 world tool
 
 ## 当前 HTTP / 产品入口
 
-HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。产品／onboarding adapter 另外提供 role、join ticket、带 operation_id 的 token rotate/revoke、rotation receipt 查询与 join exchange。鉴权请求的主体只来自 credential，`role_id` 不属于鉴权调用参数。
+HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。onboarding adapter 公开 key identity challenge / exchange，用于“公钥 + 持钥签名 → 本世界档案 + world-local Credential”；operator 管理面另外保留 role、join ticket、token rotate/revoke 与 rotation receipt。鉴权请求的主体只来自 credential，`role_id` 不属于鉴权调用参数。
 
 这些路径是当前 L6 表面，不应被 L1-L3 当成概念定义。
 
@@ -171,24 +177,10 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 
 这批 fixture 不创建 Conversation、Friend、Party 或其他产品对象，因此不能反向定义 Runtime 领域模型。以后新增拓扑／故障组合时优先扩展 Harness，而不是为每个实验重新造一个大场景。
 
-## 当前跨世界身份实验
-
-仓库当前保留 `experiments/cross_world_identity.py` 与 `experiments/cross_world_identity_cli.py` 作为 **可删除实验消费者**。它们不属于 `agent_world` package，也不改变当前 Runtime protocol / SDK。
-
-实验使用 Ed25519：
-
-- user-held root key 只在实验客户端侧存在；
-- root 签发 audience-bound device delegation；
-- world verifier 发一次性 challenge 并验证 device proof-of-possession；
-- 验证成功后只调用现有 `WorldRuntime.create_role` / `issue_identity_token` 建立本地 profile 与 world-scoped credential；
-- 两个独立进程和独立数据库没有共享 bearer state。
-
-实验的密码学依赖放在 `requirements-experiments.txt`，不会进入 `agent-world` 的运行时依赖。当前实验额外使用 sidecar identity DB，因此不是正式 Identity Core；它已经暴露“identity provenance 与 Runtime credential store 跨存储非原子”这一集成问题，正式方案必须重新选择提交边界。
 
 ## 当前明确实现差距
 
-1. **G2 跨世界身份只部分实现。** 当前 token 仍绑定单 universe，独立部署缺少用户持有、可验证的根身份证明与世界本地授权衔接。
-2. **外部系统副作用交付没有通用合同。** Runtime store 内部提交不能自动覆盖支付、第三方 API、文件等外部写入；尚无统一 outbox / delivery / compensation 能力。
+1. **外部系统副作用交付没有通用合同。** Runtime store 内部提交不能自动覆盖支付、第三方 API、文件等外部写入；尚无统一 outbox / delivery / compensation 能力。
 
 共同事项模型、第三方／群众公裁等仍属于 [OPEN_DESIGN](OPEN_DESIGN.md) 的产品／领域设计问题，不能因为“尚未实现”就假装它们已经被证明应该进入 Runtime。
 

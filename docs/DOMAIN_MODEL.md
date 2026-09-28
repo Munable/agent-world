@@ -6,10 +6,10 @@
 
 | 概念 | 含义 |
 | --- | --- |
-| User Identity | 用户控制的底层身份。产品目标要求它能够跨世界延续，但具体跨部署验证机制尚未完成。 |
+| User Identity | 用户持有的一把身份密钥所定义的底层身份。公钥相同即同一身份；公钥不同即不同身份。没有私钥就不能证明控制该身份。 |
 | Principal | 世界可以把行动归因到的主体，包括用户参与者或明确的系统主体。 |
-| Participant Profile | 与用户身份关联、可在世界接入时使用的稳定参与资料；世界自己的等级、关系、资产等仍属于世界状态。 |
-| Credential | 用来证明某次调用代表哪个主体、具有什么访问模式的可撤销凭据；凭据本身不是领域授权。 |
+| Participant Profile | 某个 World Instance 为一个 User Identity 建立的本地参与档案。它由该世界保存，不随身份密钥自动跨世界搬运；不同世界可以为同一公钥保存不同档案。 |
+| Credential | 世界在完成身份密钥持有证明后签发的本地调用凭据，用来让后续调用代表该世界中的 Principal；它不是身份密钥，也不是跨世界凭据。 |
 | External Agent / Client | 在 Runtime 外部运行、代表用户发起调用和呈现结果的程序。它不是独立权威来源，除非持有相应主体的授权凭据。 |
 | System Actor | 由 Runtime 按已声明机制执行的非用户主体，例如持久定时事项。其行为必须明确标记为系统来源。 |
 
@@ -50,7 +50,7 @@
 
 ## 核心关系
 
-- 一个 User Identity 关联稳定的 Participant Profile，并控制一个或多个可撤销 Credential；世界自己的角色属性、关系和资产仍属于该 World Instance 的 Domain Object / State Fact。
+- 一个 User Identity 可以在多个 World Instance 中分别映射到各自的 Participant Profile；同一公钥再次进入同一世界时回到原档案，新公钥则创建新的本地档案。每个世界自己签发本地 Credential，世界自己的角色属性、关系和资产仍属于该 World Instance 的 Domain Object / State Fact。
 - Credential 的作用是把一次调用可靠归因给某个 Principal；External Agent / Client 只是使用用户授权代表 Principal 发起调用，不因此成为新的权威主体。
 - 一个 World Definition 可以产生多个相互隔离的 World Instance；规则身份和持久实例身份不能混为一谈。
 - Principal 在某个 World Instance 中执行 Query 或 Command。Command 由 Operation 表示可重试意图，并在成功时形成 Commit 与 Receipt。

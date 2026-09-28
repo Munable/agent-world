@@ -52,6 +52,26 @@ class ExchangeJoinTicketRequest(StrictModel):
     ticket: str = Field(min_length=1, max_length=256)
 
 
+class CreateIdentityKeyChallengeRequest(StrictModel):
+    public_key: str = Field(min_length=1, max_length=128)
+    ttl_seconds: float = Field(default=120.0, gt=0, le=300)
+
+
+class ExchangeIdentityKeyChallengeRequest(StrictModel):
+    challenge_id: str = Field(min_length=1, max_length=128)
+    signature: str = Field(min_length=1, max_length=256)
+
+
+class CreateIdentityKeyChallengeRequest(StrictModel):
+    public_key: str = Field(min_length=1, max_length=128)
+    ttl_seconds: float = Field(default=120.0, gt=0, le=300)
+
+
+class ExchangeIdentityKeyChallengeRequest(StrictModel):
+    challenge_id: str = Field(min_length=1, max_length=128)
+    signature: str = Field(min_length=1, max_length=256)
+
+
 class RotateTokenRequest(StrictModel):
     operation_id: str = Field(min_length=1, max_length=128)
     ttl_seconds: float | None = Field(default=None, gt=0)
@@ -81,7 +101,7 @@ def create_onboarding_app(
     identity_ttl_seconds: float | None = None,
 ) -> FastAPI:
     runtime = WorldRuntime(db_path)
-    app = FastAPI(title="Agent World Onboarding", version="0.6")
+    app = FastAPI(title="Agent World Onboarding", version="0.7")
     app.state.runtime = runtime
     app.state.universe = universe
     add_web_safety(app)
@@ -111,9 +131,38 @@ def create_onboarding_app(
     def health():
         return {
             "ok": True,
-            "version": "0.6",
+            "version": "0.7",
             "universe": universe,
             "operator_configured": bool(operator_key),
+        }
+
+    @app.post("/v1/key-identities/challenges")
+    def issue_identity_key_challenge(body: CreateIdentityKeyChallengeRequest):
+        return runtime.issue_identity_key_challenge(
+            universe,
+            body.public_key,
+            ttl_seconds=body.ttl_seconds,
+        )
+
+    @app.post("/v1/key-identities/exchange")
+    def exchange_identity_key_challenge(body: ExchangeIdentityKeyChallengeRequest):
+        result = runtime.exchange_identity_key_challenge(
+            body.challenge_id,
+            body.signature,
+            expected_universe=universe,
+            identity_ttl_seconds=identity_ttl_seconds,
+        )
+        return {
+            **result,
+            "mcp": {
+                "url": mcp_url,
+                "authorization_scheme": "Bearer",
+                "authorization_token": result["identity"]["token"],
+            },
+            "next": {
+                "tool": "world.bootstrap",
+                "arguments": {},
+            },
         }
 
     @app.post("/v1/roles")

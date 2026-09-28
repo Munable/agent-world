@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -17,6 +18,9 @@ from .runtime_contracts import (
 from pathlib import Path
 from typing import Any, Callable
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 
 from .runtime_errors import (
     WorldRuntimeError,
@@ -32,6 +36,10 @@ from .runtime_errors import (
     CursorExpired,
     AuthenticationRequired,
     InvalidIdentityToken,
+    IdentityChallengeConsumed,
+    IdentityChallengeExpired,
+    IdentityChallengeInvalid,
+    IdentityKeyInvalid,
     IdentityScopeMismatch,
     RoleNotFound,
     RoleInvalid,
@@ -126,7 +134,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     @staticmethod
     def _schema_script(c, script):
         c.execute("BEGIN IMMEDIATE")
-        if c.execute("PRAGMA user_version").fetchone()[0] > 6:
+        if c.execute("PRAGMA user_version").fetchone()[0] > 7:
             raise WorldVersionMismatch("database schema is newer than this runtime")
         for statement in script.split(";"):
             statement = statement.strip()
@@ -135,7 +143,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
 
     def _init_db(self) -> None:
         with self._conn() as c:
-            if c.execute("PRAGMA user_version").fetchone()[0] > 6:
+            if c.execute("PRAGMA user_version").fetchone()[0] > 7:
                 raise WorldVersionMismatch("database schema is newer than this runtime")
             self._enable_wal(c)
             self._schema_script(
@@ -222,6 +230,30 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                   created_at REAL NOT NULL,
                   updated_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS identity_keys(
+                  universe TEXT NOT NULL,
+                  public_key TEXT NOT NULL,
+                  role_id TEXT NOT NULL,
+                  created_at REAL NOT NULL,
+                  PRIMARY KEY(universe,public_key),
+                  UNIQUE(universe,role_id),
+                  FOREIGN KEY(role_id) REFERENCES roles(role_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_identity_keys_role
+                  ON identity_keys(universe,role_id);
+                CREATE TABLE IF NOT EXISTS identity_key_challenges(
+                  challenge_id TEXT PRIMARY KEY,
+                  universe TEXT NOT NULL,
+                  public_key TEXT NOT NULL,
+                  nonce TEXT NOT NULL,
+                  created_at REAL NOT NULL,
+                  expires_at REAL NOT NULL,
+                  used_at REAL,
+                  used_token_id TEXT,
+                  created_profile INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_identity_key_challenges_scope
+                  ON identity_key_challenges(universe,public_key,created_at);
                 CREATE TABLE IF NOT EXISTS join_tickets(
                   ticket_id TEXT PRIMARY KEY,
                   ticket_hash TEXT NOT NULL UNIQUE,
@@ -313,7 +345,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             if "access_mode" not in {r["name"] for r in c.execute("PRAGMA table_info(identity_tokens)")}:
                 c.execute("ALTER TABLE identity_tokens ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'control'")
             self._init_streams_tx(c)
-            c.execute("PRAGMA user_version=6")
+            c.execute("PRAGMA user_version=7")
             c.execute("COMMIT")
 
     @staticmethod
@@ -376,27 +408,42 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             "updated_at": float(row["updated_at"]),
         }
 
+    def _create_role_tx(
+        self,
+        c: sqlite3.Connection,
+        display_name: str,
+        avatar_ref: str | None = None,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        name, avatar = self._normalize_role_profile(display_name, avatar_ref)
+        created_at = time.time() if now is None else now
+        for _ in range(5):
+            role_id = "awr_" + secrets.token_hex(12)
+            try:
+                c.execute(
+                    """INSERT INTO roles(
+                         role_id,display_name,avatar_ref,status,created_at,updated_at
+                       ) VALUES(?,?,?,'active',?,?)""",
+                    (role_id, name, avatar, created_at, created_at),
+                )
+                row = c.execute(
+                    """SELECT role_id,display_name,avatar_ref,status,created_at,updated_at
+                       FROM roles WHERE role_id=?""",
+                    (role_id,),
+                ).fetchone()
+                return self._row_to_role(row)
+            except sqlite3.IntegrityError:
+                continue
+        raise RoleInvalid("could not allocate a unique role_id")
+
     def create_role(
         self,
         display_name: str,
         avatar_ref: str | None = None,
     ) -> dict[str, Any]:
-        name, avatar = self._normalize_role_profile(display_name, avatar_ref)
-        now = time.time()
         with self._conn() as c:
-            for _ in range(5):
-                role_id = "awr_" + secrets.token_hex(12)
-                try:
-                    c.execute(
-                        """INSERT INTO roles(
-                             role_id,display_name,avatar_ref,status,created_at,updated_at
-                           ) VALUES(?,?,?,'active',?,?)""",
-                        (role_id, name, avatar, now, now),
-                    )
-                    return self.get_role(role_id)
-                except sqlite3.IntegrityError:
-                    continue
-        raise RoleInvalid("could not allocate a unique role_id")
+            return self._create_role_tx(c, display_name, avatar_ref)
 
     def get_role(self, role_id: str) -> dict[str, Any]:
         if not role_id:
@@ -442,6 +489,355 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         if result.rowcount != 1:
             raise RoleNotFound(role_id)
         return self.get_role(role_id)
+
+    @staticmethod
+    def _b64url_encode(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+    @staticmethod
+    def _b64url_decode(value: str, label: str, expected_length: int) -> bytes:
+        if not isinstance(value, str) or not value or len(value) > 512:
+            raise IdentityKeyInvalid(f"invalid {label}")
+        try:
+            padded = value + "=" * (-len(value) % 4)
+            raw = base64.b64decode(
+                padded.encode("ascii"),
+                altchars=b"-_",
+                validate=True,
+            )
+        except (ValueError, UnicodeEncodeError) as exc:
+            raise IdentityKeyInvalid(f"invalid {label}") from exc
+        if len(raw) != expected_length:
+            raise IdentityKeyInvalid(f"invalid {label} length")
+        return raw
+
+    @classmethod
+    def _normalize_identity_public_key(cls, public_key: str) -> tuple[str, bytes]:
+        raw = cls._b64url_decode(public_key, "identity public key", 32)
+        try:
+            Ed25519PublicKey.from_public_bytes(raw)
+        except ValueError as exc:
+            raise IdentityKeyInvalid("invalid identity public key") from exc
+        return cls._b64url_encode(raw), raw
+
+    @staticmethod
+    def _identity_key_fingerprint(public_key_raw: bytes) -> str:
+        return hashlib.sha256(public_key_raw).hexdigest()
+
+    @staticmethod
+    def _identity_key_challenge_message(
+        universe: str,
+        challenge_id: str,
+        nonce: str,
+    ) -> bytes:
+        return "\x00".join(
+            ["agent-world-key-identity-v1", universe, challenge_id, nonce]
+        ).encode("utf-8")
+
+    def _identity_token_from_key_challenge(
+        self,
+        conn: sqlite3.Connection,
+        public_key: str,
+        challenge_id: str,
+        universe: str,
+        role_id: str,
+    ) -> str:
+        message = "\x00".join(
+            ["key-identity-token-v1", public_key, challenge_id, universe, role_id]
+        ).encode("utf-8")
+        digest = hmac.new(
+            self._identity_secret(conn),
+            message,
+            hashlib.sha256,
+        ).hexdigest()
+        return "awid_" + digest
+
+    def issue_identity_key_challenge(
+        self,
+        universe: str,
+        public_key: str,
+        *,
+        ttl_seconds: float = 120.0,
+    ) -> dict[str, Any]:
+        identifier(universe, "universe")
+        normalized_key, _ = self._normalize_identity_public_key(public_key)
+        ttl_seconds = duration(ttl_seconds, "identity challenge ttl_seconds", 300)
+        now = time.time()
+        challenge_id = "awkc_" + secrets.token_hex(16)
+        nonce = self._b64url_encode(secrets.token_bytes(32))
+        message = self._identity_key_challenge_message(universe, challenge_id, nonce)
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO identity_key_challenges(
+                     challenge_id,universe,public_key,nonce,created_at,expires_at,
+                     used_at,used_token_id,created_profile
+                   ) VALUES(?,?,?,?,?,?,NULL,NULL,NULL)""",
+                (
+                    challenge_id,
+                    universe,
+                    normalized_key,
+                    nonce,
+                    now,
+                    now + ttl_seconds,
+                ),
+            )
+        return {
+            "version": "agent-world-key-identity-v1",
+            "challenge_id": challenge_id,
+            "universe": universe,
+            "public_key": normalized_key,
+            "nonce": nonce,
+            "message": self._b64url_encode(message),
+            "expires_at": now + ttl_seconds,
+        }
+
+    def _verify_identity_key_signature(
+        self,
+        public_key: str,
+        universe: str,
+        challenge_id: str,
+        nonce: str,
+        signature: str,
+    ) -> None:
+        normalized_key, raw_key = self._normalize_identity_public_key(public_key)
+        if normalized_key != public_key:
+            raise IdentityKeyInvalid("identity public key is not canonical")
+        signature_raw = self._b64url_decode(signature, "identity signature", 64)
+        message = self._identity_key_challenge_message(universe, challenge_id, nonce)
+        try:
+            Ed25519PublicKey.from_public_bytes(raw_key).verify(signature_raw, message)
+        except InvalidSignature as exc:
+            raise IdentityChallengeInvalid("identity key proof is invalid") from exc
+
+    def _identity_key_result_tx(
+        self,
+        c: sqlite3.Connection,
+        challenge,
+        role,
+        *,
+        replayed: bool,
+    ) -> dict[str, Any]:
+        token_id = challenge["used_token_id"]
+        if not token_id:
+            raise IdentityChallengeConsumed("identity challenge has no recoverable credential")
+        token = self._identity_token_from_key_challenge(
+            c,
+            challenge["public_key"],
+            challenge["challenge_id"],
+            challenge["universe"],
+            role["role_id"],
+        )
+        token_row = c.execute(
+            """SELECT token_id,token_hash,universe,role_id,created_at,expires_at,revoked_at,access_mode
+               FROM identity_tokens WHERE token_id=?""",
+            (token_id,),
+        ).fetchone()
+        now = time.time()
+        if token_row is None or token_row["token_hash"] != self._identity_token_hash(token):
+            raise WorldRuntimeError("identity key challenge credential integrity mismatch")
+        if token_row["revoked_at"] is not None:
+            raise IdentityChallengeConsumed("identity challenge credential was later revoked")
+        if token_row["expires_at"] is not None and float(token_row["expires_at"]) <= now:
+            raise IdentityChallengeConsumed("identity challenge credential has expired")
+        return {
+            "version": "agent-world-key-identity-v1",
+            "public_key": challenge["public_key"],
+            "created_profile": bool(challenge["created_profile"]),
+            "replayed": replayed,
+            "role_profile": self._row_to_role(role),
+            "identity": {
+                "token_id": token_row["token_id"],
+                "token": token,
+                "universe": token_row["universe"],
+                "role_id": token_row["role_id"],
+                "created_at": float(token_row["created_at"]),
+                "expires_at": (
+                    float(token_row["expires_at"])
+                    if token_row["expires_at"] is not None
+                    else None
+                ),
+                "access_mode": token_row["access_mode"],
+            },
+        }
+
+    def exchange_identity_key_challenge(
+        self,
+        challenge_id: str,
+        signature: str,
+        *,
+        expected_universe: str | None = None,
+        identity_ttl_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        identifier(challenge_id, "challenge_id")
+        if not isinstance(signature, str) or not signature:
+            raise IdentityChallengeInvalid("identity signature is required")
+        if identity_ttl_seconds is not None:
+            identity_ttl_seconds = duration(
+                identity_ttl_seconds,
+                "identity ttl_seconds",
+                315360000,
+            )
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                challenge = c.execute(
+                    """SELECT challenge_id,universe,public_key,nonce,created_at,expires_at,
+                              used_at,used_token_id,created_profile
+                       FROM identity_key_challenges WHERE challenge_id=?""",
+                    (challenge_id,),
+                ).fetchone()
+                if challenge is None:
+                    raise IdentityChallengeInvalid("identity challenge not found")
+                if (
+                    expected_universe is not None
+                    and challenge["universe"] != expected_universe
+                ):
+                    raise IdentityScopeMismatch(
+                        "identity challenge belongs to another universe"
+                    )
+
+                self._verify_identity_key_signature(
+                    challenge["public_key"],
+                    challenge["universe"],
+                    challenge["challenge_id"],
+                    challenge["nonce"],
+                    signature,
+                )
+
+                mapping = c.execute(
+                    """SELECT k.role_id,r.display_name,r.avatar_ref,r.status,
+                              r.created_at,r.updated_at
+                       FROM identity_keys k
+                       JOIN roles r ON r.role_id=k.role_id
+                       WHERE k.universe=? AND k.public_key=?""",
+                    (challenge["universe"], challenge["public_key"]),
+                ).fetchone()
+
+                if challenge["used_at"] is not None:
+                    if mapping is None:
+                        raise WorldRuntimeError(
+                            "identity challenge mapping is missing after credential issuance"
+                        )
+                    if mapping["status"] != "active":
+                        raise RoleInactive(mapping["role_id"])
+                    result = self._identity_key_result_tx(
+                        c,
+                        challenge,
+                        mapping,
+                        replayed=True,
+                    )
+                    c.execute("COMMIT")
+                    return result
+
+                now = time.time()
+                if float(challenge["expires_at"]) <= now:
+                    raise IdentityChallengeExpired("identity challenge has expired")
+
+                created_profile = False
+                if mapping is None:
+                    _, raw_key = self._normalize_identity_public_key(
+                        challenge["public_key"]
+                    )
+                    display_name = "key-" + self._identity_key_fingerprint(raw_key)[:12]
+                    profile = self._create_role_tx(
+                        c,
+                        display_name,
+                        now=now,
+                    )
+                    c.execute(
+                        """INSERT INTO identity_keys(universe,public_key,role_id,created_at)
+                           VALUES(?,?,?,?)""",
+                        (
+                            challenge["universe"],
+                            challenge["public_key"],
+                            profile["role_id"],
+                            now,
+                        ),
+                    )
+                    mapping = c.execute(
+                        """SELECT k.role_id,r.display_name,r.avatar_ref,r.status,
+                                  r.created_at,r.updated_at
+                           FROM identity_keys k
+                           JOIN roles r ON r.role_id=k.role_id
+                           WHERE k.universe=? AND k.public_key=?""",
+                        (challenge["universe"], challenge["public_key"]),
+                    ).fetchone()
+                    created_profile = True
+
+                if mapping["status"] != "active":
+                    raise RoleInactive(mapping["role_id"])
+
+                token = self._identity_token_from_key_challenge(
+                    c,
+                    challenge["public_key"],
+                    challenge["challenge_id"],
+                    challenge["universe"],
+                    mapping["role_id"],
+                )
+                identity = self._issue_identity_token_tx(
+                    c,
+                    challenge["universe"],
+                    mapping["role_id"],
+                    ttl_seconds=identity_ttl_seconds,
+                    now=now,
+                    token_override=token,
+                )
+                updated = c.execute(
+                    """UPDATE identity_key_challenges
+                       SET used_at=?,used_token_id=?,created_profile=?
+                       WHERE challenge_id=? AND used_at IS NULL""",
+                    (
+                        now,
+                        identity["token_id"],
+                        1 if created_profile else 0,
+                        challenge["challenge_id"],
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise IdentityChallengeConsumed(
+                        "identity challenge was concurrently consumed"
+                    )
+                challenge = c.execute(
+                    """SELECT challenge_id,universe,public_key,nonce,created_at,expires_at,
+                              used_at,used_token_id,created_profile
+                       FROM identity_key_challenges WHERE challenge_id=?""",
+                    (challenge_id,),
+                ).fetchone()
+                result = self._identity_key_result_tx(
+                    c,
+                    challenge,
+                    mapping,
+                    replayed=False,
+                )
+                c.execute("COMMIT")
+                return result
+            except Exception:
+                if c.in_transaction:
+                    c.execute("ROLLBACK")
+                raise
+
+    def get_identity_key_profile(
+        self,
+        universe: str,
+        public_key: str,
+    ) -> dict[str, Any] | None:
+        identifier(universe, "universe")
+        normalized_key, _ = self._normalize_identity_public_key(public_key)
+        with self._conn(readonly=True) as c:
+            row = c.execute(
+                """SELECT k.public_key,r.role_id,r.display_name,r.avatar_ref,r.status,
+                          r.created_at,r.updated_at
+                   FROM identity_keys k
+                   JOIN roles r ON r.role_id=k.role_id
+                   WHERE k.universe=? AND k.public_key=?""",
+                (universe, normalized_key),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "public_key": row["public_key"],
+            "role_profile": self._row_to_role(row),
+        }
 
     @staticmethod
     def _identity_token_hash(token: str) -> str:

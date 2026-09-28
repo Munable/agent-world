@@ -61,15 +61,21 @@ Receipt 只证明一个 Operation 的提交结果。跨多次调用的请求、�
 
 Committed result 的重放必须返回原提交结果，而不是重新运行世界规则或重新抽取随机结果。
 
-## 身份与撤销
+## 身份密钥与世界本地凭据
 
-调用身份来自鉴权边界，而不是客户端在业务参数里声称“我是某人”。身份成立后，世界仍必须独立判断动作资格。
+User Identity 只由身份密钥决定。进入世界时，调用方先提供身份公钥，并通过世界发出的新鲜 challenge 对应的签名证明自己持有私钥。仅知道公钥、档案内容或旧消息不能代替持钥证明。
 
-若凭据、主体状态或控制租约在 Command 等待提交期间失效，Runtime 必须在提交前重新检查会影响提交资格的条件；已经失效的主体不能因为先排到队列就晚提交成功。
+世界完成持钥证明后按 `公钥 → 本世界 Participant Profile` 查找映射：已有映射就回到原档案；没有映射就创建新档案。新公钥永远是新身份，不能声明自己继承另一公钥的旧档案。Participant Profile 是世界本地事实，不随公钥自动复制到其他世界。
 
-会让当前凭据失效并产生 replacement credential 的变更同样必须遵守 I7：调用方需要稳定 operation identity 或等价持久恢复证据，使“服务端已经轮换但响应丢失”能够恢复同一结果，而不是只能人工重置或再创建另一枚凭据。重放同一 rotation operation 必须返回同一 replacement credential；同一 operation identity 不能被用于不同轮换意图。
+密钥丢失后，旧身份不能恢复。Runtime 不提供身份密钥轮换继承、找回、合并或人工身份恢复合同。若用户改用另一把密钥，世界必须把它当作新的 User Identity。
 
-跨世界统一身份仍是产品目标但未完整实现；当前凭据形式与范围见 [IMPLEMENTATION](IMPLEMENTATION.md)。
+持钥证明只建立底层身份，不直接授予世界动作权限。世界可以在验证成功后签发自己 scope 的短期／可撤销 Credential 供后续调用使用；该 Credential 只属于本世界，撤销或轮换它不会改变底层身份密钥。不同世界不能互相接受对方签发的本地 Credential。
+
+调用身份来自鉴权边界，而不是客户端在业务参数里声称“我是某人”。身份成立后，世界仍必须独立判断动作资格。若本地 Credential、Participant Profile 状态或控制租约在 Command 等待提交期间失效，Runtime 必须在提交前重新检查会影响提交资格的条件。
+
+会让当前本地 Credential 失效并产生 replacement credential 的变更同样必须遵守 I7：调用方需要稳定 operation identity 或等价持久恢复证据，使“服务端已经轮换本地 Credential 但响应丢失”能够恢复同一结果。这里的 Credential rotation 不是 User Identity 密钥轮换。
+
+当前密钥证明与本地凭据的具体实现见 [IMPLEMENTATION](IMPLEMENTATION.md)。
 
 ## 可选控制租约
 

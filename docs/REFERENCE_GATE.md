@@ -62,7 +62,8 @@ EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFL
 
 当前关键证据入口包括：
 
-- `tests/test_foundation.py`：事务、Operation/Receipt、身份、Join Ticket、credential rotation receipt、撤权、并发与基础恢复。
+- `tests/test_foundation.py`：事务、Operation/Receipt、本地 Credential、Join Ticket、credential rotation receipt、撤权、并发与基础恢复。
+- `tests/test_key_identity.py`：身份公钥持钥证明、首次建档、同钥回档、新钥新身份、跨世界本地档案／本地 bearer、错误签名、过期 challenge 与禁用档案。
 - `tests/test_onboarding.py`：operator credential rotation 的 operation_id、丢响应重放与 receipt 查询。
 - `tests/test_transport.py`：HTTP/MCP 同源语义、会话身份绑定、严格主体归因、wait/cancel/wakeup、跨 transport replay。
 - `tests/test_error_contract.py`、`tests/test_structured_error_transport.py`：结构化 recovery / retry / details 及 HTTP/MCP 保真。
@@ -71,7 +72,7 @@ EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFL
 - `tools/check_package.py`：当前 package 构建与 checkout 外 probe。
 - 两份 Node 客户端测试：当前 View / Stream 客户端合同。
 
-当前 0.15.0 代码树已重新执行：`python tools/run_tests.py` 共 **213 个 unittest 全部通过**，其中 `tests/test_cross_world_identity.py` 的 **9 个身份实验测试**包含独立子进程 A/B；`python tools/check_package.py` 通过 wheel 构建、独立安装与 checkout 外 package probe；`node tests/view_client.test.mjs` 与 `node tests/stream_client.test.mjs` 均通过。这个数字只描述当前树，不作为未来提交的永久成绩单。
+当前 0.16.0 代码树已重新执行：`python tools/run_tests.py` 共 **213 个 unittest 全部通过**，其中 `tests/test_key_identity.py` 的 **9 个密钥身份合同测试**覆盖首次建档、同钥回档、新钥新身份、跨世界本地档案／本地 bearer、错误签名、过期 challenge、禁用档案和 challenge 重放；`python tools/check_package.py` 通过 wheel 构建、独立安装与 checkout 外 package probe；两份 Node 客户端合同测试均通过。这个数字只描述当前树，不作为未来提交的永久成绩单。
 
 ## 新实验最低要求
 
@@ -85,31 +86,20 @@ EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFL
 
 优先补最小回归；只有交互性质无法被小夹具表达时，才增加更大消费者。失去当前验证用途的实验材料直接删除，过去内容由 Git 历史保存。
 
-## 跨世界身份实验状态
+## 密钥身份验证证据
 
-候选架构见 [OPEN_DESIGN](OPEN_DESIGN.md#1-跨世界身份架构)。当前实验代码在 `experiments/cross_world_identity.py` 与对应 subprocess driver；它们不是稳定 Runtime API。
+当前正式合同只验证“密钥就是身份”：
 
-当前已经实际验证：
+1. Ed25519 公钥作为 User Identity；世界通过一次性 challenge + signature 验证私钥持有。
+2. 同一公钥第一次进入某 World Instance 时创建本地 Participant Profile；以后同钥回到同一档案。
+3. 新公钥创建新身份／新档案，不允许通过名字、档案内容或声明认领旧公钥档案。
+4. 同一公钥进入两个独立 Runtime 时，两边可以保存不同本地 profile / role_id；不会搬运 display name、avatar、资产或权限。
+5. 每个世界独立签发 bearer Credential；A 的 Credential 在 B 无效。
+6. challenge 过期、错误私钥签名和禁用本地档案都会拒绝进入。
+7. 同一 challenge 的网络重试恢复同一个本地 Credential，不重复创建档案。
+8. 身份密钥没有恢复／换钥继承接口；这不是待补功能，而是当前 L2 明确边界。
 
-1. **两个独立进程／数据库。** A/B 由不同 Python 进程打开各自 Runtime DB 与 identity DB；同一个用户根身份可分别完成 challenge proof。
-2. **身份连续但授权本地。** 两边识别相同 root identity，却创建各自本地 role/profile；A 的 bearer credential 在 B 无效。
-3. **device / Agent delegation。** root 可委托具体 device 公钥，并限制 audience、能力和有效期；换设备、verifier 重启后仍能回到原本本地 profile。
-4. **撤销。** root-signed delegation revocation 到达某世界后，该世界拒绝旧 delegation，并撤销从它发出的本地 credential；只通知 A 时 B 不会神秘同步，明确暴露 revocation propagation 问题。
-5. **root rotation。** old root + new root 双签名能证明主动轮换连续性，保留两个世界各自原本 profile，并拒绝旧 root 后续 proof。
-6. **故障／攻击边界。** challenge 重放、过期 challenge、过期 delegation、错误 audience、device signature 篡改、root delegation signature 篡改、root rotation 单边签名篡改、旧 delegation replay 均被拒绝。
-7. **私钥边界。** proof/delegation 只携带公钥和签名；实验世界不接收 root private key。
-
-当前实验 **没有证明**：
-
-- root 私钥已经丢失／被盗时如何恢复同一身份；当前 rotation 需要 old root 参与。
-- revocation 如何可靠传播到所有独立部署，以及世界应要求多新的撤销状态。
-- 全局 root_id 的隐私是否可接受；当前公钥哈希可直接跨世界关联。
-- identity sidecar 与 Runtime credential store 的跨存储原子性；实验仅有补偿逻辑。
-- 协议编码、keychain / hardware key、用户授权 UI、第三方 issuer / recovery authority。
-- 任何跨世界业务权限；身份成立仍不等于世界授权。
-
-因此当前结论是：**“用户持有根身份 → device delegation → world challenge verification → world-local credential”这个架构方向已被最小实验证明可行，但还不够进入正式 L3/L4 合同。**
 
 ## 当前仍缺的验证
 
-长期 soak、当前提交的完整远端 CI 矩阵、真实多宿主 Agent、跨机器网络分区、跨机器／真实部署身份验证、生产数据库迁移和真实用户使用仍需要独立证据。
+长期 soak、当前提交的完整远端 CI 矩阵、真实多宿主 Agent、跨机器网络分区、生产数据库迁移和真实用户使用仍需要独立证据。

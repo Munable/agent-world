@@ -123,6 +123,22 @@ class InvalidIdentityToken(WorldRuntimeError):
     recovery = "reauthenticate"
 
 
+class IdentityKeyInvalid(WorldRuntimeError):
+    recovery = "use_valid_identity_key"
+
+
+class IdentityChallengeInvalid(WorldRuntimeError):
+    recovery = "request_new_identity_challenge"
+
+
+class IdentityChallengeExpired(WorldRuntimeError):
+    recovery = "request_new_identity_challenge"
+
+
+class IdentityChallengeConsumed(WorldRuntimeError):
+    recovery = "request_new_identity_challenge"
+
+
 class IdentityScopeMismatch(WorldRuntimeError):
     recovery = "use_matching_credential"
 

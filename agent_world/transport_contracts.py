@@ -25,6 +25,10 @@ from .runtime_errors import (
     CursorInvalid,
     FunctionNotFound,
     FunctionVersionMismatch,
+    IdentityChallengeConsumed,
+    IdentityChallengeExpired,
+    IdentityChallengeInvalid,
+    IdentityKeyInvalid,
     IdentityScopeMismatch,
     InvalidArguments,
     InvalidIdentityToken,
@@ -242,15 +246,15 @@ def error_response(exc: Exception):
         return 404, _error_payload("TimerNotFound", str(exc), retryable=False)
     if isinstance(exc, ViewNotFound):
         return 404, _error_payload("ViewNotFound", str(exc), retryable=False)
-    if isinstance(exc, (AuthenticationRequired, InvalidIdentityToken)):
+    if isinstance(exc, (AuthenticationRequired, InvalidIdentityToken, IdentityChallengeInvalid)):
         status = 401
     elif isinstance(exc, (IdentityScopeMismatch, PermissionDenied, RoleInactive)):
         status = 403
     elif isinstance(exc, (FunctionNotFound, RoleNotFound, ActivityNotFound, ReceiptNotFound)):
         status = 404
-    elif isinstance(exc, (JoinTicketExpired, JoinTicketConsumed)):
+    elif isinstance(exc, (JoinTicketExpired, JoinTicketConsumed, IdentityChallengeExpired, IdentityChallengeConsumed)):
         status = 410
-    elif isinstance(exc, (InvalidArguments, SchemaRejected, RoleInvalid, AccessModeMismatch)):
+    elif isinstance(exc, (InvalidArguments, SchemaRejected, RoleInvalid, AccessModeMismatch, IdentityKeyInvalid)):
         status = 422
     elif isinstance(
         exc,

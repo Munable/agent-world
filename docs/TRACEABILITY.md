@@ -5,13 +5,13 @@
 | 主张 | 下层落点 | 当前状态 | 核心证据／限制 |
 | --- | --- | --- | --- |
 | G1 世界持续存在 | State Fact、Operation、Commit、Receipt；L4 提交／恢复合同；Runtime journal/state | **已实现核心机制；长期证据有限** | `tests/test_foundation.py`、`tests/test_world_data.py`、`tests/test_world_sdk.py` 覆盖提交、恢复、重启与升级；没有真实长期 soak 证明。 |
-| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **正式 Runtime 仍未实现；候选架构实验已通过** | `tests/test_cross_world_identity.py` 已用独立进程／数据库验证 user-held Ed25519 root → device delegation → world challenge proof → world-local credential；同一 root 可映射两边本地 profile，A bearer 在 B 无效。pairwise privacy、root 丢失恢复、revocation propagation 与正式 Identity Core 集成仍未解决。 |
+| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **已实现最小密钥身份合同** | `tests/test_key_identity.py` 验证同一 Ed25519 公钥在独立 Runtime 中表示同一底层身份、每个世界建立自己的本地档案并签发自己的 bearer；新公钥就是新身份，档案不跨世界搬运，错误私钥不能认领旧档。密钥丢失不提供恢复。 |
 | G3 Agent 在 Runtime 外部 | External Agent / Client、System Actor；L5 外部推理边界 | **架构上成立** | Runtime 没有模型推理器；timer 以系统来源执行。现有测试能证明 timer 不保存用户 token 等局部性质，但不能证明所有未来宿主都正确。 |
 | G4 世界开发者拥有领域规则 | World Definition、Domain Object；L4 声明式行动／状态合同；SDK | **已形成核心机制** | `tests/test_world_sdk.py` 覆盖外部模块、非游戏规则、版本与 schema；这证明接口可承载这些夹具，不证明任意领域天然适配。 |
 | G5 多类型世界共用 Runtime | 领域中立不变量、SDK／adapter 架构 | **设计与架构成立，通用性不可由有限样本证明** | 仓库内最小示例和打包夹具只验证接口边界；任何临时游戏／社交测试都不能升级为产品证明。 |
 | I1 声明机制产生权威事实 | Command、State Fact、Commit；L4 结构／授权／规则链 | **已实现底座** | `tests/test_foundation.py`、`tests/test_managed_state_boundary.py`、transport tests 覆盖 schema、授权、回滚；Runtime 不解释文本语义。 |
 | I2 不伪造他人意愿 | Principal、Credential、Command；世界业务状态机 | **Runtime 提供归因底座，具体确认仍由世界定义** | 调用主体来自鉴权而非业务参数；没有通用 Confirm 类型，因此 Runtime 也不能替所有世界证明业务确认正确。 |
-| I3 身份与领域授权分离 | Credential + command/state authorization | **已实现当前机制** | Function authorization、state authorization、observe/control 等有回归；跨世界身份本身仍未完成。 |
+| I3 用户身份只认密钥，且与领域授权分离 | Identity Key + world-local Credential + command/state authorization | **已实现当前机制** | challenge signature 证明持钥；`identity_keys` 保存公钥到本地 role 映射；Function/state authorization、observe/control 继续独立判断。不同公钥不能合并，世界 bearer 不能跨实例使用。 |
 | I4 Runtime 不冒充用户／Agent | External Agent / Client、System Actor、Scheduled Effect | **已实现架构边界** | `tests/test_timers.py` 覆盖定时事项离线执行与不保存用户 token；系统行为与用户行为来源区分。 |
 | I5 提交事实独立于会话 | Commit、Receipt、authoritative state | **已实现核心机制** | receipt 恢复、进程重启、状态持久化测试存在；网络外部副作用不在该保证内。 |
 | I6 同一 Runtime 提交无半成品 | L4 原子提交；事务执行核心 | **有强回归覆盖** | `test_write_cannot_commit_partially`、output/schema failure、timer retry/rollback、history rollback 等。 |
@@ -27,7 +27,7 @@
 | 能力 | 当前状态 | 主要判断 |
 | --- | --- | --- |
 | Principal 归因与 world-scoped Credential | **已实现并有强回归** | Bearer credential 绑定 role + world instance；observe/control、撤权、过期与 session 绑定已有测试。 |
-| 跨独立部署 User Identity | **候选架构已通过最小实验；正式能力仍缺** | 两个独立进程／数据库可验证同一 user-held root，并各发本地 credential；实验仍暴露全局标识可关联、root 丢失恢复、撤销传播与跨存储原子性问题。 |
+| 跨独立部署 User Identity | **已实现最小密钥身份** | 同一 Ed25519 公钥可在独立 Runtime 完成持钥证明；各世界保存本地档案并独立签发 credential。系统明确不提供密钥找回、换钥继承或档案跨世界同步。 |
 | 世界本地授权 | **已实现并有强回归** | Function authorization、state authorization、credential access mode 分离。 |
 | State / schema / CAS / journal | **已实现并有强回归** | 当前状态、版本、删除 tombstone、历史 journal、schema 与授权均有合同测试。 |
 | 原子 Command / Commit | **已实现并有强回归** | 状态、Receipt、Event、Stream、Timer 等受管效果在同一提交边界成立或回滚。 |

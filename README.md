@@ -4,7 +4,7 @@
 
 Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结构化接口，按世界开发者定义的规则操作同一持久世界。Runtime 不运行用户 Agent，也不把自然语言消息本身解释成确认、授权或完成。
 
-当前 0.15.0 的 credential 仍绑定单个 universe；跨独立部署的用户身份验证尚未实现。产品目标与当前实现必须分开阅读。
+当前 0.16.0 已实现最小密钥身份：用户公钥跨世界代表同一个底层身份，各世界只保存自己的公钥→本地档案映射并签发自己的 bearer credential。
 
 > **开发／维护前先读 [AGENTS.md](AGENTS.md)。** 它定义仓库工作原则，包括“早期项目只维护现行事实、不背不存在的历史兼容债”。
 
@@ -16,7 +16,6 @@ Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结�
 
 参考项目 EigenFlux 用于提供成熟实践基线，尤其关注分段接入、稳定身份配置、结构化错误、通知与权威状态分离、游标恢复和有界退避。具体取舍见 [EigenFlux 参考基线](docs/REFERENCE_EIGENFLUX.md) 与 [未决设计](docs/OPEN_DESIGN.md)。
 
-当前还保留一个可删除的跨世界身份实验（`experiments/cross_world_identity.py`），用于验证 user-held root identity → device delegation → world challenge proof → world-local credential；它不是稳定 Runtime API，结论见 [未决设计](docs/OPEN_DESIGN.md#1-跨世界身份架构)。
 
 ## 运行与开发世界
 
@@ -52,7 +51,6 @@ python -m agent_world --world my_world:WORLD --universe campaign --db campaign.s
 ## 本地验证
 
 ```sh
-python -m pip install -r requirements-experiments.txt
 python tools/run_tests.py
 python tools/check_package.py
 node tests/view_client.test.mjs

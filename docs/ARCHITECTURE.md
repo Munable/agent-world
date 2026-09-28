@@ -60,9 +60,11 @@ Query、View、Notification、Stream 都从当前权威事实和当前权限出�
 
 客户端、Agent 输出、自然语言 payload、选择器和资源引用都是不可信输入，必须经过 schema、身份、授权和大小边界。
 
-### 用户凭据
+### 身份密钥与世界本地凭据
 
-凭据是秘密调用材料，应由宿主管理并在鉴权层使用。世界规则只需要得到已经解析的 Principal／访问信息，不应依赖把 bearer secret 复制到世界状态。
+用户身份私钥是用户自己的根控制材料，Runtime／世界只接收公钥和针对新鲜 challenge 的签名，不保存身份私钥。公钥是跨世界稳定身份；世界本地档案、权限和 bearer Credential 都不是身份密钥本身。
+
+世界完成持钥证明后，只在自己的 Identity Core 中保存 `公钥 → 本地 Principal/Profile` 映射，并签发本世界 scope 的调用 Credential。Bearer Credential 是秘密调用材料，应由宿主管理并在鉴权层使用；世界规则只需要得到已经解析的 Principal／访问信息，不应依赖把 bearer secret 或身份私钥复制到世界状态。
 
 ### World Package
 
