@@ -67,12 +67,12 @@ EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFL
 - `tests/test_onboarding.py`：operator credential rotation 的 operation_id、丢响应重放与 receipt 查询。
 - `tests/test_transport.py`：HTTP/MCP 同源语义、会话身份绑定、严格主体归因、wait/cancel/wakeup、跨 transport replay。
 - `tests/test_error_contract.py`、`tests/test_structured_error_transport.py`：结构化 recovery / retry / details 及 HTTP/MCP 保真。
-- `tests/test_runtime_capability_matrix.py`：1→N、N→1、N→N、撤权、重放和重启恢复。
+- `tests/test_runtime_capability_matrix.py`：正式 Key Identity 参与者下的 1→N、N→1、N→N、撤权、重放、重启回档、并发首次进入、批量进入、跨独立 Runtime 隔离与同对象 CAS 竞争；`tests/test_transport.py` 另覆盖同一密钥的双 MCP session。
 - view / stream / timer / world-data / SDK 测试：各自现行能力合同。
 - `tools/check_package.py`：当前 package 构建与 checkout 外 probe。
 - 两份 Node 客户端测试：当前 View / Stream 客户端合同。
 
-当前 0.17.0 代码树已重新执行：`python tools/run_tests.py` 共 **214 个 unittest 全部通过**，其中 `tests/test_key_identity.py` 的 **10 个密钥身份合同测试**除首次建档、同钥回档、新钥新身份、跨世界本地档案／本地 bearer、错误签名、过期 challenge、禁用档案和 challenge 重放外，还覆盖组合应用在 operator 未配置时直接完成 challenge → exchange → bootstrap 的默认入场路径；`python tools/check_package.py` 通过 wheel 构建、独立安装与 checkout 外 package probe；两份 Node 客户端合同测试均通过。这个数字只描述当前树，不作为未来提交的永久成绩单。
+当前 0.17.0 代码树已重新执行：`python tools/run_tests.py` 共 **221 个 unittest 全部通过**。`tests/test_key_identity.py` 的 **10 个密钥身份合同测试**覆盖默认 challenge → exchange → bootstrap；`tests/test_runtime_capability_matrix.py` 的 **9 个矩阵测试**现在全部使用正式 Key Identity 参与者，并覆盖同钥多 Credential、撤销后持钥重进、重启回档、独立 Runtime 隔离、并发首次进入、32 身份并发进入和同对象 CAS 竞争；`tests/test_transport.py` 另验证同一密钥的两枚本地 Credential 可同时建立两个 MCP session。0.17.0 package check 与两份 Node 客户端合同在默认入场变更时已通过；本轮只增强测试／证据，没有修改 package 或客户端实现。这个数字只描述当前树，不作为未来提交的永久成绩单。
 
 ## 新实验最低要求
 

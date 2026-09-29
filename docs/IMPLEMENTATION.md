@@ -168,11 +168,15 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 - HTTP 在存在 `retry_after_seconds` 时额外发送整数秒 `Retry-After`；401 仍只在鉴权错误路径发送 `WWW-Authenticate: Bearer`。
 - 常见恢复提示已覆盖缺少／失效身份、scope 不匹配、无效输入、Join Ticket 失效、函数版本／发现变化、observe/control 不匹配和 StorageBusy；世界规则也可在 `RuleViolation` 等 Runtime error 上附带安全的恢复元数据。
 
-当前仓库使用 `tests/capability_harness.py` 和 `tests/fixtures/capability_matrix_world.py`。它们是 **确定性的 Runtime 测试基础设施，不是新的 Reference Application 或领域模型**。当前矩阵用 6 个动态参与者覆盖：
+当前仓库使用 `tests/capability_harness.py` 和 `tests/fixtures/capability_matrix_world.py`。它们是 **确定性的 Runtime 测试基础设施，不是新的 Reference Application 或领域模型**。Harness 参与者现在通过正式 Key Identity challenge / signature / exchange 进入，而不是直接预造 Role / token。当前矩阵覆盖：
 
 - 1→N 定向 fan-out，并验证同 Operation 重放与 Runtime 重启后 Receipt／事件仍可恢复。
 - N→1 并发 fan-in，验证多个写者向同一目标聚合且非目标主体不能读取私有聚合。
 - N→N mesh，验证多主体同时 fan-out；撤销其中一个凭据后，该主体立即失效而其他主体继续运行。
+- 同一密钥获取多个本地 Credential、单 Credential 撤销后持钥重进、Runtime 重启后回原档，以及同一密钥跨独立 Runtime 只共享身份而不共享本地 profile / bearer。
+- 同一新密钥并发首次进入只创建一个本地 profile；32 个不同密钥可并发进入且 profile / credential 保持唯一。
+- 同一密钥的两枚本地 Credential 可同时建立两个 MCP session，并归因到同一 profile。
+- 同对象 CAS 并发竞争恰好一个提交者成功，另一个收到 `StateConflict`。
 - HTTP/MCP 对同一个带 recovery/retry/details 的规则错误保持结构化语义一致。
 
 这批 fixture 不创建 Conversation、Friend、Party 或其他产品对象，因此不能反向定义 Runtime 领域模型。以后新增拓扑／故障组合时优先扩展 Harness，而不是为每个实验重新造一个大场景。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import base64
 import os
 import secrets
 import socket
@@ -11,6 +12,8 @@ import tempfile
 import time
 
 import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -114,6 +117,35 @@ class LiveServer:
             response = client.post(self.url + "/v1/join/exchange", json={"ticket": ticket})
             response.raise_for_status()
             return role, response.json()["identity"]
+
+    def key_identity(self, private_key=None):
+        private_key = private_key or Ed25519PrivateKey.generate()
+        public_key = base64.urlsafe_b64encode(
+            private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        ).rstrip(b"=").decode("ascii")
+        with httpx.Client(trust_env=False, timeout=5) as client:
+            response = client.post(
+                self.url + "/v1/key-identities/challenges",
+                json={"public_key": public_key},
+            )
+            response.raise_for_status()
+            challenge = response.json()
+            message = base64.urlsafe_b64decode(
+                challenge["message"] + "=" * (-len(challenge["message"]) % 4)
+            )
+            signature = base64.urlsafe_b64encode(
+                private_key.sign(message)
+            ).rstrip(b"=").decode("ascii")
+            response = client.post(
+                self.url + "/v1/key-identities/exchange",
+                json={
+                    "challenge_id": challenge["challenge_id"],
+                    "signature": signature,
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+        return body["role_profile"], body["identity"], private_key
 
     @asynccontextmanager
     async def session(self, identity, *, terminate=True):

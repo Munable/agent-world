@@ -35,6 +35,15 @@ AGGREGATE = {
     "required": ["target_role_id"],
     "additionalProperties": False,
 }
+CLAIM_SLOT = {
+    "type": "object",
+    "properties": {
+        "slot_id": ID,
+        "expected_version": {"type": "integer", "minimum": 0},
+    },
+    "required": ["slot_id", "expected_version"],
+    "additionalProperties": False,
+}
 
 
 def _require_active(ctx, role_id):
@@ -91,6 +100,20 @@ def aggregate(ctx, args):
         {"contributions": [item["value"] for item in page["items"]]}
     )
 
+def claim_slot(ctx, args):
+    value = {
+        "owner_role_id": ctx.actor_role_id,
+        "slot_id": args["slot_id"],
+    }
+    version = ctx.set_state(
+        "contest:shared",
+        "slot:" + args["slot_id"],
+        value,
+        expected_version=args["expected_version"],
+    )
+    return FunctionOutcome({"version": version, **value})
+
+
 def structured_failure(ctx, args):
     raise RuleViolation(
         "probe capacity reached",
@@ -114,9 +137,11 @@ WORLD = WorldDefinition(
         FunctionSpec("topology.broadcast", broadcast, BROADCAST),
         FunctionSpec("topology.contribute", contribute, CONTRIBUTE),
         FunctionSpec("topology.aggregate", aggregate, AGGREGATE, access="read"),
+        FunctionSpec("topology.claim_slot", claim_slot, CLAIM_SLOT),
         FunctionSpec("topology.structured_failure", structured_failure, EMPTY),
     ),
     state_rules=(
         StateRule("aggregate:", "contribution:", {"type": "object"}),
+        StateRule("contest:", "slot:", {"type": "object"}),
     ),
 )

@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from agent_world.errors import InvalidIdentityToken, PermissionDenied
+from agent_world.errors import InvalidIdentityToken, PermissionDenied, StateConflict
 from tests.capability_harness import RuntimeCapabilityHarness
 from tests.fixtures.capability_matrix_world import WORLD
 
@@ -111,6 +111,125 @@ class RuntimeCapabilityMatrixTests(unittest.TestCase):
                 "topology.aggregate",
                 {"target_role_id": target.role_id},
             )
+
+    def test_same_key_supports_multiple_local_credentials_and_reentry_after_revoke(self):
+        first = self.p[0]
+        second = self.h.reenter(first)
+
+        self.assertFalse(second.created_profile)
+        self.assertEqual(second.public_key, first.public_key)
+        self.assertEqual(second.role_id, first.role_id)
+        self.assertNotEqual(second.token_id, first.token_id)
+
+        for participant in (first, second):
+            aggregate = self.h.query(
+                participant,
+                "topology.aggregate",
+                {"target_role_id": first.role_id},
+            )
+            self.assertEqual(aggregate["result"]["contributions"], [])
+
+        self.h.revoke(first)
+        with self.assertRaises(InvalidIdentityToken):
+            self.h.query(
+                first,
+                "topology.aggregate",
+                {"target_role_id": first.role_id},
+            )
+
+        replacement = self.h.reenter(first)
+        self.assertFalse(replacement.created_profile)
+        self.assertEqual(replacement.role_id, first.role_id)
+        self.assertNotEqual(replacement.token_id, first.token_id)
+        self.assertEqual(
+            self.h.query(
+                replacement,
+                "topology.aggregate",
+                {"target_role_id": first.role_id},
+            )["result"]["contributions"],
+            [],
+        )
+
+    def test_same_key_returns_to_same_profile_after_runtime_restart(self):
+        first = self.p[0]
+        self.h.restart()
+        returned = self.h.reenter(first)
+
+        self.assertFalse(returned.created_profile)
+        self.assertEqual(returned.public_key, first.public_key)
+        self.assertEqual(returned.role_id, first.role_id)
+        self.assertNotEqual(returned.token_id, first.token_id)
+
+    def test_same_key_in_independent_worlds_has_independent_profiles_and_bearers(self):
+        first = self.p[0]
+        other = RuntimeCapabilityHarness(
+            Path(self.temp.name) / "other.sqlite3",
+            WORLD,
+            universe="other",
+        )
+        remote = other.enter(first.private_key)
+
+        self.assertEqual(remote.public_key, first.public_key)
+        self.assertNotEqual(remote.role_id, first.role_id)
+        self.assertNotEqual(remote.token, first.token)
+        self.assertTrue(remote.created_profile)
+        with self.assertRaises(InvalidIdentityToken):
+            other.runtime.resolve_identity_token(first.token)
+
+    def test_concurrent_first_entry_of_same_key_creates_one_profile(self):
+        private_key = self.p[0].private_key
+        fresh = RuntimeCapabilityHarness(
+            Path(self.temp.name) / "concurrent-entry.sqlite3",
+            WORLD,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            entries = list(pool.map(lambda _: fresh.enter(private_key), range(2)))
+
+        self.assertEqual({entry.role_id for entry in entries}, {entries[0].role_id})
+        self.assertEqual(len({entry.token_id for entry in entries}), 2)
+        self.assertEqual(sorted(entry.created_profile for entry in entries), [False, True])
+
+    def test_concurrent_same_object_cas_allows_exactly_one_winner(self):
+        contenders = self.p[:2]
+
+        def claim(pair):
+            index, participant = pair
+            try:
+                result = self.h.call(
+                    participant,
+                    "topology.claim_slot",
+                    {"slot_id": "shared", "expected_version": 0},
+                    f"claim-slot-{index}",
+                )
+                return ("ok", participant.role_id, result)
+            except StateConflict as exc:
+                return ("conflict", participant.role_id, exc)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(claim, enumerate(contenders)))
+
+        self.assertEqual(
+            sorted(result[0] for result in results),
+            ["conflict", "ok"],
+        )
+        winner = next(result for result in results if result[0] == "ok")
+        state = self.h.runtime.get_state(
+            self.h.universe,
+            "contest:shared",
+            "slot:shared",
+        )
+        self.assertEqual(state["value"]["owner_role_id"], winner[1])
+        self.assertEqual(state["version"], 1)
+
+    def test_bulk_key_identity_entry_keeps_profiles_and_credentials_unique(self):
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            participants = list(pool.map(lambda _: self.h.enter(), range(32)))
+
+        self.assertEqual(len({p.public_key for p in participants}), 32)
+        self.assertEqual(len({p.role_id for p in participants}), 32)
+        self.assertEqual(len({p.token_id for p in participants}), 32)
+        self.assertTrue(all(p.created_profile for p in participants))
 
     def test_many_to_many_and_one_revocation_does_not_stop_others(self):
         def send(participant):

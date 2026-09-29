@@ -157,6 +157,23 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             boot = await session.call_tool("world.bootstrap", arguments={})
             self.assertEqual(boot.structured_content["role_id"], self.role["role_id"])
 
+    async def test_same_key_can_drive_two_live_mcp_sessions_for_one_profile(self):
+        role, first, private_key = self.server.key_identity()
+        returned_role, second, _ = self.server.key_identity(private_key)
+
+        self.assertEqual(returned_role["role_id"], role["role_id"])
+        self.assertNotEqual(second["token_id"], first["token_id"])
+
+        async with self.server.session(first) as (first_session, _):
+            async with self.server.session(second) as (second_session, _):
+                first_boot = await first_session.call_tool("world.bootstrap", arguments={})
+                second_boot = await second_session.call_tool("world.bootstrap", arguments={})
+
+        self.assertFalse(first_boot.is_error, first_boot.structured_content)
+        self.assertFalse(second_boot.is_error, second_boot.structured_content)
+        self.assertEqual(first_boot.structured_content["role_id"], role["role_id"])
+        self.assertEqual(second_boot.structured_content["role_id"], role["role_id"])
+
     async def test_revoked_token_stops_live_mcp_session(self):
         async with self.server.session(self.identity, terminate=False) as (_, captured):
             WorldRuntime(self.server.db).revoke_identity_token(self.identity["token_id"])

@@ -5,7 +5,7 @@
 | 主张 | 下层落点 | 当前状态 | 核心证据／限制 |
 | --- | --- | --- | --- |
 | G1 世界持续存在 | State Fact、Operation、Commit、Receipt；L4 提交／恢复合同；Runtime journal/state | **已实现核心机制；长期证据有限** | `tests/test_foundation.py`、`tests/test_world_data.py`、`tests/test_world_sdk.py` 覆盖提交、恢复、重启与升级；没有真实长期 soak 证明。 |
-| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **已实现最小密钥身份合同，并接成默认组合入口** | `tests/test_key_identity.py` 验证同一 Ed25519 公钥在独立 Runtime 中表示同一底层身份、每个世界建立自己的本地档案并签发自己的 bearer；组合应用在 operator 未配置时仍可完成 challenge → exchange → bootstrap，同钥再次进入回原档。新公钥就是新身份，档案不跨世界搬运，密钥丢失不提供恢复。 |
+| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **已实现最小密钥身份合同，并接成默认组合入口** | `tests/test_key_identity.py` 验证默认 challenge → exchange → bootstrap；Capability Harness 进一步验证同钥多 Credential／双 MCP session、撤销后持钥重进、重启回档、并发首次进入与独立 Runtime 隔离。新公钥就是新身份，档案不跨世界搬运，密钥丢失不提供恢复。 |
 | G3 Agent 在 Runtime 外部 | External Agent / Client、System Actor；L5 外部推理边界 | **架构上成立** | Runtime 没有模型推理器；timer 以系统来源执行。现有测试能证明 timer 不保存用户 token 等局部性质，但不能证明所有未来宿主都正确。 |
 | G4 世界开发者拥有领域规则 | World Definition、Domain Object；L4 声明式行动／状态合同；SDK | **已形成核心机制** | `tests/test_world_sdk.py` 覆盖外部模块、非游戏规则、版本与 schema；这证明接口可承载这些夹具，不证明任意领域天然适配。 |
 | G5 多类型世界共用 Runtime | 领域中立不变量、SDK／adapter 架构 | **设计与架构成立，通用性不可由有限样本证明** | 仓库内最小示例和打包夹具只验证接口边界；任何临时游戏／社交测试都不能升级为产品证明。 |
@@ -41,7 +41,7 @@
 | Retention | **已实现机制；长期策略仍需验证** | event/history/stream 保留与 gap recovery 已实现；长期压缩与真实增长仍需 soak。 |
 | 结构化错误与恢复提示 | **已实现** | recovery / retry_after / details 经 HTTP/MCP 保真。 |
 | HTTP / MCP 统一 Gateway | **已实现主要合同** | 同函数、同错误、receipt replay、identity/session 边界有跨 transport 测试。 |
-| 多参与者拓扑验证 | **已有基础 Harness** | 1→N、N→1、N→N、并发、撤权、重启恢复已覆盖；更大规模与网络分区仍待验证。 |
+| 多参与者拓扑验证 | **Harness 已覆盖密钥身份与主要本机拓扑** | 参与者通过正式 Key Identity 进入；1→N、N→1、N→N、并发 CAS、撤权后持钥重进、重启回档、同钥多 Credential／双 MCP session、独立 Runtime 身份连续但 profile/bearer 隔离，以及 32 身份并发进入已有回归；跨机器网络分区与长期大规模仍待验证。 |
 | 外部系统副作用交付 | **明确缺口** | Runtime 事务不能给支付、第三方 API、文件等外部写入提供 exactly-once；尚无通用 outbox/delivery/compensation 合同。 |
 | 通用 Request/Response/Confirmation 模型 | **未证明需要** | 先由 Reference Application 验证；当前 State + Operation + Receipt + Event 足以承载具体世界流程。 |
 | 真实多宿主 Agent / 长期运行 | **验证缺口** | 不等于 Runtime 功能缺失；需要真实宿主、网络故障与 soak 证据。 |
