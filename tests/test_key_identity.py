@@ -16,6 +16,7 @@ from agent_world.errors import (
     InvalidIdentityToken,
     RoleInactive,
 )
+from agent_world.application import create_application
 from agent_world.onboarding_app import create_onboarding_app
 from agent_world.runtime_core import WorldRuntime
 
@@ -217,6 +218,76 @@ class KeyIdentityTests(unittest.TestCase):
             self.assertEqual(
                 body["mcp"]["authorization_scheme"],
                 "Bearer",
+            )
+
+    def test_combined_application_uses_key_identity_as_public_default_entry(self):
+        db = self.root / "combined.sqlite3"
+        with TestClient(
+            create_application(
+                db,
+                world_profile="demo",
+                universe="u",
+                public_base_url="http://127.0.0.1:8000",
+                web_password=None,
+                timers_enabled=False,
+            )
+        ) as client:
+            operator_only = client.post(
+                "/api/roles",
+                json={"display_name": "operator-created"},
+            )
+            self.assertEqual(operator_only.status_code, 503, operator_only.text)
+
+            issued = client.post(
+                "/v1/key-identities/challenges",
+                json={"public_key": self.public_key},
+            )
+            self.assertEqual(issued.status_code, 200, issued.text)
+            challenge = issued.json()
+            self.assertEqual(challenge["universe"], "u")
+            self.assertEqual(issued.headers["cache-control"], "no-store")
+
+            exchanged = client.post(
+                "/v1/key-identities/exchange",
+                json={
+                    "challenge_id": challenge["challenge_id"],
+                    "signature": sign(self.private, challenge),
+                },
+            )
+            self.assertEqual(exchanged.status_code, 200, exchanged.text)
+            first = exchanged.json()
+            self.assertTrue(first["created_profile"])
+            self.assertEqual(first["public_key"], self.public_key)
+            self.assertEqual(first["next"], {"tool": "world.bootstrap", "arguments": {}})
+
+            auth = {"Authorization": "Bearer " + first["identity"]["token"]}
+            boot = client.get("/v1/bootstrap", headers=auth)
+            self.assertEqual(boot.status_code, 200, boot.text)
+            self.assertEqual(boot.json()["role_id"], first["role_profile"]["role_id"])
+
+            issued_again = client.post(
+                "/v1/key-identities/challenges",
+                json={"public_key": self.public_key},
+            )
+            self.assertEqual(issued_again.status_code, 200, issued_again.text)
+            challenge_again = issued_again.json()
+            exchanged_again = client.post(
+                "/v1/key-identities/exchange",
+                json={
+                    "challenge_id": challenge_again["challenge_id"],
+                    "signature": sign(self.private, challenge_again),
+                },
+            )
+            self.assertEqual(exchanged_again.status_code, 200, exchanged_again.text)
+            second = exchanged_again.json()
+            self.assertFalse(second["created_profile"])
+            self.assertEqual(
+                second["role_profile"]["role_id"],
+                first["role_profile"]["role_id"],
+            )
+            self.assertNotEqual(
+                second["identity"]["token_id"],
+                first["identity"]["token_id"],
             )
 
 

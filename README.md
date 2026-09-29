@@ -4,7 +4,7 @@
 
 Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结构化接口，按世界开发者定义的规则操作同一持久世界。Runtime 不运行用户 Agent，也不把自然语言消息本身解释成确认、授权或完成。
 
-当前 0.16.0 已实现最小密钥身份：用户公钥跨世界代表同一个底层身份，各世界只保存自己的公钥→本地档案映射并签发自己的 bearer credential。
+当前 0.17.0 已把最小密钥身份接成组合应用的默认公开入场路径：用户公钥跨世界代表同一个底层身份，各世界只保存自己的公钥→本地档案映射并签发自己的 bearer credential；正常进入不需要 operator 预建 Role 或 Join Ticket。
 
 > **开发／维护前先读 [AGENTS.md](AGENTS.md)。** 它定义仓库工作原则，包括“早期项目只维护现行事实、不背不存在的历史兼容债”。
 
@@ -28,6 +28,18 @@ python -m agent_world --world my_world:WORLD --universe campaign --db campaign.s
 ```
 
 当前组合入口把 Web、HTTP、MCP、timer worker 和 retention maintenance 接到同一 Runtime；详细实现见 [IMPLEMENTATION](docs/IMPLEMENTATION.md)。只加载部署方信任的 World Package。
+
+### 默认进入世界
+
+正常用户／Agent 使用自己的身份密钥进入，不需要 operator 先创建 Role：
+
+1. `POST /v1/key-identities/challenges`，提交身份公钥。
+2. 客户端用对应私钥签名响应中的 `message`。
+3. `POST /v1/key-identities/exchange`，提交 `challenge_id + signature`。
+4. 世界第一次见到该公钥时自动创建本地 Participant Profile；同一公钥再次进入时回到原档案。
+5. 使用返回的 world-local bearer Credential 调用 `/v1/bootstrap` 或连接 `/mcp`。
+
+`/api/roles`、Join Ticket 等入口仍属于 operator 管理／受控接入工具，不是普通用户身份的前置条件。
 
 ## 六层设计入口
 

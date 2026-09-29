@@ -4,7 +4,7 @@
 
 ## 版本与运行形态
 
-- Python package：`agent-world` 0.16.0，要求 Python 3.11+。
+- Python package：`agent-world` 0.17.0，要求 Python 3.11+。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
@@ -113,7 +113,7 @@ WorldDefinition 中声明的 functions 另外动态映射为可调用 world tool
 
 ## 当前 HTTP / 产品入口
 
-HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。onboarding adapter 公开 key identity challenge / exchange，用于“公钥 + 持钥签名 → 本世界档案 + world-local Credential”；operator 管理面另外保留 role、join ticket、token rotate/revoke 与 rotation receipt。鉴权请求的主体只来自 credential，`role_id` 不属于鉴权调用参数。
+HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。组合应用与 standalone onboarding 都公开 key identity challenge / exchange，用于“公钥 + 持钥签名 → 本世界档案 + world-local Credential”；这是正常用户／Agent 的默认公开入场路径，不要求 operator 预建 Role 或 Join Ticket。operator 管理面仍保留 role、join ticket、token rotate/revoke 与 rotation receipt，作为管理／受控接入工具。鉴权请求的主体只来自 credential，`role_id` 不属于鉴权调用参数。
 
 这些路径是当前 L6 表面，不应被 L1-L3 当成概念定义。
 

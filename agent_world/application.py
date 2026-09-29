@@ -63,7 +63,11 @@ def create_application(
             path = scope.get("path", "")
             if path == "/mcp" or path.startswith("/mcp/"):
                 target = mcp_app
-            elif path == "/" or path.startswith(("/api/", "/static/")) or path == "/v1/join/exchange":
+            elif (
+                path == "/"
+                or path.startswith(("/api/", "/static/", "/v1/key-identities/"))
+                or path == "/v1/join/exchange"
+            ):
                 target = web_app
             else:
                 target = http_app

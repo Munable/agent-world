@@ -41,6 +41,16 @@ class ExchangeJoinTicketRequest(StrictModel):
     ticket: str = Field(min_length=1, max_length=256)
 
 
+class CreateIdentityKeyChallengeRequest(StrictModel):
+    public_key: str = Field(min_length=1, max_length=128)
+    ttl_seconds: float = Field(default=120.0, gt=0, le=300)
+
+
+class ExchangeIdentityKeyChallengeRequest(StrictModel):
+    challenge_id: str = Field(min_length=1, max_length=128)
+    signature: str = Field(min_length=1, max_length=256)
+
+
 def _runtime_status(exc: WorldRuntimeError) -> int:
     if isinstance(exc, RoleNotFound):
         return 404
@@ -67,7 +77,7 @@ def create_product_app(
 
     web_dir = files("agent_world").joinpath("web")
 
-    app = FastAPI(title="Agent World", version="0.8")
+    app = FastAPI(title="Agent World", version="0.9")
     app.state.runtime = runtime
     app.state.universe = universe
     add_web_safety(app)
@@ -141,7 +151,7 @@ def create_product_app(
     def health():
         return {
             "ok": True,
-            "version": "0.8",
+            "version": "0.9",
             "universe": universe,
             "web_auth_configured": bool(web_password),
         }
@@ -150,6 +160,31 @@ def create_product_app(
     def index(request: Request):
         require_web_auth(request)
         return FileResponse(web_dir / "index.html")
+
+    @app.post("/v1/key-identities/challenges")
+    def issue_identity_key_challenge(body: CreateIdentityKeyChallengeRequest):
+        return runtime.issue_identity_key_challenge(
+            universe,
+            body.public_key,
+            ttl_seconds=body.ttl_seconds,
+        )
+
+    @app.post("/v1/key-identities/exchange")
+    def exchange_identity_key_challenge(body: ExchangeIdentityKeyChallengeRequest):
+        result = runtime.exchange_identity_key_challenge(
+            body.challenge_id,
+            body.signature,
+            expected_universe=universe,
+        )
+        return {
+            **result,
+            "mcp": {
+                "url": mcp_url,
+                "authorization_scheme": "Bearer",
+                "authorization_token": result["identity"]["token"],
+            },
+            "next": {"tool": "world.bootstrap", "arguments": {}},
+        }
 
     @app.post("/v1/join/exchange")
     def exchange_join_ticket(body: ExchangeJoinTicketRequest):

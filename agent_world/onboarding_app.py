@@ -62,16 +62,6 @@ class ExchangeIdentityKeyChallengeRequest(StrictModel):
     signature: str = Field(min_length=1, max_length=256)
 
 
-class CreateIdentityKeyChallengeRequest(StrictModel):
-    public_key: str = Field(min_length=1, max_length=128)
-    ttl_seconds: float = Field(default=120.0, gt=0, le=300)
-
-
-class ExchangeIdentityKeyChallengeRequest(StrictModel):
-    challenge_id: str = Field(min_length=1, max_length=128)
-    signature: str = Field(min_length=1, max_length=256)
-
-
 class RotateTokenRequest(StrictModel):
     operation_id: str = Field(min_length=1, max_length=128)
     ttl_seconds: float | None = Field(default=None, gt=0)

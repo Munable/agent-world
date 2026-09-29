@@ -72,7 +72,7 @@ EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFL
 - `tools/check_package.py`：当前 package 构建与 checkout 外 probe。
 - 两份 Node 客户端测试：当前 View / Stream 客户端合同。
 
-当前 0.16.0 代码树已重新执行：`python tools/run_tests.py` 共 **213 个 unittest 全部通过**，其中 `tests/test_key_identity.py` 的 **9 个密钥身份合同测试**覆盖首次建档、同钥回档、新钥新身份、跨世界本地档案／本地 bearer、错误签名、过期 challenge、禁用档案和 challenge 重放；`python tools/check_package.py` 通过 wheel 构建、独立安装与 checkout 外 package probe；两份 Node 客户端合同测试均通过。这个数字只描述当前树，不作为未来提交的永久成绩单。
+当前 0.17.0 代码树已重新执行：`python tools/run_tests.py` 共 **214 个 unittest 全部通过**，其中 `tests/test_key_identity.py` 的 **10 个密钥身份合同测试**除首次建档、同钥回档、新钥新身份、跨世界本地档案／本地 bearer、错误签名、过期 challenge、禁用档案和 challenge 重放外，还覆盖组合应用在 operator 未配置时直接完成 challenge → exchange → bootstrap 的默认入场路径；`python tools/check_package.py` 通过 wheel 构建、独立安装与 checkout 外 package probe；两份 Node 客户端合同测试均通过。这个数字只描述当前树，不作为未来提交的永久成绩单。
 
 ## 新实验最低要求
 

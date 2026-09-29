@@ -5,7 +5,7 @@
 | 主张 | 下层落点 | 当前状态 | 核心证据／限制 |
 | --- | --- | --- | --- |
 | G1 世界持续存在 | State Fact、Operation、Commit、Receipt；L4 提交／恢复合同；Runtime journal/state | **已实现核心机制；长期证据有限** | `tests/test_foundation.py`、`tests/test_world_data.py`、`tests/test_world_sdk.py` 覆盖提交、恢复、重启与升级；没有真实长期 soak 证明。 |
-| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **已实现最小密钥身份合同** | `tests/test_key_identity.py` 验证同一 Ed25519 公钥在独立 Runtime 中表示同一底层身份、每个世界建立自己的本地档案并签发自己的 bearer；新公钥就是新身份，档案不跨世界搬运，错误私钥不能认领旧档。密钥丢失不提供恢复。 |
+| G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **已实现最小密钥身份合同，并接成默认组合入口** | `tests/test_key_identity.py` 验证同一 Ed25519 公钥在独立 Runtime 中表示同一底层身份、每个世界建立自己的本地档案并签发自己的 bearer；组合应用在 operator 未配置时仍可完成 challenge → exchange → bootstrap，同钥再次进入回原档。新公钥就是新身份，档案不跨世界搬运，密钥丢失不提供恢复。 |
 | G3 Agent 在 Runtime 外部 | External Agent / Client、System Actor；L5 外部推理边界 | **架构上成立** | Runtime 没有模型推理器；timer 以系统来源执行。现有测试能证明 timer 不保存用户 token 等局部性质，但不能证明所有未来宿主都正确。 |
 | G4 世界开发者拥有领域规则 | World Definition、Domain Object；L4 声明式行动／状态合同；SDK | **已形成核心机制** | `tests/test_world_sdk.py` 覆盖外部模块、非游戏规则、版本与 schema；这证明接口可承载这些夹具，不证明任意领域天然适配。 |
 | G5 多类型世界共用 Runtime | 领域中立不变量、SDK／adapter 架构 | **设计与架构成立，通用性不可由有限样本证明** | 仓库内最小示例和打包夹具只验证接口边界；任何临时游戏／社交测试都不能升级为产品证明。 |
