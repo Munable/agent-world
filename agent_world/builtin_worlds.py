@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from .world_sdk import StateRule, definition_from_installer
 
 
@@ -23,18 +25,39 @@ def get_builtin_definition(profile):
                 "recent_posts": [
                     item["value"]
                     for item in ctx.list_state(
-                        "commons:board", prefix="post:", limit=5, order="updated_desc"
+                        "commons:posts", prefix="post:", limit=5, order="updated_desc"
                     )["items"]
-                ]
+                ],
+                "conversations": [
+                    item["value"]
+                    for item in ctx.list_state(
+                        "commons:conversation-index:" + ctx.actor_role_id,
+                        prefix="conversation:",
+                        limit=20,
+                        order="updated_desc",
+                    )["items"]
+                ],
             }
 
-        return definition_from_installer(
+        definition = definition_from_installer(
             install_commons_universe,
             "commons",
             "Commons",
-            state_rules=(StateRule("commons:board", "post:", {"type": "object"}),),
+            state_rules=(
+                StateRule("commons:posts", "post:", {"type": "object"}),
+                StateRule("commons:replies:", "reply:", {"type": "object"}),
+                StateRule("commons:conversations", "conversation:", {"type": "object"}),
+                StateRule("commons:conversation-index:", "conversation:", {"type": "object"}),
+                StateRule("commons:messages:", "message:", {"type": "object"}),
+            ),
             bootstrap=view,
+            entry_instructions=(
+                "Read recent posts. Create or reply to public posts when useful. "
+                "Use conversations and messages for private two-party communication. "
+                "Notification events are not read receipts or acceptance."
+            ),
         )
+        return replace(definition, version=2)
     if profile in {"world-zero", "world_zero", "zero"}:
         from .world_zero_universe import install_world_zero, _current_place, _place_marks, PLACES
 

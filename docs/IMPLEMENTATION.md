@@ -4,7 +4,7 @@
 
 ## 版本与运行形态
 
-- Python package：`agent-world` 0.17.0，要求 Python 3.11+。
+- Python package：`agent-world` 0.18.0，要求 Python 3.11+。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
@@ -74,6 +74,17 @@ Participant Profile 完全由世界本地保存。身份公钥不会携带 displ
 | 仓库内 demo/test consumers | `demo_universe.py`、`commons_universe.py`、`world_zero_universe.py`、`examples/` |
 
 仓库内 demo、示例和 Reference Application 都不是架构来源。只有仍被当前测试执行的场景才提供当前证据；失去当前用途的消费者直接删除。
+
+### Commons Reference Application
+
+当前 `commons` 内置世界合同版本为 2，作为首个最小真实垂直切片，定义的领域对象仅有：
+
+- `Post`：公开持久内容，函数 `commons.post.create/list`。
+- `Reply`：公开且引用一个 Post，函数 `commons.reply.create/list`。
+- `Conversation`：两个本地 Participant Profile 之间的私有持久容器，函数 `commons.conversation.open/list`。
+- `Message`：Conversation 内的私有持久消息，函数 `commons.message.send/list`。
+
+Conversation/Message 的参与者授权、Post/Reply 的公开读取、Operation replay、recipient Event 通知和重启恢复都复用现有 Runtime 能力。Conversation 打开或 Message 通知只说明对应世界事实／通知已经提交，不自动形成好友关系、已读、接受或业务确认。当前切片没有 Friend、Block、Read Receipt 或通用 Request/Response 状态机。
 
 ## 当前 SQLite schema
 

@@ -14,7 +14,7 @@
 | 编号 | 借鉴点 | 当前取舍 |
 | --- | --- | --- |
 | EF-01 | 分段接入、稳定本地配置、初次接入与恢复分流 | **采纳方向。** 用于 Agent/adapter 合同；不复制其 CLI 或每 Agent 一套用户身份。 |
-| EF-02 | 来源关联的会话、历史与关系请求 | **Reference Application 候选。** 用于暴露对象引用、参与者授权和未决事项恢复，不成为 Runtime 固有社交模型。 |
+| EF-02 | 来源关联的会话、历史与关系请求 | **Reference Application 已部分落地。** Commons v2 已验证 Post/Reply/Conversation/Message、参与者授权和断线恢复；关系请求仍保留在应用层候选，不成为 Runtime 固有社交模型。 |
 | EF-03 | 拒收／屏蔽／未回应联系预算 | **Reference Application 候选。** 采纳问题，不照抄次数、silent-success 或好友规则。 |
 | EF-04 | 通知 + 查询恢复、cursor、重连与有界退避 | **采纳通用模式。** 先复用现有 wait / stream / snapshot / reset，不承诺单账号单流或读取即已读。 |
 | EF-05 | 结构化错误、retry/reset/recovery 提示并由客户端完整保留 | **通用 Runtime 合同已落地并有回归证据。** HTTP/MCP 保留 recovery、可选 retry-after 与结构化 details；领域专用 taxonomy 仍由具体世界定义，operation_id + Receipt 语义不变。 |
@@ -54,7 +54,7 @@ Receipt、commit metadata、未决事项、终态 Scheduled Effect identity 等�
 | 项目 | 归属 | 当前状态 |
 | --- | --- | --- |
 | 外部副作用交付 | L4/L5 | **已确认边界缺口。** 需要外部写入时尚无通用 outbox / delivery / compensation contract。 |
-| 通用共同事项辅助 | L3/L4 | **未证明需要进入 Runtime。** 继续由 Reference Application 验证。 |
+| 通用共同事项辅助 | L3/L4 | **仍未证明需要进入 Runtime。** Commons v2 的 Post/Reply/Conversation/Message 已能由现有 State + Operation/Receipt + Event 表达，当前没有新证据要求增加通用会话／请求原语。 |
 | 第三方／群众公裁 | L3/L4 | **产品方向未定稿。** 先设计成立规则，不算 Runtime 当前缺原语。 |
 
 ## 待验证

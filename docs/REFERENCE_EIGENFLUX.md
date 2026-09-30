@@ -20,7 +20,7 @@ EigenFlux 与 Agent World 都需要解决外部 Agent 接入、结构化操作�
 | 编号 | 参考机制 | Agent World 当前取舍 |
 | --- | --- | --- |
 | EF-01 | 分段接入、稳定 Agent Home、初次接入与恢复分流 | **采纳思路。** 宿主适配、身份建立、权限可用、持续自动运行授权分开表达；稳定配置不随工作目录或新对话重建。 |
-| EF-02 | 来源关联的会话、消息历史、关系请求 | **Reference Application 候选。** 用于验证对象引用、参与者授权和未决事项恢复，不成为 Runtime 固有社交对象。 |
+| EF-02 | 来源关联的会话、消息历史、关系请求 | **Reference Application 已部分落地。** Commons v2 已用 Post/Reply/Conversation/Message 验证对象引用、参与者授权、私有历史和通知恢复；关系请求仍未实现，也不成为 Runtime 固有社交对象。 |
 | EF-03 | block、拒收、未回应联系预算 | **Reference Application 候选。** 采纳要解决的问题，不照抄具体次数、好友例外或 silent-success 表现。 |
 | EF-04 | 实时通知 + 持久查询恢复、cursor、重连退避 | **采纳通用模式。** 先用现有 wait / stream / snapshot / reset；不照抄单账号单流或读取即全局已读。 |
 | EF-05 | 机器可处理错误、恢复条件、retry hint | **已进入 Runtime 合同。** HTTP/MCP 保留 recovery、可选 retry-after 与结构化 details；operation_id + Receipt 继续定义未知结果恢复。 |
@@ -93,7 +93,7 @@ EigenFlux 的 stream 文档提供 cursor 续接和有界指数退避；Agent Wor
 - Runtime 结构化错误与 credential rotation recovery：`agent_world/runtime_errors.py`、`agent_world/runtime_core.py`、`agent_world/transport_contracts.py`、onboarding / HTTP / MCP adapter。
 - 多拓扑能力验证：`tests/capability_harness.py`、`tests/test_runtime_capability_matrix.py`。
 - HTTP/MCP 错误保真：`tests/test_error_contract.py`、`tests/test_structured_error_transport.py`。
-- 社交 Reference Application 当前消费者：`agent_world/commons_universe.py`；它仍只是最小帖子／定向通知实现，不代表 EF-02/03 已完成。
+- 社交 Reference Application 当前消费者：`agent_world/commons_universe.py`；Commons v2 已覆盖 Post / Reply / Conversation / Message，并通过 Runtime 与 HTTP/MCP 混合测试验证公开／私有、参与者授权、通知与重启恢复。Friend / Block / 关系请求和反骚扰预算仍未实现，因此 EF-02/03 仍不是全部完成。
 
 ## 固定来源
 
