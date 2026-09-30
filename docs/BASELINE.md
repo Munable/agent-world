@@ -1,6 +1,20 @@
 # 六层基线与仓库入口
 
-定稿：2026-09-27。六层的目的不是增加审批，而是避免目标、原则、模型、合同、架构、代码和测试再次互相冒充。
+复核：2026-09-30。六层的目的不是增加审批，而是避免目标、原则、模型、合同、架构、代码和测试再次互相冒充。
+
+## 当前仓库快照
+
+当前工作树代表现行事实：
+
+- Python package：`agent-world` **0.18.0**；Runtime protocol **0.15**；SQLite schema `user_version` **7**。
+- User Identity：**只认密钥，不认人**；Key Identity 已是组合应用默认公开入场路径。
+- Runtime Capability Harness：正式 Key Identity 参与者下已覆盖 1→N、N→1、N→N、并发 CAS、撤权后持钥重进、重启回档、多 session、独立 Runtime 隔离和批量进入。
+- Commons Reference Application v2：当前只定义 `Post / Reply / Conversation / Message`，用于验证公开／私有、持久历史、参与者授权、通知与恢复；这些对象不属于 Runtime 固有模型。
+- 故障／恢复：Operation replay、Runtime 重启、离线恢复、Credential 失效后同钥重进、event cursor 续接、HTTP/MCP 混合调用均有当前回归。
+- Real Agent Integration：OpenCode 与 Pi 已在本机独立进程中通过 MCP 自主发现并调用 Commons；OpenCode 新进程可恢复离线期间事实。该证据是本机 loopback 短时实验，不承担身份鉴权或跨机器／soak 证明。
+- 最近记录的确定性证据：**227 个 unittest 全部通过**；0.18.0 wheel 构建、独立安装与 checkout 外 package probe 已通过。
+- 当前唯一已确认的 Runtime 实现缺口：**外部系统副作用交付**（outbox / delivery / compensation）。
+- 当前主要证据缺口：跨机器／跨主机 Agent、网络分区、长期 soak、生产数据库迁移和真实用户使用。
 
 ## 六层语义主轴
 

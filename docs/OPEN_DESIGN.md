@@ -1,13 +1,13 @@
 # 未决设计、实现差距与待验证
 
-更新：2026-09-27。这里不是第七层。每个未决项都标明真正归属；候选方案在决定前不具有现行合同地位。
+复核：2026-09-30。这里不是第七层。每个未决项都标明真正归属；候选方案在决定前不具有现行合同地位。
 
 ## 当前处理顺序
 
-1. **先验证 Runtime 能力面，而不是固定两人故事。** 建立可编排 Capability Harness，覆盖单主体、多主体、1→N 广播、N→1 汇聚、N→N、并发竞争、离线／后加入、撤权、重连和恢复。
-2. **并行维护一个社交 Reference Application。** 它用于真实消费 Runtime、暴露 API／恢复／权限缺口，不定义产品本体，也不把 Conversation / Friend / Block 强塞进 Runtime。
-3. **缺口先分类。** Reference Application 自己的领域问题留在应用；已有 Runtime 能力可解决的就正确使用；只有跨领域通用且当前无法可靠表达的问题才进入 Runtime。
-4. 第三方／群众公裁、外部副作用交付等长期问题继续按各自层级推进，不被首个 Reference Application 的范围覆盖或取消。
+1. **不继续为已经成立的本机能力重复造抽象。** Key Identity、Capability Harness、Commons v2、恢复矩阵和真实 OpenCode/Pi 宿主短时实验都已经有当前证据；没有新的反例时不增加 Runtime 原语。
+2. **下一优先级是证据，而不是功能。** 重点补跨机器／跨主机 Agent、网络分区、长期 soak、生产数据库迁移和真实用户使用。它们失败时再判断是实现缺陷、合同问题还是环境问题。
+3. **Reference Application 只按真实产品流程继续长。** Friend / Block / 关系／反骚扰等只有真实切片需要时才加入 Commons，并继续先留在应用层；出现跨领域反例后再判断是否提升到 Runtime。
+4. **外部副作用交付是唯一已确认的 Runtime 实现缺口，但不抢跑。** 只有真实消费者需要支付、第三方 API、文件或其他外部写入时，再设计 outbox / delivery / compensation 合同。第三方／群众公裁和长期 retention 语义继续按各自层级推进。
 
 ## EigenFlux 参考采纳清单
 
@@ -31,7 +31,7 @@
 
 需要明确：是否存在值得通用化的 Request / Response / Confirmation / Completion 对象；引用关系；允许提交者；Delivered / Read / Responded / Confirmed / Executed / Completed 的可选阶段；并发、晚到、撤回、超时、重发和换客户端恢复。
 
-先用最小非游戏交互验证语义，再决定哪些真的应该进入 Runtime。不要先造全局 conversation turn、统一审批状态机或“所有动作必领租约”。
+Commons v2 已经完成一轮最小非游戏交互验证：Post / Reply / Conversation / Message、私有授权、通知与离线恢复都能由现有 State + Operation/Receipt + Event 表达。当前证据**不支持**增加全局 conversation turn、统一审批状态机或“所有动作必领租约”；只有新的跨领域反例出现时才重开这个问题。
 
 ## 2. 第三方／群众公裁
 
