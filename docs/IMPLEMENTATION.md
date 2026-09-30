@@ -1,6 +1,6 @@
 # L6：当前实现
 
-复核：2026-09-27。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-09-30。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
@@ -199,4 +199,4 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 
 共同事项模型、第三方／群众公裁等仍属于 [OPEN_DESIGN](OPEN_DESIGN.md) 的产品／领域设计问题，不能因为“尚未实现”就假装它们已经被证明应该进入 Runtime。
 
-长期 soak、浏览器轨迹、更多平台矩阵属于验证缺口而不是 L6 功能缺口，统一记录在 [REFERENCE_GATE](REFERENCE_GATE.md)。
+跨机器／跨主机 Agent、网络分区与重连、长期 soak、生产数据库迁移／备份恢复、浏览器轨迹和更广平台矩阵属于验证缺口而不是 L6 功能缺口，统一记录在 [REFERENCE_GATE](REFERENCE_GATE.md)。

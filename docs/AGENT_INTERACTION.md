@@ -1,6 +1,6 @@
 # L4：外部 Agent 接入与交互合同
 
-复核：2026-09-27。本文说明外部 Agent／客户端与持久世界交互时，哪些事实可以成立、哪些不能靠推断补出来。它不创建统一聊天产品或强制所有世界使用同一会话状态机。
+复核：2026-09-30。本文说明外部 Agent／客户端与持久世界交互时，哪些事实可以成立、哪些不能靠推断补出来。它不创建统一聊天产品或强制所有世界使用同一会话状态机。
 
 ## 接入与提交
 
@@ -21,7 +21,7 @@
 
 Delivered、Read、Responded、Confirmed、Executed、Completed 是不同语义。具体世界可以有意省略某些阶段，但必须在自己的规则里明确合并，不能由客户端或 Runtime 猜测。
 
-当前 Runtime 没有通用“会话已读／已确认／已完成”对象。若未来要抽成通用能力，必须先解决 [OPEN_DESIGN](OPEN_DESIGN.md) 中的共同事项模型。
+当前 Runtime 没有通用“会话已读／已确认／已完成”对象。Commons v2 已证明当前 Post / Reply / Conversation / Message 流程不需要这种 Runtime 原语；只有新的跨领域反例证明现有 State + Operation/Receipt + Event 无法可靠表达时，才重新评估 [OPEN_DESIGN](OPEN_DESIGN.md) 中的共同事项模型。
 
 ## 外部运行、离线与等待
 

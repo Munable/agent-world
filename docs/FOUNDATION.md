@@ -1,6 +1,6 @@
 # L4：Runtime 核心行为合同
 
-复核：2026-09-27。本文定义 **跨具体语言、数据库和传输仍应保持的 Runtime 行为语义**。L1-L3 见 [产品目标](../PRODUCT_POSITIONING.md)、[系统不变量](INVARIANTS.md)、[领域模型](DOMAIN_MODEL.md)；当前 Python/SQLite/API 映射见 [L6 当前实现](IMPLEMENTATION.md)。
+复核：2026-09-30。本文定义 **跨具体语言、数据库和传输仍应保持的 Runtime 行为语义**。L1-L3 见 [产品目标](../PRODUCT_POSITIONING.md)、[系统不变量](INVARIANTS.md)、[领域模型](DOMAIN_MODEL.md)；当前 Python/SQLite/API 映射见 [L6 当前实现](IMPLEMENTATION.md)。
 
 ## 声明式调用
 

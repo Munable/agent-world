@@ -10,9 +10,9 @@ Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结�
 
 ## 当前主线
 
-**用 Reference Application 与 Runtime Capability Harness 驱动 Runtime 演进。** Agent World 的产品主体仍是持久世界 Runtime；社交只是首个垂直切片和现实消费者，不是产品本体或唯一方向。
+**继续用 Reference Application 与 Capability Harness 暴露真实问题，但下一优先级已经从“补本机能力”切到“补真实环境证据”。** Agent World 的产品主体仍是持久世界 Runtime；社交只是首个垂直切片和现实消费者，不是产品本体或唯一方向。
 
-当前先复用已有身份、授权、事务、Receipt、State、Event/View/Stream/Wait 等能力，在真实切片以及单主体、多主体、广播、汇聚、并发、离线和恢复场景中验证它们。只有被实际场景暴露、且确实跨领域通用的缺口才进入 Runtime；已有 RPG／复杂玩法暂停扩展，只保留仍验证当前合同的最小 fixture。
+Key Identity、主要多参与者拓扑、Commons v2、恢复矩阵以及 OpenCode / Pi 本机真实宿主短时实验已经有当前证据；没有新的跨领域反例时，不继续增加 Runtime 抽象。下一阶段优先验证跨机器／跨主机 Agent、网络分区与重连、长期 soak、生产数据库迁移／备份恢复和真实用户使用。当前唯一已确认的 Runtime 实现缺口是外部系统副作用交付（outbox / delivery / compensation），只有真实消费者逼到该边界时再设计。当前快照见 [六层基线](docs/BASELINE.md)，证据范围见 [REFERENCE_GATE](docs/REFERENCE_GATE.md)。
 
 参考项目 EigenFlux 用于提供成熟实践基线，尤其关注分段接入、稳定身份配置、结构化错误、通知与权威状态分离、游标恢复和有界退避。具体取舍见 [EigenFlux 参考基线](docs/REFERENCE_EIGENFLUX.md) 与 [未决设计](docs/OPEN_DESIGN.md)。
 
