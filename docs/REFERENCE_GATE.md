@@ -73,7 +73,7 @@ EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFL
 - `tools/check_package.py`：当前 package 构建与 checkout 外 probe。
 - 两份 Node 客户端测试：当前 View / Stream 客户端合同。
 
-当前 0.18.0 代码树已重新执行：`python tools/run_tests.py` 共 **225 个 unittest 全部通过**。密钥身份与 Capability Harness 保持原有覆盖；新增 **4 个 Commons Reference Application 测试**验证 Post / Reply / Conversation / Message、私有参与者授权、通知≠已读／接受、Operation replay、并发消息、Runtime 重启后的离线恢复和 HTTP/MCP 混合调用。`python tools/check_package.py` 通过 0.18.0 wheel 构建、独立安装与 checkout 外 package probe。客户端 JS 本轮未修改，因此没有重复执行两份 Node 客户端合同。这个数字只描述当前树，不作为未来提交的永久成绩单。
+当前 0.18.0 代码树已重新执行：`python tools/run_tests.py` 共 **227 个 unittest 全部通过**。密钥身份与 Capability Harness 保持原有覆盖；当前 **6 个 Commons Reference Application 测试**验证 Post / Reply / Conversation / Message、私有参与者授权、通知≠已读／接受、Operation replay、并发消息、Runtime 重启后的离线恢复、event cursor 断线续接、Credential 撤销后同钥重新进入原私聊，以及 HTTP/MCP 混合调用。0.18.0 package check 已在 Commons v2 变更上通过 wheel 构建、独立安装与 checkout 外 package probe；本轮故障补测只改测试／证据，没有重复 package 或 Node 客户端验证。这个数字只描述当前树，不作为未来提交的永久成绩单。
 
 ## 新实验最低要求
 

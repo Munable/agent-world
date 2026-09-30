@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from agent_world.builtin_worlds import get_builtin_definition
-from agent_world.errors import PermissionDenied
+from agent_world.errors import InvalidIdentityToken, PermissionDenied
 from tests.capability_harness import RuntimeCapabilityHarness
 
 
@@ -171,6 +171,99 @@ class CommonsReferenceTests(unittest.TestCase):
         )
         self.assertTrue(replay["replayed"])
         self.assertEqual(len(self.h.changes(self.bob)["events"]), 2)
+
+    def test_event_cursor_resumes_only_unseen_message_after_restart(self):
+        self.h.call(
+            self.alice,
+            "commons.conversation.open",
+            {
+                "conversation_id": "cursor-c1",
+                "peer_role_id": self.bob.role_id,
+            },
+            "cursor-open",
+        )
+        first_page = self.h.changes(self.bob)
+        self.assertEqual(
+            [event["kind"] for event in first_page["events"]],
+            ["commons.conversation.opened"],
+        )
+        cursor = first_page["next_cursor"]
+
+        self.h.call(
+            self.alice,
+            "commons.message.send",
+            {
+                "conversation_id": "cursor-c1",
+                "message_id": "cursor-m1",
+                "text": "after cursor",
+            },
+            "cursor-message",
+        )
+        self.h.restart()
+
+        resumed = self.h.changes(self.bob, after=cursor)
+        self.assertEqual(
+            [event["kind"] for event in resumed["events"]],
+            ["commons.message.created"],
+        )
+        self.assertEqual(
+            resumed["events"][0]["payload"]["message_id"],
+            "cursor-m1",
+        )
+
+    def test_revoked_credential_reenters_same_private_history_with_same_key(self):
+        self.h.call(
+            self.alice,
+            "commons.conversation.open",
+            {
+                "conversation_id": "reentry-c1",
+                "peer_role_id": self.bob.role_id,
+            },
+            "reentry-open",
+        )
+        self.h.call(
+            self.alice,
+            "commons.message.send",
+            {
+                "conversation_id": "reentry-c1",
+                "message_id": "reentry-m1",
+                "text": "persisted",
+            },
+            "reentry-message",
+        )
+
+        self.h.revoke(self.bob)
+        with self.assertRaises(InvalidIdentityToken):
+            self.h.query(
+                self.bob,
+                "commons.message.list",
+                {"conversation_id": "reentry-c1", "limit": 10},
+            )
+
+        returned = self.h.reenter(self.bob)
+        self.assertFalse(returned.created_profile)
+        self.assertEqual(returned.role_id, self.bob.role_id)
+
+        messages = self.h.query(
+            returned,
+            "commons.message.list",
+            {"conversation_id": "reentry-c1", "limit": 10},
+        )
+        self.assertEqual(
+            [message["message_id"] for message in messages["result"]["messages"]],
+            ["reentry-m1"],
+        )
+        sent = self.h.call(
+            returned,
+            "commons.message.send",
+            {
+                "conversation_id": "reentry-c1",
+                "message_id": "reentry-m2",
+                "text": "back again",
+            },
+            "reentry-message-2",
+        )
+        self.assertEqual(sent["result"]["sender_role_id"], self.bob.role_id)
 
     def test_two_participants_can_write_same_conversation_concurrently(self):
         self.h.call(
