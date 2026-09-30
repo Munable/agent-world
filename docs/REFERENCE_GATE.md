@@ -22,6 +22,7 @@
 | --- | --- | --- |
 | 单元／合同回归 | 某个明确语义在当前代码下成立。 | 整个产品已经完成。 |
 | 当前 transport / integration 测试 | 当前 HTTP/MCP、身份和进程边界在被测路径中成立。 | 真实外部 Agent 长期行为或全部平台。 |
+| Real Agent Integration | 真实模型宿主能够通过 MCP 自己发现、理解、调用世界能力，并在新进程中重新读取持久事实。 | 跨机器网络、长期 soak、所有宿主兼容性或身份鉴权宿主实现。 |
 | checkout 外 package probe | 安装包、公开 import 与若干可选能力可以脱离源码目录组合使用。 | 它不是 Reference Application，也不能证明复杂领域天然适配。 |
 | Capability Harness | 多参与者拓扑、并发、撤权、重放、恢复等明确能力组合成立。 | 某个具体产品体验已经合理。 |
 | Reference Application | 一组真实领域规则能够消费 Runtime，并可暴露通用缺口。 | 该领域对象应该进入 Runtime。 |
@@ -75,6 +76,21 @@ EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFL
 
 当前 0.18.0 代码树已重新执行：`python tools/run_tests.py` 共 **227 个 unittest 全部通过**。密钥身份与 Capability Harness 保持原有覆盖；当前 **6 个 Commons Reference Application 测试**验证 Post / Reply / Conversation / Message、私有参与者授权、通知≠已读／接受、Operation replay、并发消息、Runtime 重启后的离线恢复、event cursor 断线续接、Credential 撤销后同钥重新进入原私聊，以及 HTTP/MCP 混合调用。0.18.0 package check 已在 Commons v2 变更上通过 wheel 构建、独立安装与 checkout 外 package probe；本轮故障补测只改测试／证据，没有重复 package 或 Node 客户端验证。这个数字只描述当前树，不作为未来提交的永久成绩单。
 
+## Real Agent Integration 证据
+
+2026-09-30 在本机 loopback Commons v2 实例上完成一次真实模型宿主实验。这里验证的是“外部 Agent 能否理解并正确使用 Runtime”，不是新的功能合同：
+
+- **OpenCode 1.18.33 + OpenCode Go / GLM 5.3 Flash，Agent A**：独立进程自行调用 `world.bootstrap`、`world.describe`，随后创建 Post、打开 Conversation、发送 Message，并主动 `post.list / conversation.list / message.list` 复核。Runtime 权威状态确认三条写入存在，宿主进程 `returncode=0`。
+- **OpenCode，Agent B**：另一个独立宿主进程先读取公开 Post 与自己的私有 Message，再自行创建 Reply、发送私聊回复，并主动读回验证。Runtime 权威状态确认两条写入存在，进程 `returncode=0`。
+- **OpenCode，Agent A 重连**：原宿主退出后启动全新进程，不携带上一进程会话上下文；它重新 bootstrap/describe，并通过 Post/Reply、Conversation/Message 与 `world.get_changes` 恢复出 B 在离线期间的公开和私有回复，没有创建新世界状态。
+- **Pi Coding Agent 0.87.1 + `pi-mcp-extension` 1.5.0 + OpenCode Go / GLM 5.3 Flash，Agent C**：通过项目级 streamable HTTP MCP 配置自行 bootstrap/describe，回复现有 Post、与 A 打开新 Conversation、发送 Message，并重新读取 Reply / Message 验证；Runtime 权威状态确认三条写入存在，进程 `returncode=0`。
+
+这个实验只提供**短时真实宿主证据**，有明确限制：
+
+1. 所有进程运行在同一台机器，通过 loopback MCP 连接，不是跨机器网络或分区实验。
+2. 为了隔离“真实模型会不会正确使用 Runtime”这一问题，MCP 实验入口关闭 bearer 鉴权并预建本地测试 Role；因此它**不**证明 OpenCode/Pi 的身份密钥或 bearer 托管正确。Key Identity、Credential、MCP session 鉴权已有确定性合同测试单独验证。
+3. 这不是 soak；没有证明长时间资源增长、模型漂移、网络抖动或生产平台矩阵。
+
 ## 新实验最低要求
 
 任何新实验先写明：
@@ -103,4 +119,4 @@ EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFL
 
 ## 当前仍缺的验证
 
-长期 soak、当前提交的完整远端 CI 矩阵、真实多宿主 Agent、跨机器网络分区、生产数据库迁移和真实用户使用仍需要独立证据。
+长期 soak、当前提交的完整远端 CI 矩阵、跨机器／跨主机 Agent、网络分区、生产数据库迁移和真实用户使用仍需要独立证据。本机真实多宿主／多进程已经有上述短时证据。

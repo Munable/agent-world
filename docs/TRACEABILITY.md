@@ -44,7 +44,7 @@
 | 多参与者拓扑验证 | **Harness 已覆盖密钥身份与主要本机拓扑** | 参与者通过正式 Key Identity 进入；1→N、N→1、N→N、并发 CAS、撤权后持钥重进、重启回档、同钥多 Credential／双 MCP session、独立 Runtime 身份连续但 profile/bearer 隔离，以及 32 身份并发进入已有回归；跨机器网络分区与长期大规模仍待验证。 |
 | 外部系统副作用交付 | **明确缺口** | Runtime 事务不能给支付、第三方 API、文件等外部写入提供 exactly-once；尚无通用 outbox/delivery/compensation 合同。 |
 | 通用 Request/Response/Confirmation 模型 | **未证明需要** | Commons v2 已用现有 State + Operation/Receipt + Event 承载 Post/Reply/Conversation/Message、私有授权与通知恢复；当前实验没有暴露必须提升为 Runtime 通用会话／确认原语的缺口。 |
-| 真实多宿主 Agent / 长期运行 | **验证缺口** | 不等于 Runtime 功能缺失；需要真实宿主、网络故障与 soak 证据。 |
+| 真实多宿主 Agent / 长期运行 | **本机真实宿主已有短时证据；跨机器与 soak 仍缺** | OpenCode 与 Pi 已在独立进程中通过 MCP 自主发现并调用 Commons，OpenCode 新进程可恢复离线期间事实；实验为本机 loopback 且不承担身份鉴权证明。跨机器网络故障、长期运行和更广宿主矩阵仍是证据缺口，不是当前功能缺口。 |
 
 ## 证据使用规则
 
