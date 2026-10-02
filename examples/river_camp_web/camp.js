@@ -4,6 +4,7 @@ const $=id=>document.getElementById(id), client=new CampClient();
 let key=null, profile=null, snapshot=null, busy=false, generation=0, timer=null, agentClient=null;
 const text=(tag,value,cls='')=>{const n=document.createElement(tag);n.textContent=value;if(cls)n.className=cls;return n;};
 const status={pending:'待裁判回应',approved:'方案已获准，等待本人接受',declined:'未获准',executed:'已执行',active:'进行中',completed:'本人已声明完成',expired:'已到期'};
+const passage={blocked:'阻断',foot:'步行',cargo:'货物'};
 function download(name,value){const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)+'\n'],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function draft(){if(!profile)return;client.saveDraft('camp-intent',JSON.stringify({text:$('intent').value,note:$('private-note').value}));}
 function restoreDraft(){let data={};try{data=JSON.parse(client.draft('camp-intent')||'{}');}catch{}$('intent').value=data.text||'';$('private-note').value=data.note||'';}
@@ -34,14 +35,14 @@ function render(){
   const s=snapshot, route=s.route.value, stock=s.inventory.value;
   $('situation').replaceChildren(text('p',s.goal_reached?'目标已达成：稳定且低暴露的货物通行。':'目标：恢复货物通行，稳定度至少 2，暴露程度至多 1。'));
   const materials=text('div','','materials');for(const [name,label] of [['wood','木材'],['rope','绳子'],['stone','石料']])materials.append(text('span',label+' '+stock[name]));$('situation').append(materials);
-  $('situation').append(text('p','通行：'+({blocked:'阻断',foot:'步行',cargo:'货物'}[route.passage])+' · 稳定度 '+route.stability+' · 暴露 '+route.exposure));
+  $('situation').append(text('p','通行：'+passage[route.passage]+' · 稳定度 '+route.stability+' · 暴露 '+route.exposure));
   $('freshness').textContent='最后核对 '+new Date(s.now*1000).toLocaleTimeString()+'；页面可见时每 6 秒读取。';
   $('sites').replaceChildren();for(const [site,label] of [['bank','河岸'],['bridge','旧桥'],['store','仓库']])$('sites').append(actionButton('探索'+label,async()=>{const result=await mutate('camp.explore',{site});$('clues').replaceChildren(text('p',result.clue));await refresh();}));
   $('intents').replaceChildren();const notes=new Map((s.private_notes||[]).map(n=>[n.key,n.value.content]));
   for(const record of [...s.intents].sort((a,b)=>b.value.created_at-a.value.created_at)){
     const v=record.value, item=text('article','','record');item.append(text('span',status[v.status],'tag'),text('small',v.owner===profile.role_id?'你的提案':'参与者 '+v.owner.slice(-6)),text('p',v.text));
     if(notes.has(record.key))item.append(text('p','私密补充（你有读取权限）：'+notes.get(record.key),'small'));
-    if(v.ruling){item.append(text('p','裁判理由：'+v.ruling.reason));if(v.ruling.effects)item.append(text('p','代价：木材 '+v.ruling.cost.wood+' / 绳子 '+v.ruling.cost.rope+' / 石料 '+v.ruling.cost.stone+'；结果：'+v.ruling.effects.passage+'，稳定 '+v.ruling.effects.stability+'，暴露 '+v.ruling.effects.exposure));}
+    if(v.ruling){item.append(text('p','裁判理由：'+v.ruling.reason));if(v.ruling.effects)item.append(text('p','代价：木材 '+v.ruling.cost.wood+' / 绳子 '+v.ruling.cost.rope+' / 石料 '+v.ruling.cost.stone+'；'+(v.status==='executed'?'已执行效果：':'获准效果：')+passage[v.ruling.effects.passage]+'，稳定 '+v.ruling.effects.stability+'，暴露 '+v.ruling.effects.exposure));}
     if(v.owner===profile.role_id&&v.status==='approved')item.append(actionButton('接受代价并执行',async()=>{await mutate('camp.accept',{intent_id:record.key,expected_intent_version:record.version});await refresh();}));
     $('intents').append(item);
   }

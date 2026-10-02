@@ -1,6 +1,6 @@
 # L6：当前实现
 
-复核：2026-10-02。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-10-03。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
@@ -115,7 +115,23 @@ Conversation/Message 的参与者授权、Post/Reply 的公开读取、Operation
 
 `agent_world.__all__` 当前导出：WorldRuntime、WorldDefinition、FunctionSpec、StateRule、RetentionPolicy、PresentationCue、StreamSpec、StreamEvent、ViewSpec、TimerSpec、TimerInvocation、RetryTimer、FunctionContext、FunctionOutcome、EventSpec。
 
+包根通过 `__getattr__` 按需从原模块导入并缓存这 15 个对象，`TYPE_CHECKING` 保留静态类型导入；`__all__`、star import、原对象同一性与未知名称的 `AttributeError` 行为保持。单独导入 `agent_world.connect` 不再预加载 Runtime／jsonschema 依赖图。延迟导出不创建代理对象、不更改 Identity／Credential 语义，也不启动服务。
+
 WorldDefinition 当前可声明 functions、state rules、state authorizer、bootstrap/initialize/migrations、views、timers、retention、streams 等；这些可选能力不是所有世界的必选模型。FunctionContext 对世界作者暴露受管 state / timer / stream / role 等 helper，不再暴露公共数据库连接。
+
+### 当前本地验证与有界模型工具
+
+`tests/live_server.py` 的 async 生命周期在线程中启动／停止自有服务；Commons 网络测试使用异步 HTTP，持钥初始化在线程完成。失败与取消保留 server log、原异常及清理 cause；自有进程未回收时不删除数据库目录。启动取消继续等待清理，原 `CancelledError` 保留 caller message／notes／cause，不吞掉残留进程诊断。原 60 秒启动、5 秒 HTTP、10 秒连接模块 import 限制未放宽；这些是验证基础设施修复，不改变 Runtime 行为合同。
+
+`tools/run_river_camp_models.py` 是固定本机实验工具，非 Runtime Agent 宿主。每次显式续接只启动一个选择的模型步骤，原尝试与续接／小子集共同受十次推理用 CLI 宿主限制。异常、取消与 deadline 统一终止／回收自有进程组、关闭资源并保存脱敏失败；不能回收就保留 profile、标 unfinished、拒绝后续推理。构造 `Popen` 时先延后信号取消，取得 child handle 后立即检查原期限，避免在已创建子进程但尚无句柄时丢失清理能力；阻塞构造不声称受 Python watchdog 硬抢占。正常 EOF 在原剩余期限内等待最多 3 秒，再必要终止；TERM／KILL 各配置 3 秒回收等待。账本原子替换并有失败 fallback，metadata refresh 与旧冻结证据分开；记录仅为宿主／CLI 时间与已报告 usage，provider 请求次数、未报告尾段及账户账单仍未知。
+
+B 的无 CLI 事件超时与无凭据版本检查暴露本机启动路径阻塞后，工具增加显式定向存储选项：内部 binary 须与官方 SHA 完全一致、本人所有且 0700，真实路径及全部祖先无符号链接；私有 profile 的任何 Git 祖先在写凭据前拒绝。B 特例仍用原提示／逻辑 Operation，检查回执缺失、无 B intent 和 A 既有状态，旧计数与失败不重置。models.dev 连接失败后仅新增显式官方 GitHub 同源元数据选择，默认源不变；固定 provider／base TOML 三项费用显式零、工具能力继承或覆盖，Go 价格 DOM 绑定正确 tab／tabpanel、六表头及唯一免费行。专用 no-host proof 绑定源码／价格文件摘要与 300 秒时效，profile 准备后和 ledger 写完、启动前再次核对；过期不启动模型、不计新宿主。
+
+第八宿主实际 GM 格式错误只新增显式恢复入口：保留精确 SchemaRejected、八次计数及原证据；第九只允许同 Operation、新 stage，原提示追加三句外层格式说明，不提供裁判答案。第九失败阻止后续推理；第十只能由 B 同钥新进程接受真实已获准意图，先核第九成功、同外层 Operation／参数内无 Operation 与 B 意图、持久事实一致。实际 GM9／B10 已完成，全部十次额度用完；两个语义子集及旧探针入口停用，原 28 条有效覆盖 0。实际执行源码 e10e08d7 与测试 99ea1831 已封存在唯一源码 ZIP，后续代码仅补 macOS 清理库存，不改变模型结果、Runtime 或世界规则。
+
+多位置清理按各 run 的精确记录路径，在全部 PID 与一次当前 UID 文件占用盘点通过后才删除。实际 macOS 输出使旧清理两次安全停止：自动 f 字段与非文件系统空名称；最终 `-Fptfn` 严格关联 p／f／t／n，仅数字描述符的 NPOLICY／NEXUS／PIPE／rte 可以无名称，REG／DIR／未知空名称和异常完整性仍保留。非空名称始终检查精确目录／子路径及内部 binary，不保存无关文件名。现场只读库存先通过，随后七个 profile 和独立核验的临时内部 CLI／公开 HTML 已精确清理；活动环境、服务、密钥、数据库、唯一备份和证据保留。最终清理源码 7f2ed1da、测试 d419ca83，24 项 synthetic 回归 0.817 秒通过；条目分配量与观察到的可用空间变化分开，不宣称 APFS 净释放。
+
+当前本机性能环境原路径为 `repo/work/latency-runtime`，与原外置环境共享相同 base Python 和 35 个相同依赖版本，通过已有缓存离线建立；小型身份／数据库测试目录放 Git 外的任务 `work/test-work`，不弱化私有文件保护。原外置缓存、环境、大型资产、真实数据库与固定服务不迁移。该环境和最终代码／fixture 共同通过当前 364 项完整 Python（40.933 秒，`latency-full-typed-cleanup-final.log`）、四份 Node 与 0.20.0 package 检查；测量、失败原记录、缓存／源码混杂限制和启动方法统一见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)，不把环境选择当 Runtime 原语或存储持久性策略改变。
 
 ## 当前 core tool surface
 

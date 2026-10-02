@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
 import base64
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -20,6 +22,19 @@ from mcp.client.streamable_http import streamable_http_client
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class _OwnedDirectory:
+    # A process that cannot be reaped may still have its database open. Unlike
+    # TemporaryDirectory, this directory has no implicit deletion finalizer.
+    def __init__(self):
+        self.name = tempfile.mkdtemp(prefix="agent-world-test-")
+
+    def cleanup(self):
+        try:
+            shutil.rmtree(self.name)
+        except FileNotFoundError:
+            pass
+
+
 class LiveServer:
     def __init__(self, profile="demo"):
         self.profile = profile
@@ -28,43 +43,75 @@ class LiveServer:
             raise ValueError("test startup timeout must be between 1 and 300 seconds")
 
     def __enter__(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.db = Path(self.temp.name) / "network.sqlite3"
-        self.password = secrets.token_urlsafe(24)
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            self.port = sock.getsockname()[1]
-        self.url = f"http://127.0.0.1:{self.port}"
-        self.log_path = Path(self.temp.name) / "server.log"
-        self.log = self.log_path.open("w", encoding="utf-8")
-        self.start()
+        self.temp = _OwnedDirectory()
+        self.proc = None
+        self.log = None
+        try:
+            self.db = Path(self.temp.name) / "network.sqlite3"
+            self.password = secrets.token_urlsafe(24)
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                self.port = sock.getsockname()[1]
+            self.url = f"http://127.0.0.1:{self.port}"
+            self.log_path = Path(self.temp.name) / "server.log"
+            self.log = self.log_path.open("w", encoding="utf-8")
+            self.start()
+        except BaseException as exc:
+            if self.log is None or not self.log.closed:
+                self.__exit__(type(exc), exc, exc.__traceback__)
+            raise
         return self
+
+    async def __aenter__(self):
+        opening = asyncio.create_task(asyncio.to_thread(self.__enter__))
+        try:
+            return await asyncio.shield(opening)
+        except asyncio.CancelledError as cancelled:
+            # A cancelled await does not stop the startup thread. Reap its
+            # owned process before allowing the test to leave this context.
+            try:
+                await opening
+            except Exception as opening_failure:
+                for note in getattr(opening_failure, "__notes__", ()):
+                    cancelled.add_note(note)
+                raise cancelled from opening_failure
+            else:
+                await asyncio.to_thread(self.__exit__, None, None, None)
+            raise
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        closing = asyncio.create_task(asyncio.to_thread(self.__exit__, exc_type, exc, traceback))
+        try:
+            return await asyncio.shield(closing)
+        except asyncio.CancelledError:
+            await closing
+            raise
 
     def start(self):
         """Start the owned process with the same database and network address."""
         env = os.environ.copy()
         env["WORLD_WEB_PASSWORD"] = self.password
-        self.proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-u",
-                "-m",
-                "agent_world",
-                "--world",
-                self.profile,
-                "--universe",
-                "network",
-                "--db",
-                str(self.db),
-                "--port",
-                str(self.port),
-            ],
-            cwd=ROOT,
-            env=env,
-            stdout=self.log,
-            stderr=subprocess.STDOUT,
-        )
         try:
+            self.proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-u",
+                    "-m",
+                    "agent_world",
+                    "--world",
+                    self.profile,
+                    "--universe",
+                    "network",
+                    "--db",
+                    str(self.db),
+                    "--port",
+                    str(self.port),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=self.log,
+                stderr=subprocess.STDOUT,
+            )
             with httpx.Client(trust_env=False, timeout=0.3) as client:
                 deadline = time.monotonic() + self.startup_timeout
                 last_probe = "not attempted"
@@ -81,12 +128,14 @@ class LiveServer:
                     time.sleep(0.05)
             details = self.log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
             raise RuntimeError(f"test server readiness deadline exceeded; {last_probe}; log: {details}")
-        except BaseException:
-            self.__exit__(None, None, None)
+        except BaseException as exc:
+            self.__exit__(type(exc), exc, exc.__traceback__)
             raise
 
     def stop(self, *, abrupt=False):
         """Stop only this fixture process, preserving its database for recovery tests."""
+        if self.proc is None:
+            return
         if abrupt and os.name != "nt" and self.proc.poll() is None:
             self.proc.kill()
         if os.name == "nt" and self.proc.poll() is None:
@@ -109,10 +158,40 @@ class LiveServer:
         self.stop(abrupt=abrupt)
         self.start()
 
-    def __exit__(self, *_):
-        self.stop()
-        self.log.close()
-        self.temp.cleanup()
+    def __exit__(self, exc_type, exc, traceback):
+        stop_error = None
+        try:
+            self.stop()
+        except BaseException as failure:
+            stop_error = failure
+            if exc is not None:
+                raise failure from exc
+            raise
+        finally:
+            unreaped = self.proc is not None and self.proc.poll() is None
+            failure = stop_error if stop_error is not None else exc
+            if unreaped and failure is None:
+                failure = RuntimeError("owned test server did not exit")
+            if failure is not None:
+                try:
+                    if self.log is None:
+                        details = "no server log was opened"
+                    else:
+                        self.log.flush()
+                        details = self.log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+                except (OSError, ValueError) as log_error:
+                    details = f"log unavailable: {type(log_error).__name__}"
+                failure.add_note("Owned test server log before cleanup:\n" + (details or "(empty)"))
+                if unreaped:
+                    failure.add_note(f"Owned test server PID {self.proc.pid} is still running; retained directory: {self.temp.name}")
+            try:
+                if self.log is not None:
+                    self.log.close()
+            finally:
+                if not unreaped:
+                    self.temp.cleanup()
+            if unreaped and stop_error is None:
+                raise failure
 
     def role(self, name="Visitor"):
         with httpx.Client(trust_env=False, timeout=5) as client:

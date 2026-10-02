@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 
 import httpx
@@ -9,8 +10,8 @@ from tests.live_server import LiveServer
 
 class CommonsTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_post_is_a_public_resource_error_over_http_and_mcp(self):
-        with LiveServer("commons") as server:
-            _, identity, _ = server.key_identity()
+        async with LiveServer("commons") as server:
+            _, identity, _ = await asyncio.to_thread(server.key_identity)
             auth = {"Authorization": "Bearer " + identity["token"]}
             cases = (
                 ("commons.post.get", {"arguments": {"post_id": "missing-post"}}),
@@ -22,10 +23,10 @@ class CommonsTransportTests(unittest.IsolatedAsyncioTestCase):
             )
             expected = {"error": "ResourceNotFound", "message": "post not found", "retryable": False}
             async with server.session(identity) as (session, _):
-                with httpx.Client(trust_env=False, timeout=5) as client:
+                async with httpx.AsyncClient(trust_env=False, timeout=5) as client:
                     for tool, arguments in cases:
                         with self.subTest(tool=tool):
-                            response = client.post(
+                            response = await client.post(
                                 server.url + f"/v1/functions/{tool}/invoke",
                                 headers=auth, json=arguments,
                             )
@@ -36,15 +37,15 @@ class CommonsTransportTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(result.structured_content, {**expected, "tool": tool})
 
     async def test_reference_slice_works_across_http_and_mcp(self):
-        with LiveServer("commons") as server:
-            alice, alice_identity, _ = server.key_identity()
-            bob, bob_identity, _ = server.key_identity()
-            _, carol_identity, _ = server.key_identity()
+        async with LiveServer("commons") as server:
+            alice, alice_identity, _ = await asyncio.to_thread(server.key_identity)
+            bob, bob_identity, _ = await asyncio.to_thread(server.key_identity)
+            _, carol_identity, _ = await asyncio.to_thread(server.key_identity)
             alice_auth = {"Authorization": "Bearer " + alice_identity["token"]}
             bob_auth = {"Authorization": "Bearer " + bob_identity["token"]}
 
-            with httpx.Client(trust_env=False, timeout=5) as client:
-                post = client.post(
+            async with httpx.AsyncClient(trust_env=False, timeout=5) as client:
+                post = await client.post(
                     server.url + "/v1/functions/commons.post.create/invoke",
                     headers=alice_auth,
                     json={
@@ -90,8 +91,8 @@ class CommonsTransportTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertFalse(opened.is_error, opened.structured_content)
 
-            with httpx.Client(trust_env=False, timeout=5) as client:
-                sent = client.post(
+            async with httpx.AsyncClient(trust_env=False, timeout=5) as client:
+                sent = await client.post(
                     server.url + "/v1/functions/commons.message.send/invoke",
                     headers=bob_auth,
                     json={

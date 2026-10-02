@@ -359,7 +359,7 @@ class ConnectionHelperTests(unittest.TestCase):
     def test_importing_module_has_no_key_or_config_side_effects(self):
         env = {**os.environ, "HOME": str(self.root),
                "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
-        result = subprocess.run([sys.executable, "-c", "import agent_world.connect"],
+        result = subprocess.run([sys.executable, "-c", "import agent_world.connect, sys; assert 'agent_world.runtime_core' not in sys.modules; assert 'jsonschema' not in sys.modules"],
                                 cwd=self.root, env=env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / ".config").exists())
