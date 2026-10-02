@@ -71,16 +71,37 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(status["entered_world"])
 
     async def test_duplicate_authentication_headers_are_rejected(self):
+        other_role, other_identity = self.server.role("Other")
+        first = "Bearer " + self.identity["token"]
+        second = "Bearer " + other_identity["token"]
+        pairs = [(first, first), (first, second), (second, first),
+                 (first, "Bearer invalid"), ("Bearer invalid", first)]
         async with httpx.AsyncClient(trust_env=False) as client:
-            response = await client.post(
-                self.server.url + "/mcp",
-                headers=[
-                    ("Authorization", "Bearer " + self.identity["token"]),
-                    ("Authorization", "Bearer " + self.identity["token"]),
-                ],
-                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-            )
-            self.assertEqual(response.status_code, 400, response.text)
+            for index, (left, right) in enumerate(pairs):
+                headers = [("Authorization", left), ("authorization", right)]
+                with self.subTest(index=index):
+                    for path in ("/mcp", "/v1/functions/counter.increment/invoke"):
+                        response = await client.post(
+                            self.server.url + path, headers=headers,
+                            json=({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+                                  if path == "/mcp" else
+                                  {"operation_id": "ambiguous-auth", "arguments": {"amount": 3}}),
+                        )
+                        self.assertEqual(response.status_code, 400, response.text)
+                        self.assertEqual(response.json()["error"], "InvalidArguments")
+                        self.assertEqual(response.json()["recovery"], "fix_request")
+                        self.assertEqual(response.headers["cache-control"], "no-store")
+                    who = await client.get(self.server.url + "/v1/whoami", headers=headers)
+                    self.assertEqual(who.status_code, 400, who.text)
+            for identity in (self.identity, other_identity):
+                receipt = await client.get(self.server.url + "/v1/receipts/ambiguous-auth",
+                    headers={"Authorization": "Bearer " + identity["token"]})
+                self.assertEqual(receipt.status_code, 404, receipt.text)
+            # A rejected request must not consume the operation or change world state.
+            good = await client.post(self.server.url + "/v1/functions/counter.increment/invoke",
+                headers=self.auth, json={"operation_id": "ambiguous-auth", "arguments": {"amount": 3}})
+            self.assertEqual(good.status_code, 200, good.text)
+            self.assertEqual(good.json()["result"]["value"], 3)
 
     async def test_same_invalid_function_arguments_rejected_on_both_transports(self):
         args = {"operation_id": "bad-op", "arguments": {"amount": 999}}
@@ -103,13 +124,13 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_authenticated_requests_reject_supplied_role_id_and_old_bootstrap_route(self):
         with httpx.Client(trust_env=False) as client:
-            same_role = client.get(
-                self.server.url + "/v1/bootstrap",
-                headers=self.auth,
-                params={"role_id": self.role["role_id"]},
-            )
-            self.assertEqual(same_role.status_code, 422, same_role.text)
-            self.assertEqual(same_role.json()["error"], "InvalidArguments")
+            for path in ("/v1/bootstrap", "/v1/discover", "/v1/functions"):
+                same_role = client.get(
+                    self.server.url + path, headers=self.auth,
+                    params={"role_id": self.role["role_id"]},
+                )
+                self.assertEqual(same_role.status_code, 422, same_role.text)
+                self.assertEqual(same_role.json()["error"], "InvalidArguments")
 
             removed = client.get(
                 self.server.url + f"/v1/bootstrap/{self.role['role_id']}",

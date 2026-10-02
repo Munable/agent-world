@@ -37,6 +37,11 @@ class LiveServer:
         self.url = f"http://127.0.0.1:{self.port}"
         self.log_path = Path(self.temp.name) / "server.log"
         self.log = self.log_path.open("w", encoding="utf-8")
+        self.start()
+        return self
+
+    def start(self):
+        """Start the owned process with the same database and network address."""
         env = os.environ.copy()
         env["WORLD_WEB_PASSWORD"] = self.password
         self.proc = subprocess.Popen(
@@ -80,7 +85,10 @@ class LiveServer:
             self.__exit__(None, None, None)
             raise
 
-    def __exit__(self, *_):
+    def stop(self, *, abrupt=False):
+        """Stop only this fixture process, preserving its database for recovery tests."""
+        if abrupt and os.name != "nt" and self.proc.poll() is None:
+            self.proc.kill()
         if os.name == "nt" and self.proc.poll() is None:
             # Windows venv redirectors may have a Python child; stop only this owned tree.
             subprocess.run(
@@ -96,6 +104,13 @@ class LiveServer:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(timeout=5)
+
+    def restart(self, *, abrupt=False):
+        self.stop(abrupt=abrupt)
+        self.start()
+
+    def __exit__(self, *_):
+        self.stop()
         self.log.close()
         self.temp.cleanup()
 

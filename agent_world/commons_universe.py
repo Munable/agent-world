@@ -8,7 +8,8 @@ from .runtime_core import (
     WorldRuntime,
     WorldRuntimeError,
 )
-from .runtime_errors import PermissionDenied
+from .runtime_contracts import MAX_RESULT_BYTES, json_text
+from .runtime_errors import InvalidArguments, PermissionDenied, ResourceNotFound
 
 
 POST_SCOPE = "commons:posts"
@@ -26,17 +27,57 @@ ID_SCHEMA = {
 ROLE_ID_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 128}
 TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 2000}
 LIMIT_SCHEMA = {"type": "integer", "minimum": 1, "maximum": 100}
+AFTER_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 4096}
 
 
-def _rows(page: dict) -> list[dict]:
+def _rows(page: dict, ctx: FunctionContext) -> list[dict]:
     return [
         {
-            **row["value"],
+            **_with_names(row["value"], ctx),
             "state_version": row["version"],
             "updated_at": row["updated_at"],
         }
         for row in page["items"]
     ]
+
+
+def _page_result(page: dict, field: str, ctx: FunctionContext) -> dict:
+    return {
+        field: _rows(page, ctx),
+        "has_more": page["has_more"],
+        "next_cursor": page["next_cursor"],
+    }
+
+
+def _list_result(ctx: FunctionContext, arguments: dict, *, scope: str, prefix: str,
+                 field: str, default_limit: int, **context) -> dict:
+    limit = int(arguments.get("limit", default_limit))
+    while True:
+        page = ctx.list_state(scope, prefix=prefix, limit=limit,
+                              after=arguments.get("after"), order="updated_desc")
+        result = {**context, **_page_result(page, field, ctx)}
+        try:
+            # Leave room for the Runtime/transport envelope. Re-read a smaller
+            # page so the cursor always follows the final returned item.
+            json_text(result, maximum=MAX_RESULT_BYTES - 1024)
+        except InvalidArguments:
+            if limit == 1:
+                raise
+            limit = max(1, limit // 2)
+        else:
+            return result
+
+
+def _with_names(value: dict, ctx: FunctionContext) -> dict:
+    result = dict(value)
+    for field in ("author_role_id", "sender_role_id"):
+        if field in value:
+            result[field.replace("role_id", "display_name")] = ctx.get_role(value[field])["display_name"]
+    if "participant_role_ids" in value:
+        result["participant_names"] = {
+            role: ctx.get_role(role)["display_name"] for role in value["participant_role_ids"]
+        }
+    return result
 
 
 def _active_role(ctx: FunctionContext, role_id: str) -> dict:
@@ -98,23 +139,31 @@ def install_commons_universe(
         access="write",
     )
 
+    def get_post(ctx: FunctionContext, arguments: dict) -> FunctionOutcome:
+        post = ctx.get_state(POST_SCOPE, "post:" + arguments["post_id"], None)
+        if post is None:
+            raise ResourceNotFound("post not found")
+        return FunctionOutcome({"post": _with_names(post, ctx)})
+
+    runtime.register_function(
+        universe, "commons.post.get", 1, "Read one durable public post by its ID.",
+        {"type": "object", "properties": {"post_id": ID_SCHEMA},
+         "required": ["post_id"], "additionalProperties": False},
+        get_post, access="read",
+    )
+
     def list_posts(ctx: FunctionContext, arguments: dict) -> FunctionOutcome:
-        page = ctx.list_state(
-            POST_SCOPE,
-            prefix="post:",
-            limit=int(arguments.get("limit", 20)),
-            order="updated_desc",
-        )
-        return FunctionOutcome({"posts": _rows(page)})
+        return FunctionOutcome(_list_result(ctx, arguments, scope=POST_SCOPE, prefix="post:",
+                                            field="posts", default_limit=20))
 
     runtime.register_function(
         universe,
         "commons.post.list",
-        1,
-        "Read recent public posts.",
+        2,
+        "Read public posts newest first; pass next_cursor as after to read older posts.",
         {
             "type": "object",
-            "properties": {"limit": LIMIT_SCHEMA},
+            "properties": {"limit": LIMIT_SCHEMA, "after": AFTER_SCHEMA},
             "additionalProperties": False,
         },
         list_posts,
@@ -125,7 +174,7 @@ def install_commons_universe(
         post_id = str(arguments["post_id"])
         post = ctx.get_state(POST_SCOPE, "post:" + post_id, None)
         if post is None:
-            raise WorldRuntimeError("post not found")
+            raise ResourceNotFound("post not found")
         reply_id = str(arguments["reply_id"])
         scope = REPLY_SCOPE_PREFIX + post_id
         key = "reply:" + reply_id
@@ -179,23 +228,19 @@ def install_commons_universe(
     def list_replies(ctx: FunctionContext, arguments: dict) -> FunctionOutcome:
         post_id = str(arguments["post_id"])
         if ctx.get_state(POST_SCOPE, "post:" + post_id, None) is None:
-            raise WorldRuntimeError("post not found")
-        page = ctx.list_state(
-            REPLY_SCOPE_PREFIX + post_id,
-            prefix="reply:",
-            limit=int(arguments.get("limit", 50)),
-            order="updated_desc",
-        )
-        return FunctionOutcome({"post_id": post_id, "replies": _rows(page)})
+            raise ResourceNotFound("post not found")
+        return FunctionOutcome(_list_result(ctx, arguments, scope=REPLY_SCOPE_PREFIX + post_id,
+                                            prefix="reply:", field="replies", default_limit=50,
+                                            post_id=post_id))
 
     runtime.register_function(
         universe,
         "commons.reply.list",
-        1,
-        "Read recent public replies for one post.",
+        2,
+        "Read public replies newest first; pass next_cursor as after to read older replies.",
         {
             "type": "object",
-            "properties": {"post_id": ID_SCHEMA, "limit": LIMIT_SCHEMA},
+            "properties": {"post_id": ID_SCHEMA, "limit": LIMIT_SCHEMA, "after": AFTER_SCHEMA},
             "required": ["post_id"],
             "additionalProperties": False,
         },
@@ -265,22 +310,18 @@ def install_commons_universe(
         ctx: FunctionContext,
         arguments: dict,
     ) -> FunctionOutcome:
-        page = ctx.list_state(
-            CONVERSATION_INDEX_SCOPE_PREFIX + ctx.actor_role_id,
-            prefix="conversation:",
-            limit=int(arguments.get("limit", 50)),
-            order="updated_desc",
-        )
-        return FunctionOutcome({"conversations": _rows(page)})
+        return FunctionOutcome(_list_result(ctx, arguments,
+                                            scope=CONVERSATION_INDEX_SCOPE_PREFIX + ctx.actor_role_id,
+                                            prefix="conversation:", field="conversations", default_limit=50))
 
     runtime.register_function(
         universe,
         "commons.conversation.list",
-        1,
-        "List private conversations visible to the current participant.",
+        2,
+        "List private conversations newest first; pass next_cursor as after to read older conversations.",
         {
             "type": "object",
-            "properties": {"limit": LIMIT_SCHEMA},
+            "properties": {"limit": LIMIT_SCHEMA, "after": AFTER_SCHEMA},
             "additionalProperties": False,
         },
         list_conversations,
@@ -349,29 +390,21 @@ def install_commons_universe(
         conversation_id = str(arguments["conversation_id"])
         conversation = _conversation(ctx, conversation_id)
         _require_conversation_participant(ctx, conversation)
-        page = ctx.list_state(
-            MESSAGE_SCOPE_PREFIX + conversation_id,
-            prefix="message:",
-            limit=int(arguments.get("limit", 100)),
-            order="updated_desc",
-        )
-        return FunctionOutcome(
-            {
-                "conversation_id": conversation_id,
-                "messages": _rows(page),
-            }
-        )
+        return FunctionOutcome(_list_result(ctx, arguments, scope=MESSAGE_SCOPE_PREFIX + conversation_id,
+                                            prefix="message:", field="messages", default_limit=100,
+                                            conversation_id=conversation_id))
 
     runtime.register_function(
         universe,
         "commons.message.list",
-        1,
-        "Read recent messages from a private conversation.",
+        2,
+        "Read private messages newest first; pass next_cursor as after to read older messages.",
         {
             "type": "object",
             "properties": {
                 "conversation_id": ID_SCHEMA,
                 "limit": LIMIT_SCHEMA,
+                "after": AFTER_SCHEMA,
             },
             "required": ["conversation_id"],
             "additionalProperties": False,

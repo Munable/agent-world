@@ -458,10 +458,13 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             raise RoleNotFound(role_id)
         return self._row_to_role(row)
 
-    def update_role_profile(self, role_id, *, display_name=_UNSET, avatar_ref=_UNSET):
+    def update_role_profile(self, role_id, *, display_name=_UNSET, avatar_ref=_UNSET,
+                            identity_token=None, universe=None):
         identifier(role_id, "role_id")
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
+            if identity_token is not None:
+                self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
             row = c.execute("SELECT * FROM roles WHERE role_id=?", (role_id,)).fetchone()
             if row is None:
                 raise RoleNotFound(role_id)
@@ -972,6 +975,27 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     def resolve_identity_token(self, token: str) -> dict[str, Any]:
         with self._conn(readonly=True) as c:
             return self._identity_metadata_tx(c, token)
+
+    def revoke_other_identity_tokens(self, universe: str, identity_token: str) -> dict[str, Any]:
+        """Let a control credential close its own other sessions atomically."""
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            identity = self._identity_metadata_tx(c, identity_token, universe=universe)
+            self._admit_actor_tx(
+                c, universe, identity["role_id"], identity_token, require_control=True
+            )
+            now = time.time()
+            updated = c.execute(
+                """UPDATE identity_tokens SET revoked_at=?
+                   WHERE universe=? AND role_id=? AND token_id!=? AND revoked_at IS NULL
+                     AND (expires_at IS NULL OR expires_at>?)""",
+                (now, universe, identity["role_id"], identity["token_id"], now),
+            )
+            return {
+                "revoked_count": updated.rowcount,
+                "kept_token_id": identity["token_id"],
+                "expires_at": identity["expires_at"],
+            }
 
     def revoke_identity_token(self, token_id: str, *, expected_universe=None) -> bool:
         if not token_id:

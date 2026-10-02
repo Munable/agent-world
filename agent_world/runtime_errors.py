@@ -83,6 +83,10 @@ class FunctionNotFound(WorldRuntimeError):
     recovery = "rediscover"
 
 
+class ResourceNotFound(WorldRuntimeError):
+    """A world-defined resource referenced by a valid request does not exist."""
+
+
 class FunctionVersionMismatch(WorldRuntimeError):
     recovery = "rediscover"
 

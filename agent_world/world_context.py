@@ -274,7 +274,19 @@ class FunctionContext:
             (role_id,),
         ).fetchone()
         if row is None:
-            raise RoleNotFound(role_id)
+            raise RoleNotFound("role not found in this universe")
+        # Public-key profiles and operator entry records are world-local.
+        # Completely unbound roles remain available to trusted SDK fixtures;
+        # the operator's Runtime.get_role is the explicit global lookup.
+        tables = ("identity_keys", "identity_tokens", "join_tickets", "role_world_presence")
+        local = any(self._conn.execute(
+            f"SELECT 1 FROM {table} WHERE universe=? AND role_id=? LIMIT 1",
+            (self.universe, role_id),
+        ).fetchone() is not None for table in tables)
+        if not local and any(self._conn.execute(
+            f"SELECT 1 FROM {table} WHERE role_id=? LIMIT 1", (role_id,),
+        ).fetchone() is not None for table in tables):
+            raise RoleNotFound("role not found in this universe")
         return dict(row)
 
     def get_activity(self, activity_id: str) -> dict:

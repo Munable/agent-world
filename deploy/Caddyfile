@@ -1,0 +1,5 @@
+# Set WORLD_DOMAIN to the authorized hostname when starting Caddy.
+# Public DNS and ports 80/443 must reach this host. No public port for Python.
+{$WORLD_DOMAIN} {
+    reverse_proxy 127.0.0.1:8000
+}

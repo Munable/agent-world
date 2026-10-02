@@ -155,7 +155,10 @@ def _function_tool(desc, universe, auth_required=False):
         }
     return types.Tool(
         name=desc["function_id"],
-        description=desc["description"],
+        description=desc["description"] + (
+            " Call with {operation_id: <stable ID>, arguments: <world fields>}; operation_id is not inside arguments."
+            if desc["access"] == "write" else ""
+        ),
         inputSchema=function_schema(desc, auth_required=auth_required),
         outputSchema=output,
         annotations=_annotations(desc["access"] == "read"),

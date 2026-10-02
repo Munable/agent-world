@@ -8,6 +8,33 @@ from tests.live_server import LiveServer
 
 
 class CommonsTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_post_is_a_public_resource_error_over_http_and_mcp(self):
+        with LiveServer("commons") as server:
+            _, identity, _ = server.key_identity()
+            auth = {"Authorization": "Bearer " + identity["token"]}
+            cases = (
+                ("commons.post.get", {"arguments": {"post_id": "missing-post"}}),
+                ("commons.reply.list", {"arguments": {"post_id": "missing-post"}}),
+                ("commons.reply.create", {
+                    "operation_id": "missing-post-reply",
+                    "arguments": {"post_id": "missing-post", "reply_id": "reply", "text": "test"},
+                }),
+            )
+            expected = {"error": "ResourceNotFound", "message": "post not found", "retryable": False}
+            async with server.session(identity) as (session, _):
+                with httpx.Client(trust_env=False, timeout=5) as client:
+                    for tool, arguments in cases:
+                        with self.subTest(tool=tool):
+                            response = client.post(
+                                server.url + f"/v1/functions/{tool}/invoke",
+                                headers=auth, json=arguments,
+                            )
+                            self.assertEqual(response.status_code, 404, response.text)
+                            self.assertEqual(response.json(), expected)
+                            result = await session.call_tool(tool, arguments=arguments)
+                            self.assertTrue(result.is_error)
+                            self.assertEqual(result.structured_content, {**expected, "tool": tool})
+
     async def test_reference_slice_works_across_http_and_mcp(self):
         with LiveServer("commons") as server:
             alice, alice_identity, _ = server.key_identity()

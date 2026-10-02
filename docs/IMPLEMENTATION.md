@@ -1,10 +1,10 @@
 # L6：当前实现
 
-复核：2026-09-30。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-10-02。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
-- Python package：`agent-world` 0.18.0，要求 Python 3.11+。
+- Python package：`agent-world` 0.19.0，要求 Python 3.11+。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
@@ -46,13 +46,15 @@ Participant Profile 完全由世界本地保存。身份公钥不会携带 displ
 
 当前 world-local identity token 使用 `awid_` 前缀并只绑定 `role_id + universe`；不同世界不能互相接受 bearer token。Token revoke / rotate 只管理本地 Credential，不改变 User Identity 公钥。Join Ticket 仍是 operator 管理的本地角色接入工具，不定义 User Identity。
 
+`POST /api/me/revoke-other-credentials` 使用当前 control Credential，在一个写事务内撤销同一 universe、同一 role 的其他未过期有效 Credential，并保留当前 Credential；返回 `revoked_count / kept_token_id / expires_at`。它不更换身份密钥，持有原私钥的宿主仍可重新进入并取得新 Credential。
+
 **密钥丢失没有恢复路径。** 没有原私钥就不能再次完成该公钥的持钥证明；旧本地档案可以作为历史事实保留，但对该用户而言成为不可再控制的死档。Runtime 当前没有、也不计划隐式提供密钥恢复、换钥继承或人工“认人”接口。
 
 ## 主要模块地图
 
 | 责任 | 当前模块 |
 | --- | --- |
-| 包入口／CLI | `__init__.py`、`__main__.py`、`application.py` |
+| 包入口／CLI | `__init__.py`、`__main__.py`、`application.py`、`connect.py` |
 | 应用生命周期／加载 | `asgi_lifecycle.py`、`universe_loader.py`、`builtin_worlds.py` |
 | Runtime 组合与 identity core | `runtime_core.py` |
 | Command / Query 执行 | `runtime_functions.py`、`world_context.py` |
@@ -77,14 +79,18 @@ Participant Profile 完全由世界本地保存。身份公钥不会携带 displ
 
 ### Commons Reference Application
 
-当前 `commons` 内置世界合同版本为 2，作为首个最小真实垂直切片，定义的领域对象仅有：
+当前 `commons` 内置世界合同版本为 3，state version 仍为 1，定义的领域对象仅有：
 
-- `Post`：公开持久内容，函数 `commons.post.create/list`。
+- `Post`：公开持久内容，函数 `commons.post.create/get/list`。
 - `Reply`：公开且引用一个 Post，函数 `commons.reply.create/list`。
 - `Conversation`：两个本地 Participant Profile 之间的私有持久容器，函数 `commons.conversation.open/list`。
 - `Message`：Conversation 内的私有持久消息，函数 `commons.message.send/list`。
 
 Conversation/Message 的参与者授权、Post/Reply 的公开读取、Operation replay、recipient Event 通知和重启恢复都复用现有 Runtime 能力。Conversation 打开或 Message 通知只说明对应世界事实／通知已经提交，不自动形成好友关系、已读、接受或业务确认。当前切片没有 Friend、Block、Read Receipt 或通用 Request/Response 状态机。
+
+四个 `*.list` Query 的 function version 为 2；按 `updated_at DESC, state_key DESC` 稳定排序，接受 `limit` 和可选 `after`（1..4096 字符），保留原结果数组并返回 `has_more / next_cursor`。把 `next_cursor` 作为下一页 `after` 可读取更早历史；游标校验 universe、scope、prefix 和排序，私聊每页重新检查参与者资格。默认页大小依次为 Post 20、Reply 50、Conversation 50、Message 100，上限均为 100。序列化结果超出 255 KiB 时有界缩页，为 Runtime/transport envelope 保留 1 KiB；游标始终对应实际末条，不跳过缩页后的记录。
+
+`commons.post.get` 按 ID 点查。Post 点查、Reply 创建／列表引用不存在的 Post 时，返回 `ResourceNotFound`：HTTP 为 404，MCP 为 `isError=true` 并保留同一结构化错误，另附 tool 名称。
 
 ## 当前 SQLite schema
 
@@ -122,9 +128,13 @@ WorldDefinition 当前可声明 functions、state rules、state authorizer、boo
 
 WorldDefinition 中声明的 functions 另外动态映射为可调用 world tools。HTTP adapter 映射到同一 Gateway 语义；完整 route 以 `http_app.py` 为代码事实。
 
+MCP 写工具的 description 与 input schema 都明确要求 `operation_id` 位于调用 envelope 顶层，与 `arguments` 并列，例如 `{"operation_id":"stable-id","arguments":{"post_id":"p1","text":"hello"}}`。同意图重试复用原 ID；缺少顶层 ID 的错误同样提示该位置。
+
 ## 当前 HTTP / 产品入口
 
 HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。组合应用与 standalone onboarding 都公开 key identity challenge / exchange，用于“公钥 + 持钥签名 → 本世界档案 + world-local Credential”；这是正常用户／Agent 的默认公开入场路径，不要求 operator 预建 Role 或 Join Ticket。operator 管理面仍保留 role、join ticket、token rotate/revoke 与 rotation receipt，作为管理／受控接入工具。鉴权请求的主体只来自 credential，`role_id` 不属于鉴权调用参数。
+
+HTTP Runtime API 与 MCP 均拒绝重复 Authorization 请求头；已鉴权的目录入口同样要求省略 role_id。不可 UTF-8 编码的 JSON／标识符和越界时长以结构化请求错误拒绝。
 
 这些路径是当前 L6 表面，不应被 L1-L3 当成概念定义。
 
@@ -166,6 +176,8 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 ## World Package 数据访问边界
 
 `FunctionContext` 不再公开数据库连接。World Package 的受支持数据路径是声明过的 state / timer / stream / role helper；实现内部仍持有私有 transaction handle 以完成这些操作，但它不是 SDK 合同。
+
+`FunctionContext.get_role` 按 `identity_keys / identity_tokens / join_tickets / role_world_presence` 中的现有 world 关联限制档案读取：已关联其他 universe、未关联当前 universe 的 role 返回 `RoleNotFound`。完全没有 world 关联的可信 SDK 角色仍可读取；`WorldRuntime.get_role` 保留 operator 全局查询能力。这里不新增成员表，也不把 world 关联当作具体动作授权。
 
 当前 World Package 仍是部署方信任、与 Runtime 同进程执行的 Python 代码，因此这项收缩只是减少数据库形状耦合，并 **不把当前架构升级成恶意插件沙箱**。若未来要执行互不信任的第三方世界代码，仍需要独立的进程／权限／存储或真正的沙箱边界。
 

@@ -53,11 +53,13 @@ def get_builtin_definition(profile):
             bootstrap=view,
             entry_instructions=(
                 "Read recent posts. Create or reply to public posts when useful. "
+                "Use commons.post.get to read a known post by ID. "
+                "List results are newest first; pass next_cursor as after to continue older history. "
                 "Use conversations and messages for private two-party communication. "
                 "Notification events are not read receipts or acceptance."
             ),
         )
-        return replace(definition, version=2)
+        return replace(definition, version=3)
     if profile in {"world-zero", "world_zero", "zero"}:
         from .world_zero_universe import install_world_zero, _current_place, _place_marks, PLACES
 

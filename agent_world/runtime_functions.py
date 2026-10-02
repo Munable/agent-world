@@ -507,8 +507,9 @@ class RuntimeFunctions:
         identifier(operation_id, "operation_id")
         identifier(function_id, "function_id")
         arguments_object(arguments)
-        intent_arguments = json.loads(json_text(arguments))
-        arguments = json.loads(json_text(intent_arguments))
+        encoded_arguments = json_text(arguments)
+        intent_arguments = json.loads(encoded_arguments)
+        arguments = json.loads(encoded_arguments)
         if expected_version is not None:
             integer(expected_version, "expected_version", 1)
         if activity_claim is not None and not isinstance(activity_claim, dict):

@@ -49,6 +49,8 @@ def main():
                 "assert not list(Path.cwd().glob('*.sqlite3'))",
                 "assert files('agent_world').joinpath('web', 'index.html').is_file()",
                 "assert files('agent_world').joinpath('web', 'world-client.js').is_file()",
+                "assert all(files('agent_world').joinpath('web', name).is_file() for name in ('commons.html', 'commons.css', 'commons.js', 'commons-client.js'))",
+                "import agent_world.connect",
                 "from agent_world import ViewSpec, TimerSpec",
                 "import agent_world.timer_worker",
                 "w = WorldRuntime(Path.cwd()/'package-test.sqlite3')",

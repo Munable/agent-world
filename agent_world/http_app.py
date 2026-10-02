@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from .runtime_core import WorldRuntime, WorldRuntimeError
 from .runtime_contracts import PROTOCOL_VERSION
+from .runtime_errors import InvalidArguments
 from .transport_contracts import WorldGateway, error_response
 from .universe_loader import get_universe_installer
 
@@ -44,7 +45,11 @@ def create_app(
 
     @app.middleware("http")
     async def no_store(request: Request, call_next):
-        response = await call_next(request)
+        if len(request.headers.getlist("authorization")) > 1:
+            _, payload = error_response(InvalidArguments("duplicate authentication or session header"))
+            response = JSONResponse(payload, status_code=400)
+        else:
+            response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
@@ -56,8 +61,6 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def request_error_handler(request: Request, exc: RequestValidationError):
-        from .runtime_errors import InvalidArguments
-
         status, payload = error_response(
             InvalidArguments("invalid request shape", recovery="fix_request")
         )
@@ -90,12 +93,15 @@ def create_app(
 
     @app.get("/v1/functions")
     async def functions(request: Request, role_id: str | None = None):
-        # Compatibility endpoint; discover provides bounded, compact retrieval.
+        # Full catalog endpoint; discover provides bounded, compact retrieval.
         identity, token = await asyncio.to_thread(gateway.identity, request.headers.get("authorization"))
         if identity is not None:
             from .identity_auth import bound_role
 
-            role_id = bound_role(identity, role_id, auth_required=True)
+            resolved_role = bound_role(identity, role_id, auth_required=True)
+            if role_id is not None:
+                raise InvalidArguments("authenticated requests must omit role_id")
+            role_id = resolved_role
         functions = await asyncio.to_thread(
             runtime.list_functions, universe, actor_role_id=role_id, identity_token=token
         )

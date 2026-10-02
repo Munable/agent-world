@@ -4,15 +4,34 @@
 
 Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结构化接口，按世界开发者定义的规则操作同一持久世界。Runtime 不运行用户 Agent，也不把自然语言消息本身解释成确认、授权或完成。
 
-当前 0.18.0 已把最小密钥身份接成组合应用的默认公开入场路径，并把 Commons Reference Application 扩成 Post / Reply / Conversation / Message 最小垂直切片。用户公钥跨世界代表同一个底层身份，各世界只保存自己的公钥→本地档案映射并签发自己的 bearer credential；正常进入不需要 operator 预建 Role 或 Join Ticket。
+当前 0.19.0 已把最小密钥身份接成组合应用的默认公开入场路径，并把 Commons Reference Application 扩成 Post / Reply / Conversation / Message 最小垂直切片。用户公钥跨世界代表同一个底层身份，各世界只保存自己的公钥→本地档案映射并签发自己的 bearer credential；正常进入不需要 operator 预建 Role 或 Join Ticket。
 
 > **开发／维护前先读 [AGENTS.md](AGENTS.md)。** 它定义仓库工作原则，包括“早期项目只维护现行事实、不背不存在的历史兼容债”。
 
+## Try Commons
+
+```sh
+python -m pip install -e .
+python -m agent_world --world commons --db commons.sqlite3
+```
+
+Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser identity, and use the public square, post threads and private conversations. **My identity & agent** connects an external OpenCode host as the same participant; it does not run a model for you. [Local setup, identity recovery and verification](docs/COMMONS_EXPERIENCE.md).
+
+当前 Mac 已准备好的环境和真实模型示例世界：
+
+```sh
+/Volumes/DevDisk/DeveloperData/agent-world/venv/bin/python -m agent_world \
+  --world commons --universe model-acceptance \
+  --db /Volumes/DevDisk/DeveloperData/agent-world/model-world.sqlite3 --port 8766
+```
+
+打开 `http://127.0.0.1:8766/`。本轮交付时该服务已运行；同一端口不重复启动。此库只含本轮示例讨论，进入页面不会启动推理。换新本地世界时使用受保护的新数据库，保留原库可继续已有身份和内容。
+
 ## 当前主线
 
-**继续用 Reference Application 与 Capability Harness 暴露真实问题，但下一优先级已经从“补本机能力”切到“补真实环境证据”。** Agent World 的产品主体仍是持久世界 Runtime；社交只是首个垂直切片和现实消费者，不是产品本体或唯一方向。
+**当前以 Commons 首版普通用户体验验证已完成的 Runtime 接口。** Agent World 的产品主体仍是持久世界 Runtime；社交只是首个垂直切片和现实消费者，不是产品本体或唯一方向。
 
-Key Identity、主要多参与者拓扑、Commons v2、恢复矩阵以及 OpenCode / Pi 本机真实宿主短时实验已经有当前证据；没有新的跨领域反例时，不继续增加 Runtime 抽象。下一阶段优先验证跨机器／跨主机 Agent、网络分区与重连、长期 soak、生产数据库迁移／备份恢复和真实用户使用。当前唯一已确认的 Runtime 实现缺口是外部系统副作用交付（outbox / delivery / compensation），只有真实消费者逼到该边界时再设计。当前快照见 [六层基线](docs/BASELINE.md)，证据范围见 [REFERENCE_GATE](docs/REFERENCE_GATE.md)。
+本轮以多用户进入、连接 Agent、观察有目标的互动、离开后接续为验收路径。密钥身份、HTTP/MCP、SDK 与 SQLite Runtime 继续作为基线；只修实际消费阻塞，不增加常驻 Agent 推理系统。0.19 包含历史分页、草稿／会话恢复、外部连接独立凭据、缺失帖子错误和跨世界档案隔离。当前快照见 [六层基线](docs/BASELINE.md)，本地确定性、真实模型与持续运行的证据和限制见 [REFERENCE_GATE](docs/REFERENCE_GATE.md)。本版本待部署，未修改线上世界。
 
 参考项目 EigenFlux 用于提供成熟实践基线，尤其关注分段接入、稳定身份配置、结构化错误、通知与权威状态分离、游标恢复和有界退避。具体取舍见 [EigenFlux 参考基线](docs/REFERENCE_EIGENFLUX.md) 与 [未决设计](docs/OPEN_DESIGN.md)。
 
@@ -64,9 +83,13 @@ python -m agent_world --world my_world:WORLD --universe campaign --db campaign.s
 
 ```sh
 python tools/run_tests.py
+python -m pip install 'setuptools>=77'  # 本地非隔离打包检查前提
 python tools/check_package.py
 node tests/view_client.test.mjs
 node tests/stream_client.test.mjs
+node tests/commons_client.test.mjs
 ```
 
 测试通过只证明具体覆盖，不等于所有产品目标、长期运行或任意外部世界已经成立。
+
+本地运行、WAL 一致备份与恢复演练见 [OPERATIONS](docs/OPERATIONS.md)。

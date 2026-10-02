@@ -39,6 +39,7 @@ from .runtime_errors import (
     PermissionDenied,
     ReceiptNotFound,
     RegistryConflict,
+    ResourceNotFound,
     RoleInactive,
     RoleInvalid,
     RoleNotFound,
@@ -204,7 +205,10 @@ def function_schema(desc, *, auth_required):
         props["role_id"] = STRING
         required.append("role_id")
     if desc["access"] == "write":
-        props["operation_id"] = STRING
+        props["operation_id"] = {
+            **STRING,
+            "description": "Stable idempotency ID. Put it beside arguments at the top level; reuse it only for the same intent.",
+        }
         required.append("operation_id")
     if desc["requires_activity_claim"]:
         props["activity_claim"] = CLAIM
@@ -232,25 +236,12 @@ def _error_payload(
 
 
 def error_response(exc: Exception):
-    if isinstance(exc, StreamResetRequired):
-        return 409, _error_payload(
-            "StreamResetRequired", str(exc), retryable=False, recovery="read_stream_recent"
-        )
-    if isinstance(exc, ViewResetRequired):
-        return 409, _error_payload(
-            "ViewResetRequired", str(exc), retryable=False, recovery="reset_view"
-        )
-    if isinstance(exc, TimerConflict):
-        return 409, _error_payload("TimerConflict", str(exc), retryable=False)
-    if isinstance(exc, TimerNotFound):
-        return 404, _error_payload("TimerNotFound", str(exc), retryable=False)
-    if isinstance(exc, ViewNotFound):
-        return 404, _error_payload("ViewNotFound", str(exc), retryable=False)
     if isinstance(exc, (AuthenticationRequired, InvalidIdentityToken, IdentityChallengeInvalid)):
         status = 401
     elif isinstance(exc, (IdentityScopeMismatch, PermissionDenied, RoleInactive)):
         status = 403
-    elif isinstance(exc, (FunctionNotFound, RoleNotFound, ActivityNotFound, ReceiptNotFound)):
+    elif isinstance(exc, (FunctionNotFound, ResourceNotFound, RoleNotFound, ActivityNotFound, ReceiptNotFound,
+                          TimerNotFound, ViewNotFound)):
         status = 404
     elif isinstance(exc, (JoinTicketExpired, JoinTicketConsumed, IdentityChallengeExpired, IdentityChallengeConsumed)):
         status = 410
@@ -270,14 +261,15 @@ def error_response(exc: Exception):
             CursorExpired,
             CursorInvalid,
             RuleViolation,
+            TimerConflict,
         ),
     ):
         status = 409
     elif isinstance(exc, JoinTicketInvalid):
         status = 400
-    elif isinstance(exc, StorageBusy) or (
-        isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
-    ):
+    elif isinstance(exc, StorageBusy):
+        status = 503
+    elif isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
         exc, status = StorageBusy("world storage is busy; retry the same operation_id"), 503
     else:
         return 500, _error_payload(
@@ -294,6 +286,10 @@ def error_response(exc: Exception):
         retry_after_seconds=getattr(exc, "retry_after_seconds", None),
         details=getattr(exc, "details", None),
     )
+    if isinstance(exc, StreamResetRequired):
+        payload["recovery"] = "read_stream_recent"
+    if isinstance(exc, ViewResetRequired):
+        payload["recovery"] = "reset_view"
     if isinstance(exc, CursorExpired):
         payload.update(recovery="bootstrap", event_floor=getattr(exc, "event_floor", None))
     if isinstance(exc, ReceiptNotFound):
@@ -356,7 +352,7 @@ class WorldGateway:
             else:
                 desc = self.runtime.get_function(self.universe, name)
                 if desc["access"] == "write" and not args.get("operation_id"):
-                    raise OperationConflict("operation_id is required for write functions")
+                    raise OperationConflict("operation_id is required at the top level beside arguments for write functions")
                 validate(function_schema(desc, auth_required=self.auth_required), args)
         args.pop("role_id", None)
         return role, token, args

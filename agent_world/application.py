@@ -55,6 +55,7 @@ def create_application(
         public_base_url=public_base_url,
         web_user=web_user,
         web_password=web_password,
+        commons_ui=world_profile == "commons",
     )
     mcp_base = mcp_app.app if isinstance(mcp_app, BearerIdentityMiddleware) else mcp_app
 

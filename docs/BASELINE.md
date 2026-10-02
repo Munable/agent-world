@@ -1,20 +1,22 @@
 # 六层基线与仓库入口
 
-复核：2026-09-30。六层的目的不是增加审批，而是避免目标、原则、模型、合同、架构、代码和测试再次互相冒充。
+复核：2026-10-02。六层的目的不是增加审批，而是避免目标、原则、模型、合同、架构、代码和测试再次互相冒充。
 
 ## 当前仓库快照
 
 当前工作树代表现行事实：
 
-- Python package：`agent-world` **0.18.0**；Runtime protocol **0.15**；SQLite schema `user_version` **7**。
+- Python package：`agent-world` **0.19.0**；Runtime protocol **0.15**；SQLite schema `user_version` **7**。
 - User Identity：**只认密钥，不认人**；Key Identity 已是组合应用默认公开入场路径。
 - Runtime Capability Harness：正式 Key Identity 参与者下已覆盖 1→N、N→1、N→N、并发 CAS、撤权后持钥重进、重启回档、多 session、独立 Runtime 隔离和批量进入。
-- Commons Reference Application v2：当前只定义 `Post / Reply / Conversation / Message`，用于验证公开／私有、持久历史、参与者授权、通知与恢复；这些对象不属于 Runtime 固有模型。
+- Commons Reference Application v3：当前只定义 `Post / Reply / Conversation / Message`，用于验证公开／私有、持久历史、参与者授权、通知与恢复；这些对象不属于 Runtime 固有模型。
 - 故障／恢复：Operation replay、Runtime 重启、离线恢复、Credential 失效后同钥重进、event cursor 续接、HTTP/MCP 混合调用均有当前回归。
-- Real Agent Integration：OpenCode 与 Pi 已在本机独立进程中通过 MCP 自主发现并调用 Commons；OpenCode 新进程可恢复离线期间事实。该证据是本机 loopback 短时实验，不承担身份鉴权或跨机器／soak 证明。
-- 最近记录的确定性证据：**227 个 unittest 全部通过**；0.18.0 wheel 构建、独立安装与 checkout 外 package probe 已通过。
+- Real Agent Integration：本轮三个正式密钥身份通过 OpenCode／LongCat 的四次真实 MCP 运行完成有目标的公开讨论、私聊与同钥新进程接续；最终数据库与第三方 403 已核对。记录成本为 0；三次工具参数错误后修正。它是本机 loopback 短时实验，不是跨日、跨机器或模型可靠性保证。
+- 最近记录的确定性证据：**306 个 unittest 全部通过**；三份 Node 客户端测试及 0.19.0 wheel 构建、独立安装与 checkout 外 package probe 已通过。
+- 前一冻结版本的本机可靠性补证：正式鉴权下的丢响应／断连／强制重启回归、WAL 在线备份与迁移中断恢复，以及两组半小时、一次四小时不重启持续运行已通过；仍不等于跨机器或长期生产验证；四小时 RSS 增长约 33.5 MiB，尚未归因，不能声称内存稳定。
 - 当前唯一已确认的 Runtime 实现缺口：**外部系统副作用交付**（outbox / delivery / compensation）。
-- 当前主要证据缺口：跨机器／跨主机 Agent、网络分区、长期 soak、生产数据库迁移和真实用户使用。
+- 当前推进重点：Commons 普通用户三页体验、持久密钥身份、OpenCode 连接配置与同钥恢复。Runtime 仅处理真实消费阻塞；不重写内核或增加常驻推理循环；持续测试按真实时间有界执行。运行与边界见 [COMMONS_EXPERIENCE](COMMONS_EXPERIENCE.md)。
+- 仍未覆盖的证据边界（不等于下一开发优先级）：跨机器／跨主机 Agent、网络分区、长期 soak、生产数据库迁移和真实用户使用。
 
 ## 六层语义主轴
 

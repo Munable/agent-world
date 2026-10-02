@@ -43,7 +43,7 @@ def identifier(value: Any, label: str, maximum: int = 128) -> str:
         not isinstance(value, str)
         or not value.strip()
         or len(value) > maximum
-        or any(ord(c) < 32 for c in value)
+        or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in value)
     ):
         raise InvalidArguments(f"{label} must be a nonempty string of at most {maximum} characters")
     return value
@@ -59,9 +59,9 @@ def duration(value: Any, label: str, maximum: float = 86400, *, zero: bool = Fal
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
-        or not math.isfinite(value)
         or value > maximum
         or (value < 0 if zero else value <= 0)
+        or not math.isfinite(value)
     ):
         raise InvalidArguments(
             f"{label} must be a finite {'nonnegative' if zero else 'positive'} number <= {maximum}"
@@ -89,7 +89,11 @@ def json_text(value: Any, *, maximum: int = MAX_RESULT_BYTES) -> str:
 
     check(value)
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    if len(encoded.encode("utf-8")) > maximum:
+    try:
+        size = len(encoded.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise InvalidArguments("JSON strings must be valid UTF-8 text") from exc
+    if size > maximum:
         raise InvalidArguments(f"JSON payload exceeds {maximum} bytes")
     return encoded
 

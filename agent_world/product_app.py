@@ -51,6 +51,10 @@ class ExchangeIdentityKeyChallengeRequest(StrictModel):
     signature: str = Field(min_length=1, max_length=256)
 
 
+class RevokeOtherCredentialsRequest(StrictModel):
+    pass
+
+
 def _runtime_status(exc: WorldRuntimeError) -> int:
     if isinstance(exc, RoleNotFound):
         return 404
@@ -71,6 +75,7 @@ def create_product_app(
     public_base_url: str | None = None,
     web_user: str = "operator",
     web_password: str | None = None,
+    commons_ui: bool = False,
 ) -> FastAPI:
     runtime = WorldRuntime(db_path)
     from importlib.resources import files
@@ -158,6 +163,10 @@ def create_product_app(
 
     @app.get("/")
     def index(request: Request):
+        if commons_ui:
+            return FileResponse(web_dir / "commons.html", headers={
+                "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+            })
         require_web_auth(request)
         return FileResponse(web_dir / "index.html")
 
@@ -175,6 +184,7 @@ def create_product_app(
             body.challenge_id,
             body.signature,
             expected_universe=universe,
+            identity_ttl_seconds=86400 if commons_ui else None,
         )
         return {
             **result,
@@ -208,9 +218,37 @@ def create_product_app(
             "next": {"tool": "world.bootstrap", "arguments": {}},
         }
 
+    def current_identity(request: Request):
+        from .identity_auth import resolve_authorization
+        from .runtime_errors import InvalidArguments
+        if len(request.headers.getlist("authorization")) > 1:
+            raise InvalidArguments("duplicate authorization header")
+        return resolve_authorization(runtime, universe, request.headers.get("authorization"))
+
+    @app.get("/api/me")
+    def my_profile(request: Request):
+        identity = current_identity(request)
+        return runtime.get_role(identity["role_id"])
+
+    @app.patch("/api/me")
+    def update_my_profile(body: CreateRoleRequest, request: Request):
+        identity = current_identity(request)
+        return runtime.update_role_profile(
+            identity["role_id"], display_name=body.display_name, avatar_ref=body.avatar_ref,
+            universe=universe, identity_token=request.headers["authorization"].partition(" ")[2].strip(),
+        )
+
+    @app.post("/api/me/revoke-other-credentials")
+    def revoke_other_credentials(body: RevokeOtherCredentialsRequest, request: Request):
+        current_identity(request)  # Includes the duplicate-header and origin boundaries.
+        return runtime.revoke_other_identity_tokens(
+            universe, request.headers["authorization"].partition(" ")[2].strip()
+        )
+
     @app.get("/api/config")
     def config(request: Request):
-        require_web_auth(request)
+        if not commons_ui:
+            require_web_auth(request)
         return {
             "universe": universe,
             "mcp_url": mcp_url,
