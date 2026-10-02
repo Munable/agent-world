@@ -4,7 +4,9 @@
 
 关键主张当前状态见 [TRACEABILITY](TRACEABILITY.md)。
 
-## 2026-10-02 本轮待部署验收
+## 2026-10-02 Commons 0.19 待部署验收记录
+
+以下保留上一轮 Commons 的源码与证据，不表示 0.20 全部代码已通过相同实验。新增世界消费者与最终检查见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
 
 代码来源：GitHub `main` 实查仍为 `a7e92db213033cccf41f4759d24419cadf8721d1`；部署源码 v5 ZIP 的 SHA-256 为 `cd1163f3a19b731ebf8c10eb6b2ad045b108c559ad3cfd688ef8e5408b0b06d7`。v5 相对 main 的前端、正式身份接入和 Railway 改动已整合；包内补丁通过反向检查确认已有，未重复应用。独立 missing-post-resource-error.patch 应用一次，再补本轮实际阻塞。版本 0.19.0；protocol 0.15、SQLite schema 7；未推送、未部署或修改线上数据。
 

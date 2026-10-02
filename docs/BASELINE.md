@@ -6,16 +6,18 @@
 
 当前工作树代表现行事实：
 
-- Python package：`agent-world` **0.19.0**；Runtime protocol **0.15**；SQLite schema `user_version` **7**。
+- Python package：`agent-world` **0.20.0**；Runtime protocol **0.15**；SQLite schema `user_version` **7**。
 - User Identity：**只认密钥，不认人**；Key Identity 已是组合应用默认公开入场路径。
 - Runtime Capability Harness：正式 Key Identity 参与者下已覆盖 1→N、N→1、N→N、并发 CAS、撤权后持钥重进、重启回档、多 session、独立 Runtime 隔离和批量进入。
 - Commons Reference Application v3：当前只定义 `Post / Reply / Conversation / Message`，用于验证公开／私有、持久历史、参与者授权、通知与恢复；这些对象不属于 Runtime 固有模型。
+- River Camp：新增有界自由意图／获准外部裁判／本人接受／有限后果及独立定时事项消费者，复用现有 SDK 与 HTTP/MCP；不是完整 RPG，规则不提升为 Runtime 固有对象。
 - 故障／恢复：Operation replay、Runtime 重启、离线恢复、Credential 失效后同钥重进、event cursor 续接、HTTP/MCP 混合调用均有当前回归。
-- Real Agent Integration：本轮三个正式密钥身份通过 OpenCode／LongCat 的四次真实 MCP 运行完成有目标的公开讨论、私聊与同钥新进程接续；最终数据库与第三方 403 已核对。记录成本为 0；三次工具参数错误后修正。它是本机 loopback 短时实验，不是跨日、跨机器或模型可靠性保证。
-- 最近记录的确定性证据：**306 个 unittest 全部通过**；三份 Node 客户端测试及 0.19.0 wheel 构建、独立安装与 checkout 外 package probe 已通过。
+- 上一轮 Commons 真实模型：三个正式密钥身份通过 OpenCode／LongCat 四次真实 MCP 运行完成有目标讨论、私聊及同钥新进程接续；数据库与第三方 403 已核对。记录成本为 0；三次工具参数错误后修正。这是 0.19 的本机短时证据，不计作本轮 River Camp 验收。
+- 本轮确定性证据：River Camp 的 **18 项定向回归通过**（9 项领域、8 项组合、1 项非 Commons 正式 helper 接入）；另有 9 项独立入口回归分别通过，真实网络恢复例使用 180 秒启动等待，默认 60 秒曾失败，不证明启动性能稳定。最终四份 Node（22.23.1）与 0.20 wheel／独立安装／checkout 外 ASGI／package probe 已通过；完整 Python suite 333 项／1631.423 秒，河谷相关全部通过，但存在两项超时错误，不算全套通过；原限制三项定向复测中相同两项仍失败。上一轮 306 项 Python、三份 Node 与 0.19.0 包结果保留为上一轮证据。
+- 本轮 River Camp 真实模型有界停止：三个进程、十次已完成工具调用，仅探索与 pending 意图持久化；裁判与首批语义 probe 均在 120 秒预算内未完成。28 条封存案例有效覆盖为 0，没有语义通过率，也未完成模型同钥执行接续或真人／跨日验证。细节与费用记录边界见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
 - 前一冻结版本的本机可靠性补证：正式鉴权下的丢响应／断连／强制重启回归、WAL 在线备份与迁移中断恢复，以及两组半小时、一次四小时不重启持续运行已通过；仍不等于跨机器或长期生产验证；四小时 RSS 增长约 33.5 MiB，尚未归因，不能声称内存稳定。
 - 当前唯一已确认的 Runtime 实现缺口：**外部系统副作用交付**（outbox / delivery / compensation）。
-- 当前推进重点：Commons 普通用户三页体验、持久密钥身份、OpenCode 连接配置与同钥恢复。Runtime 仅处理真实消费阻塞；不重写内核或增加常驻推理循环；持续测试按真实时间有界执行。运行与边界见 [COMMONS_EXPERIENCE](COMMONS_EXPERIENCE.md)。
+- 当前推进重点：保留 Commons，继续有界河谷营地的同世界组合与少量真实模型试验，检验自由意图、裁判与接续；只补必要的轻量观察表达。Runtime 仅处理真实消费阻塞；不重写内核或增加常驻推理循环，不预先开发三款 App。Commons 运行边界见 [COMMONS_EXPERIENCE](COMMONS_EXPERIENCE.md)，本轮计划、当前证据和真人／跨日未验证项见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
 - 仍未覆盖的证据边界（不等于下一开发优先级）：跨机器／跨主机 Agent、网络分区、长期 soak、生产数据库迁移和真实用户使用。
 
 ## 六层语义主轴
@@ -73,6 +75,7 @@
 | PRESENTATION | 横轴 | UI／客户端怎样忠实表达已存在事实。 |
 | TRACEABILITY | 证据横轴 | 核心跨层主张当前实现／证据状态。 |
 | REFERENCE_GATE | 证据横轴 | 测试与实验什么能证明、什么不能证明。 |
+| WORLD_EXPERIMENT | 证据横轴 | 当前河谷营地的可反驳假设、世界边界、实际结果与未验证项。 |
 | OPEN_DESIGN | 附着项 | 尚未定稿的模型、合同、架构或实现问题。 |
 
 示例世界、Reference Application 和临时测试消费者都不能覆盖上述现行入口；失去当前验证用途的材料直接删除，不在工作树维护历史副本。

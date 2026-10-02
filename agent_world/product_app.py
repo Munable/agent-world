@@ -76,6 +76,7 @@ def create_product_app(
     web_user: str = "operator",
     web_password: str | None = None,
     commons_ui: bool = False,
+    identity_ttl_seconds: float | None = None,
 ) -> FastAPI:
     runtime = WorldRuntime(db_path)
     from importlib.resources import files
@@ -184,7 +185,7 @@ def create_product_app(
             body.challenge_id,
             body.signature,
             expected_universe=universe,
-            identity_ttl_seconds=86400 if commons_ui else None,
+            identity_ttl_seconds=identity_ttl_seconds if identity_ttl_seconds is not None else (86400 if commons_ui else None),
         )
         return {
             **result,

@@ -23,6 +23,7 @@ from agent_world.connect import (
 from agent_world.runtime_core import WorldRuntime
 
 
+@unittest.skipUnless(os.name == "posix", "The connection helper requires POSIX private-file permissions")
 class ConnectionHelperTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

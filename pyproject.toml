@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-world"
-version = "0.19.0"
+version = "0.20.0"
 description = "Persistent worlds for people and agents."
 requires-python = ">=3.11"
 license = "MIT"
@@ -24,6 +24,7 @@ exclude = ["tests*"]
 
 [tool.setuptools.package-data]
 agent_world = ["web/*.html", "web/*.css", "web/*.js"]
+examples = ["river_camp_web/*.html", "river_camp_web/*.css", "river_camp_web/*.js"]
 
 [tool.ruff]
 line-length = 110

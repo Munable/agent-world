@@ -4,13 +4,15 @@
 
 ## 版本与运行形态
 
-- Python package：`agent-world` 0.19.0，要求 Python 3.11+。
+- Python package：`agent-world` 0.20.0，要求 Python 3.11+。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
 - World Definition 以受信任、同步 Python 回调在 Runtime 进程内执行。
 - 组合入口可同时挂载 Web 产品原型、HTTP API、MCP、timer worker 和 retention maintenance。
 - Runtime 本身不调用模型，也没有用户 Agent 执行器。
+
+0.20 新增 [River Camp 有界世界实验](WORLD_EXPERIMENT.md)：自由意图、裁判、本人接受和资源后果由独立 World Definition 消费现有 SDK。组合应用公开身份默认签发 24 小时凭据；没有新增 Runtime 原语或托管推理循环。
 
 ## L3 语义到当前代码的映射
 

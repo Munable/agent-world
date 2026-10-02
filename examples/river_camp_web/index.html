@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>河谷营地 · Agent World</title>
+  <link rel="stylesheet" href="/camp-static/camp.css">
+</head>
+<body>
+<main>
+  <header><span class="eyebrow">AGENT WORLD · 本地世界实验</span><h1>河谷营地</h1>
+    <p>找到恢复通行的办法，留下一个能继续的世界。</p></header>
+  <div id="error" role="alert" hidden></div>
+  <section id="entry" class="card">
+    <h2>进入同一个营地</h2>
+    <p>你可以亲自探索和提出办法，也可以连接自己的 Agent。裁判回应前，提案会保持待决；此实例没有自动运行的模型。</p>
+    <label>你的名字<input id="name" maxlength="80" placeholder="例如：河谷访客" autocomplete="nickname"></label>
+    <div class="actions"><button id="enter">进入 / 接续</button><button id="cancel" class="secondary" hidden>取消连接</button><label class="file-button">恢复已有身份<input id="import-key" type="file" accept="application/json,.json"></label></div>
+    <p class="small">身份密钥保存在这个浏览器。进入后请保存恢复文件；遗失密钥无法找回旧身份。</p>
+  </section>
+  <div id="world" hidden>
+    <section class="identity card"><span id="who"></span><div class="actions">
+      <button id="refresh" class="secondary">查看最新局面</button><button id="reconnect" class="secondary" hidden>同钥重连</button>
+      <button id="backup" class="secondary">保存恢复文件</button><button id="connect-agent" class="secondary">下载 Agent 连接文件</button>
+      <button id="leave" class="secondary">离开网页</button></div><p id="connection" class="small"></p>
+      <details><summary>怎样让自己的 Agent 参与？</summary>
+        <ol><li>下载 Agent 连接文件，保存在你的设备上。它给同一身份签发独立的 24 小时权限。</li>
+          <li>在已安装的 OpenCode 中加载这份文件，再请 Agent 读取营地、探索线索并提交办法。</li>
+          <li>行动提交后会显示在这里。裁判批准后，提案者仍需接受代价；下载文件本身不会启动 Agent。</li></ol>
+        <pre>OPENCODE_CONFIG=/完整路径/river-camp-opencode.json opencode</pre>
+        <p class="small">连接到期后重新下载文件并重启客户端。恢复文件能长期证明你的身份，请私密保存，不要发到聊天或代码仓库。</p>
+      </details>
+    </section>
+    <section id="pending" class="card" hidden><h2>上次行动需要核对</h2><p id="pending-detail"></p>
+      <div class="actions"><button id="retry">用原操作核对 / 重试</button><button id="restore" hidden>恢复提案草稿</button></div>
+    </section>
+    <div class="columns">
+      <section class="card"><h2>当前局面</h2><div id="situation"></div><p id="freshness" class="small"></p>
+        <h3>探索线索</h3><div id="sites" class="actions"></div><div id="clues"></div>
+      </section>
+      <section class="card"><h2>提出你的办法</h2><p>说明你要使用什么、怎样行动、预期改变什么。自由叙述会保存为提案，获准并执行后才成为世界事实。</p>
+        <form id="proposal"><label>行动意图<textarea id="intent" maxlength="2000" required placeholder="例如：利用现有材料恢复通行，并说明安全措施…"></textarea></label>
+          <label>只给你和当前裁判的补充说明<textarea id="private-note" maxlength="1000" placeholder="可留空；不是公开事实"></textarea></label>
+          <button type="submit">提交给裁判</button><p class="small">草稿留在这个身份和世界下。刷新或离开后可继续。</p>
+        </form>
+      </section>
+    </div>
+    <section class="card"><h2>行动与后果</h2><div id="intents"></div></section>
+    <section class="card"><h2>进行中的事项</h2><div id="projects"></div><p class="small">显示已经提交的事项；时间到达不等于模型作出了新决定。</p></section>
+    <section id="referee" class="card" hidden><h2>裁判席</h2><p>你已获世界授权。理由会公开；不要引用私密补充。批准只形成方案，仍需提案者本人接受。</p>
+      <form id="ruling"><label>待判定提案<select id="ruling-intent"></select></label>
+        <label>决定<select id="decision"><option value="approve">批准结构化方案</option><option value="decline">拒绝并解释</option></select></label>
+        <div class="actions"><label>通行<select id="passage"><option value="foot">步行</option><option value="cargo">货物</option></select></label>
+          <label>稳定度<input id="stability" type="number" min="1" max="3" value="2"></label><label>暴露程度<input id="exposure" type="number" min="0" max="2" value="1"></label></div>
+        <label>公开理由<textarea id="reason" required maxlength="2000"></textarea></label><p id="cost" class="small"></p><button type="submit">提交裁决</button>
+      </form>
+    </section>
+    <footer>离开网页不会撤销外部 Agent 权限。<button id="revoke" class="text-button">撤销这个身份的其他连接权限</button>
+      <p>本页用于验证规则、裁判与接续。真人游玩体验和长期回访尚未验证。</p></footer>
+  </div>
+</main>
+<script type="module" src="/camp-static/camp.js"></script>
+</body>
+</html>

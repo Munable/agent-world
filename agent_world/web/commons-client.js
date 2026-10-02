@@ -37,23 +37,28 @@ export async function savedKey(value) {
 }
 export class CommonsClient {
   constructor(fetcher=globalThis.fetch.bind(globalThis), storage=localStorage, locks=globalThis.navigator?.locks) {this.fetcher=fetcher;this.storage=storage;this.locks=locks;this.token=null;this.publicKey=null;this.universe=null;this.expiresAt=null;}
-  async request(path, body, method) {
+  async request(path, body, method, {signal}={}) {
     const sentToken=this.token;
-    const response = await this.fetcher(path,{method:method || (body ? 'POST':'GET'),cache:'no-store',headers:{'Content-Type':'application/json',...(sentToken ? {Authorization:'Bearer '+sentToken}:{})},...(body ? {body:JSON.stringify(body)}:{})});
+    const response = await this.fetcher(path,{method:method || (body ? 'POST':'GET'),cache:'no-store',headers:{'Content-Type':'application/json',...(sentToken ? {Authorization:'Bearer '+sentToken}:{})},...(body ? {body:JSON.stringify(body)}:{}),...(signal ? {signal}:{})});
     let data;
-    try {data=await response.json();} catch {const error=new Error('The world response was interrupted. Your submission can be checked with its original operation.');error.status=response.status;error.client=this;error.staleAuth=response.status===401 && this.token!==sentToken;if(response.status===401 && !error.staleAuth)this.token=null;throw error;}
+    try {data=await response.json();} catch(cause) {if(signal?.aborted)throw cause;const error=new Error('The world response was interrupted. Your submission can be checked with its original operation.');error.status=response.status;error.client=this;error.staleAuth=response.status===401 && this.token!==sentToken;if(response.status===401 && !error.staleAuth)this.token=null;throw error;}
     if (!response.ok) { const error = new Error(data.message || data.detail || 'The world could not be reached. Try again.');error.client=this;error.staleAuth=response.status===401 && this.token!==sentToken;if(response.status===401 && !error.staleAuth)this.token=null;error.status=response.status;error.code=data.error;error.recovery=data.recovery;throw error; }
     return data;
   }
-  async authenticate(key) {
+  async authenticate(key,{isCurrent=()=>true}={}) {
+    const active=()=>{if(!isCurrent())throw cancelledSession();};
+    active();
     this.token=null; this.publicKey=key.public_key;
     const challenge=await this.request('/v1/key-identities/challenges',{public_key:key.public_key});
+    active();
     if(challenge.public_key!==key.public_key || challenge.version!=='agent-world-key-identity-v1') throw new Error('The world returned an unexpected identity challenge.');
     const expected=new TextEncoder().encode(['agent-world-key-identity-v1',challenge.universe,challenge.challenge_id,challenge.nonce].join('\0'));
     if(encode(expected)!==challenge.message) throw new Error('The world returned an invalid identity challenge.');
     this.universe=challenge.universe;
     const signature=encode(await crypto.subtle.sign('Ed25519',await signingKey(key),decode(challenge.message)));
+    active();
     const result=await this.request('/v1/key-identities/exchange',{challenge_id:challenge.challenge_id,signature});
+    active();
     this.token=result.identity.token;this.expiresAt=result.identity.expires_at; return result;
   }
   async query(name,args={}) {return (await this.request('/v1/functions/'+name+'/invoke',{arguments:args})).result;}

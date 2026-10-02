@@ -56,6 +56,9 @@ def create_application(
         web_user=web_user,
         web_password=web_password,
         commons_ui=world_profile == "commons",
+        # Public key entry must satisfy the bounded session contract of the
+        # portable connection helper, independently of the selected UI/world.
+        identity_ttl_seconds=86400,
     )
     mcp_base = mcp_app.app if isinstance(mcp_app, BearerIdentityMiddleware) else mcp_app
 

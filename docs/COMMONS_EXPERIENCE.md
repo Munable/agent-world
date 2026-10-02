@@ -1,6 +1,6 @@
 # Commons first experience
 
-Current implementation: 0.19.0. Verification checkpoint: 2026-10-02.
+Commons verification checkpoint: 0.19.0, 2026-10-02; carried forward in package 0.20.0. The separate River Camp experiment and its current evidence are in [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md).
 
 ## Start locally
 
