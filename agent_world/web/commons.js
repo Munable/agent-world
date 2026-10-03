@@ -2,24 +2,55 @@ import {CommonsClient,CommonsHistory,createKey,validateKey,savedKey,parseRoute} 
 const $=s=>document.querySelector(s);
 const client=new CommonsClient();
 let key=null,profile=null,config=null,generation=0,sessionGeneration=0,loading=false,busy=false,refreshTimer=null,agentExpiresAt=null,agentAccessRevoked=false;
+let accountGeneration=0,accountBusy=false,accountController=null;
 const histories=new Map();let shownRoute=null,shownRouteReady=false;
 function element(tag,attributes={},text=''){const node=document.createElement(tag);for(const [k,v] of Object.entries(attributes))node.setAttribute(k,v);node.textContent=text;return node;}
 function saveCurrentDraft(){const area=$('#page textarea');if(shownRoute && area)client.saveDraft(shownRoute,area.value);}
-function error(err){if(err.staleAuth || err.cancelled)return;if(err.status===401 && err.client===client && profile){saveCurrentDraft();generation++;sessionGeneration++;loading=false;histories.clear();client.token=null;shownRouteReady=false;clearTimeout(refreshTimer);$('#page').replaceChildren();$('#session-expired').hidden=false;$('#refresh-button').disabled=true;$('#freshness').textContent='Session expired · your drafts remain on this device';updateAccount();}$('#error').textContent=err.message || String(err);$('#error').hidden=false;}
+function error(err){if(err.staleAuth || err.cancelled)return;if(err.status===401 && err.client===client && profile){saveCurrentDraft();generation++;sessionGeneration++;cancelAccount();loading=false;histories.clear();client.token=null;shownRouteReady=false;clearTimeout(refreshTimer);$('#page').replaceChildren();$('#session-expired').hidden=false;$('#refresh-button').disabled=true;$('#freshness').textContent='Session expired · your drafts remain on this device';updateAccount();}$('#error').textContent=err.message || String(err);$('#error').hidden=false;}
 function clearError(){$('#error').hidden=true;}
 function pendingUI(){const pending=profile && client.pending();$('#pending').hidden=!pending;$('#retry-button').hidden=!!pending?.rejection;$('#restore-button').hidden=!pending?.rejection;$('#pending-title').textContent=pending?.rejection ? 'This submission was rejected' : 'A submission needs checking';$('#pending-description').textContent=pending?.rejection ? pending.rejection.message+' Nothing was committed. Restore the original text to edit it or keep it for later.' : 'Your original submission is saved on this device. Check & retry uses the same operation, without sending a second copy.';}
 function person(id,name){return id===profile?.role_id ? profile.display_name+' · you' : name || 'Participant '+id.slice(-6);}
 function time(epoch){return new Date(epoch*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}
 function expiry(epoch){return Number.isFinite(epoch) ? new Date(epoch*1000).toLocaleString() : 'not available';}
 function updateAccount(){$('#browser-expiry').textContent=client.token ? 'This page’s access expires '+expiry(client.expiresAt)+'.' : 'This page’s access has expired. Reconnect with the same saved identity.';$('#agent-expiry').textContent=agentAccessRevoked ? 'Existing external credentials were revoked from this page. Download a new connection file to grant fresh access.' : agentExpiresAt ? 'Last connection file issued here: access expires '+expiry(agentExpiresAt)+'. Host activity is not reported by the world.' : 'No connection file has been issued during this page session. Host activity is not reported by the world.';}
+function accountControls(){for(const selector of ['#config-button','#refresh-credentials-button','#revoke-button','#connection-access-mode'])$(selector).disabled=accountBusy || !client.token;for(const button of $('#credential-list').querySelectorAll('button'))button.disabled=accountBusy || !client.token;}
+function cancelAccount(){accountGeneration++;accountController?.abort();accountController=null;accountBusy=false;$('#credential-list').replaceChildren();$('#credential-status').textContent='Open or refresh to read current access.';$('#account-error').hidden=true;accountControls();}
+async function accountAction(fn){
+  if(accountBusy || !profile || !client.token)return;
+  const current=++accountGeneration,session=sessionGeneration,token=client.token;const controller=new AbortController();accountController=controller;accountBusy=true;
+  const isCurrent=()=>current===accountGeneration && session===sessionGeneration && !!profile && client.token===token && $('#account').open && !controller.signal.aborted;
+  $('#account-error').hidden=true;$('#revoke-result').textContent='';accountControls();
+  try{await fn({signal:controller.signal,isCurrent});}catch(e){if(current===accountGeneration && !controller.signal.aborted && !e.cancelled && !e.staleAuth){if(e.status===401 && e.client===client)error(e);else{$('#account-error').textContent=e.message || String(e);$('#account-error').hidden=false;}}}
+  finally{if(current===accountGeneration){accountController=null;accountBusy=false;accountControls();}}
+}
+async function refreshCredentials(options){
+  $('#credential-list').replaceChildren();$('#credential-status').textContent='Reading current access…';
+  let result;try{result=await client.listCredentials(options);}catch(e){if(options.isCurrent())$('#credential-status').textContent='Access list could not be read. Refresh to try again.';throw e;}
+  if(!options.isCurrent())return;
+  const rows=document.createDocumentFragment();
+  for(const credential of result.credentials){
+    const row=element('li',{class:'credential-row'}),description=element('div',{class:'credential-description'});
+    description.append(element('strong',{},credential.is_current ? 'This page' : 'Other connection'),element('span',{class:'credential-id',title:credential.token_id},'ID …'+credential.token_id.slice(-8)),element('span',{},(credential.access_mode==='observe' ? 'Read only' : 'Read and act')+' · '+credential.status),element('small',{},'Created '+time(credential.created_at)+' · '+(credential.expires_at===null ? 'no expiry' : 'expires '+expiry(credential.expires_at))));
+    row.append(description);
+    if(!credential.is_current && credential.status!=='revoked'){
+      const revoke=element('button',{type:'button',class:'secondary'},'Revoke');revoke.addEventListener('click',()=>accountAction(async options=>{
+        await client.revokeCredential(credential.token_id,options);if(!options.isCurrent())return;
+        $('#revoke-result').textContent='Connection …'+credential.token_id.slice(-8)+' revoked. Your identity, drafts and world content remain.';
+        await refreshCredentials(options);
+      }));row.append(revoke);
+    }else row.append(element('span',{class:'credential-state'},credential.is_current ? 'Current' : 'Revoked'));
+    rows.append(row);
+  }
+  $('#credential-list').replaceChildren(rows);$('#credential-status').textContent='Access permissions reported by the world. This list does not report host activity.';
+}
 function download(name,data){const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'}));const link=element('a',{href:url,download:name});link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 async function action(fn){if(busy)return;busy=true;clearError();document.querySelectorAll('button[type="submit"]').forEach(n=>n.disabled=true);try{await fn();}catch(e){error(e);}finally{busy=false;document.querySelectorAll('button[type="submit"]').forEach(n=>n.disabled=false);pendingUI();}}
 async function enter(newKey,name){
-  const session=++sessionGeneration;generation++;loading=false;
+  const session=++sessionGeneration;generation++;cancelAccount();loading=false;
   saveCurrentDraft();const previousIdentity=client.publicKey,previousWorld=client.universe;
   key=await validateKey(newKey);await savedKey(key); // Do not issue an identity until durable local storage works.
   if(session!==sessionGeneration)return;
-  const result=await client.authenticate(key);if(session!==sessionGeneration){client.token=null;return;}profile=result.role_profile;
+  const result=await client.authenticate(key,{isCurrent:()=>session===sessionGeneration});if(session!==sessionGeneration)return;profile=result.role_profile;
   if(previousIdentity!==client.publicKey || previousWorld!==client.universe){histories.clear();shownRoute=null;agentExpiresAt=null;agentAccessRevoked=false;$('#revoke-result').textContent='';}
   if(name){const updated=await client.request('/api/me',{display_name:name},'PATCH');if(session!==sessionGeneration)return;profile=updated;}
   sessionStorage.removeItem('agent-world-signed-out');
@@ -119,16 +150,20 @@ $('#restore-button').addEventListener('click',()=>action(async()=>{saveCurrentDr
 $('#reconnect-button').addEventListener('click',()=>action(()=>enter(key)));
 $('#account-reconnect-button').addEventListener('click',()=>action(()=>enter(key)));
 window.addEventListener('hashchange',()=>render());
-$('#account-button').addEventListener('click',()=>{$('#account-name').textContent=profile.display_name;$('#account-id').textContent=profile.role_id;updateAccount();$('#account').showModal();});
-$('#close-account').addEventListener('click',()=>$('#account').close());
-$('#config-button').addEventListener('click',()=>action(async()=>{
-  const session=sessionGeneration;
-  const agentClient=new CommonsClient();const result=await agentClient.authenticate(key);const url=new URL(result.mcp.url,location.origin);if(url.origin!==location.origin || !['https:','http:'].includes(url.protocol))throw new Error('The world returned an unexpected agent address.');
-  if(session!==sessionGeneration || !profile)return;
-  download('agent-world-opencode.json',{$schema:'https://opencode.ai/config.json',mcp:{commons:{type:'remote',url:url.href,enabled:true,oauth:false,headers:{Authorization:'Bearer '+result.identity.token}}}});
-  agentExpiresAt=result.identity.expires_at;agentAccessRevoked=false;$('#revoke-result').textContent='';updateAccount();
+$('#account-button').addEventListener('click',()=>{$('#account-name').textContent=profile.display_name;$('#account-id').textContent=profile.role_id;updateAccount();$('#account').showModal();return accountAction(refreshCredentials);});
+$('#close-account').addEventListener('click',()=>{$('#account').close();cancelAccount();});
+$('#account').addEventListener('cancel',cancelAccount);$('#account').addEventListener('close',cancelAccount);
+$('#refresh-credentials-button').addEventListener('click',()=>accountAction(refreshCredentials));
+$('#config-button').addEventListener('click',()=>accountAction(async options=>{
+  const accessMode=$('#connection-access-mode').value;
+  const agentClient=new CommonsClient();const result=await agentClient.authenticate(key,{...options,accessMode});if(typeof result.mcp?.url!=='string')throw new Error('The world returned an unexpected agent address or connection credential.');const url=new URL(result.mcp.url,location.origin);if(url.origin!==location.origin || !['https:','http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash || result.mcp.authorization_scheme!=='Bearer' || result.mcp.authorization_token!==result.identity.token)throw new Error('The world returned an unexpected agent address or connection credential.');
+  if(!options.isCurrent())return;
+  const filename='agent-world-opencode-'+result.identity.access_mode+'-'+result.identity.token_id.slice(-8)+'.json';
+  download(filename,{$schema:'https://opencode.ai/config.json',mcp:{commons:{type:'remote',url:url.href,enabled:true,oauth:false,headers:{Authorization:'Bearer '+result.identity.token}}}});
+  $('#connect-command').textContent='OPENCODE_CONFIG=/path/to/'+filename+' opencode';
+  agentExpiresAt=result.identity.expires_at;agentAccessRevoked=false;updateAccount();await refreshCredentials(options);
 }));
-$('#revoke-button').addEventListener('click',()=>action(async()=>{const session=sessionGeneration;const result=await client.request('/api/me/revoke-other-credentials',{});if(session!==sessionGeneration || !profile)return;agentAccessRevoked=true;updateAccount();$('#revoke-result').textContent='Revoked '+result.revoked_count+' existing credential(s). This page stays connected. Anyone with your recovery key can still return and authorize a new session.';}));
+$('#revoke-button').addEventListener('click',()=>accountAction(async options=>{const result=await client.request('/api/me/revoke-other-credentials',{},undefined,options);if(!options.isCurrent())return;if(!Number.isInteger(result?.revoked_count) || result.revoked_count<0)throw new Error('The world did not confirm how many connections were revoked. Refresh the access list before retrying.');agentAccessRevoked=true;updateAccount();$('#revoke-result').textContent='Revoked '+result.revoked_count+' existing credential(s). This page stays connected. Anyone with your recovery key can still return and authorize a new session.';await refreshCredentials(options);}));
 $('#recovery-button').addEventListener('click',()=>download('agent-world-recovery.json',key));
-$('#logout-button').addEventListener('click',()=>{saveCurrentDraft();generation++;sessionGeneration++;loading=false;clearTimeout(refreshTimer);profile=null;client.token=null;histories.clear();shownRoute=null;sessionStorage.setItem('agent-world-signed-out','yes');$('#account').close();$('#world').hidden=true;$('#page').replaceChildren();$('#welcome').hidden=false;$('#account-button').hidden=true;$('#identity-label').textContent='Session closed';$('#name').value='';$('#name').required=false;$('#join-form button').textContent='Return with my identity ↗';clearError();});
+$('#logout-button').addEventListener('click',()=>{saveCurrentDraft();generation++;sessionGeneration++;loading=false;clearTimeout(refreshTimer);profile=null;client.token=null;cancelAccount();histories.clear();shownRoute=null;sessionStorage.setItem('agent-world-signed-out','yes');$('#account').close();$('#world').hidden=true;$('#page').replaceChildren();$('#welcome').hidden=false;$('#account-button').hidden=true;$('#identity-label').textContent='Session closed';$('#name').value='';$('#name').required=false;$('#join-form button').textContent='Return with my identity ↗';clearError();});
 (async()=>{try{if(!crypto.subtle)throw new Error('Open Commons over HTTPS or localhost to use a secure identity.');config=await client.request('/api/config');key=await savedKey();if(key && !sessionStorage.getItem('agent-world-signed-out'))await enter(key);else if(key){$('#join-form button').textContent='Return with my identity ↗';$('#name').required=false;}}catch(e){error(e);}})();

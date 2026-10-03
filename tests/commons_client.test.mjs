@@ -24,7 +24,7 @@ rejected.token='expired-fixture-token';rejected.fetcher=async()=>({ok:false,stat
 await assert.rejects(rejected.mutate('commons.post.create',{post_id:'p',text:'valid'}));assert.ok(rejected.pending());assert.equal(rejected.token,null);
 rejected.publicKey=other.public_key;assert.equal(rejected.pending(),null);
 // A browser must not sign arbitrary content returned by a malicious challenge endpoint.
-const tampered=new CommonsClient(async()=>({ok:true,json:async()=>({version:'agent-world-key-identity-v1',public_key:key.public_key,challenge_id:'id',universe:'commons',nonce:'nonce',message:encode(new TextEncoder().encode('sign this unrelated text'))})}),storage);
+const tampered=new CommonsClient(async()=>({ok:true,json:async()=>({version:'agent-world-key-identity-v2',access_mode:'control',public_key:key.public_key,challenge_id:'id',universe:'commons',nonce:'nonce',message:encode(new TextEncoder().encode('sign this unrelated text'))})}),storage);
 await assert.rejects(tampered.authenticate(key),/invalid identity challenge/);
 assert.deepEqual(parseRoute('#post/p-1'),{page:'post',id:'p-1'});assert.deepEqual(parseRoute('#messages/c1'),{page:'messages',id:'c1'});assert.deepEqual(parseRoute('#post/<img>'),{page:'posts',id:null});
 console.log('Commons client: key recovery, signature validation, durable same-operation retry, identity isolation and route validation passed');
@@ -100,7 +100,7 @@ for(const broken of [false,true]){
   let finish;
   const renewed=new CommonsClient(()=>new Promise(resolve=>{finish=resolve;}),draftStorage);renewed.token='old-access';
   const oldRead=renewed.request('/v1/bootstrap');
-  renewed.fetcher=async path=>({ok:true,json:async()=>path.endsWith('/challenges') ? {version:'agent-world-key-identity-v1',public_key:key.public_key,universe:'commons',challenge_id:'fresh-id',nonce:'fresh-nonce',message:encode(new TextEncoder().encode(['agent-world-key-identity-v1','commons','fresh-id','fresh-nonce'].join('\0')))} : {identity:{token:'fresh-access',expires_at:2000000000},role_profile:{role_id:'same-role'}}});
+  renewed.fetcher=async path=>({ok:true,json:async()=>path.endsWith('/challenges') ? {version:'agent-world-key-identity-v2',access_mode:'control',public_key:key.public_key,universe:'commons',challenge_id:'fresh-id',nonce:'fresh-nonce',message:encode(new TextEncoder().encode(['agent-world-key-identity-v2','commons','fresh-id','fresh-nonce','control'].join('\0')))} : {version:'agent-world-key-identity-v2',public_key:key.public_key,identity:{token:'fresh-access',token_id:'fresh-id',universe:'commons',role_id:'same-role',access_mode:'control',expires_at:2000000000},role_profile:{role_id:'same-role'}}});
   await renewed.authenticate(key);
   finish({ok:false,status:401,json:async()=>{if(broken)throw new SyntaxError('broken body');return {error:'InvalidIdentityToken',message:'old access expired'};}});
   await assert.rejects(oldRead,error=>error.status===401 && error.staleAuth===true);assert.equal(renewed.token,'fresh-access');
@@ -235,18 +235,20 @@ class PageNode {
   find(tag){if(this.tag===tag)return this;for(const child of this.children){const found=child.find(tag);if(found)return found;}return null;}
   all(){return [this,...this.children.flatMap(child=>child.all())];}
   get text(){return [this.textContent,...this.children.map(child=>child.text)].join(' ');}
-  close(){}
+  querySelectorAll(tag){return this.all().filter(node=>node.tag===tag);}
+  showModal(){this.open=true;}
+  close(){this.open=false;}
 }
-function pageFixture(){
+function pageFixture({externalFetcher}={}){
   const nodes=new Map(),events=new Map(),records=new Map();
   const fixtureStorage={getItem:k=>records.get(k)??null,setItem:(k,v)=>records.set(k,v),removeItem:k=>records.delete(k)};
   const node=id=>{if(!nodes.has(id))nodes.set(id,new PageNode());return nodes.get(id);};
   const document={activeElement:null,hidden:false,createElement:tag=>new PageNode(tag),createDocumentFragment:()=>new PageNode('fragment'),querySelector:selector=>{const [id,tag]=selector.split(' ');return tag ? node(id).find(tag) : node(id);},querySelectorAll:()=>[...nodes.values()].flatMap(n=>n.all()).filter(n=>n.tag==='button' && n.attributes.type==='submit')};
   node('#join-form').append(new PageNode('button'));
-  class PageClient extends CommonsClient {constructor(){super(()=>new Promise(()=>{}),fixtureStorage);}}
-  const location={hash:'#posts'};
+  class PageClient extends CommonsClient {constructor(){super((path,options)=>path==='/api/config' ? new Promise(()=>{}) : externalFetcher ? externalFetcher(path,options) : new Promise(()=>{}),fixtureStorage);}}
+  const location={hash:'#posts',origin:'http://localhost'};
   const controller=readFileSync(new URL('../agent_world/web/commons.js',import.meta.url),'utf8').replace(/^import[^\n]*\n/,'');
-  const app=runInNewContext(controller+'\n({client,render,activate(){profile={role_id:"self",display_name:"Self"};client.publicKey="page-key";client.universe="commons";client.token="page-access";}})',{CommonsClient:PageClient,CommonsHistory,createKey,validateKey,savedKey:()=>{},parseRoute,document,location,crypto,sessionStorage:fixtureStorage,window:{addEventListener:(name,listener)=>events.set(name,listener)},setTimeout:()=>0,clearTimeout(){}});
+  const app=runInNewContext(controller+'\n({client,render,downloads:[],activate(){profile={role_id:"self",display_name:"Self"};client.publicKey="page-key";client.universe="commons";client.token="page-access";client.tokenId="page-token-id";client.roleId="self";},setKey(value){key=value;},captureDownloads(records){download=(name,data)=>records.push({name,data});}})',{CommonsClient:PageClient,CommonsHistory,createKey,validateKey,savedKey:()=>{},parseRoute,document,location,crypto,AbortController,URL,sessionStorage:fixtureStorage,window:{addEventListener:(name,listener)=>events.set(name,listener)},setTimeout:()=>0,clearTimeout(){}});
   app.activate();return {...app,node,location,navigate(hash){location.hash=hash;return events.get('hashchange')();}};
 }
 const pageApp=pageFixture();
@@ -313,3 +315,106 @@ assert.equal(pageApp.node('#world').hidden,true);
 assert.equal(pageApp.node('#page').find('form'),null);
 assert.doesNotMatch(pageApp.node('#page').text,/Late content after Leave/);
 console.log('Commons page: route reads remove stale submission forms, failed routes offer safe navigation, drafts survive, same-route refresh content and session/generation recovery remain intact');
+
+function accessChallenge(accessMode='control'){
+  const challenge={version:'agent-world-key-identity-v2',public_key:key.public_key,universe:'commons',challenge_id:'access-proof',nonce:'access-nonce',access_mode:accessMode};
+  challenge.message=encode(new TextEncoder().encode([challenge.version,challenge.universe,challenge.challenge_id,challenge.nonce,accessMode].join('\0')));return challenge;
+}
+function accessExchange(accessMode='control'){
+  return {version:'agent-world-key-identity-v2',public_key:key.public_key,identity:{token:'issued-secret',token_id:'issued-token-id',universe:'commons',role_id:'self',access_mode:accessMode,created_at:1,expires_at:2000000000},role_profile:{role_id:'self'},mcp:{url:'/mcp',authorization_scheme:'Bearer',authorization_token:'issued-secret'}};
+}
+const success=data=>({ok:true,status:200,json:async()=>data});
+const proofPublic=await crypto.subtle.importKey('raw',Uint8Array.from(Buffer.from(key.public_key,'base64url')),{name:'Ed25519'},false,['verify']);
+for(const mode of ['control','observe']){
+  const paths=[],challenge=accessChallenge(mode);
+  const scoped=new CommonsClient(async(path,options)=>{
+    paths.push(path);const body=JSON.parse(options.body);
+    if(path.endsWith('/challenges')){assert.equal(body.access_mode,mode);return success(challenge);}
+    assert.deepEqual(Object.keys(body).sort(),['challenge_id','signature']);
+    assert.ok(await crypto.subtle.verify('Ed25519',proofPublic,Uint8Array.from(Buffer.from(body.signature,'base64url')),Uint8Array.from(Buffer.from(challenge.message,'base64url'))));
+    return success(accessExchange(mode));
+  },storage);
+  await scoped.authenticate(key,{accessMode:mode});assert.equal(scoped.accessMode,mode);assert.equal(scoped.token,'issued-secret');assert.equal(paths.length,2);
+}
+let invalidModeCalls=0;
+const invalidMode=new CommonsClient(async()=>{invalidModeCalls++;},storage);
+await assert.rejects(invalidMode.authenticate(key,{accessMode:'owner'}),/Read and act or Read only/);assert.equal(invalidModeCalls,0);
+for(const mismatch of ['challenge-mode','signed-mode','exchange-mode','exchange-world','exchange-key','exchange-version']){
+  const paths=[];
+  const mismatched=new CommonsClient(async path=>{
+    paths.push(path);
+    if(path.endsWith('/challenges')){
+      const challenge=accessChallenge('observe');if(mismatch==='challenge-mode')challenge.access_mode='control';if(mismatch==='signed-mode')challenge.message=accessChallenge('control').message;return success(challenge);
+    }
+    const result=accessExchange('observe');if(mismatch==='exchange-mode')result.identity.access_mode='control';if(mismatch==='exchange-world')result.identity.universe='other-world';if(mismatch==='exchange-key')result.public_key=other.public_key;if(mismatch==='exchange-version')result.version='agent-world-key-identity-v1';return success(result);
+  },storage);
+  await assert.rejects(mismatched.authenticate(key,{accessMode:'observe'}),/identity challenge|returned access/);assert.equal(mismatched.token,null);
+  if(mismatch.startsWith('challenge') || mismatch.startsWith('signed'))assert.deepEqual(paths,['/v1/key-identities/challenges']);
+}
+console.log('Access proof: both permission choices are signed and granted exactly; challenge/message/exchange scope mismatches are rejected');
+
+const credential=(token_id,access_mode='control',status='active')=>({token_id,universe:'commons',role_id:'self',access_mode,created_at:1,expires_at:2000000000,revoked_at:status==='revoked'?2:null,is_current:token_id==='page-token-id',status});
+const credentialList=(credentials=[credential('page-token-id'),credential('external-read-token','observe')])=>({universe:'commons',role_id:'self',current_token_id:'page-token-id',credentials});
+const controlsClient=new CommonsClient(async()=>success(credentialList([{...credential('page-token-id'),token:'should-never-render'},{...credential('external-read-token','observe'),authorization_token:'should-never-render'}])),storage);
+controlsClient.universe='commons';controlsClient.roleId='self';controlsClient.tokenId='page-token-id';controlsClient.token='page-access';
+const listed=await controlsClient.listCredentials();assert.equal(listed.credentials.length,2);assert.ok(!JSON.stringify(listed).includes('should-never-render'));
+controlsClient.fetcher=async()=>success({...credentialList(),role_id:'another-role'});await assert.rejects(controlsClient.listCredentials(),/invalid access list/);
+controlsClient.fetcher=async()=>success(credentialList([credential('external-read-token','observe')]));await assert.rejects(controlsClient.listCredentials(),/incomplete access list/);
+let revokeCalls=0;
+controlsClient.fetcher=async(path,options)=>{revokeCalls++;assert.equal(path,'/api/me/credentials/external-read-token');assert.equal(options.method,'DELETE');return success({token_id:'external-read-token',revoked:true});};
+await assert.rejects(controlsClient.revokeCredential('page-token-id'),/Keep this page connected/);assert.equal(revokeCalls,0);
+await controlsClient.revokeCredential('external-read-token');assert.equal(revokeCalls,1);assert.equal(controlsClient.token,'page-access');
+controlsClient.fetcher=async()=>({ok:false,status:403,json:async()=>({error:'PermissionDenied',message:'revocation denied'})});await assert.rejects(controlsClient.revokeCredential('external-read-token'),/revocation denied/);
+controlsClient.fetcher=async()=>success({token_id:'different-token',revoked:true});await assert.rejects(controlsClient.revokeCredential('external-read-token'),/did not confirm/);
+console.log('Credential control: scoped metadata excludes bearers; per-item revocation checks confirmation and refuses the current page');
+
+let accountHandler=async()=>success(credentialList()),uiRequests=[];
+const accountApp=pageFixture({externalFetcher:async(path,options)=>{uiRequests.push({path,options});return accountHandler(path,options);}});
+accountApp.setKey(key);accountApp.captureDownloads(accountApp.downloads);
+await accountApp.node('#account-button').listeners.get('click')();
+assert.match(accountApp.node('#credential-list').text,/This page/);assert.match(accountApp.node('#credential-list').text,/Read only · active/);assert.match(accountApp.node('#credential-list').text,/expires/);assert.equal(accountApp.node('#credential-list').querySelectorAll('button').length,1);
+accountApp.client.saveDraft('posts:','preserved while managing access');
+accountHandler=async path=>path.startsWith('/api/me/credentials/') ? ({ok:false,status:403,json:async()=>({message:'revocation denied'})}) : success(credentialList());
+await accountApp.node('#credential-list').find('button').listeners.get('click')();
+assert.match(accountApp.node('#account-error').text,/revocation denied/);assert.equal(accountApp.node('#revoke-result').text,'');assert.match(accountApp.node('#credential-list').text,/Read only · active/);
+assert.equal(accountApp.client.draft('posts:'),'preserved while managing access');assert.equal(accountApp.client.token,'page-access');
+accountHandler=async path=>path.startsWith('/api/me/credentials/') ? success({token_id:'external-read-token',revoked:true}) : success(credentialList([credential('page-token-id'),credential('external-read-token','observe','revoked')]));
+await accountApp.node('#credential-list').find('button').listeners.get('click')();assert.match(accountApp.node('#revoke-result').text,/revoked/);assert.match(accountApp.node('#credential-list').text,/Read only · revoked/);assert.equal(accountApp.node('#credential-list').querySelectorAll('button').length,0);
+assert.equal(accountApp.node('#account-error').hidden,true);
+
+let finishDownload,challengeCalls=0;
+accountApp.node('#connection-access-mode').value='observe';
+accountHandler=async(path,options)=>{
+  if(path.endsWith('/challenges')){challengeCalls++;assert.equal(JSON.parse(options.body).access_mode,'observe');return success(accessChallenge('observe'));}
+  if(path.endsWith('/exchange'))return new Promise(resolve=>{finishDownload=resolve;});return success(credentialList());
+};
+const firstDownload=accountApp.node('#config-button').listeners.get('click')();
+await accountApp.node('#config-button').listeners.get('click')();
+while(!finishDownload)await new Promise(resolve=>setImmediate(resolve));
+assert.equal(challengeCalls,1);assert.equal(accountApp.node('#connection-access-mode').disabled,true);
+finishDownload(success(accessExchange('observe')));await firstDownload;
+assert.equal(accountApp.downloads.length,1);assert.equal(accountApp.downloads[0].data.mcp.commons.headers.Authorization,'Bearer issued-secret');assert.equal(accountApp.client.token,'page-access');assert.equal(accountApp.node('#config-button').disabled,false);
+assert.equal(accountApp.downloads[0].name,'agent-world-opencode-observe-token-id.json');assert.match(accountApp.node('#connect-command').textContent,/observe-token-id\.json/);
+assert.ok(!accountApp.node('#credential-list').text.includes('issued-secret'));
+
+let finishList;
+accountHandler=async()=>new Promise(resolve=>{finishList=resolve;});
+const abandonedList=accountApp.node('#refresh-credentials-button').listeners.get('click')();
+accountApp.node('#close-account').listeners.get('click')();
+finishList(success(credentialList()));await abandonedList;assert.equal(accountApp.node('#credential-list').children.length,0);
+accountHandler=async()=>success(credentialList());await accountApp.node('#account-button').listeners.get('click')();
+
+let finishRevoke;
+accountHandler=async()=>new Promise(resolve=>{finishRevoke=resolve;});
+const abandonedRevoke=accountApp.node('#credential-list').find('button').listeners.get('click')();
+accountApp.node('#account').listeners.get('cancel')();finishRevoke(success({token_id:'external-read-token',revoked:true}));await abandonedRevoke;
+assert.equal(accountApp.node('#revoke-result').text,'');assert.equal(accountApp.node('#credential-list').children.length,0);
+assert.equal(accountApp.client.draft('posts:'),'preserved while managing access');
+
+accountHandler=async()=>success(credentialList());await accountApp.node('#account-button').listeners.get('click')();
+finishDownload=null;accountHandler=async path=>path.endsWith('/challenges') ? success(accessChallenge('observe')) : new Promise(resolve=>{finishDownload=resolve;});
+const cancelledDownload=accountApp.node('#config-button').listeners.get('click')();
+while(!finishDownload)await new Promise(resolve=>setImmediate(resolve));
+accountApp.node('#logout-button').listeners.get('click')();finishDownload(success(accessExchange('observe')));await cancelledDownload;
+assert.equal(accountApp.downloads.length,1);assert.equal(accountApp.node('#world').hidden,true);assert.equal(accountApp.client.draft('posts:'),'preserved while managing access');
+console.log('Commons access UI: permission choice, one download per double click, scoped list, revoke failure/success and Close/Escape/Leave cancellation preserve identity and drafts');

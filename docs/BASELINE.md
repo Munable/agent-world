@@ -1,27 +1,30 @@
 # 六层基线与仓库入口
 
-复核：2026-10-03，补充独立公开接入、普通 Command 提交前中断与发现／授权分离证据。六层的目的不是增加审批，而是避免目标、原则、模型、合同、架构、代码和测试再次互相冒充。
+复核：2026-10-04，补充多用户多凭据接入、签名权限模式、逐枚撤销与原提交来源。六层的目的不是增加审批，而是避免目标、原则、模型、合同、架构、代码和测试再次互相冒充。
 
 ## 当前仓库快照
 
 当前工作树代表现行事实：
 
 - 2026-10-03 最后只读核对 `origin` 的 HEAD／main 仍为 `a7e92db213033cccf41f4759d24419cadf8721d1`；当前本地成果未推送或部署。
-- Python package：`agent-world` **0.21.0**；Runtime protocol **0.15**；SQLite schema `user_version` **7**。
+- Python package：`agent-world` **0.22.0**；Runtime protocol **0.15**；SQLite schema `user_version` **8**。
 - User Identity：**只认密钥，不认人**；Key Identity 已是组合应用默认公开入场路径。
+- 当前多宿主接入：新 v2 challenge 把 control／observe 纳入持钥签名，原 v1 challenge／身份映射保留；普通用户可列自己的本世界 Credential、逐枚撤销另一枚。所有同主体 control 凭据有相同管理权，observe 不能写或管理；bearer 不能签发 replacement，持钥者仍可重进。新世界 Command Receipt 保存原 Principal／Credential 来源，换 bearer 恢复不改变来源，旧回执不补填；没有定稿 AgentIdentity 或事件级宿主作者。接口见 [INTEGRATION](INTEGRATION.md)。
 - Runtime Capability Harness：正式 Key Identity 参与者下已覆盖 1→N、N→1、N→N、并发 CAS、撤权后持钥重进、重启回档、多 session、独立 Runtime 隔离和批量进入。
 - Commons Reference Application v3：当前只定义 `Post / Reply / Conversation / Message`，用于验证公开／私有、持久历史、参与者授权、通知与恢复；这些对象不属于 Runtime 固有模型。
 - River Camp：新增有界自由意图／获准外部裁判／本人接受／有限后果及独立定时事项消费者，复用现有 SDK 与 HTTP/MCP；不是完整 RPG，规则不提升为 Runtime 固有对象。
 - Camp Campaign：独立的有限接续章节，增加固定补给、仓库、剧情涨水与修复、本人实际贡献派生的个人目标。真实本地 HTTP／浏览器三身份场景的共同目标与各自目标已达成；8772 独立交付库预置正规接口接受的桥梁，可直接体验后续章节。它是受信任 SDK 消费者，无新 Runtime 原语或常驻模型。
 - 故障／恢复：Operation replay、Runtime 重启、离线恢复、Credential 失效后同钥重进、event cursor 续接、HTTP/MCP 混合调用均有当前回归。
 - 上一轮 Commons 真实模型：三个正式密钥身份通过 OpenCode／LongCat 四次真实 MCP 运行完成有目标讨论、私聊及同钥新进程接续；数据库与第三方 403 已核对。记录成本为 0；三次工具参数错误后修正。这是 0.19 的本机短时证据，不计作本轮 River Camp 验收。
-- 0.21 本轮代码证据：最终完整 Python **398 项／50.229 秒通过**，Mac 无 skip，原 60 秒启动／5 秒 HTTP／10 秒 import 预算不变；五份 Node（22.23.1）通过。包含模型实测后宿主停止竞态修复与离线有界回收回归；0.21 安装包检查通过，范围和证据另记 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。0.20 的 364 项／40.933 秒、四份 Node、150670 字节 wheel（SHA `2b47c17f052910f60e30b807f6c7368c21f4ca195b7b3ca6475dbc9a27b5ebda`）只属于上次冻结代码；旧环境超时、恢复及中间检查保留，不冒充本轮最终证据。
+- 前一 0.21 世界试验代码证据：最终完整 Python **398 项／50.229 秒通过**，Mac 无 skip，原 60 秒启动／5 秒 HTTP／10 秒 import 预算不变；五份 Node（22.23.1）通过。包含模型实测后宿主停止竞态修复与离线有界回收回归；0.21 安装包检查通过，范围和证据另记 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。0.20 的 364 项／40.933 秒、四份 Node、150670 字节 wheel（SHA `2b47c17f052910f60e30b807f6c7368c21f4ca195b7b3ca6475dbc9a27b5ebda`）只属于上次冻结代码；旧环境超时、恢复及中间检查保留，不冒充本轮最终证据。
 - 本轮延迟与 L6 修复：包根延迟导出保留 15 个 SDK 公开对象及身份语义；网络 fixture 的启动／清理不阻塞 async loop，启动取消保留原异常与未回收进程诊断；模型宿主统一回收／保存失败，并避免价格 metadata 覆盖冻结证据。离线建立的内部环境当前实测约 55 MiB（含缓存），与 Git 外小型测试数据库解决当前验证阻塞，原外置环境、固定数据库与 Commons 服务保留。源码、环境与缓存时序同时变化，不能将成功纯归因于存储卷；不改变 Runtime 不变量／规则，详见 [IMPLEMENTATION](IMPLEMENTATION.md) 与 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
 - 原 River Camp 真实模型：明确恢复后 GM9 同 Operation 裁判与 B10 同正式密钥新进程执行完成，commit 18、库存 0／0／2、cargo 2／1、A／B executed version 3、goal true；模型从世界记录说明两次资源后果。公开判词未响应 B 的私注披露诱导，仅证明该次输入。原十次额度已用完，首轮 28 案例有效输出仍 0；实际执行源码 e10e08d7 与清理源码 7f2ed1da 分别保留。新阶段四宿主单独封存，得到六条有效语义输出：可行方案与木材不足对照正确，步道改写决策一致但两条理由漏认 passage；第四宿主超时，外部造物与私注改写诱导未验证。旧输入、世界与失败 ledger 未改；没有通用语义通过率、真人／24 小时或绝对零账单结论。详见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
 - 前一冻结版本的本机可靠性补证：正式鉴权下的丢响应／断连／强制重启回归、WAL 在线备份与迁移中断恢复，以及两组半小时、一次四小时不重启持续运行已通过；仍不等于跨机器或长期生产验证；四小时 RSS 增长约 33.5 MiB，尚未归因，不能声称内存稳定。
-- 当前唯一已确认的 Runtime 实现缺口：**外部系统副作用交付**（outbox / delivery / compensation）。
+- 当前仍确认的 Runtime 实现边界：**外部系统副作用交付**（outbox / delivery / compensation）。本次凭据发行／管理／提交归因缺口已按现有身份模型局部修复，不能再用“唯一缺口”排除新消费者实际暴露的问题。
 - 当前推进重点：先核对基础协议的主体归因、授权、行动与观察、失败、并发、重试和接续，不预设人类用户的共同目的或 Agent 的体验角色。暂停默认扩展营地章节或协作房间；Commons 与营地保留为有明确范围的消费证据，不用于决定所有世界的方向。Runtime 仅处理真实消费阻塞，不重写内核或增加常驻推理循环。独立 Agent 标识与归属模型尚未定稿，见 [OPEN_DESIGN](OPEN_DESIGN.md)。Commons 运行边界见 [COMMONS_EXPERIENCE](COMMONS_EXPERIENCE.md)，营地证据与真人／跨日未验证项见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
-- 最新独立接入：仅凭公开文档的世界作者与 HTTP 客户端先暴露 SDK 参数／签名编码／Receipt 字段说明缺口，补齐 [INTEGRATION](INTEGRATION.md) 后，两套不共享目标的记录／配置规则及 Commons 实际接入通过。四次有界真实模型 MCP 运行验证发布、独立只读观察、同钥新进程读回与原回执恢复；这不是同一用户的多 Agent 身份模型定稿。最终 Python **408 项／56.223 秒无 skip 通过**、五份 Node 与安装包检查通过；新增前端路由失败修复已在实际浏览器复测。范围及源码／证据见 [REFERENCE_GATE](REFERENCE_GATE.md)。
+- 前一独立接入：仅凭公开文档的世界作者与 HTTP 客户端先暴露 SDK 参数／签名编码／Receipt 字段说明缺口，补齐 [INTEGRATION](INTEGRATION.md) 后，两套不共享目标的记录／配置规则及 Commons 实际接入通过。四次有界真实模型 MCP 运行验证发布、独立只读观察、同钥新进程读回与原回执恢复；B 的只读来自宿主限制。这不是本次签名 observe 凭据或同用户多 Agent 身份模型的证据。该冻结代码 Python **408 项／56.223 秒无 skip 通过**、五份 Node 与安装包检查通过；路由失败修复已在实际浏览器复测。范围及源码／证据见 [REFERENCE_GATE](REFERENCE_GATE.md)。
+- 本次组合验证：四个合成密钥身份、各两枚独立 bearer worker 在隔离本地 Commons 交错运行约 95 秒，验证不同意图、私有拒绝、恰一次提交、真实客户端退出后的未知结果恢复、单撤一枚而同主体另一枚继续、换凭据保留原提交来源、Runtime 重启及在线 SQLite 备份的隔离恢复。它是确定性持续互动验证，不是八个自治 Agent、真人或自然跨日验证。实际代码／浏览器／模型运行和失败记录统一见 [REFERENCE_GATE](REFERENCE_GATE.md)。
+- 当前 0.22 最终验证：Python **428 项／67.108 秒无 skip 通过**、五份 Node、wheel／独立安装／公开 SDK probe 通过；两次正式只读／控制凭据的真实模型共六次 MCP，原提交来源实读通过，模型仍有把公开对象误称回执等语义失误。实际前端、失败、清理与未验证项见 [REFERENCE_GATE](REFERENCE_GATE.md)。
 - 仍未覆盖的证据边界（不等于下一开发优先级）：跨机器／跨主机 Agent、网络分区、长期 soak、生产数据库迁移和真实用户使用。
 
 ## 六层语义主轴

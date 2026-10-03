@@ -4,7 +4,7 @@ import base64
 import hmac
 import os
 import pathlib
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -44,6 +44,7 @@ class ExchangeJoinTicketRequest(StrictModel):
 class CreateIdentityKeyChallengeRequest(StrictModel):
     public_key: str = Field(min_length=1, max_length=128)
     ttl_seconds: float = Field(default=120.0, gt=0, le=300)
+    access_mode: Literal["control", "observe"] = "control"
 
 
 class ExchangeIdentityKeyChallengeRequest(StrictModel):
@@ -177,6 +178,7 @@ def create_product_app(
             universe,
             body.public_key,
             ttl_seconds=body.ttl_seconds,
+            access_mode=body.access_mode,
         )
 
     @app.post("/v1/key-identities/exchange")
@@ -244,6 +246,20 @@ def create_product_app(
         current_identity(request)  # Includes the duplicate-header and origin boundaries.
         return runtime.revoke_other_identity_tokens(
             universe, request.headers["authorization"].partition(" ")[2].strip()
+        )
+
+    @app.get("/api/me/credentials")
+    def my_credentials(request: Request):
+        current_identity(request)
+        return runtime.list_own_identity_tokens(
+            universe, request.headers["authorization"].partition(" ")[2].strip()
+        )
+
+    @app.delete("/api/me/credentials/{token_id}")
+    def revoke_my_credential(token_id: str, request: Request):
+        current_identity(request)
+        return runtime.revoke_own_identity_token(
+            universe, request.headers["authorization"].partition(" ")[2].strip(), token_id
         )
 
     @app.get("/api/config")

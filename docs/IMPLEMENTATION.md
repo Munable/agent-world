@@ -1,10 +1,10 @@
 # L6：当前实现
 
-复核：2026-10-03。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-10-04。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
-- Python package：`agent-world` 0.21.0，要求 Python 3.11+。
+- Python package：`agent-world` 0.22.0，要求 Python 3.11+。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
@@ -14,7 +14,9 @@
 
 0.20 新增 [River Camp 有界世界实验](WORLD_EXPERIMENT.md)：自由意图、裁判、本人接受和资源后果由独立 World Definition 消费现有 SDK。组合应用公开身份默认签发 24 小时凭据；没有新增 Runtime 原语或托管推理循环。
 
-0.21 的 `examples.camp_campaign` 是独立的有限章节 World Definition，组合原 River Camp 的初桥规则。增加两趟固定外部补给、一次剧情涨水、共享仓库、一次应急箱和两种修复；共同目标与个人真实贡献分别派生，货运通行只是一项里程碑。第一趟补给关闭自由桥梁提案，后续使用已定义的章节行动；不宣称完整跑团或自动生成后续章节。`examples.river_camp_app --campaign` 选择独立 world_id／universe／8772，重用数据库前只读核对世界类型，不把原实验库改成新世界。前端显示当前阶段、可用行动与阻塞原因；回访对比仅缓存本浏览器的公开库存／路线／服务端时间，不缓存私注、权限或模型思考。Runtime／protocol／SQLite schema 未改。
+0.21 的 `examples.camp_campaign` 是独立的有限章节 World Definition，组合原 River Camp 的初桥规则。增加两趟固定外部补给、一次剧情涨水、共享仓库、一次应急箱和两种修复；共同目标与个人真实贡献分别派生，货运通行只是一项里程碑。第一趟补给关闭自由桥梁提案，后续使用已定义的章节行动；不宣称完整跑团或自动生成后续章节。`examples.river_camp_app --campaign` 选择独立 world_id／universe／8772，重用数据库前只读核对世界类型，不把原实验库改成新世界。前端显示当前阶段、可用行动与阻塞原因；回访对比仅缓存本浏览器的公开库存／路线／服务端时间，不缓存私注、权限或模型思考。该章节本身未改变 Runtime／protocol／SQLite schema。
+
+0.22 修复多宿主接入暴露的 L6 缺口：身份持钥证明签入 control／observe，组合入口公开自己的凭据列表与逐枚撤销，新世界 Command Receipt 保存原提交 Principal／Credential。protocol 保持 0.15，SQLite schema 升为 8；不新增 AgentIdentity 或托管推理循环。当前验证范围见 [REFERENCE_GATE](REFERENCE_GATE.md)。
 
 ## L3 语义到当前代码的映射
 
@@ -28,7 +30,7 @@
 | Query / Command | `FunctionSpec(access="read" / "write")`。 |
 | State Fact | `world_state` + `StateRule` / state_authorizer。 |
 | Operation | 调用方 `operation_id`，持久化到 `operations.idempotency_key`。 |
-| Receipt | `operations.receipt_json`。 |
+| Receipt | `operations.receipt_json`；新世界 Command 回执保存原 `actor_role_id / credential_id`。 |
 | Commit | `world_commits` 及关联 `state_changes`。 |
 | Notification Event | `events` / `EventSpec`。 |
 | Shared Stream | `StreamSpec` / `StreamEvent` / `stream_events`。 |
@@ -46,11 +48,17 @@ User Identity 的现行根事实是 Ed25519 公钥。客户端先调用 key iden
 
 Participant Profile 完全由世界本地保存。身份公钥不会携带 display name、avatar、资产、关系或其他世界档案；同一公钥在 World A 与 World B 可以对应不同 `role_id`、不同本地资料和不同业务权限。
 
-`identity_key_challenges` 保存短期 challenge、public key、过期时间和已签发的本地 token id。相同 challenge 在网络响应丢失后可重放并恢复同一个 world-local Credential；challenge 不能把身份映射到另一公钥。当前身份 challenge 最长 300 秒。
+`identity_key_challenges` 保存短期 challenge、public key、过期时间、access_mode 和已签发的本地 token id。新 challenge 全为 `agent-world-key-identity-v2`：精确签名串是 `[version, universe, challenge_id, nonce, access_mode]` 以 NUL 分隔后的 UTF-8 字节，返回无 padding base64url 编码的 message。control 为默认，observe 必须在 challenge 时选择；exchange 按已签名的存储模式发行，不接受 bearer mint 或交换时改模式。相同 challenge 在网络响应丢失后可重放并恢复同一个 world-local Credential；challenge 不能把身份映射到另一公钥。当前身份 challenge 最长 300 秒。
+
+schema 8 的新增 nullable access_mode 列保留原数据库 pending／used v1 challenge：NULL 继续使用四段 v1 control 签名串，已有 profile、key mapping 与 credential 不变；新请求不会发行 v1 challenge。
 
 当前 world-local identity token 使用 `awid_` 前缀并只绑定 `role_id + universe`；不同世界不能互相接受 bearer token。Token revoke / rotate 只管理本地 Credential，不改变 User Identity 公钥。Join Ticket 仍是 operator 管理的本地角色接入工具，不定义 User Identity。
 
-`POST /api/me/revoke-other-credentials` 使用当前 control Credential，在一个写事务内撤销同一 universe、同一 role 的其他未过期有效 Credential，并保留当前 Credential；返回 `revoked_count / kept_token_id / expires_at`。它不更换身份密钥，持有原私钥的宿主仍可重新进入并取得新 Credential。
+`GET /api/me/credentials` 要求有效 control Credential，只列同 universe、同 Principal 的元数据：`token_id / access_mode / created_at / expires_at / revoked_at / is_current / status` 及 scope，status 为 active／expired／revoked，不返回 bearer／hash。`DELETE /api/me/credentials/{token_id}` 在写事务取得锁后检查调用者及目标 scope，重复撤销成功；撤当前凭据为 422，未知／跨主体／跨世界均为相同 404。`POST /api/me/revoke-other-credentials` 继续撤销自己的其他未过期有效 Credential，保留当前 Credential；返回 `revoked_count / kept_token_id / expires_at`。
+
+同一 Principal 的所有 control Credential 都有这些管理权限；外部宿主的 control 不低于浏览器 control，没有仅人类 owner 的管理边界。observe 能读取获准内容，不能写／重放写、改档案或管理凭据。用户可保留私钥并为每个宿主独立签发 bearer；凭据管理本身不能签发新 bearer，持有原私钥者仍能重新进入。宿主密钥保管及同 UID 进程隔离不是 Runtime 提供的保证。
+
+世界 Command 在提交前解析有效 Credential，将 `actor_role_id / credential_id` 与结果一起写入原 Receipt；可信进程内调用和 timer 的 credential_id 为 null。同 Principal 换 bearer 查回执或重放保留原提交来源，旧 Receipt 不补填来源字段。Operation identity 仍为 `universe + actor_role_id + operation_id`，不是每 Credential 各自命名空间。事件、共享流和 journal 继续保存 Principal 归因，未新增事件级宿主作者；credential_id 不定义 AgentIdentity。
 
 **密钥丢失没有恢复路径。** 没有原私钥就不能再次完成该公钥的持钥证明；旧本地档案可以作为历史事实保留，但对该用户而言成为不可再控制的死档。Runtime 当前没有、也不计划隐式提供密钥恢复、换钥继承或人工“认人”接口。
 
@@ -98,7 +106,7 @@ Conversation/Message 的参与者授权、Post/Reply 的公开读取、Operation
 
 ## 当前 SQLite schema
 
-当前 schema `user_version` 为 7。主要表：
+当前 schema `user_version` 为 8；新增 `identity_key_challenges.access_mode` 并保留已有 v1 证明。主要表：
 
 - identity / entry：`roles`、`identity_keys`、`identity_key_challenges`、`role_world_presence`、`identity_tokens`、`join_tickets`、`identity_token_rotations`。
 - world registry：`world_definitions`、`function_registry`。
@@ -154,7 +162,9 @@ MCP 写工具的 description 与 input schema 都明确要求 `operation_id` 位
 
 ## 当前 HTTP / 产品入口
 
-HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。组合应用与 standalone onboarding 都公开 key identity challenge / exchange，用于“公钥 + 持钥签名 → 本世界档案 + world-local Credential”；这是正常用户／Agent 的默认公开入场路径，不要求 operator 预建 Role 或 Join Ticket。operator 管理面仍保留 role、join ticket、token rotate/revoke 与 rotation receipt，作为管理／受控接入工具。鉴权请求的主体只来自 credential，`role_id` 不属于鉴权调用参数。
+HTTP Runtime API 包含 health/whoami、function discovery/invoke、bootstrap/describe、views、streams、public views/streams、receipt、activities、changes 等路径。组合应用与 standalone onboarding 都公开 key identity challenge / exchange，用于“公钥 + 含权限模式的持钥签名 → 本世界档案 + world-local Credential”；这是正常用户／Agent 的默认公开入场路径，不要求 operator 预建 Role 或 Join Ticket。组合产品入口另有 own credential list／single revoke／revoke others，MCP 不增加凭据管理 tool。standalone onboarding 的 operator 管理面仍保留 role、join ticket、token rotate/revoke 与 rotation receipt，不能当作普通用户接口。鉴权请求的主体只来自 credential，`role_id` 不属于鉴权调用参数。
+
+`agent-world-connect` 默认 control，可用 `--access-mode observe` 申请只读凭据；helper 验证 v2 challenge 的模式和签名串，并核对 exchange 的模式。Commons 连接权限选择器使用相同证明；下载名为 `agent-world-opencode-{mode}-{token_id末8位}.json`，便于与列表 ID 对应。关闭／取消／离开或换身份会取消当前 UI 请求并拒绝迟到响应；下载或列表不证明宿主已运行。helper 管理的 POSIX owner-only 文件也不证明同 UID 宿主之间存在 OS 沙箱。
 
 HTTP Runtime API 与 MCP 均拒绝重复 Authorization 请求头；已鉴权的目录入口同样要求省略 role_id。不可 UTF-8 编码的 JSON／标识符和越界时长以结构化请求错误拒绝。
 

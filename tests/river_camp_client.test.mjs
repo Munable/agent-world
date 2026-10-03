@@ -52,8 +52,8 @@ console.log('River Camp client: body timeout, leave cancellation and same-operat
 
 // Cancellation between a challenge and signing must not issue a later credential.
 const {createKey,encode}=await import(commonsUrl), authKey=await createKey();
-const challenge={version:'agent-world-key-identity-v1',public_key:authKey.public_key,universe:'cancel-camp',challenge_id:'synthetic',nonce:'nonce'};
-challenge.message=encode(new TextEncoder().encode([challenge.version,challenge.universe,challenge.challenge_id,challenge.nonce].join('\0')));
+const challenge={version:'agent-world-key-identity-v2',access_mode:'control',public_key:authKey.public_key,universe:'cancel-camp',challenge_id:'synthetic',nonce:'nonce'};
+challenge.message=encode(new TextEncoder().encode([challenge.version,challenge.universe,challenge.challenge_id,challenge.nonce,challenge.access_mode].join('\0')));
 let releaseSign, signStarted;
 const signReady=new Promise(resolve=>{signStarted=resolve;}), originalSign=crypto.subtle.sign;
 const authCalls=[];

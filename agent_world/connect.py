@@ -31,7 +31,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 
 KEY_VERSION = "agent-world-key-v1"
-PROOF_VERSION = "agent-world-key-identity-v1"
+PROOF_VERSION = "agent-world-key-identity-v2"
 SESSION_MAX_SECONDS = 86400
 CONFIG_SCHEMA = "https://opencode.ai/config.json"
 
@@ -64,6 +64,7 @@ class ConnectionResult:
     expires_at: float
     key_path: Path
     output_path: Path
+    access_mode: str
 
 
 def _encode(raw: bytes) -> str:
@@ -258,16 +259,19 @@ def _post(client: httpx.Client, url: str, payload: dict[str, Any], *, replay: bo
         raise ConnectionSetupError("The world returned an invalid connection response.") from None
 
 
-def _exchange(client: httpx.Client, origin: str, key: IdentityKey) -> dict[str, Any]:
-    challenge = _post(client, origin + "/v1/key-identities/challenges", {"public_key": key.public_key})
+def _exchange(client: httpx.Client, origin: str, key: IdentityKey, access_mode: str) -> dict[str, Any]:
+    challenge = _post(client, origin + "/v1/key-identities/challenges", {
+        "public_key": key.public_key, "access_mode": access_mode,
+    })
     try:
-        if challenge["version"] != PROOF_VERSION or challenge["public_key"] != key.public_key:
+        if (challenge["version"] != PROOF_VERSION or challenge["public_key"] != key.public_key
+                or challenge["access_mode"] != access_mode):
             raise ConnectionSetupError("The world's challenge does not match this identity.")
         universe = _text(challenge["universe"])
         challenge_id = _text(challenge["challenge_id"])
         nonce = challenge["nonce"]
         _decode(nonce, 32)
-        message = "\0".join((PROOF_VERSION, universe, challenge_id, nonce)).encode("utf-8")
+        message = "\0".join((PROOF_VERSION, universe, challenge_id, nonce, access_mode)).encode("utf-8")
         if _decode(challenge["message"]) != message:
             raise ConnectionSetupError("The world requested an unexpected signing message.")
         if not time.time() < _timestamp(challenge["expires_at"]) <= time.time() + 360:
@@ -279,6 +283,7 @@ def _exchange(client: httpx.Client, origin: str, key: IdentityKey) -> dict[str, 
         if (
             result["version"] != PROOF_VERSION or result["public_key"] != key.public_key
             or identity["universe"] != universe
+            or identity["access_mode"] != access_mode
             or _text(identity["role_id"]) != result["role_profile"]["role_id"]
         ):
             raise ConnectionSetupError("The returned session does not match this identity and world.")
@@ -333,10 +338,13 @@ def connect_world(
     replace_config: bool = False,
     export_key: str | Path | None = None,
     client: httpx.Client | None = None,
+    access_mode: str = "control",
 ) -> ConnectionResult:
     """Write private local files only for this explicit invocation; never print secrets."""
     if os.name != "posix":
         raise ConnectionSetupError("This helper currently requires macOS/Linux private-file permissions.")
+    if access_mode not in {"control", "observe"}:
+        raise ConnectionSetupError("Choose control or observe access.")
     origin = validate_origin(url)
     key_path, output_path = _managed_path(key_path), _managed_path(output_path)
     export_path = _managed_path(export_key) if export_key is not None else None
@@ -354,9 +362,9 @@ def connect_world(
     key = load_identity(key_path, import_key=Path(import_key) if import_key else None, new_identity=new_identity)
     if client is None:
         with httpx.Client(timeout=15.0, follow_redirects=False, trust_env=False) as owned_client:
-            result = _exchange(owned_client, origin, key)
+            result = _exchange(owned_client, origin, key, access_mode)
     else:
-        result = _exchange(client, origin, key)
+        result = _exchange(client, origin, key, access_mode)
     config = {"$schema": CONFIG_SCHEMA, "mcp": {"agent_world": {
         "type": "remote", "url": result["mcp_url"], "enabled": True, "oauth": False,
         "headers": {"Authorization": "Bearer " + result["identity"]["token"]},
@@ -366,7 +374,7 @@ def connect_world(
         _atomic_json(export_path, key.recovery())
     identity = result["identity"]
     return ConnectionResult(key.public_key, identity["role_id"], identity["universe"],
-                            float(identity["expires_at"]), key_path, output_path)
+                            float(identity["expires_at"]), key_path, output_path, identity["access_mode"])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -380,6 +388,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--new-identity", action="store_true", help="explicitly create a new identity if none is saved")
     parser.add_argument("--replace-config", action="store_true", help="refresh an existing helper-generated config")
     parser.add_argument("--export-key", type=Path, help="optional unencrypted browser-compatible recovery file")
+    parser.add_argument("--access-mode", choices=("control", "observe"), default="control",
+                        help="control can read and act; observe can only read authorized world content")
     parser.add_argument("--launch-opencode", action="store_true",
                         help="refresh this helper's config and start the installed OpenCode host in one step")
     args = parser.parse_args(argv)
@@ -390,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = connect_world(args.url, key_path=args.key, output_path=args.output, import_key=args.import_key,
                                new_identity=args.new_identity, replace_config=args.replace_config or args.launch_opencode,
-                               export_key=args.export_key)
+                               export_key=args.export_key, access_mode=args.access_mode)
     except ConnectionSetupError as exc:
         print(f"Connection setup failed: {exc}", file=sys.stderr)
         return 1
@@ -399,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
     print(f"Connection config saved. Participant: {result.role_id}")
+    print("Access mode: " + result.access_mode)
     print("Session expires (UTC): " + datetime.fromtimestamp(result.expires_at, timezone.utc).isoformat())
     print("Start OpenCode locally: OPENCODE_CONFIG=" + shlex.quote(str(result.output_path)) + " opencode")
     print("To renew, use the same --url, --key, and --output plus --replace-config; omit --new-identity.")

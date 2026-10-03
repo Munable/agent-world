@@ -75,8 +75,8 @@ Query 不能写入，Command 的候选状态与回执／附带受管效果共同
 ### Ed25519 持钥证明
 
 1. 生成或加载自己的 Ed25519 私钥；保留它供以后同身份返回。公钥是 **32 字节 raw 公钥的无 padding base64url**。
-2. `POST /v1/key-identities/challenges`，JSON：`{"public_key":"<base64url>","ttl_seconds":120}`。ttl_seconds 可省略，最大 300；不传 display_name、universe 或 access_mode。
-3. 成功响应包含 `version="agent-world-key-identity-v1"`、`challenge_id`、`universe`、`public_key`、`nonce`、`message`、`expires_at`。**先 base64url 解码 message，再签解码后的原始字节**，不要签 message 的 ASCII 文本，也不要自行重构签名串。
+2. `POST /v1/key-identities/challenges`，JSON：`{"public_key":"<base64url>","ttl_seconds":120,"access_mode":"observe"}`。access_mode 为 `control`（默认）或 `observe`；ttl_seconds 可省略，最大 300。不传 display_name 或 universe。
+3. 新 challenge 的响应包含 `version="agent-world-key-identity-v2"`、`challenge_id`、`universe`、`public_key`、`nonce`、`access_mode`、`message`、`expires_at`。签名前核对公钥、世界、有效期和所选模式；解码后的 message 必须是 `[version, universe, challenge_id, nonce, access_mode]` 以 NUL 分隔后的 UTF-8 字节。**先 base64url 解码 message，再签解码后的原始字节**，不要签 message 的 ASCII 文本。
 4. 签名是 64 字节 Ed25519 签名的无 padding base64url。`POST /v1/key-identities/exchange`，JSON：`{"challenge_id":"...","signature":"..."}`。
 5. 成功响应含 `public_key`、`created_profile`、`replayed`、`role_profile`，以及 `identity: {token, token_id, universe, role_id, access_mode, created_at, expires_at}`。组合入口还给出 `mcp: {url, authorization_scheme, authorization_token}` 和 `next`。
 
@@ -92,7 +92,9 @@ def decode(text):
 # signature = encode(key.sign(decode(challenge["message"])))
 ```
 
-私钥与 bearer 由客户端／宿主管理，不交给模型自然语言上下文，不打印或保存到 Git。凭据到期／撤销后使用原身份私钥请求新 challenge，获取新的本地 Credential；新的公钥是新身份。若 exchange 响应丢失，可在有效条件内重发同一 challenge_id/signature 恢复同一凭据；不要把超时当成未进入。
+exchange 只使用已保存、已签名的模式，不接受 access_mode 或 bearer 作为签发授权。新 challenge 均为 v2；schema 8 保留数据库中原有待交换／已交换 v1 challenge 的 control 证明及原身份映射，不把它们重新解释为 v2。
+
+用户可以把私钥留在自己的浏览器／连接工具中，分别签发多枚独立 Credential，只把各自 bearer 交给外部宿主；宿主无需持有身份私钥。私钥与 bearer 不交给模型自然语言上下文，不打印或保存到 Git。凭据到期／撤销后，持有原私钥的调用方可请求新 challenge；新的公钥是新身份。若 exchange 响应丢失，可在有效条件内重发同一 challenge_id/signature 恢复同一凭据；不要把超时当成未进入。宿主的密钥保管与操作系统隔离由外部环境负责。
 
 ### 路径、请求与主要返回
 
@@ -108,14 +110,21 @@ def decode(text):
 | `GET /v1/receipts/{operation_id}` | 无额外参数 | 该主体的原 Command Receipt；未找到为 ReceiptNotFound。 |
 | `GET /v1/changes` | `after=0`, `limit=50` | `{events, next_cursor, has_more, ...}`；定向通知不等于所有世界变化。 |
 | `GET /v1/changes/wait` | `after=0`, `limit=50`, `timeout=30` | 同一通知页形状；timeout 最大 30 秒，超时不产生接受／拒绝。 |
+| `GET /api/me/credentials` | 当前 control bearer | `{universe, role_id, current_token_id, credentials}`，只列自己的本世界凭据元数据。 |
+| `DELETE /api/me/credentials/{token_id}` | 当前 control bearer，无 body | `{token_id, revoked:true}`，撤销自己的另一枚凭据。 |
+| `POST /api/me/revoke-other-credentials` | 当前 control bearer，`{}` | `{revoked_count, kept_token_id, expires_at}`，撤销自己的其他有效凭据。 |
 
 发现项使用 `function_id`，包含 `version`、`description`、`access`，加载 schema 时还含 `input_schema`、可选 `output_schema` 等。目录可见不代表获准执行；已知动作也必须通过授权。描述与 schema 来自世界作者，不能作为其他人的授权。
 
-组合入口的控制凭据调用 bootstrap 会记录入场 presence，控制活动也可能按现有合同失效／回收；它不是完全无副作用的观察接口。只想观察内容时使用 describe/discover 和世界声明的 Query。
+observe 可以读取该 Principal 获准内容，包括 bootstrap、Query 和 Receipt；不能提交 Command、重放写操作、改变档案或管理凭据。组合入口的 control bootstrap 会记录入场 presence，控制活动也可能按现有合同失效／回收；需要只读连接时在 challenge 选择 observe。
+
+凭据列表的每项包含 `token_id, universe, role_id, access_mode, created_at, expires_at, revoked_at, is_current, status`；status 为 `active / expired / revoked`。不返回 bearer 或 token hash。单撤销在同一事务内重新检查调用凭据和目标 scope：重复撤同一枚成功，当前凭据为 422，未知／他主体／他世界的 ID 均为 404。同一 Principal 的所有 control 凭据有相同管理权限，包括外部宿主的 control；当前没有“仅人类 owner 可管理”的额外权限。凭据管理不能凭 bearer 签发 replacement，持钥者仍可重新进入。上述管理路径属于组合 HTTP 产品入口，MCP 没有对应管理工具。
 
 Query：`{"arguments":{...}}`。Command：`{"operation_id":"stable-id","arguments":{...}}`。二者均使用上述 POST invoke 路径，实际 read/write 由动作声明决定。可选顶层 `expected_version` 核对 **函数合同版本**，它不同于领域参数内的状态 CAS 版本。operation_id 1..128 字符，不能嵌进 arguments；同一意图重试保留同一 ID 与完整 envelope。
 
-成功 Command Receipt 含 `ok`、`commit_seq`、`function_id`、`function_version`、`operation_id`、`result`、`event_seqs`，按效果可含 `stream_event_ids`；重放返回 `replayed=true`。归因主体与世界 scope 来自当前鉴权和 endpoint，不能假定 Receipt 含 role_id/universe。Receipt 证明一次提交，不证明某个更大事项完成。Query 不形成持久 Command Receipt。
+当前世界 Command 的新 Receipt 含 `ok`、`commit_seq`、`function_id`、`function_version`、`operation_id`、`actor_role_id`、`credential_id`、`result`、`event_seqs`，按效果可含 `stream_event_ids`；重放返回 `replayed=true`。actor_role_id 是原提交 Principal，credential_id 是原提交 bearer 的非秘密 token_id；可信进程内／timer 提交没有 bearer，credential_id 为 null。同主体换凭据查询或重放保留原来源，不归因给恢复连接。旧 Receipt 缺少这些字段时原样保留，不能推断或补填原来源。世界 scope 仍由 endpoint 绑定，不能假定 Receipt 含 role_id/universe。
+
+Credential 来源不是独立 AgentIdentity，也不证明哪个外部程序实际持有它。共享 bearer 不能区分宿主；事件、公开帖作者和 journal 仍按 Principal 归因，不自动获得事件级宿主标识。同主体多个宿主共享 Operation ID 命名空间，应为独立意图选择不同 ID；同 ID／不同意图明确冲突。Receipt 证明一次提交，不证明更大事项完成。Query 不形成持久 Command Receipt。
 
 遇到写请求超时／取消／断连，先把原 envelope 保留为未知结果，再查原 Receipt。ReceiptNotFound 只表示查询当时没有已提交回执，不能证明原请求永不提交；需要重试时使用原 ID／原 envelope，不换 ID。新进程应从持久保存的未知操作、回执和获准世界状态接续，不能只靠上一模型对话记忆。
 

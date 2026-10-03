@@ -39,7 +39,8 @@ class ConnectionHelperTests(unittest.TestCase):
         body = json.loads(request.content)
         self.requests.append((request.url.path, body))
         if request.url.path == "/v1/key-identities/challenges":
-            result = self.runtime.issue_identity_key_challenge("commons", body["public_key"])
+            result = self.runtime.issue_identity_key_challenge("commons", body["public_key"],
+                                                               access_mode=body.get("access_mode", "control"))
         elif request.url.path == "/v1/key-identities/exchange":
             result = self.runtime.exchange_identity_key_challenge(
                 body["challenge_id"], body["signature"], expected_universe="commons", identity_ttl_seconds=86400,
@@ -88,6 +89,28 @@ class ConnectionHelperTests(unittest.TestCase):
         self.assertEqual((first.role_id, first.public_key), (second.role_id, second.public_key))
         self.assertEqual(key_bytes, self.key_path.read_bytes())
         self.assertNotEqual(first_config, self.saved_config())
+
+    def test_observe_connection_retains_identity_and_requested_server_authority(self):
+        first = self.connect(new_identity=True)
+        second = self.connect(replace_config=True, access_mode="observe")
+        self.assertEqual(first.role_id, second.role_id)
+        self.assertEqual(second.access_mode, "observe")
+        token = self.saved_config()["mcp"]["agent_world"]["headers"]["Authorization"].removeprefix("Bearer ")
+        self.assertEqual(self.runtime.resolve_identity_token(token)["access_mode"], "observe")
+
+    def test_requested_mode_cannot_be_changed_by_challenge_or_exchange(self):
+        for stage in ("challenges", "exchange"):
+            def handler(request):
+                response = self.response(request)
+                if request.url.path.endswith(stage):
+                    data = response.json()
+                    target = data if stage == "challenges" else data["identity"]
+                    target["access_mode"] = "control"
+                    return httpx.Response(200, json=data)
+                return response
+            with self.subTest(stage=stage), self.assertRaises(ConnectionSetupError):
+                self.connect(handler, new_identity=not self.key_path.exists(), access_mode="observe")
+            self.assertFalse(self.output_path.exists())
 
     def test_helper_accepts_actual_commons_product_exchange(self):
         from fastapi.testclient import TestClient

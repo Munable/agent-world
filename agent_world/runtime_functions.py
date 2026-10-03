@@ -517,7 +517,7 @@ class RuntimeFunctions:
         with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             now = time.time()  # Admission time is AFTER the database write lock.
-            self._admit_actor_tx(c, universe, actor_role_id, identity_token, require_control=True)
+            identity = self._admit_actor_tx(c, universe, actor_role_id, identity_token, require_control=True)
             old = c.execute(
                 "SELECT * FROM operations WHERE universe=? AND actor_role_id=? AND idempotency_key=?",
                 (universe, actor_role_id, operation_id),
@@ -565,17 +565,18 @@ class RuntimeFunctions:
             outcome = self._run_user_code(c, handler, ctx, arguments)
             self._validate_outcome(outcome, desc)
             # Expiry during rule evaluation cannot turn into a late unauthorized commit.
-            self._admit_actor_tx(c, universe, actor_role_id, identity_token, require_control=True)
+            identity = self._admit_actor_tx(c, universe, actor_role_id, identity_token, require_control=True)
             if activity_claim:
                 self._validate_claim_tx(c, universe, actor_role_id, activity_claim, time.time())
             receipt = self._commit_outcome_tx(
                 c, ctx, outcome, intent_arguments, journal_marker=journal_marker, activity_id=activity_id,
+                credential_id=identity["token_id"] if identity is not None else None,
             )
         self.wake_waiters()
         return receipt
 
     def _commit_outcome_tx(self, c, ctx, outcome, arguments, *, journal_marker,
-                           activity_id=None, source="action", extra_receipt=None):
+                           activity_id=None, source="action", extra_receipt=None, credential_id=None):
         """One effect/receipt path shared by immediate actions and durable timers."""
         self._validate_managed_state_changes_tx(c, ctx, journal_marker)
         transitions = self._apply_timer_commands_tx(c, ctx)
@@ -603,6 +604,8 @@ class RuntimeFunctions:
                       (commit_seq,ctx.universe,stream,seq))
         receipt = {
             "commit_seq": commit_seq, "ok": True, "operation_id": ctx.operation_id,
+            # This original submission source survives replay under another credential.
+            "actor_role_id": ctx.actor_role_id, "credential_id": credential_id,
             "function_id": ctx.function_id, "function_version": ctx.function_version,
             "result": outcome.result, "event_seqs": event_seqs, "replayed": False,
         }

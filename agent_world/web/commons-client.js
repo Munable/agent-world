@@ -36,7 +36,7 @@ export async function savedKey(value) {
   }); } finally {db.close();}
 }
 export class CommonsClient {
-  constructor(fetcher=globalThis.fetch.bind(globalThis), storage=localStorage, locks=globalThis.navigator?.locks) {this.fetcher=fetcher;this.storage=storage;this.locks=locks;this.token=null;this.publicKey=null;this.universe=null;this.expiresAt=null;}
+  constructor(fetcher=globalThis.fetch.bind(globalThis), storage=localStorage, locks=globalThis.navigator?.locks) {this.fetcher=fetcher;this.storage=storage;this.locks=locks;this.token=null;this.tokenId=null;this.roleId=null;this.accessMode=null;this.publicKey=null;this.universe=null;this.expiresAt=null;}
   async request(path, body, method, {signal}={}) {
     const sentToken=this.token;
     const response = await this.fetcher(path,{method:method || (body ? 'POST':'GET'),cache:'no-store',headers:{'Content-Type':'application/json',...(sentToken ? {Authorization:'Bearer '+sentToken}:{})},...(body ? {body:JSON.stringify(body)}:{}),...(signal ? {signal}:{})});
@@ -45,21 +45,48 @@ export class CommonsClient {
     if (!response.ok) { const error = new Error(data.message || data.detail || 'The world could not be reached. Try again.');error.client=this;error.staleAuth=response.status===401 && this.token!==sentToken;if(response.status===401 && !error.staleAuth)this.token=null;error.status=response.status;error.code=data.error;error.recovery=data.recovery;throw error; }
     return data;
   }
-  async authenticate(key,{isCurrent=()=>true}={}) {
-    const active=()=>{if(!isCurrent())throw cancelledSession();};
+  async authenticate(key,{accessMode='control',isCurrent=()=>true,signal}={}) {
+    if(!['control','observe'].includes(accessMode))throw new Error('Choose Read and act or Read only for this connection.');
+    const active=()=>{if(signal?.aborted || !isCurrent())throw cancelledSession();};
     active();
-    this.token=null; this.publicKey=key.public_key;
-    const challenge=await this.request('/v1/key-identities/challenges',{public_key:key.public_key});
+    this.token=null;this.tokenId=null;this.accessMode=null;this.publicKey=key.public_key;
+    const challenge=await this.request('/v1/key-identities/challenges',{public_key:key.public_key,access_mode:accessMode},undefined,{signal});
     active();
-    if(challenge.public_key!==key.public_key || challenge.version!=='agent-world-key-identity-v1') throw new Error('The world returned an unexpected identity challenge.');
-    const expected=new TextEncoder().encode(['agent-world-key-identity-v1',challenge.universe,challenge.challenge_id,challenge.nonce].join('\0'));
+    if(!challenge || challenge.public_key!==key.public_key || challenge.version!=='agent-world-key-identity-v2' || challenge.access_mode!==accessMode || ![challenge.universe,challenge.challenge_id,challenge.nonce].every(value=>typeof value==='string' && value && !value.includes('\0'))) throw new Error('The world returned an unexpected identity challenge.');
+    const expected=new TextEncoder().encode([challenge.version,challenge.universe,challenge.challenge_id,challenge.nonce,accessMode].join('\0'));
     if(encode(expected)!==challenge.message) throw new Error('The world returned an invalid identity challenge.');
     this.universe=challenge.universe;
     const signature=encode(await crypto.subtle.sign('Ed25519',await signingKey(key),decode(challenge.message)));
     active();
-    const result=await this.request('/v1/key-identities/exchange',{challenge_id:challenge.challenge_id,signature});
+    const result=await this.request('/v1/key-identities/exchange',{challenge_id:challenge.challenge_id,signature},undefined,{signal});
     active();
-    this.token=result.identity.token;this.expiresAt=result.identity.expires_at; return result;
+    const identity=result?.identity;
+    if(!result || result.version!==challenge.version || result.public_key!==key.public_key || !identity || identity.universe!==challenge.universe || identity.access_mode!==accessMode || typeof identity.role_id!=='string' || !identity.role_id || identity.role_id!==result.role_profile?.role_id || typeof identity.token_id!=='string' || !identity.token_id || typeof identity.token!=='string' || !identity.token || !Number.isFinite(identity.expires_at))throw new Error('The returned access does not match this identity, world and permission choice.');
+    this.token=identity.token;this.tokenId=identity.token_id;this.roleId=identity.role_id;this.accessMode=identity.access_mode;this.expiresAt=identity.expires_at;return result;
+  }
+  async listCredentials({signal,isCurrent=()=>true}={}) {
+    if(signal?.aborted || !isCurrent())throw cancelledSession();
+    const result=await this.request('/api/me/credentials',undefined,undefined,{signal});
+    if(signal?.aborted || !isCurrent())throw cancelledSession();
+    if(!result || result.universe!==this.universe || result.role_id!==this.roleId || result.current_token_id!==this.tokenId || !Array.isArray(result.credentials))throw new Error('The world returned an invalid access list.');
+    const ids=new Set();
+    const credentials=result.credentials.map(row=>{
+      if(!row || typeof row.token_id!=='string' || !row.token_id || ids.has(row.token_id) || row.universe!==result.universe || row.role_id!==result.role_id || !['control','observe'].includes(row.access_mode) || !Number.isFinite(row.created_at) || !(row.expires_at===null || Number.isFinite(row.expires_at)) || !(row.revoked_at===null || Number.isFinite(row.revoked_at)) || typeof row.is_current!=='boolean' || row.is_current!==(row.token_id===result.current_token_id) || !['active','expired','revoked'].includes(row.status))throw new Error('The world returned an invalid access list.');
+      ids.add(row.token_id);
+      // Only credential metadata reaches the account view, even if a response adds fields.
+      return Object.fromEntries(['token_id','universe','role_id','access_mode','created_at','expires_at','revoked_at','is_current','status'].map(field=>[field,row[field]]));
+    });
+    if(!ids.has(result.current_token_id))throw new Error('The world returned an incomplete access list.');
+    return {universe:result.universe,role_id:result.role_id,current_token_id:result.current_token_id,credentials};
+  }
+  async revokeCredential(tokenId,{signal,isCurrent=()=>true}={}) {
+    if(typeof tokenId!=='string' || !tokenId)throw new Error('Choose an existing connection to revoke.');
+    if(tokenId===this.tokenId)throw new Error('Keep this page connected; choose another connection to revoke.');
+    if(signal?.aborted || !isCurrent())throw cancelledSession();
+    const result=await this.request('/api/me/credentials/'+encodeURIComponent(tokenId),undefined,'DELETE',{signal});
+    if(signal?.aborted || !isCurrent())throw cancelledSession();
+    if(!result || result.token_id!==tokenId || result.revoked!==true)throw new Error('The world did not confirm this connection was revoked. Refresh the access list before retrying.');
+    return result;
   }
   async query(name,args={}) {return (await this.request('/v1/functions/'+name+'/invoke',{arguments:args})).result;}
   async openConversation(peer,{isCurrent=()=>true,onPage=()=>{}}={}){
@@ -129,7 +156,7 @@ export class CommonsClient {
     }
   }
 }
-function cancelledSession(){const error=new Error('This browser session changed before a conversation could be opened.');error.cancelled=true;return error;}
+function cancelledSession(){const error=new Error('This browser session changed before the request could finish.');error.cancelled=true;return error;}
 export function mutationRoute(pending){const args=pending.body.arguments;if(pending.name==='commons.reply.create')return 'post:'+args.post_id;if(pending.name==='commons.message.send')return 'messages:'+args.conversation_id;return 'posts:';}
 // Authorized history remains in memory. Refreshing merges a recent page without
 // throwing away older pages already read; older pages are fetched only on demand.

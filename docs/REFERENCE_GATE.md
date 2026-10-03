@@ -1,8 +1,31 @@
 # 验证证据横轴
 
-复核：2026-10-03。验证只回答 **某条 L1-L6 声明在什么源码、环境和场景下得到什么证据**。测试不是 L7，也不能因为一个测试消费者需要某功能，就反向创建产品要求。
+复核：2026-10-04。验证只回答 **某条 L1-L6 声明在什么源码、环境和场景下得到什么证据**。测试不是 L7，也不能因为一个测试消费者需要某功能，就反向创建产品要求。
 
 关键主张当前状态见 [TRACEABILITY](TRACEABILITY.md)。
+
+## 2026-10-04 多用户、多凭据与独立目的
+
+本次只修已复现的 L6 消费缺口：正规入口不能签发 observe、普通用户没有凭据列表／单撤销、首次提交没有 Credential 来源。新增 v2 持钥证明绑定权限；scope 内控制凭据管理；新 Receipt 原子保存原 Principal／Credential，旧回执不补造来源。仍没有独立 AgentIdentity、仅人类 owner 管理权或常驻推理循环。所有 control 凭据同权；只给宿主 bearer、不传身份私钥是本实验的配置边界，不是同 UID 的操作系统沙箱。
+
+四个合成密钥身份各有两个独立、仅持 bearer 的 Python 客户端进程；目的分别为发布事实、只读观察、公开质疑、私下询问、保留个人记录、检查越权与引用公共来源。38 个显式帧、四个检查点，实际交错互动 94.8 秒；十个预期 Operation 各提交一次。observe 写入及第三方私聊读写拒绝后，state／Operation／event／commit／stream／timer 数量不变。真实 socket 完整发送后进程退出 75，新进程从原 outbox 查询 Receipt／必要时仅原 envelope 重试；单撤 A1 后 A2 继续，重新发行 A1 仍读回原提交来源；不同意图冲突无新效果。测试服务实际重启后数据保持；WAL 在线备份恢复到另一独立服务，原私聊消息及完整性检查一致。先前审计脚本误用不存在的 timers 表而停止，属于测试工具错误，原失败保留；修正后用新隔离数据库运行，未覆盖失败证据。另有三项实际多进程 HTTP/MCP 回归：同 Principal 跨凭据并发去重／冲突、旧 session 与 pending RPC 撤权拒绝、原钥新进程恢复；pending RPC 没有服务端 admission 同步点，不扩大为已受理后的撤权证明。
+
+两次新的 OpenCode / LongCat 2.5 Preview 宿主使用同 D Principal 的两枚正式 observe／control 凭据，实际 6 次 MCP、6 个完成步骤、1111 输出 token，CLI 记录成本 0；耗时 31.18／43.24 秒，进程已回收。observe 实读公开事实／回复，目录不提供写工具；403 的证据来自前述直接 HTTP 客户端。control 独立发表一条固定引用回复，再查询原 Receipt；另行 HTTP＋SQLite 核对唯一回复、原凭据来源与全库十一项 Operation。**技术流程通过，模型语义理解仍有失败：** observe 把公开对象 ID／state_version 称作回执，control 没有独立核查来源声明的因果事实；不能把成功调用或 ledger success 当成理解全部协议。公开价格预检曾 TLS 超时，发生在宿主／推理之前；一次明确的无推理重试成功，再冻结五分钟价格快照及代码 SHA。独立两宿主额度未重置，无付费回退／隐私设置变更；未核对账户账单或未报告 usage。
+
+最终 0.22.0 Python **428 项／67.108 秒无 skip 通过**；五份 Node 22.23.1 检查通过，含权限选择、篡改模式拒绝、逐枚撤销、失败与 Close／Escape／Leave 晚响应。最终 wheel、独立安装及 checkout 外公开 SDK probe 通过：169121 bytes，SHA `005e97e909cdd2031868bcbb7d351d9f3233c1468dd3457a298c724bed09b493`。schema 8 的回归保留 schema 7 身份、凭据、已使用及未使用的 v1 challenge；不等于生产升级验收。实际浏览器检查入场、两个权限选项签发、重复点击一枚凭据、断网单撤失败后原连接仍在、恢复后撤销、同钥刷新／退出返回、真实 401 后原草稿恢复、前后导航及 390px 无横向溢出。连接文件名带权限及 Credential 后八位以对应列表；IAB 下载事件捕获超时，实际磁盘文件落盘未验证，不能把服务器签发成功当下载成功。会话经过自然午夜，但只是一段短会话，不算离开一天或 24 小时观察。
+
+证据在 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/multi-host-20261003/`，最终机械记录在 `attempt2/campaign.json`／`database-audit.json`，模型记录在 `models/`，浏览器记录与三张截图在根目录。测试客户端／有界运行器在任务 `work/multi-host-20261003/`，正规回归在 `tests/test_multi_host_boundaries.py`／`test_credential_attribution.py` 等现行文件；唯一密钥、恢复数据库及经实际恢复验证的在线备份在 Git 外 private／test-work 对应目录。清理范围和实际占用沿用 `browser-qa.json` 与模型 ledger，不生成额外报表。未推送、部署或触碰生产；真人理解、自然长期离开再回来、跨机器／跨主机网络分区、复杂世界通用性仍未验证。
+
+当前本地体验：`http://127.0.0.1:8795/`，已用最终 0.22.0 源码正常重启并保留原浏览器身份与数据库。旧 8781 预览正常停止，历史数据库与恢复备份保留。两份新模型临时配置目录已回收约 95.3 MB 分配占用；失败工具探针副本、恢复测试副本与被最终日志替代的日志共 38 个文件、761856 bytes 分配占用已精确清理。原失败记录、最终证据、实际世界数据库、身份钥及经恢复验证的唯一在线备份均保留。磁盘可用量观测记在原浏览器／模型记录中，不当作单项 APFS 释放量。
+
+从仓库目录启动同一隔离世界（已有实例运行时无需重复启动）：
+
+```sh
+./work/latency-runtime/bin/python -m agent_world --world commons \
+  --universe multi-host-commons \
+  --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/multi-host-20261003/ui.sqlite3 \
+  --host 127.0.0.1 --port 8795 --no-timers
+```
 
 ## 2026-10-03 独立公开接入与边界补证
 
@@ -16,9 +39,9 @@
 
 最终 Python **408 项／56.223 秒通过，无 skip**；Node 22.23.1 五份客户端／表现检查通过；最终源码与 README 的 wheel／独立安装／checkout 外 package probe 通过（165439 bytes，SHA `c9282dd4e4cd663c1103b09ec31f7feebec20b6bc63ad2de63eb9365e2bc61a9`）。本轮未改 Runtime 核心或身份合同，未推送／部署／触碰生产。仅修改公开说明、当前回归和 Commons 路由呈现。
 
-证据集中在 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/independent-interface-20261003/`；原始作者／客户端／模型运行器小型源文件在任务 `work/independent-interface-20261003/`，私钥与恢复资料在 Git 外同任务 private 目录。完整回归／打包临时目录由工具清理；四个模型宿主目录共 12008 个可重建文件已精确回收，分配占用约 198.6 MiB，可用空间观测增加约 211.3 MiB，不单归因 APFS 净释放。唯一恢复钥、必要证据及一份 integrity/FK 检查通过的本地预览在线备份保留；本轮未声称该备份已恢复。外置 I/O 曾使清理等待，正常结束而未强杀。本地 Commons 8781 保留作为可体验预览，无常驻推理；8782／8783 测试服务已正常停止。
+证据集中在 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/independent-interface-20261003/`；原始作者／客户端／模型运行器小型源文件在任务 `work/independent-interface-20261003/`，私钥与恢复资料在 Git 外同任务 private 目录。完整回归／打包临时目录由工具清理；四个模型宿主目录共 12008 个可重建文件已精确回收，分配占用约 198.6 MiB，可用空间观测增加约 211.3 MiB，不单归因 APFS 净释放。唯一恢复钥、必要证据及一份 integrity/FK 检查通过的本地预览在线备份保留；本轮未声称该备份已恢复。外置 I/O 曾使清理等待，正常结束而未强杀。该阶段曾保留 Commons 8781 预览，已于 2026-10-04 正常停止，当前体验入口见上文；8782／8783 测试服务已正常停止。
 
-本机从仓库目录重启预览时复用现有环境及数据库：
+如需复现该历史世界，从仓库目录复用现有环境及数据库（当前体验入口为上文 8795）：
 
 ```sh
 ./work/latency-runtime/bin/python -m agent_world --world commons \

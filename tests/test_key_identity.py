@@ -95,6 +95,88 @@ class KeyIdentityTests(unittest.TestCase):
         self.assertEqual(replay["identity"]["token"], first["identity"]["token"])
         self.assertEqual(replay["role_profile"]["role_id"], first["role_profile"]["role_id"])
 
+    def test_access_mode_is_bound_to_key_proof_and_survives_replay_and_restart(self):
+        runtime = self.runtime("observe")
+        challenge = runtime.issue_identity_key_challenge(
+            "u", self.public_key, access_mode="observe"
+        )
+        self.assertEqual(challenge["access_mode"], "observe")
+        self.assertEqual(
+            b64url_decode(challenge["message"]),
+            "\x00".join([
+                "agent-world-key-identity-v2", "u", challenge["challenge_id"],
+                challenge["nonce"], "observe",
+            ]).encode(),
+        )
+        changed = {**challenge, "message": b64url(
+            b64url_decode(challenge["message"]).replace(b"observe", b"control")
+        )}
+        with self.assertRaises(IdentityChallengeInvalid):
+            runtime.exchange_identity_key_challenge(challenge["challenge_id"], sign(self.private, changed))
+        self.assertIsNone(runtime.get_identity_key_profile("u", self.public_key))
+        signature = sign(self.private, challenge)
+        first = runtime.exchange_identity_key_challenge(challenge["challenge_id"], signature)
+        reopened = self.runtime("observe")
+        replay = reopened.exchange_identity_key_challenge(challenge["challenge_id"], signature)
+        self.assertEqual(first["identity"]["access_mode"], "observe")
+        self.assertEqual(replay["identity"], first["identity"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(reopened.resolve_identity_token(first["identity"]["token"])["access_mode"], "observe")
+
+    def test_public_surfaces_select_mode_only_in_challenge_and_reject_exchange_override(self):
+        apps = [
+            create_onboarding_app(self.root / "observe-onboarding.sqlite3", "u"),
+            create_application(self.root / "observe-product.sqlite3", world_profile="commons", universe="u", timers_enabled=False),
+        ]
+        for index, app in enumerate(apps):
+            with self.subTest(surface=index), TestClient(app) as client:
+                issued = client.post("/v1/key-identities/challenges", json={
+                    "public_key": self.public_key, "access_mode": "observe",
+                })
+                self.assertEqual(issued.status_code, 200, issued.text)
+                challenge = issued.json()
+                proof = {"challenge_id": challenge["challenge_id"], "signature": sign(self.private, challenge)}
+                self.assertEqual(client.post(
+                    "/v1/key-identities/exchange", json={**proof, "access_mode": "control"}
+                ).status_code, 422)
+                exchanged = client.post("/v1/key-identities/exchange", json=proof)
+                self.assertEqual(exchanged.status_code, 200, exchanged.text)
+                self.assertEqual(exchanged.json()["identity"]["access_mode"], "observe")
+                default = client.post("/v1/key-identities/challenges", json={"public_key": self.public_key})
+                self.assertEqual(default.json()["access_mode"], "control")
+                self.assertEqual(client.post("/v1/key-identities/challenges", json={
+                    "public_key": self.public_key, "access_mode": "admin",
+                }).status_code, 422)
+
+    def test_schema_migration_preserves_profile_bearer_and_stored_key_proofs(self):
+        runtime = self.runtime("migration")
+        used = runtime.issue_identity_key_challenge("u", self.public_key)
+        first = runtime.exchange_identity_key_challenge(used["challenge_id"], sign(self.private, used))
+        pending = runtime.issue_identity_key_challenge("u", self.public_key)
+
+        def stored_v1_signature(challenge):
+            message = "\x00".join([
+                "agent-world-key-identity-v1", "u", challenge["challenge_id"], challenge["nonce"],
+            ]).encode()
+            return b64url(self.private.sign(message))
+
+        with runtime._conn() as c:
+            c.execute("ALTER TABLE identity_key_challenges DROP COLUMN access_mode")
+            c.execute("PRAGMA user_version=7")
+        reopened = self.runtime("migration")
+        with reopened._conn(readonly=True) as c:
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], 8)
+        self.assertEqual(reopened.resolve_identity_token(first["identity"]["token"])["role_id"], first["role_profile"]["role_id"])
+        replay = reopened.exchange_identity_key_challenge(used["challenge_id"], stored_v1_signature(used))
+        self.assertEqual(replay["identity"], first["identity"])
+        self.assertEqual(replay["version"], "agent-world-key-identity-v1")
+        restored = reopened.exchange_identity_key_challenge(pending["challenge_id"], stored_v1_signature(pending))
+        self.assertEqual(restored["role_profile"]["role_id"], first["role_profile"]["role_id"])
+        self.assertEqual(restored["identity"]["access_mode"], "control")
+        fresh = reopened.issue_identity_key_challenge("u", self.public_key)
+        self.assertEqual(fresh["version"], "agent-world-key-identity-v2")
+        self.assertEqual(fresh["access_mode"], "control")
+
     def test_same_key_across_independent_worlds_has_local_profiles_and_local_bearers(self):
         world_a = self.runtime("a")
         world_b = self.runtime("b")

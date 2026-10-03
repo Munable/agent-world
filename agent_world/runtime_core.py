@@ -51,6 +51,7 @@ from .runtime_errors import (
     AccessModeMismatch,
     PermissionDenied,
     ReceiptNotFound,
+    ResourceNotFound,
     StateConflict,
     ResultRejected,
     WorldDefinitionError,
@@ -134,7 +135,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     @staticmethod
     def _schema_script(c, script):
         c.execute("BEGIN IMMEDIATE")
-        if c.execute("PRAGMA user_version").fetchone()[0] > 7:
+        if c.execute("PRAGMA user_version").fetchone()[0] > 8:
             raise WorldVersionMismatch("database schema is newer than this runtime")
         for statement in script.split(";"):
             statement = statement.strip()
@@ -143,7 +144,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
 
     def _init_db(self) -> None:
         with self._conn() as c:
-            if c.execute("PRAGMA user_version").fetchone()[0] > 7:
+            if c.execute("PRAGMA user_version").fetchone()[0] > 8:
                 raise WorldVersionMismatch("database schema is newer than this runtime")
             self._enable_wal(c)
             self._schema_script(
@@ -250,7 +251,8 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                   expires_at REAL NOT NULL,
                   used_at REAL,
                   used_token_id TEXT,
-                  created_profile INTEGER
+                  created_profile INTEGER,
+                  access_mode TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_identity_key_challenges_scope
                   ON identity_key_challenges(universe,public_key,created_at);
@@ -344,8 +346,11 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             self._init_timers_tx(c)
             if "access_mode" not in {r["name"] for r in c.execute("PRAGMA table_info(identity_tokens)")}:
                 c.execute("ALTER TABLE identity_tokens ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'control'")
+            if "access_mode" not in {r["name"] for r in c.execute("PRAGMA table_info(identity_key_challenges)")}:
+                # NULL preserves the signed v1 control proof for already stored challenges.
+                c.execute("ALTER TABLE identity_key_challenges ADD COLUMN access_mode TEXT")
             self._init_streams_tx(c)
-            c.execute("PRAGMA user_version=7")
+            c.execute("PRAGMA user_version=8")
             c.execute("COMMIT")
 
     @staticmethod
@@ -532,10 +537,13 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         universe: str,
         challenge_id: str,
         nonce: str,
+        access_mode: str | None = None,
     ) -> bytes:
-        return "\x00".join(
-            ["agent-world-key-identity-v1", universe, challenge_id, nonce]
-        ).encode("utf-8")
+        if access_mode is None:
+            return "\x00".join(["agent-world-key-identity-v1", universe, challenge_id, nonce]).encode("utf-8")
+        return "\x00".join([
+            "agent-world-key-identity-v2", universe, challenge_id, nonce, access_mode,
+        ]).encode("utf-8")
 
     def _identity_token_from_key_challenge(
         self,
@@ -561,20 +569,23 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         public_key: str,
         *,
         ttl_seconds: float = 120.0,
+        access_mode: str = "control",
     ) -> dict[str, Any]:
         identifier(universe, "universe")
+        if not isinstance(access_mode, str) or access_mode not in {"control", "observe"}:
+            raise InvalidArguments("identity access_mode must be control or observe")
         normalized_key, _ = self._normalize_identity_public_key(public_key)
         ttl_seconds = duration(ttl_seconds, "identity challenge ttl_seconds", 300)
         now = time.time()
         challenge_id = "awkc_" + secrets.token_hex(16)
         nonce = self._b64url_encode(secrets.token_bytes(32))
-        message = self._identity_key_challenge_message(universe, challenge_id, nonce)
+        message = self._identity_key_challenge_message(universe, challenge_id, nonce, access_mode)
         with self._conn() as c:
             c.execute(
                 """INSERT INTO identity_key_challenges(
                      challenge_id,universe,public_key,nonce,created_at,expires_at,
-                     used_at,used_token_id,created_profile
-                   ) VALUES(?,?,?,?,?,?,NULL,NULL,NULL)""",
+                     used_at,used_token_id,created_profile,access_mode
+                   ) VALUES(?,?,?,?,?,?,NULL,NULL,NULL,?)""",
                 (
                     challenge_id,
                     universe,
@@ -582,14 +593,16 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                     nonce,
                     now,
                     now + ttl_seconds,
+                    access_mode,
                 ),
             )
         return {
-            "version": "agent-world-key-identity-v1",
+            "version": "agent-world-key-identity-v2",
             "challenge_id": challenge_id,
             "universe": universe,
             "public_key": normalized_key,
             "nonce": nonce,
+            "access_mode": access_mode,
             "message": self._b64url_encode(message),
             "expires_at": now + ttl_seconds,
         }
@@ -601,12 +614,13 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         challenge_id: str,
         nonce: str,
         signature: str,
+        access_mode: str | None = None,
     ) -> None:
         normalized_key, raw_key = self._normalize_identity_public_key(public_key)
         if normalized_key != public_key:
             raise IdentityKeyInvalid("identity public key is not canonical")
         signature_raw = self._b64url_decode(signature, "identity signature", 64)
-        message = self._identity_key_challenge_message(universe, challenge_id, nonce)
+        message = self._identity_key_challenge_message(universe, challenge_id, nonce, access_mode)
         try:
             Ed25519PublicKey.from_public_bytes(raw_key).verify(signature_raw, message)
         except InvalidSignature as exc:
@@ -638,12 +652,14 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         now = time.time()
         if token_row is None or token_row["token_hash"] != self._identity_token_hash(token):
             raise WorldRuntimeError("identity key challenge credential integrity mismatch")
+        if token_row["access_mode"] != (challenge["access_mode"] or "control"):
+            raise WorldRuntimeError("identity key challenge credential mode mismatch")
         if token_row["revoked_at"] is not None:
             raise IdentityChallengeConsumed("identity challenge credential was later revoked")
         if token_row["expires_at"] is not None and float(token_row["expires_at"]) <= now:
             raise IdentityChallengeConsumed("identity challenge credential has expired")
         return {
-            "version": "agent-world-key-identity-v1",
+            "version": "agent-world-key-identity-v2" if challenge["access_mode"] is not None else "agent-world-key-identity-v1",
             "public_key": challenge["public_key"],
             "created_profile": bool(challenge["created_profile"]),
             "replayed": replayed,
@@ -685,7 +701,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             try:
                 challenge = c.execute(
                     """SELECT challenge_id,universe,public_key,nonce,created_at,expires_at,
-                              used_at,used_token_id,created_profile
+                              used_at,used_token_id,created_profile,access_mode
                        FROM identity_key_challenges WHERE challenge_id=?""",
                     (challenge_id,),
                 ).fetchone()
@@ -705,6 +721,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                     challenge["challenge_id"],
                     challenge["nonce"],
                     signature,
+                    challenge["access_mode"],
                 )
 
                 mapping = c.execute(
@@ -784,6 +801,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                     ttl_seconds=identity_ttl_seconds,
                     now=now,
                     token_override=token,
+                    access_mode=challenge["access_mode"] or "control",
                 )
                 updated = c.execute(
                     """UPDATE identity_key_challenges
@@ -802,7 +820,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                     )
                 challenge = c.execute(
                     """SELECT challenge_id,universe,public_key,nonce,created_at,expires_at,
-                              used_at,used_token_id,created_profile
+                              used_at,used_token_id,created_profile,access_mode
                        FROM identity_key_challenges WHERE challenge_id=?""",
                     (challenge_id,),
                 ).fetchone()
@@ -975,6 +993,56 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     def resolve_identity_token(self, token: str) -> dict[str, Any]:
         with self._conn(readonly=True) as c:
             return self._identity_metadata_tx(c, token)
+
+    def list_own_identity_tokens(self, universe: str, identity_token: str) -> dict[str, Any]:
+        """Return session metadata to this Principal's live control credential."""
+        with self._conn(readonly=True) as c:
+            c.execute("BEGIN")
+            identity = self._identity_metadata_tx(c, identity_token, universe=universe)
+            self._admit_actor_tx(c, universe, identity["role_id"], identity_token, require_control=True)
+            rows = c.execute(
+                """SELECT token_id,universe,role_id,access_mode,created_at,expires_at,revoked_at
+                   FROM identity_tokens WHERE universe=? AND role_id=? ORDER BY created_at,token_id""",
+                (universe, identity["role_id"]),
+            ).fetchall()
+            now = time.time()
+            credentials = []
+            for row in rows:
+                status = "active"
+                if row["revoked_at"] is not None:
+                    status = "revoked"
+                elif row["expires_at"] is not None and float(row["expires_at"]) <= now:
+                    status = "expired"
+                credentials.append({
+                    **dict(row), "is_current": row["token_id"] == identity["token_id"], "status": status,
+                })
+            return {
+                "universe": universe, "role_id": identity["role_id"],
+                "current_token_id": identity["token_id"], "credentials": credentials,
+            }
+
+    def revoke_own_identity_token(self, universe: str, identity_token: str, token_id: str) -> dict[str, Any]:
+        """Revoke one other credential of the same Principal and world atomically."""
+        identifier(token_id, "token_id")
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            identity = self._identity_metadata_tx(c, identity_token, universe=universe)
+            self._admit_actor_tx(c, universe, identity["role_id"], identity_token, require_control=True)
+            if token_id == identity["token_id"]:
+                raise InvalidArguments("the current credential cannot be revoked through this endpoint")
+            target = c.execute(
+                """SELECT token_id FROM identity_tokens
+                   WHERE token_id=? AND universe=? AND role_id=?""",
+                (token_id, universe, identity["role_id"]),
+            ).fetchone()
+            if target is None:
+                raise ResourceNotFound("credential not found")
+            c.execute(
+                """UPDATE identity_tokens SET revoked_at=?
+                   WHERE token_id=? AND universe=? AND role_id=? AND revoked_at IS NULL""",
+                (time.time(), token_id, universe, identity["role_id"]),
+            )
+            return {"token_id": token_id, "revoked": True}
 
     def revoke_other_identity_tokens(self, universe: str, identity_token: str) -> dict[str, Any]:
         """Let a control credential close its own other sessions atomically."""

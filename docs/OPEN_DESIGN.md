@@ -1,13 +1,13 @@
 # 未决设计、实现差距与待验证
 
-复核：2026-10-03。这里不是第七层。每个未决项都标明真正归属；候选方案在决定前不具有现行合同地位。
+复核：2026-10-04。这里不是第七层。每个未决项都标明真正归属；候选方案在决定前不具有现行合同地位。
 
 ## 当前处理顺序
 
 1. **不继续为已经成立的本机能力重复造抽象。** Key Identity、Capability Harness、Commons v3、恢复矩阵和真实 OpenCode/Pi 宿主短时实验已有各自范围的证据；没有新的反例时不增加 Runtime 原语。
 2. **当前优先级是基础协议合同核对与最小组合验证。** 不预设人类用户有共同目标、相同理解或体验期待，也不把 Agent 定义为协作者、冒险者或玩家。先核对主体归因、授权、合法行动与观察、错误、并发、重复操作、状态一致性和接续；测试中的目标与角色仅属于具体消费者。保留 Commons 与河谷营地的现有证据，暂停默认扩展营地章节或协作房间；只有复现问题才局部修改。跨机器、跨 CLI 和单纯延长长跑不是当前主线。已有营地证据见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
 3. **Reference Application 只按真实产品流程继续长。** Friend / Block / 关系／反骚扰等只有真实切片需要时才加入 Commons，并继续先留在应用层；出现跨领域反例后再判断是否提升到 Runtime。
-4. **外部副作用交付是唯一已确认的 Runtime 实现缺口，但不抢跑。** 只有真实消费者需要支付、第三方 API、文件或其他外部写入时，再设计 outbox / delivery / compensation 合同。第三方／群众公裁和长期 retention 语义继续按各自层级推进。
+4. **外部副作用交付仍是已确认的 Runtime 实现边界，但不抢跑。** 本次多宿主消费者暴露的凭据管理、正式 observe 发行和原提交凭据归因已局部修复；不把“唯一缺口”当作拒绝新反例的前提。只有真实消费者需要支付、第三方 API、文件或其他外部写入时，再设计 outbox / delivery / compensation 合同。第三方／群众公裁和长期 retention 语义继续按各自层级推进。
 
 ## EigenFlux 参考采纳清单
 
@@ -59,6 +59,10 @@ Receipt、commit metadata、未决事项、终态 Scheduled Effect identity 等�
 
 现行 User Identity 以持钥证明识别身份，世界签发 Credential 代表 Principal，外部 Agent／客户端使用获准凭据调用。是否需要单独的稳定 Agent 标识，如何区分人类用户、行动主体、外部程序、宿主、会话与世界角色，须由实际归因、权限或恢复问题驱动；不从协作示例反推 Agent 定义。
 
+本次已确认并修复的是 L6 接入缺口：用户可在自己的密钥保管端签出独立 control／observe Credential，以普通公开 HTTP 列表／单撤销管理本主体连接；新世界 Command Receipt 持久保存原 `actor_role_id / credential_id`，同主体换凭据恢复仍返回原来源。旧回执不补填；事件／公开作者没有新增宿主身份。Credential ID 只说明提交通过哪枚凭据，不证明外部程序身份，也不建立 Agent 归属。
+
+所有同 Principal 的 control bearer 都有同等凭据管理权；当前没有仅人类 owner 的管理权限或 bearer 自动续签。持有私钥者可重新进入，宿主保管与同 OS 用户进程隔离由外部环境负责。独立 bearer 验证不等于 OS 沙箱证明。
+
 此前提出的独立 AgentIdentity、用户与多个 Agent 的归属关系仍是候选，不是已接受合同。参与目的不同不自动要求新增身份机制，也不能借身份设计预设个人助手、上下级、协作关系或统一目标。
 
 ## 当前缺口状态
@@ -66,6 +70,7 @@ Receipt、commit metadata、未决事项、终态 Scheduled Effect identity 等�
 | 项目 | 归属 | 当前状态 |
 | --- | --- | --- |
 | 外部副作用交付 | L4/L5 | **已确认边界缺口。** 需要外部写入时尚无通用 outbox / delivery / compensation contract。 |
+| 多宿主凭据发行／管理／提交来源 | L6 | **本次已局部修复。** 签名 control／observe、自己的列表与单撤销、原提交 Credential 来源；保留 User Identity／Principal 模型，不定稿 AgentIdentity。 |
 | 通用共同事项辅助 | L3/L4 | **仍未证明需要进入 Runtime。** Commons v2 的 Post/Reply/Conversation/Message 已能由现有 State + Operation/Receipt + Event 表达，当前没有新证据要求增加通用会话／请求原语。 |
 | 第三方／群众公裁 | L3/L4 | **产品方向未定稿。** 先设计成立规则，不算 Runtime 当前缺原语。 |
 
