@@ -136,6 +136,96 @@ class OwnedHostRegression(unittest.TestCase):
         self.assertEqual(child.returncode, 0)
         self.assertTrue(self.item['owned_process_reaped'])
 
+    def test_watchdog_deadline_reaps_quiet_child_once_with_alarm_disabled(self):
+        real_terminate = runner.terminate
+        observed = []
+        def reap(child):
+            observed.append(child.pid)
+            self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+            self.assertEqual(signal.getsignal(signal.SIGALRM), signal.SIG_IGN)
+            os.kill(os.getpid(), signal.SIGALRM)  # A late queued alarm cannot interrupt wait.
+            return real_terminate(child)
+        with mock.patch.object(runner, 'TIMEOUT', 0.3), \
+                mock.patch.object(runner, 'terminate', side_effect=reap), self.assertRaises(TimeoutError):
+            with runner.owned_host([sys.executable, '-c', 'import time; time.sleep(30)'], self.root,
+                    {'PATH': '/usr/bin:/bin'}, self.item, self.budget, self.ledger, self.root, [],
+                    time.monotonic(), {}) as child:
+                self.children.append(child)
+                child.stdout.read()
+        self.assertEqual(observed, [self.children[0].pid])
+        self.assertTrue(self.item['owned_process_reaped'])
+        self.assertEqual(self.item['errors'][0]['exception_type'], 'TimeoutError')
+        self.assertEqual({s: signal.getsignal(s) for s in self.handlers}, self.handlers)
+
+    def exercise_autonomous_deadline(self, *, ignore_term):
+        # Run the real reader/reap path with a local Python fixture, not OpenCode.
+        real_popen, real_terminate, real_timer = runner.subprocess.Popen, runner.terminate, signal.setitimer
+        budget = {'runs': [], 'cli_cost_total': 0}
+        observed = []
+        code = ('import os,signal,time; '
+                + ('signal.signal(signal.SIGTERM, signal.SIG_IGN); ' if ignore_term else '')
+                + 'os.write(1,b"READY\\n"); time.sleep(30)')
+        def spawn(*args, **kwargs):
+            child = real_popen([sys.executable, '-c', code], **kwargs)
+            self.children.append(child)
+            return child
+        def timer(which, seconds, interval=0):
+            # Suppress automatic delivery to force the monotonic-loop deadline;
+            # the independent watchdog test covers automatic SIGALRM delivery.
+            return real_timer(which, 0, 0)
+        def reap(child):
+            observed.append(child.pid)
+            self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+            self.assertEqual(signal.getsignal(signal.SIGALRM), signal.SIG_IGN)
+            os.kill(os.getpid(), signal.SIGALRM)
+            return real_terminate(child)
+        began = time.monotonic()
+        with mock.patch.object(runner, 'TIMEOUT', 0.3), \
+                mock.patch.object(runner.subprocess, 'Popen', side_effect=spawn), \
+                mock.patch.object(runner, 'provider_preflight', return_value={'allowed': True}), \
+                mock.patch.object(runner, 'terminate', side_effect=reap), \
+                mock.patch.object(signal, 'setitimer', side_effect=timer), \
+                mock.patch.dict(os.environ, {'OPENCODE_API_KEY': 'SYNTHETIC_FIXTURE_NOT_A_CREDENTIAL'}), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            runner.run('synthetic-autonomous-deadline', 'synthetic fixture', [], budget,
+                       evidence_root=self.root, ledger_path=self.ledger, runtime_root=self.root / 'profiles')
+        self.assertLess(time.monotonic() - began, 7.5)
+        item = budget['runs'][0]
+        self.assertEqual(observed, [self.children[0].pid])
+        self.assertTrue(item['owned_process_reaped'])
+        self.assertTrue(item['finished'])
+        self.assertTrue(any(error['type'] == 'timeout' for error in item['errors']))
+        self.assertFalse(any(error['type'] == 'host_exception' for error in item['errors']))
+        self.assertIn('first_stdout_seconds', item)
+        self.assertEqual(self.children[0].returncode, -signal.SIGKILL if ignore_term else -signal.SIGTERM)
+        self.assertTrue(self.children[0].stdout.closed)
+        self.assertEqual({s: signal.getsignal(s) for s in self.handlers}, self.handlers)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+        self.assertTrue(json.loads(self.ledger.read_text())['runs'][0]['owned_process_reaped'])
+
+    def test_autonomous_deadline_reaps_quiet_child_once(self):
+        self.exercise_autonomous_deadline(ignore_term=False)
+
+    def test_autonomous_deadline_kills_term_ignoring_child_within_existing_grace(self):
+        self.exercise_autonomous_deadline(ignore_term=True)
+
+    def test_permission_failure_preserves_unreaped_diagnostic_and_profile(self):
+        child = types.SimpleNamespace(pid=999999, stdout=io.BytesIO(), poll=lambda: None)
+        with mock.patch.object(runner.subprocess, 'Popen', return_value=child), \
+                mock.patch.object(runner.os, 'killpg', side_effect=PermissionError('synthetic owned group permission denial')), \
+                self.assertRaises(RuntimeError):
+            with runner.owned_host(['synthetic-only'], self.root, {}, self.item, self.budget,
+                    self.ledger, self.root, [], time.monotonic(), {'stop_requested': True}):
+                pass
+        self.assertFalse(self.item['owned_process_reaped'])
+        self.assertFalse(self.item['finished'])
+        details = next(error['details'] for error in self.item['errors'] if error['type'] == 'owned_cleanup_errors')
+        self.assertEqual(details[0]['exception_type'], 'PermissionError')
+        self.assertTrue(any(error['type'] == 'owned_process_unreaped' for error in self.item['errors']))
+        self.assertTrue(self.root.is_dir())
+        self.assertFalse(json.loads(self.ledger.read_text())['runs'][0]['owned_process_reaped'])
+        self.assertEqual({s: signal.getsignal(s) for s in self.handlers}, self.handlers)
+
     def test_preflight_redirects_and_default_refuses_frozen_metadata(self):
         original = self.root / 'original'
         continuation = original / 'continuation'

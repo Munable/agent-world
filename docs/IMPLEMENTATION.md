@@ -4,7 +4,7 @@
 
 ## 版本与运行形态
 
-- Python package：`agent-world` 0.20.0，要求 Python 3.11+。
+- Python package：`agent-world` 0.21.0，要求 Python 3.11+。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
@@ -13,6 +13,8 @@
 - Runtime 本身不调用模型，也没有用户 Agent 执行器。
 
 0.20 新增 [River Camp 有界世界实验](WORLD_EXPERIMENT.md)：自由意图、裁判、本人接受和资源后果由独立 World Definition 消费现有 SDK。组合应用公开身份默认签发 24 小时凭据；没有新增 Runtime 原语或托管推理循环。
+
+0.21 的 `examples.camp_campaign` 是独立的有限章节 World Definition，组合原 River Camp 的初桥规则。增加两趟固定外部补给、一次剧情涨水、共享仓库、一次应急箱和两种修复；共同目标与个人真实贡献分别派生，货运通行只是一项里程碑。第一趟补给关闭自由桥梁提案，后续使用已定义的章节行动；不宣称完整跑团或自动生成后续章节。`examples.river_camp_app --campaign` 选择独立 world_id／universe／8772，重用数据库前只读核对世界类型，不把原实验库改成新世界。前端显示当前阶段、可用行动与阻塞原因；回访对比仅缓存本浏览器的公开库存／路线／服务端时间，不缓存私注、权限或模型思考。Runtime／protocol／SQLite schema 未改。
 
 ## L3 语义到当前代码的映射
 
@@ -121,6 +123,8 @@ WorldDefinition 当前可声明 functions、state rules、state authorizer、boo
 
 ### 当前本地验证与有界模型工具
 
+0.21 新阶段仅执行四个有界语义宿主，前三组六条有效输出、第四组超时；真实执行封存旧 7f helper。超时暴露 watchdog 与主动回收重叠，当前修复将主动停止汇入关闭 SIGALRM 后的唯一有界回收，保留权限失败诊断；新 helper 2da199da 的 28 项离线回归通过，不声称再次真实推理验证。新语义 runner 的真实阶段仍封存执行摘要并拒绝新源码复用，fixture 单独封存当前 helper。下述十次 GM／A／B 与清理记录属于原初桥实验，预算不重置。
+
 `tests/live_server.py` 的 async 生命周期在线程中启动／停止自有服务；Commons 网络测试使用异步 HTTP，持钥初始化在线程完成。失败与取消保留 server log、原异常及清理 cause；自有进程未回收时不删除数据库目录。启动取消继续等待清理，原 `CancelledError` 保留 caller message／notes／cause，不吞掉残留进程诊断。原 60 秒启动、5 秒 HTTP、10 秒连接模块 import 限制未放宽；这些是验证基础设施修复，不改变 Runtime 行为合同。
 
 `tools/run_river_camp_models.py` 是固定本机实验工具，非 Runtime Agent 宿主。每次显式续接只启动一个选择的模型步骤，原尝试与续接／小子集共同受十次推理用 CLI 宿主限制。异常、取消与 deadline 统一终止／回收自有进程组、关闭资源并保存脱敏失败；不能回收就保留 profile、标 unfinished、拒绝后续推理。构造 `Popen` 时先延后信号取消，取得 child handle 后立即检查原期限，避免在已创建子进程但尚无句柄时丢失清理能力；阻塞构造不声称受 Python watchdog 硬抢占。正常 EOF 在原剩余期限内等待最多 3 秒，再必要终止；TERM／KILL 各配置 3 秒回收等待。账本原子替换并有失败 fallback，metadata refresh 与旧冻结证据分开；记录仅为宿主／CLI 时间与已报告 usage，provider 请求次数、未报告尾段及账户账单仍未知。
@@ -131,7 +135,7 @@ B 的无 CLI 事件超时与无凭据版本检查暴露本机启动路径阻塞�
 
 多位置清理按各 run 的精确记录路径，在全部 PID 与一次当前 UID 文件占用盘点通过后才删除。实际 macOS 输出使旧清理两次安全停止：自动 f 字段与非文件系统空名称；最终 `-Fptfn` 严格关联 p／f／t／n，仅数字描述符的 NPOLICY／NEXUS／PIPE／rte 可以无名称，REG／DIR／未知空名称和异常完整性仍保留。非空名称始终检查精确目录／子路径及内部 binary，不保存无关文件名。现场只读库存先通过，随后七个 profile 和独立核验的临时内部 CLI／公开 HTML 已精确清理；活动环境、服务、密钥、数据库、唯一备份和证据保留。最终清理源码 7f2ed1da、测试 d419ca83，24 项 synthetic 回归 0.817 秒通过；条目分配量与观察到的可用空间变化分开，不宣称 APFS 净释放。
 
-当前本机性能环境原路径为 `repo/work/latency-runtime`，与原外置环境共享相同 base Python 和 35 个相同依赖版本，通过已有缓存离线建立；小型身份／数据库测试目录放 Git 外的任务 `work/test-work`，不弱化私有文件保护。原外置缓存、环境、大型资产、真实数据库与固定服务不迁移。该环境和最终代码／fixture 共同通过当前 364 项完整 Python（40.933 秒，`latency-full-typed-cleanup-final.log`）、四份 Node 与 0.20.0 package 检查；测量、失败原记录、缓存／源码混杂限制和启动方法统一见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)，不把环境选择当 Runtime 原语或存储持久性策略改变。
+当前本机性能环境原路径为 `repo/work/latency-runtime`，与原外置环境共享相同 base Python 和 35 个相同依赖版本，通过已有缓存离线建立；小型身份／数据库测试目录放 Git 外的任务 `work/test-work`，不弱化私有文件保护。原外置缓存、环境、大型资产、真实数据库与固定服务不迁移。该环境与 0.21 最终代码／fixture 共同通过 398 项完整 Python（50.229 秒，`campaign/final-python-verified.log`）、五份 Node 与 0.21.0 package 检查；测量、失败原记录、缓存／源码混杂限制和启动方法统一见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)，不把环境选择当 Runtime 原语或存储持久性策略改变。
 
 ## 当前 core tool surface
 

@@ -451,6 +451,8 @@ def owned_host(cmd, workspace, env, item, budget, ledger_path, evidence_root, se
         raise
     finally:
         try:
+            # A queued/late watchdog signal must not interrupt the bounded reap.
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
             signal.setitimer(signal.ITIMER_REAL, 0)
             # Repeated cancellation may not interrupt the bounded owned-child reap.
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -460,7 +462,7 @@ def owned_host(cmd, workspace, env, item, budget, ledger_path, evidence_root, se
             try:
                 if proc is not None:
                     item['termination_or_reap_started_seconds'] = round(time.monotonic() - started, 6)
-                    if cause is None and proc.poll() is None:
+                    if cause is None and not resources.get('stop_requested') and proc.poll() is None:
                         try:
                             proc.wait(timeout=max(0, min(3, TIMEOUT - (time.monotonic() - started))))
                         except subprocess.TimeoutExpired:
@@ -653,17 +655,22 @@ def run(stage, prompt, allowed, budget, actor=None, *, evidence_root=EVIDENCE,
                           'host_elapsed_seconds': round(received - started, 6)}
                 out.write(json.dumps({**timing, **payload}, ensure_ascii=False) + '\n')
                 out.flush()
+            def request_stop():
+                resources['stop_requested'] = True
+                item.setdefault('termination_requested_seconds', round(time.monotonic() - started, 6))
             emit({'type': 'host_spawn', 'pid': proc.pid, 'spawn_seconds': item['spawn_seconds']})
-            while selector.get_map():
+            while selector.get_map() and not failure:
                 if time.monotonic() - started >= TIMEOUT:
                     item['errors'].append({'type': 'timeout', 'seconds': TIMEOUT})
                     item['termination_requested_seconds'] = round(time.monotonic() - started, 6)
                     emit({'type': 'host_timeout', 'last_event': item.get('last_event'),
                           'last_event_elapsed_seconds': item.get('last_event_elapsed_seconds')})
                     failure = True
-                    terminate(proc)
+                    request_stop()
                     break
                 for key, _ in selector.select(timeout=min(0.5, max(0, TIMEOUT - (time.monotonic() - started)))):
+                    if failure:
+                        break
                     chunk = os.read(key.fileobj.fileno(), 65536)
                     if not chunk:
                         selector.unregister(key.fileobj)
@@ -675,9 +682,9 @@ def run(stage, prompt, allowed, budget, actor=None, *, evidence_root=EVIDENCE,
                     if len(stream_buffer) > 2 * 1024 * 1024:
                         item['errors'].append({'type': 'unstructured_host_output_limit'})
                         failure = True
-                        terminate(proc)
+                        request_stop()
                         break
-                    while '\n' in stream_buffer:
+                    while '\n' in stream_buffer and not failure:
                         line, stream_buffer = stream_buffer.split('\n', 1)
                         try:
                             event = json.loads(line)
@@ -740,11 +747,11 @@ def run(stage, prompt, allowed, budget, actor=None, *, evidence_root=EVIDENCE,
                                 item['errors'].append({'type': 'world_tool_error', 'tool': tool,
                                                       'error': safe_value(tool_output.get('error') or state.get('error'), secrets)})
                                 failure = True
-                                terminate(proc)
+                                request_stop()
                             if tool not in allowed:
                                 item['errors'].append({'type': 'forbidden_tool', 'tool': tool})
                                 failure = True
-                                terminate(proc)
+                                request_stop()
                             print(json.dumps({'stage': stage, 'tool': tool, 'status': state.get('status')}), flush=True)
                         elif kind == 'step_finish':
                             item['step_finishes'] = item.get('step_finishes', 0) + 1
@@ -765,13 +772,13 @@ def run(stage, prompt, allowed, budget, actor=None, *, evidence_root=EVIDENCE,
                                     or item['step_finishes'] >= STEPS and part.get('reason') != 'stop'):
                                 item['errors'].append({'type': 'cost_or_output_boundary'})
                                 failure = True
-                                terminate(proc)
+                                request_stop()
                         elif kind == 'error':
                             error = safe_value(event.get('error', {'type': 'model_or_host_error'}), secrets)
                             item['errors'].append(error)
                             emit({'type': 'error', 'error': error})
                             failure = True
-                            terminate(proc)
+                            request_stop()
                         out.flush()
     try:
         item['structured_final'] = final_json(item.get('final_text', ''))

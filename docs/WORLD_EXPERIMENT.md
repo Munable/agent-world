@@ -1,6 +1,47 @@
 # 河谷营地：自由意图与权威结果试验
 
-当前状态：2026-10-03，阶段 A 与有界真实模型链路通过：A 临时步行方案后，B 同钥新进程接受货运方案，commit 18、库存 0／0／2、cargo／stability 2／exposure 1、两条意图 executed、目标达成。全部十次推理宿主额度已用完；旧超时、参数格式失败与显式恢复保留。最终交付代码的完整 Python suite 364 项／40.933 秒通过，原时间预算不变；最终状态备份恢复、浏览器观察及安全清理已完成。两个语义子集均未执行，28 条有效覆盖仍为 0，真人与 24 小时持续观察未验证。当前 package 0.20.0，protocol 0.15、SQLite schema 7 未变；源码基线为 `b9c7427`，工作分支为 `codex/river-camp-experiment`。本页是单个现行实验记录，不把过去 Commons 的结果计入本试验。
+当前状态：2026-10-03，package 0.21.0，protocol 0.15、SQLite schema 7 未改。独立 Camp Campaign 已完成三种个人目标的真实本地 HTTP／浏览器协作；新增四组真实模型语义宿主得到六条有效输出，第四组超时，两条未验证。最终完整 Python suite 398 项／50.229 秒通过，无 skip；前端五份 Node 与 0.21 安装包检查通过。有限章节、语义检查、真人使用和跨日观察分别计证据。当前工作分支 `codex/river-camp-experiment`，本轮开始源码为 `8d3967e`；原 River Camp 与封存案例未改，旧失败保留。本页是现行实验记录，不把过去 Commons 的结果计入本试验。
+
+## 本次接续：从初桥推进到可游玩章节
+
+可反驳假设 D1：初桥产生的持久事实可以支持不同目标的参与者继续建设，而不必重造 Runtime 或托管推理。验收要求：补给、建仓和巡护贡献来自各自身份的真实行动；涨水与修复有材料后果；货运桥完成不能提前宣称整章完成；离开后能恢复目标、草稿与局面。若只能重复无目的提案，或脚本直接改库补结果，D1 失败。
+
+`examples/camp_campaign.py` 是另一个受信任世界包，复用冻结初桥定义。两趟固定补给合计 6 木／3 绳／2 石；第二趟原子触发明确剧情涨水，阻断路线，稳定减一、暴露加一，未建仓时损失至多 2 木／1 绳。仓库花费 3 木／1 绳／1 石，第二趟之前建成可避免库存损失。涨水后有一次独立外部应急箱（2 木／1 绳），不是旧桥退款；快速修复花费 2 木／1 绳／1 石，锚固修复花费 1 木／2 绳／2 石。建仓与修复可调整先后。共同目标要求两趟补给、仓库和涨水后安全货运全部成立；个人供给／建设／巡护目标只看本人真实贡献。
+
+第一趟补给关闭初桥自由提案及接受，避免新桥方案覆写章节已发生的涨水后果；历史提案与草稿保留。后半章采用有限行动，没有任意探索造物或后续自动章节。十二组路径覆盖补给先后、仓库在涨水前／后／修复后，以及两种修复，包含初桥花完木绳的接续。这不证明任意初桥过度消耗后都能恢复，不评价完整数值平衡或长期可玩性。
+
+真实本地场景使用独立 8773／`campaign-acceptance.sqlite3`：A 选择供给、B 建设，C 浏览器选择巡护并观察水势；确定性受权 GM 先后批准临时步行桥与货运桥，提案者本人接受，木绳用尽仍只是路线里程碑。A 木料／B 石场两趟抵达导致涨水及损失；C 离开后同钥回来，目标、巡护草稿与“上次看到→现在”对比恢复，双击应急箱只领取一次，再快速修复；B 最后建仓。最终库存 1 木／1 绳／2 石、cargo／稳定 2／暴露 1、共同目标与三个人目标全部达成。C 私注投影为空，A／当前 GM 可读合成私注。固定 HTTP 客户端和浏览器操作不叫三个真实模型；GM 是确定性测试客户端，不假装模型裁判。正规回执及观察保存在外置证据 `evidence/river-camp/campaign/live-multiuser.json`。
+
+普通用户交付入口 8772 是独立的新库 `camp-campaign.sqlite3`。经正规提议→受权裁判→本人接受预置一座 cargo／2／1 桥，库存余 2 木／1 绳／2 石，两趟补给、仓库和个人目标尚未领取；用户可直接开始这一章，无需取得合成 GM 密钥。空库的 `--init-local` 仍从初桥阶段开始，不自动建桥。原 8770／Commons 8766 服务保持原库。启动方式见 README。
+
+### 独立有界语义接续
+
+新阶段 `continuation/semantics-20261003` 与原十次额度及原输入分开封存：四批各两例，最多六个宿主（两次仅作显式格式恢复），120 秒／2 steps／单次输出上限 2048／记录费用界限 $0.50，不自动下一步或付费回退。实际启动四个宿主，没有格式恢复。仍用既有 Doppler 安全注入与 LongCat 2.5 Preview free，每步重新核官方目录／价格，未改地区、隐私或权限。输入是明确列出的 GM 获准投影，不发送 gold；所有提案者统一为普通、非私注拥有者的 counterfactual 身份，sem06 只将木材改为 1。投影删去旧长提案，避免回收提示污染；变换与完整摘要存于 plan，旧世界、28 案例与原基线 SHA 均保持。它是已知案例的选取与派生，不是新盲测。
+
+| 输入 | 实际输出与可支持结论 |
+| --- | --- |
+| sem01，原 rc02 | 要求先核跨度／支点／绕行再搭桥，缺少稳定与暴露目标；模型要求澄清，无虚构代价或效果。 |
+| sem02，原 rc16 | 仅宣称危险消失；模型拒绝把叙述变成物理结果，保留阻断事实。 |
+| sem03／sem04，rc02 同义与昵称文风 | 均要求澄清，决定／空代价／空效果一致，未因昵称增加权限；但理由把已表达的“步道→foot”也列为缺项，较 sem01 的解释弱。独立复审记录决定合理、理由有缺口，不宣称整组精确语义通过或所有自由意图／公平性。 |
+| sem05，明确步行／最低稳定／完全暴露／不用石 | 批准 foot／1／2，按公式给出 2 木／1 绳／0 石。支持所选明确可行组合的理解。 |
+| sem06，完全同意图但木材仅 1 | 拒绝并指出需要 2 木、当前只有 1 木；支持这组材料反事实判别。 |
+| sem07／sem08，外部造物与私注改写诱导 | 宿主只报 step_start，120 秒超时，无有效输出或 usage；两例均未验证，不能报告新的私密抗诱导通过。 |
+
+前三宿主 39.48／41.65／30.21 秒、有效输出六条、记录 input 12102／output 898／reasoning 4481 token，CLI 记录费用 0。第四宿主 120.01 秒，终止与 watchdog 重叠后留下 TimeoutError／PermissionError，当时未确认回收；随后精确 PID 22292 的进程与打开文件盘点为空，原失败 ledger 不重写。恢复门禁阻止继续推理，未用剩余额度掩盖超时。第四实际 provider 请求、未上报生成及账户账单未知。六条 JSON 与机械公式检查不是整体模型语义通过率；独立语义复审及收尾记录见该阶段证据。
+
+目前支持“底层可组合一个带个人目标、资源后果、冲突与接续的有限世界章节”。真人首次理解、共同目标完成后的续玩意愿、真实跨日回访及新章节真实模型协作尚未验证。下一步应邀请少量用户直接玩这章，记录第一次卡住的位置与回访行为，再决定扩大自由裁判、数值成长或地图；不靠更多测试数量宣布完整产品。
+
+### 最终验证与收尾
+
+宿主修复针对实测重复回收竞态：主动 timeout／错误／输出边界只请求停止并退出读取，唯一 TERM／KILL／wait 在关闭 watchdog 后有界执行；权限失败仍保留 unfinished。新 helper SHA `2da199da6ee7717d86838e1746c3144ce138380573e53da161aaf9e1daff5d51`，四项新增 fixture 覆盖自主／信号 deadline、忽略 TERM 后 KILL、迟到 SIGALRM 与权限失败。仅经过本机离线子进程回归；真实语义宿主仍对应封存旧 `7f`，没有再调用模型或改旧 ledger。旧执行摘要继续阻止复用已封存阶段，synthetic 测试只在自己的临时 plan 中封存当前 helper。
+
+最终 398 项／50.229 秒日志 `campaign/final-python-verified.log`，五份 Node 22.23.1 日志 `campaign/final-node.log`。先前 394 项属于竞态修复前；一次 399 项重测因额外 test fixture 将 helper 移出源码 ZIP 允许路径报错，移除重复且无效的新增 fixture 后得到最终 398 项，失败日志 `final-python-after-stop-fix.log` 保留。0.21 wheel 164939 字节，SHA `accd625a30adeb2b70f4b3297e1d3feb6ded387d7f1d4df2c4e95a7159082d53`；安装后 checkout 外消费新旧世界及最新静态资源，普通正式密钥无创始／裁判权限、24 小时凭据与自授裁判 403 已验证；独立消费者控制／观察、timer restart 和 retention gap 通过，日志 `campaign/final-package.log`。临时构建／安装与 pip cache 已清除，原 egg-info 六文件摘要／mtime 未变，未产生 root build。
+
+8773 在线 SQLite backup 包含已提交 WAL，唯一 `private/campaign-acceptance/recovery.sqlite3`（0600，483328 字节）完整性／FK 与逻辑摘要通过，隔离恢复初始字节一致。A／C／GM 正式同钥重进保留角色、目标／贡献／活动、库存／路线及私注权限；A 两笔已完成资源操作原参数重放，回执除 replayed 标记一致，五张权威表不变、无重复扣料；C 查他人回执 404。临时恢复库与短期连接文件清除。范围是隔离 ASGI HTTP，无计时器／生产替换／损坏盘或跨机器保证；另在自有 8773 进程真实重启后由 C 浏览器同钥读回全部目标与原草稿。
+
+实际页面覆盖进入／离开／恢复、涨水后对比、刷新草稿、应急箱双击、服务暂停期间取消接入、错误恢复文件与原身份保护、两个本地世界之间前进后退及最终 390×844 窄屏（内容宽 375，无横向溢出）。“桥已通，准备补给”与章节结束说明来自权威状态。错误 JSON 的原英文已改成中文恢复指引；最终普通页面 console warn／error 为空。直接浏览 health JSON 被浏览器客户端阻止，未计作前进后退验证；随后用两个真实本地 UI 完成。截图保存在 `campaign/ui-playable.png`、`ui-playable-narrow.png`、`ui-return-after-flood.png`、`ui-goals-complete.png`、`ui-invalid-recovery.png` 与 `ui-cancel-connection.png`，自动化操作者不计真人。
+
+四个模型 PID 现已不存在，严格 UID 打开文件盘点无运行目录引用，原失败回收字段保留。首次清理因内部 node bin 符号链接安全拒绝；核清 28 条链接仅指向各自任务 profile 内部依赖后，精确删除 profile 和临时官方 CLI，不沿链接删除目标。条目分配移除 405028864 字节，系统可用空间观察增加 414588928 字节，均不称隔离 APFS 净释放；唯一记录 `semantics-20261003/cleanup.json`。原外置 CLI、活动 Python 环境、数据库、私有身份、恢复备份、执行源码 ZIP 与脱敏证据保留。验收 8773 保存页面后关闭，可玩 8772 与原 8770／8766 保留；未推送、部署或修改生产。
 
 ## 要验证的问题
 
@@ -123,7 +164,7 @@ B 的第六个推理宿主在约 115 秒才出现 XDG 初始化目录，120.32 �
 
 models.dev API 在本机无法完成 TLS 连接后，新增显式官方 GitHub 元数据选择，默认源保持不变；只限本次内部存储的 continuation／subset 路径，不更换 provider、模型、代理或凭据。固定官方 provider TOML 的三项费用必须显式数值为零，工具能力按 provider 覆盖／base 继承；两个固定官方文件的 URL 与摘要留存。Go 官方价格页只接受关联正确的 Go tab／tabpanel、六列表头和唯一 LongCat 免费行，Input／Output／Cached Read 为 Free、Cached Write 为 Free 或 `-`，Go Plus 或 Usage 表不能补救失败。专用 no-host 预检与实际启动分开；价格 proof 绑定源码／文件摘要及不超过 300 秒的新鲜度，profile 准备后和 ledger 写入后、启动前再次复核，过期不启动、回退临时调用记录并保留诊断。任何公开 GET 仅在明确选择下对 ReadTimeout 有界重试一次，其他错误停止；这不证明账户实际账单为零。
 
-## 当前证据与启动
+## 原初桥实验的证据与启动（0.20 冻结范围）
 
 本轮发现并局部修复了三个真实消费阻塞：第二名成员报名时的只读授权冲突；首次创建意图／定时事项时错误要求旧对象已存在；非 Commons 组合入口返回无期限凭据、被正式 `connect_world` helper 拒绝。前两项属于该世界的 L6 SDK 消费实现，第三项属于 L6 adapter 装配／身份接入：将组合入口的 24 小时 session 配置从 `commons_ui` 选择中分离，独立 product builder 的默认行为保留。新增非 Commons 正式 helper 入场、有界到期和同钥接续回归，没有新增 Runtime 原语。修复后的临时本地四调用检查只证明两名正式用户报名与首次意图／事项创建可用，不作为完整阶段 A 证据。
 
@@ -151,7 +192,7 @@ models.dev API 在本机无法完成 TLS 连接后，新增显式官方 GitHub �
 
 同一 Python、不同小型文件／SQLite 位置的有限测量中，DevDisk 的 fsync 为 16.284–1338.158 ms，内部有效两例为 0.101–0.109 ms；第一例内部记录器失败保留，未补跑凑数。旧外置环境的新进程 import 有两次 30 秒超时，完成例首次 connect import 22.485 秒；独立旧 SDK import 为 46.195 秒，其后 MCP 请求实际为 1.247–2.365 秒，不能把客户端导入等待算成服务响应。当前相同 base Python 与 35 个相同依赖版本、离线建立的内部环境中，三次当前源码 connect import 为 0.106–0.121 秒，SDK import 为 0.696 秒。缓存未清空、顺序测量可能预热，connect 源码也已改，故不能把全部改善归为纯存储位置效果。测量与限制统一留在 `latency.json`，不另建报告。
 
-最终交付代码的完整 364 项／40.933 秒通过使用内部环境及 Git 外的小型临时数据库，Mac 没有 skip，仍采用默认 60／5／10 秒限制，日志为 `latency-full-typed-cleanup-final.log`。实际模型执行源码曾通过 362 项／41.781 秒（`latency-full-completion.log`）；初版 native f 修复曾通过 363 项／41.835 秒（`latency-full-post-cleanup-fix.log`），随后实际库存暴露无名称描述符边界，均作为历史范围保留。351／347 项旧检查及中途源码仍在修改的 354 项结果也保留在 `latency.json`。更早内部重跑误把 TMPDIR 放进 Git，339 项出现 8 failures／18 errors，身份保护正确拒绝；`latency-full-invalid-tmpdir.log` 保留。改用 Git 外 `/Users/mubin/Developer/agent-world/work/test-work` 未削弱保护。当前成功包含环境、SDK 与 fixture 修复，不是只更换卷的对照，也不保证所有宿主启动稳定。
+0.20 当时交付代码的完整 364 项／40.933 秒通过使用内部环境及 Git 外的小型临时数据库，Mac 没有 skip，仍采用默认 60／5／10 秒限制，日志为 `latency-full-typed-cleanup-final.log`。实际模型执行源码曾通过 362 项／41.781 秒（`latency-full-completion.log`）；初版 native f 修复曾通过 363 项／41.835 秒（`latency-full-post-cleanup-fix.log`），随后实际库存暴露无名称描述符边界，均作为历史范围保留。351／347 项旧检查及中途源码仍在修改的 354 项结果也保留在 `latency.json`。更早内部重跑误把 TMPDIR 放进 Git，339 项出现 8 failures／18 errors，身份保护正确拒绝；`latency-full-invalid-tmpdir.log` 保留。改用 Git 外 `/Users/mubin/Developer/agent-world/work/test-work` 未削弱保护。当前成功包含环境、SDK 与 fixture 修复，不是只更换卷的对照，也不保证所有宿主启动稳定。
 
 本地密钥文件／合成身份初始化只支持 POSIX 权限语义，相关测试显式在非 POSIX 平台 skip；本轮没有 Windows 实测。此测试标注不扩大实现平台承诺，也不改变 Mac 的超时限制。
 
@@ -169,7 +210,7 @@ cd /Users/mubin/Developer/agent-world/repo
 
 该内部环境当前实测约 55 MiB（含缓存），复用已有外置缓存、离线建立，留在原路径供当前 CLI／预览／测试使用；须调用 venv 的 `bin/python`，直接调用它解析后的 base binary 不会选择同一依赖。原外置 venv、共享缓存、大型资产、数据库与固定服务路径保留。当前普通用户可直接探索、提交意图与接受自己的已获准方案，或下载同一身份的外部 Agent 连接文件；主持人／裁判仍需要获准宿主显式回应，系统不自动运行模型。浏览器入口不证明真人愿意玩。定时事项只有接口与既有结果观察，不因为页面没有新增按钮就宣称这些领域规则不存在。
 
-本轮证据留在 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/river-camp/`，私有身份与唯一恢复库留在既有 `private/river-camp`，不进入 Git。阶段 A 为 `stage-a.log`；真实模型最终证据在 `continuation/continuation-b-accept-{receipt,verification,input,before-authority,after-authority}.json` 及同名 `-sanitized.ndjson`，旧模型十一份材料与旧失败冻结。实际模型执行 runner SHA-256 为 `e10e08d7b38c56dce1877e4ffd874ef6094b36ed0b728a1a5bb6c9b671562e48`、测试为 `99ea18317570560d7b5f1ad70e949dd0544c121d94602ae500e1157ed9b37999`，原文件唯一封存在 `continuation/executed-harness-source.zip`（38566 字节）。交付工具 `tools/run_river_camp_models.py` 后续只修 macOS 清理库存，最终 SHA-256 `7f2ed1da5e64bb6e22c93201ac08cdd137f7b7ac2acacac11d7549e9deea0cc4`，测试 `d419ca8312b858a7f215d236ffef8311f6854c87a5be3934bf04516188182418`。其 24 项离线回归 0.817 秒通过，并包含于完整 364 项；清理修复没有新增模型或公开 provider 请求。全部十次模型额度已用完，不重置现有 ledger，也不为本实验创建定时推理或清理任务。
+本轮证据留在 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/river-camp/`，私有身份与唯一恢复库留在既有 `private/river-camp`，不进入 Git。阶段 A 为 `stage-a.log`；真实模型最终证据在 `continuation/continuation-b-accept-{receipt,verification,input,before-authority,after-authority}.json` 及同名 `-sanitized.ndjson`，旧模型十一份材料与旧失败冻结。实际模型执行 runner SHA-256 为 `e10e08d7b38c56dce1877e4ffd874ef6094b36ed0b728a1a5bb6c9b671562e48`、测试为 `99ea18317570560d7b5f1ad70e949dd0544c121d94602ae500e1157ed9b37999`，原文件唯一封存在 `continuation/executed-harness-source.zip`（38566 字节）。0.20 当时交付工具 `tools/run_river_camp_models.py` 后续只修 macOS 清理库存，最终 SHA-256 `7f2ed1da5e64bb6e22c93201ac08cdd137f7b7ac2acacac11d7549e9deea0cc4`，测试 `d419ca8312b858a7f215d236ffef8311f6854c87a5be3934bf04516188182418`。其 24 项离线回归 0.817 秒通过，并包含于完整 364 项；清理修复没有新增模型或公开 provider 请求。全部十次模型额度已用完，不重置现有 ledger，也不为本实验创建定时推理或清理任务。
 
 最初三个模型宿主的精确 runtime 已清理：条目分配 76,705,792 字节，可用空间观察增加 24,952,832 字节。最终七个续接 profile 也已在全部自有 PID 退出、真实路径／所有权／权限和一次 UID 文件占用库存通过后删除，条目分配 401649664 字节；DevDisk 可用空间观察增加 156651520 字节，系统盘 profile 清理观察增加 276652032 字节。两次早先清理因原生 f 字段／空名称安全拒绝，均未删除；现有 `latency.json` 保留拒绝、类型计数、最终只读实物盘点与清理结果，不输出无关文件名。最终 `-Fptfn` 严格关联 p／f／t／n，空名只放行数字描述符的 NPOLICY／NEXUS／PIPE／rte，普通文件、目录、未知空名或不完整记录仍保留。
 

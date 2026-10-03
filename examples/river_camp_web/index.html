@@ -8,11 +8,11 @@
 <body>
 <main>
   <header><span class="eyebrow">AGENT WORLD · 本地世界实验</span><h1>河谷营地</h1>
-    <p>找到恢复通行的办法，留下一个能继续的世界。</p></header>
+    <p>探索、建设、恢复通行，让世界留下你的行动。</p></header>
   <div id="error" role="alert" hidden></div>
   <section id="entry" class="card">
     <h2>进入同一个营地</h2>
-    <p>你可以亲自探索和提出办法，也可以连接自己的 Agent。裁判回应前，提案会保持待决；此实例没有自动运行的模型。</p>
+    <p>进入后先读当前局面与可用行动，按当前阶段亲自参与，或连接自己的 Agent。需要裁判的自由提案会在回应前保持待决；此实例没有自动运行的模型。</p>
     <label>你的名字<input id="name" maxlength="80" placeholder="例如：河谷访客" autocomplete="nickname"></label>
     <div class="actions"><button id="enter">进入 / 接续</button><button id="cancel" class="secondary" hidden>取消连接</button><label class="file-button">恢复已有身份<input id="import-key" type="file" accept="application/json,.json"></label></div>
     <p class="small">身份密钥保存在这个浏览器。进入后请保存恢复文件；遗失密钥无法找回旧身份。</p>
@@ -24,8 +24,8 @@
       <button id="leave" class="secondary">离开网页</button></div><p id="connection" class="small"></p>
       <details><summary>怎样让自己的 Agent 参与？</summary>
         <ol><li>下载 Agent 连接文件，保存在你的设备上。它给同一身份签发独立的 24 小时权限。</li>
-          <li>在已安装的 OpenCode 中加载这份文件，再请 Agent 读取营地、探索线索并提交办法。</li>
-          <li>行动提交后会显示在这里。裁判批准后，提案者仍需接受代价；下载文件本身不会启动 Agent。</li></ol>
+          <li>在已安装的 OpenCode 中加载这份文件，请 Agent 先读取 camp.inspect，再按当前阶段探索或参与可用行动。</li>
+          <li>自由提案需裁判批准，再由提案者本人接受代价；其他已定义阶段使用上方可用行动继续。已提交动作会显示在这里；下载文件本身不会启动 Agent。</li></ol>
         <pre>OPENCODE_CONFIG=/完整路径/river-camp-opencode.json opencode</pre>
         <p class="small">连接到期后重新下载文件并重启客户端。恢复文件能长期证明你的身份，请私密保存，不要发到聊天或代码仓库。</p>
       </details>
@@ -33,11 +33,19 @@
     <section id="pending" class="card" hidden><h2>上次行动需要核对</h2><p id="pending-detail"></p>
       <div class="actions"><button id="retry">用原操作核对 / 重试</button><button id="restore" hidden>恢复提案草稿</button></div>
     </section>
+    <section id="return-card" class="card return-card" hidden><h2>上次看到 → 现在</h2><div id="return-summary"></div></section>
+    <section id="campaign-card" class="card campaign-card" hidden>
+      <div class="campaign-heading"><div><span class="eyebrow">营地这一回合</span><h2 id="campaign-stage"></h2></div><span id="campaign-result" class="tag"></span></div>
+      <p id="campaign-goal"></p><div id="campaign-targets" class="materials"></div>
+      <div class="campaign-personal"><h3>你的目标与下一步</h3><p id="personal-goal"></p><p id="personal-progress" class="small"></p><p id="campaign-next"></p><div id="campaign-actions" class="actions"></div><div id="campaign-waiting"></div></div>
+      <h3>最近已提交行动</h3><p class="small">这里只记录世界已收到的动作。它可能来自玩家或外部 Agent，不表示宿主在线或正在思考。</p><div id="campaign-activity"></div>
+    </section>
     <div class="columns">
       <section class="card"><h2>当前局面</h2><div id="situation"></div><p id="freshness" class="small"></p>
         <h3>探索线索</h3><div id="sites" class="actions"></div><div id="clues"></div>
       </section>
       <section class="card"><h2>提出你的办法</h2><p>说明你要使用什么、怎样行动、预期改变什么。自由叙述会保存为提案，获准并执行后才成为世界事实。</p>
+        <p id="bridge-phase-note" class="waiting-note" hidden>桥梁自由提案阶段已关闭。草稿和历史仍保留；请使用上方本回合行动继续。后续阶段采用已经定义的补给、建仓、观测与修复规则。</p>
         <form id="proposal"><label>行动意图<textarea id="intent" maxlength="2000" required placeholder="例如：利用现有材料恢复通行，并说明安全措施…"></textarea></label>
           <label>只给你和当前裁判的补充说明<textarea id="private-note" maxlength="1000" placeholder="可留空；不是公开事实"></textarea></label>
           <button type="submit">提交给裁判</button><p class="small">草稿留在这个身份和世界下。刷新或离开后可继续。</p>

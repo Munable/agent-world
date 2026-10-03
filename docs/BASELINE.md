@@ -7,19 +7,20 @@
 当前工作树代表现行事实：
 
 - 2026-10-03 最后只读核对 `origin` 的 HEAD／main 仍为 `a7e92db213033cccf41f4759d24419cadf8721d1`；当前本地成果未推送或部署。
-- Python package：`agent-world` **0.20.0**；Runtime protocol **0.15**；SQLite schema `user_version` **7**。
+- Python package：`agent-world` **0.21.0**；Runtime protocol **0.15**；SQLite schema `user_version` **7**。
 - User Identity：**只认密钥，不认人**；Key Identity 已是组合应用默认公开入场路径。
 - Runtime Capability Harness：正式 Key Identity 参与者下已覆盖 1→N、N→1、N→N、并发 CAS、撤权后持钥重进、重启回档、多 session、独立 Runtime 隔离和批量进入。
 - Commons Reference Application v3：当前只定义 `Post / Reply / Conversation / Message`，用于验证公开／私有、持久历史、参与者授权、通知与恢复；这些对象不属于 Runtime 固有模型。
 - River Camp：新增有界自由意图／获准外部裁判／本人接受／有限后果及独立定时事项消费者，复用现有 SDK 与 HTTP/MCP；不是完整 RPG，规则不提升为 Runtime 固有对象。
+- Camp Campaign：独立的有限接续章节，增加固定补给、仓库、剧情涨水与修复、本人实际贡献派生的个人目标。真实本地 HTTP／浏览器三身份场景的共同目标与各自目标已达成；8772 独立交付库预置正规接口接受的桥梁，可直接体验后续章节。它是受信任 SDK 消费者，无新 Runtime 原语或常驻模型。
 - 故障／恢复：Operation replay、Runtime 重启、离线恢复、Credential 失效后同钥重进、event cursor 续接、HTTP/MCP 混合调用均有当前回归。
 - 上一轮 Commons 真实模型：三个正式密钥身份通过 OpenCode／LongCat 四次真实 MCP 运行完成有目标讨论、私聊及同钥新进程接续；数据库与第三方 403 已核对。记录成本为 0；三次工具参数错误后修正。这是 0.19 的本机短时证据，不计作本轮 River Camp 验收。
-- 本轮代码证据：最终完整 Python **364 项／40.933 秒通过**，Mac 无 skip，原 60 秒启动／5 秒 HTTP／10 秒 import 预算不变，日志 `latency-full-typed-cleanup-final.log`；runner 24 项离线回归另次 0.817 秒通过。实际模型执行源码的 362 项验证与后续 363 项中间清理验证、351／347 项旧检查均保留，不能冒充最终源码证据。四份 Node（22.23.1）与 0.20 wheel／独立消费者／checkout 外 ASGI／package probe 通过，wheel 150670 字节，SHA-256 `2b47c17f052910f60e30b807f6c7368c21f4ca195b7b3ca6475dbc9a27b5ebda`。River Camp 的 18 项定向与 9 项入口证据保留；此前完整 333 项及定向复测的两项超时仍是失败。上一轮 306 项、三份 Node 与 0.19.0 包不计作本轮验证。
+- 0.21 本轮代码证据：最终完整 Python **398 项／50.229 秒通过**，Mac 无 skip，原 60 秒启动／5 秒 HTTP／10 秒 import 预算不变；五份 Node（22.23.1）通过。包含模型实测后宿主停止竞态修复与离线有界回收回归；0.21 安装包检查通过，范围和证据另记 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。0.20 的 364 项／40.933 秒、四份 Node、150670 字节 wheel（SHA `2b47c17f052910f60e30b807f6c7368c21f4ca195b7b3ca6475dbc9a27b5ebda`）只属于上次冻结代码；旧环境超时、恢复及中间检查保留，不冒充本轮最终证据。
 - 本轮延迟与 L6 修复：包根延迟导出保留 15 个 SDK 公开对象及身份语义；网络 fixture 的启动／清理不阻塞 async loop，启动取消保留原异常与未回收进程诊断；模型宿主统一回收／保存失败，并避免价格 metadata 覆盖冻结证据。离线建立的内部环境当前实测约 55 MiB（含缓存），与 Git 外小型测试数据库解决当前验证阻塞，原外置环境、固定数据库与 Commons 服务保留。源码、环境与缓存时序同时变化，不能将成功纯归因于存储卷；不改变 Runtime 不变量／规则，详见 [IMPLEMENTATION](IMPLEMENTATION.md) 与 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
-- 本轮 River Camp 真实模型：明确恢复后 GM9 同 Operation 裁判与 B10 同正式密钥新进程执行完成，commit 18、库存 0／0／2、cargo 2／1、A／B executed version 3、goal true；模型从世界记录准确说明两次资源后果，独立验收与浏览器 C 观察一致。公开判词未响应 B 的私注披露诱导，仅证明该次输入的抵抗。原超时／SchemaRejected、无模型 metadata 失败和指导恢复保留；总十次额度已用完，两个语义子集未跑、28 条有效覆盖 0／配对未检。最终状态同钥备份恢复与精确安全清理已通过；实际执行源码 e10e08d7 与后续清理源码 7f2ed1da 分别保留。未证明广泛语义正确率、真人／24 小时持续性或账户账单绝对为零，详见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
+- 原 River Camp 真实模型：明确恢复后 GM9 同 Operation 裁判与 B10 同正式密钥新进程执行完成，commit 18、库存 0／0／2、cargo 2／1、A／B executed version 3、goal true；模型从世界记录说明两次资源后果。公开判词未响应 B 的私注披露诱导，仅证明该次输入。原十次额度已用完，首轮 28 案例有效输出仍 0；实际执行源码 e10e08d7 与清理源码 7f2ed1da 分别保留。新阶段四宿主单独封存，得到六条有效语义输出：可行方案与木材不足对照正确，步道改写决策一致但两条理由漏认 passage；第四宿主超时，外部造物与私注改写诱导未验证。旧输入、世界与失败 ledger 未改；没有通用语义通过率、真人／24 小时或绝对零账单结论。详见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
 - 前一冻结版本的本机可靠性补证：正式鉴权下的丢响应／断连／强制重启回归、WAL 在线备份与迁移中断恢复，以及两组半小时、一次四小时不重启持续运行已通过；仍不等于跨机器或长期生产验证；四小时 RSS 增长约 33.5 MiB，尚未归因，不能声称内存稳定。
 - 当前唯一已确认的 Runtime 实现缺口：**外部系统副作用交付**（outbox / delivery / compensation）。
-- 当前推进重点：保留 Commons，继续有界河谷营地的同世界组合与少量真实模型试验，检验自由意图、裁判与接续；只补必要的轻量观察表达。Runtime 仅处理真实消费阻塞；不重写内核或增加常驻推理循环，不预先开发三款 App。Commons 运行边界见 [COMMONS_EXPERIENCE](COMMONS_EXPERIENCE.md)，本轮计划、当前证据和真人／跨日未验证项见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
+- 当前推进重点：以可直接体验的有限营地章节收集首次理解与回访证据，再决定世界自由度、成长或地图。保留 Commons 与初桥实验；Runtime 仅处理真实消费阻塞，不重写内核或增加常驻推理循环。Commons 运行边界见 [COMMONS_EXPERIENCE](COMMONS_EXPERIENCE.md)，本轮计划、证据与真人／跨日未验证项见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
 - 仍未覆盖的证据边界（不等于下一开发优先级）：跨机器／跨主机 Agent、网络分区、长期 soak、生产数据库迁移和真实用户使用。
 
 ## 六层语义主轴
