@@ -4,6 +4,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -18,7 +19,7 @@ from agent_world import (
     EventSpec, FunctionOutcome, FunctionSpec, StateRule, StreamEvent, StreamSpec,
     TimerSpec, WorldDefinition, WorldRuntime,
 )
-from agent_world.errors import ReceiptNotFound, WorldVersionMismatch
+from agent_world.errors import ReceiptNotFound, TimerNotFound, WorldVersionMismatch
 from tests.capability_harness import RuntimeCapabilityHarness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,9 +103,41 @@ def inspect_restored_backup(path, data):
             "timer_receipt": w.get_timer_receipt("u", "committed")}
 
 
+def exit_before_command_commit(path, data):
+    """Exit in a real child process after every ordinary Command effect is staged."""
+    w = WorldRuntime(path)
+    w.install_world("u", RECOVERY_WORLD)
+    original = w._commit_outcome_tx
+
+    def crash(c, ctx, *args, **kwargs):
+        receipt = original(c, ctx, *args, **kwargs)
+        assert ctx.function_id == "item.store" and ctx.operation_id == data["operation_id"]
+        assert c.in_transaction
+        counts = {
+            table: c.execute(f"SELECT COUNT(*) FROM {table} WHERE universe='u'").fetchone()[0]
+            for table in ("world_state", "operations", "events", "stream_events", "world_timers")
+        }
+        assert counts == {table: 1 for table in counts}, counts
+        commit = c.execute("SELECT source,function_id,operation_id FROM world_commits WHERE seq=?",
+                           (receipt["commit_seq"],)).fetchone()
+        assert tuple(commit) == ("action", "item.store", data["operation_id"])
+        print("STAGED_COMMAND_COMMIT " + json.dumps({
+            "in_transaction": c.in_transaction, "effects": counts,
+            "source": commit["source"], "operation_id": ctx.operation_id,
+        }, sort_keys=True), flush=True)
+        os._exit(75)
+
+    w._commit_outcome_tx = crash
+    w.call_function("u", "item.store", data["actor"], data["args"],
+                    operation_id=data["operation_id"], identity_token=data["token"])
+
+
 class StorageRecoveryTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        root = os.getenv("WORLD_TEST_WORKDIR")
+        if root is not None and not Path(root).is_dir():
+            raise ValueError("WORLD_TEST_WORKDIR must be an existing directory")
+        self.temp = tempfile.TemporaryDirectory(prefix="storage-recovery-", dir=root)
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "source.sqlite3"
 
@@ -211,6 +244,63 @@ class StorageRecoveryTests(unittest.TestCase):
         self.assertEqual(restored.read_stream("u", "items")["events"], [])
         self.assertEqual(restored.read_changes("u", bob.role_id, identity_token=bob.token), [])
         self.assertTrue(h.runtime.get_state("u", "items", "pending")["exists"])
+
+    def test_process_exit_before_command_commit_rolls_back_all_effects_and_same_operation_retries_once(self):
+        """A normal Command killed before COMMIT leaves no receipt or partial effects."""
+        h, alice, bob = self.make_harness()
+        operation = "interrupted-command"
+        args = {"item_id": operation, "recipient": bob.role_id}
+        output = self.run_worker(
+            "import json,sys; from tests.test_storage_recovery import exit_before_command_commit; "
+            "exit_before_command_commit(sys.argv[1], json.load(sys.stdin))",
+            payload={"actor": alice.role_id, "token": alice.token,
+                     "operation_id": operation, "args": args}, expected_code=75,
+        )
+        marker, evidence = output.strip().split(" ", 1)
+        self.assertEqual(marker, "STAGED_COMMAND_COMMIT")
+        self.assertEqual(json.loads(evidence), {
+            "in_transaction": True, "source": "action", "operation_id": operation,
+            "effects": {table: 1 for table in (
+                "world_state", "operations", "events", "stream_events", "world_timers")},
+        })
+        # Preserve the child's actual flushed marker in the retained test log.
+        print(output, end="")
+
+        recovered = h.restart()
+        self.assertFalse(recovered.get_state("u", "items", operation)["exists"])
+        with self.assertRaises(ReceiptNotFound):
+            recovered.get_receipt("u", alice.role_id, operation, identity_token=alice.token)
+        with self.assertRaises(TimerNotFound):
+            recovered.get_timer("u", operation)
+        self.assertEqual(recovered.read_changes("u", bob.role_id, identity_token=bob.token), [])
+        self.assertEqual(recovered.read_stream("u", "items")["events"], [])
+        self.assertEqual(recovered.run_due_timers("u")["count"], 0)
+        with recovered._conn(readonly=True) as c:
+            for table in ("world_state", "operations", "events", "stream_events", "world_timers",
+                          "state_changes", "timer_transitions"):
+                self.assertEqual(c.execute(f"SELECT COUNT(*) FROM {table} WHERE universe='u'").fetchone()[0], 0)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM world_commits WHERE source='action'").fetchone()[0], 0)
+
+        receipt = h.call(alice, "item.store", args, operation)
+        self.assertFalse(receipt["replayed"])
+        self.assertEqual(recovered.get_state("u", "items", operation)["version"], 1)
+        self.assertEqual(recovered.get_receipt("u", alice.role_id, operation, identity_token=alice.token), receipt)
+        self.assertEqual([e["seq"] for e in recovered.read_changes("u", bob.role_id, identity_token=bob.token)],
+                         receipt["event_seqs"])
+        self.assertEqual([e["event_id"] for e in recovered.read_stream("u", "items")["events"]],
+                         receipt["stream_event_ids"])
+        self.assertEqual(recovered.get_timer("u", operation)["status"], "pending")
+        committed = self.database_dump()
+        replay = h.call(alice, "item.store", args, operation)
+        self.assertEqual(replay, {**receipt, "replayed": True})
+        self.assertEqual(self.database_dump(), committed)
+        with recovered._conn(readonly=True) as c:
+            for table in ("world_state", "operations", "events", "stream_events", "world_timers",
+                          "state_changes", "timer_transitions"):
+                self.assertEqual(c.execute(f"SELECT COUNT(*) FROM {table} WHERE universe='u'").fetchone()[0], 1)
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM world_commits WHERE source='action'").fetchone()[0], 1)
+            self.assertEqual(c.execute("PRAGMA integrity_check").fetchall()[0][0], "ok")
+            self.assertEqual(c.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_process_exit_before_migration_commit_preserves_old_world_and_allows_retry(self):
         """All ordered migration steps and the target install share one commit."""

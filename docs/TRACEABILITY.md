@@ -1,20 +1,20 @@
 # 六层关键主张追溯
 
-复核：2026-09-30。这里不是新的规格层，而是把关键 L1/L2 主张追到 L3-L6 与现有证据。状态只描述当前仓库，不是质量评分。
+复核：2026-10-03。这里不是新的规格层，而是把关键 L1/L2 主张追到 L3-L6 与现有证据。状态只描述当前仓库，不是质量评分。
 
 | 主张 | 下层落点 | 当前状态 | 核心证据／限制 |
 | --- | --- | --- | --- |
 | G1 世界持续存在 | State Fact、Operation、Commit、Receipt；L4 提交／恢复合同；Runtime journal/state | **已实现核心机制；长期证据有限** | `tests/test_foundation.py`、`tests/test_world_data.py`、`tests/test_world_sdk.py` 覆盖提交、恢复、重启与升级；没有真实长期 soak 证明。 |
 | G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **已实现最小密钥身份合同，并接成默认组合入口** | `tests/test_key_identity.py` 验证默认 challenge → exchange → bootstrap；Capability Harness 进一步验证同钥多 Credential／双 MCP session、撤销后持钥重进、重启回档、并发首次进入与独立 Runtime 隔离。新公钥就是新身份，档案不跨世界搬运，密钥丢失不提供恢复。 |
 | G3 Agent 在 Runtime 外部 | External Agent / Client、System Actor；L5 外部推理边界 | **架构上成立** | Runtime 没有模型推理器；timer 以系统来源执行。现有测试能证明 timer 不保存用户 token 等局部性质，但不能证明所有未来宿主都正确。 |
-| G4 世界开发者拥有领域规则 | World Definition、Domain Object；L4 声明式行动／状态合同；SDK | **已形成核心机制** | `tests/test_world_sdk.py` 覆盖外部模块、非游戏规则、版本与 schema；这证明接口可承载这些夹具，不证明任意领域天然适配。 |
+| G4 世界开发者拥有领域规则 | World Definition、Domain Object；L4 声明式行动／状态合同；SDK | **已形成核心机制，并有公开文档独立消费证据** | `tests/test_world_sdk.py` 与 `tests/test_independent_integration.py`；陌生作者／客户端仅凭文档和 HTTP 元数据完成两套独立规则，先暴露接入说明缺口再修复。保留原失败；有限样本不证明任意领域天然适配。 |
 | G5 多类型世界共用 Runtime | 领域中立不变量、SDK／adapter 架构 | **设计与架构成立，通用性不可由有限样本证明** | 仓库内最小示例和打包夹具只验证接口边界；任何临时游戏／社交测试都不能升级为产品证明。 |
 | I1 声明机制产生权威事实 | Command、State Fact、Commit；L4 结构／授权／规则链 | **已实现底座** | `tests/test_foundation.py`、`tests/test_managed_state_boundary.py`、transport tests 覆盖 schema、授权、回滚；Runtime 不解释文本语义。 |
 | I2 不伪造他人意愿 | Principal、Credential、Command；世界业务状态机 | **Runtime 提供归因底座，具体确认仍由世界定义** | 调用主体来自鉴权而非业务参数；没有通用 Confirm 类型，因此 Runtime 也不能替所有世界证明业务确认正确。 |
 | I3 用户身份只认密钥，且与领域授权分离 | Identity Key + world-local Credential + command/state authorization | **已实现当前机制** | challenge signature 证明持钥；`identity_keys` 保存公钥到本地 role 映射；Function/state authorization、observe/control 继续独立判断。不同公钥不能合并，世界 bearer 不能跨实例使用。 |
 | I4 Runtime 不冒充用户／Agent | External Agent / Client、System Actor、Scheduled Effect | **已实现架构边界** | `tests/test_timers.py` 覆盖定时事项离线执行与不保存用户 token；系统行为与用户行为来源区分。 |
 | I5 提交事实独立于会话 | Commit、Receipt、authoritative state | **已实现核心机制** | receipt 恢复、进程重启、状态持久化测试存在；网络外部副作用不在该保证内。 |
-| I6 同一 Runtime 提交无半成品 | L4 原子提交；事务执行核心 | **有强回归覆盖** | `test_write_cannot_commit_partially`、output/schema failure、timer retry/rollback、history rollback 等。 |
+| I6 同一 Runtime 提交无半成品 | L4 原子提交；事务执行核心 | **有强回归覆盖** | `test_write_cannot_commit_partially`、output/schema failure、timer retry/rollback、history rollback；`tests/test_storage_recovery.py` 另在真实子进程暂存普通 Command 的状态／回执／通知／stream／timer 后、COMMIT 前退出，重启确认零残留再同 Operation 提交一次。 |
 | I7 未知结果不靠猜测 | Operation + Receipt + structured recovery error + credential rotation receipt | **已实现核心写操作语义** | 普通 Command receipt、同 ID replay、结构化 recovery 均有回归；identity token rotation 现在也以 operation_id 持久化恢复映射，可在响应丢失或 Runtime 重启后恢复同一 replacement credential。 |
 | I8 派生观察不创造事实 | View、Stream、Sync Position、Presentation 横轴 | **已实现主要边界** | view/stream/client tests 覆盖缓存、乱序、撤权、retention gap；具体 UI 仍需按世界正确命名业务状态。 |
 | I9 world instance 默认隔离 | World Instance、instance-scoped state/action | **支持接口层已实现；不是敌对代码安全沙箱** | `test_world_instances_are_isolated`、cross-universe write 回归存在。FunctionContext 不再公开数据库连接；但受信任 Python World Package 仍与 Runtime 同进程，因此这不是恶意租户沙箱。 |
@@ -28,7 +28,7 @@
 | --- | --- | --- |
 | Principal 归因与 world-scoped Credential | **已实现并有强回归** | Bearer credential 绑定 role + world instance；observe/control、撤权、过期与 session 绑定已有测试。 |
 | 跨独立部署 User Identity | **已实现最小密钥身份** | 同一 Ed25519 公钥可在独立 Runtime 完成持钥证明；各世界保存本地档案并独立签发 credential。系统明确不提供密钥找回、换钥继承或档案跨世界同步。 |
-| 世界本地授权 | **已实现并有强回归** | Function authorization、state authorization、credential access mode 分离。 |
+| 世界本地授权 | **已实现并有强回归** | Function authorization、state authorization、credential access mode 分离；`tests/test_discovery_authorization.py` 通过 HTTP/MCP 验证目录可见／隐藏与执行允许／拒绝的四组合，拒绝无持久副作用。 |
 | State / schema / CAS / journal | **已实现并有强回归** | 当前状态、版本、删除 tombstone、历史 journal、schema 与授权均有合同测试。 |
 | 原子 Command / Commit | **已实现并有强回归** | 状态、Receipt、Event、Stream、Timer 等受管效果在同一提交边界成立或回滚。 |
 | Operation / Receipt / 未知结果恢复 | **已实现核心机制** | 同 operation_id 重放、响应丢失恢复、重启后 receipt 恢复成立。 |

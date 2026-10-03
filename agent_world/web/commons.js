@@ -2,10 +2,10 @@ import {CommonsClient,CommonsHistory,createKey,validateKey,savedKey,parseRoute} 
 const $=s=>document.querySelector(s);
 const client=new CommonsClient();
 let key=null,profile=null,config=null,generation=0,sessionGeneration=0,loading=false,busy=false,refreshTimer=null,agentExpiresAt=null,agentAccessRevoked=false;
-const histories=new Map();let shownRoute=null;
+const histories=new Map();let shownRoute=null,shownRouteReady=false;
 function element(tag,attributes={},text=''){const node=document.createElement(tag);for(const [k,v] of Object.entries(attributes))node.setAttribute(k,v);node.textContent=text;return node;}
 function saveCurrentDraft(){const area=$('#page textarea');if(shownRoute && area)client.saveDraft(shownRoute,area.value);}
-function error(err){if(err.staleAuth || err.cancelled)return;if(err.status===401 && err.client===client && profile){saveCurrentDraft();generation++;sessionGeneration++;loading=false;histories.clear();client.token=null;clearTimeout(refreshTimer);$('#page').replaceChildren();$('#session-expired').hidden=false;$('#refresh-button').disabled=true;$('#freshness').textContent='Session expired · your drafts remain on this device';updateAccount();}$('#error').textContent=err.message || String(err);$('#error').hidden=false;}
+function error(err){if(err.staleAuth || err.cancelled)return;if(err.status===401 && err.client===client && profile){saveCurrentDraft();generation++;sessionGeneration++;loading=false;histories.clear();client.token=null;shownRouteReady=false;clearTimeout(refreshTimer);$('#page').replaceChildren();$('#session-expired').hidden=false;$('#refresh-button').disabled=true;$('#freshness').textContent='Session expired · your drafts remain on this device';updateAccount();}$('#error').textContent=err.message || String(err);$('#error').hidden=false;}
 function clearError(){$('#error').hidden=true;}
 function pendingUI(){const pending=profile && client.pending();$('#pending').hidden=!pending;$('#retry-button').hidden=!!pending?.rejection;$('#restore-button').hidden=!pending?.rejection;$('#pending-title').textContent=pending?.rejection ? 'This submission was rejected' : 'A submission needs checking';$('#pending-description').textContent=pending?.rejection ? pending.rejection.message+' Nothing was committed. Restore the original text to edit it or keep it for later.' : 'Your original submission is saved on this device. Check & retry uses the same operation, without sending a second copy.';}
 function person(id,name){return id===profile?.role_id ? profile.display_name+' · you' : name || 'Participant '+id.slice(-6);}
@@ -29,6 +29,16 @@ async function enter(newKey,name){
 }
 function schedule(){clearTimeout(refreshTimer);refreshTimer=setTimeout(async()=>{if(profile && client.token && !document.hidden && !busy)await render(false);if(profile && client.token)schedule();},8000);}
 function empty(title,description){const n=element('div',{class:'empty'});n.append(element('div',{class:'small-orbit'},'◎'),element('h2',{},title),element('p',{},description));return n;}
+function routeState(route,failed=false){
+  const target=route.page==='post' ? 'post' : route.page==='posts' ? 'public square' : route.id ? 'private conversation' : 'conversation list';
+  const title=failed ? 'This '+target+' could not be opened.' : 'Opening this '+target+'…';
+  const content=document.createDocumentFragment();
+  content.append(element('a',{href:route.page==='messages' ? '#messages' : '#posts',class:'back'},route.page==='messages' ? '← All my conversations' : '← Back to the square'),empty(title,failed ? 'Use Refresh to try again, or choose another page. Your drafts remain on this device.' : 'Reading the latest history from the world.'));
+  $('#page').replaceChildren(content);$('#page-title').textContent=title;$('#page-description').textContent='Your drafts remain on this device.';
+  $('#page-kicker').textContent=route.page==='messages' ? 'YOUR CORNER OF THE WORLD' : 'THE COMMONS';
+  $('#nav-posts').classList.toggle('active',route.page!=='messages');$('#nav-messages').classList.toggle('active',route.page==='messages');
+  $('#freshness').textContent=failed ? 'This page could not be read · use Refresh to try again' : 'Reading this page…';
+}
 function composer(label,placeholder,buttonText,name,args,route){
   const form=element('form',{class:'composer'});const id='compose-'+crypto.randomUUID();const area=element('textarea',{id,required:'',maxlength:'2000',placeholder,'aria-label':label});
   const note=element('small',{},'Draft stays on this device until sent · up to 2,000 characters');const foot=element('div',{class:'composer-footer'});foot.append(note,element('button',{type:'submit'},buttonText+' ↗'));
@@ -60,6 +70,7 @@ async function render(force=true){
   const current=++generation;const route=parseRoute(location.hash);const routeKey=route.page+':'+(route.id || '');loading=true;
   saveCurrentDraft();
   if(force)clearError();
+  if(routeKey!==shownRoute || !shownRouteReady){shownRoute=routeKey;shownRouteReady=false;routeState(route);}
   try{
     const content=document.createDocumentFragment();let title,description,kicker='THE COMMONS';
     if(route.page==='posts'){
@@ -94,10 +105,10 @@ async function render(force=true){
     if(current!==generation || !profile)return;
     // Background reads never replace an in-progress draft or steal keyboard focus.
     if(!force && ($('#page textarea')?.value || $('#page').contains(document.activeElement)))return;
-    $('#page').replaceChildren(content);shownRoute=routeKey;$('#page-title').textContent=title;$('#page-description').textContent=description;$('#page-kicker').textContent=kicker;
+    $('#page').replaceChildren(content);shownRoute=routeKey;shownRouteReady=true;$('#page-title').textContent=title;$('#page-description').textContent=description;$('#page-kicker').textContent=kicker;
     $('#nav-posts').classList.toggle('active',route.page!=='messages');$('#nav-messages').classList.toggle('active',route.page==='messages');
     $('#freshness').textContent='Updated '+new Date().toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})+' · reads refresh every 8s · load older history below';pendingUI();
-  }catch(e){if(current===generation)error(e);}finally{if(current===generation)loading=false;}
+  }catch(e){if(current===generation){error(e);if(current===generation && !shownRouteReady && !e.staleAuth && !e.cancelled)routeState(route,true);}}finally{if(current===generation)loading=false;}
 }
 $('#join-form').addEventListener('submit',event=>{event.preventDefault();action(async()=>{const name=$('#name').value.trim();if(!name && !key)throw new Error('Choose a name to enter.');await enter(key || await createKey(),name);});});
 $('#import-button').addEventListener('click',()=>$('#import-file').click());

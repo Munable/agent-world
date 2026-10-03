@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import {runInNewContext} from 'node:vm';
 const source=readFileSync(new URL('../agent_world/web/commons-client.js',import.meta.url),'utf8');
 const {createKey,validateKey,CommonsClient,CommonsHistory,parseRoute,encode}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const key=await createKey();assert.deepEqual(await validateKey(key),key);
@@ -221,3 +222,94 @@ try {
   assert.deepEqual(await nativeClient.request('/api/config'),{universe:'commons'});
 } finally {globalThis.fetch=originalFetch;}
 console.log('Default native fetch retains its browser-global receiver');
+
+// Execute the actual page controller with only the DOM operations it uses.
+// This keeps route failure assertions behavioral, including saved draft state.
+class PageNode {
+  constructor(tag='div'){this.tag=tag;this.attributes={};this.children=[];this.textContent='';this.value='';this.listeners=new Map();this.classList={toggle(){}};}
+  setAttribute(name,value){this.attributes[name]=value;}
+  append(...nodes){for(const node of nodes)this.children.push(...(node.tag==='fragment' ? node.children : [node]));}
+  replaceChildren(...nodes){this.children=[];this.textContent='';this.append(...nodes);}
+  addEventListener(name,listener){this.listeners.set(name,listener);}
+  contains(node){return this===node || this.children.some(child=>child.contains(node));}
+  find(tag){if(this.tag===tag)return this;for(const child of this.children){const found=child.find(tag);if(found)return found;}return null;}
+  all(){return [this,...this.children.flatMap(child=>child.all())];}
+  get text(){return [this.textContent,...this.children.map(child=>child.text)].join(' ');}
+  close(){}
+}
+function pageFixture(){
+  const nodes=new Map(),events=new Map(),records=new Map();
+  const fixtureStorage={getItem:k=>records.get(k)??null,setItem:(k,v)=>records.set(k,v),removeItem:k=>records.delete(k)};
+  const node=id=>{if(!nodes.has(id))nodes.set(id,new PageNode());return nodes.get(id);};
+  const document={activeElement:null,hidden:false,createElement:tag=>new PageNode(tag),createDocumentFragment:()=>new PageNode('fragment'),querySelector:selector=>{const [id,tag]=selector.split(' ');return tag ? node(id).find(tag) : node(id);},querySelectorAll:()=>[...nodes.values()].flatMap(n=>n.all()).filter(n=>n.tag==='button' && n.attributes.type==='submit')};
+  node('#join-form').append(new PageNode('button'));
+  class PageClient extends CommonsClient {constructor(){super(()=>new Promise(()=>{}),fixtureStorage);}}
+  const location={hash:'#posts'};
+  const controller=readFileSync(new URL('../agent_world/web/commons.js',import.meta.url),'utf8').replace(/^import[^\n]*\n/,'');
+  const app=runInNewContext(controller+'\n({client,render,activate(){profile={role_id:"self",display_name:"Self"};client.publicKey="page-key";client.universe="commons";client.token="page-access";}})',{CommonsClient:PageClient,CommonsHistory,createKey,validateKey,savedKey:()=>{},parseRoute,document,location,crypto,sessionStorage:fixtureStorage,window:{addEventListener:(name,listener)=>events.set(name,listener)},setTimeout:()=>0,clearTimeout(){}});
+  app.activate();return {...app,node,location,navigate(hash){location.hash=hash;return events.get('hashchange')();}};
+}
+const pageApp=pageFixture();
+const pagePost=(id,text)=>({post:{post_id:id,author_role_id:'self',text,created_at:1}});
+const pageHistory={replies:[],has_more:false,next_cursor:null};
+pageApp.client.query=async(name,args)=>name==='commons.post.get' ? pagePost(args.post_id,'Original post body') : pageHistory;
+await pageApp.navigate('#post/original');
+pageApp.node('#page').find('textarea').value=' unsent original reply ';
+let failMissing;
+pageApp.client.query=async name=>name==='commons.post.get' ? new Promise((_resolve,reject)=>{failMissing=reject;}) : pageHistory;
+const missingRoute=pageApp.navigate('#post/missing');
+assert.equal(pageApp.client.draft('post:original'),' unsent original reply ');
+assert.equal(pageApp.node('#page').find('form'),null,'a pending new route must remove the previous submission form');
+assert.doesNotMatch(pageApp.node('#page').text,/Original post body/);
+assert.match(pageApp.node('#freshness').text,/Reading/);
+failMissing(Object.assign(new Error('post not found'),{status:404,client:pageApp.client}));await missingRoute;
+assert.equal(pageApp.node('#page').find('form'),null);
+assert.match(pageApp.node('#page').text,/could not be opened/);
+assert.equal(pageApp.node('#page').find('a').attributes.href,'#posts');
+assert.doesNotMatch(pageApp.node('#page').text,/Original post body/);
+assert.equal(pageApp.client.draft('post:original'),' unsent original reply ');
+
+pageApp.client.query=async(name,args)=>name==='commons.post.get' ? pagePost(args.post_id,'Original post body') : pageHistory;
+await pageApp.navigate('#post/original');
+assert.equal(pageApp.node('#page').find('textarea').value,' unsent original reply ');
+const beforeRefresh=pageApp.node('#page').children;
+pageApp.client.query=async()=>{throw new Error('temporarily offline');};await pageApp.render(false);
+assert.equal(pageApp.node('#page').children,beforeRefresh,'same-route background failure must retain its current content and draft');
+assert.match(pageApp.node('#page').text,/Original post body/);
+assert.equal(pageApp.node('#page').find('textarea').value,' unsent original reply ');
+
+let failSlow;
+pageApp.client.query=async name=>name==='commons.post.get' ? new Promise((_resolve,reject)=>{failSlow=reject;}) : pageHistory;
+const slowRoute=pageApp.navigate('#post/slow');
+pageApp.client.query=async(name,args)=>name==='commons.post.get' ? pagePost(args.post_id,'Latest route body') : pageHistory;
+await pageApp.navigate('#post/latest');
+failSlow(new Error('late abandoned route failure'));await slowRoute;
+assert.match(pageApp.node('#page').text,/Latest route body/);
+assert.ok(pageApp.node('#page').find('form'));
+assert.equal(pageApp.node('#error').hidden,true);
+
+pageApp.node('#page').find('textarea').value='latest draft';
+pageApp.client.query=async name=>{if(name==='commons.conversation.list')return {conversations:[],has_more:false,next_cursor:null};throw Object.assign(new Error('conversation is unavailable'),{status:403,client:pageApp.client});};
+await pageApp.navigate('#messages/unavailable');
+assert.equal(pageApp.node('#page').find('form'),null);
+assert.match(pageApp.node('#page').text,/private conversation could not be opened/);
+assert.equal(pageApp.node('#page').find('a').attributes.href,'#messages');
+assert.equal(pageApp.client.token,'page-access');
+pageApp.client.query=async name=>{if(name==='commons.conversation.list')return {conversations:[],has_more:false,next_cursor:null};throw Object.assign(new Error('access expired'),{status:401,client:pageApp.client});};
+await pageApp.navigate('#messages/private');
+assert.equal(pageApp.client.token,null);
+assert.equal(pageApp.node('#session-expired').hidden,false);
+assert.equal(pageApp.node('#refresh-button').disabled,true);
+assert.equal(pageApp.node('#page').find('form'),null);
+assert.match(pageApp.node('#freshness').text,/Session expired/);
+assert.equal(pageApp.client.draft('post:latest'),'latest draft');
+
+pageApp.activate();let finishAfterLeave;
+pageApp.client.query=async name=>name==='commons.post.get' ? new Promise(resolve=>{finishAfterLeave=resolve;}) : pageHistory;
+const leavingRoute=pageApp.navigate('#post/leaving');
+pageApp.node('#logout-button').listeners.get('click')();
+finishAfterLeave(pagePost('leaving','Late content after Leave'));await leavingRoute;
+assert.equal(pageApp.node('#world').hidden,true);
+assert.equal(pageApp.node('#page').find('form'),null);
+assert.doesNotMatch(pageApp.node('#page').text,/Late content after Leave/);
+console.log('Commons page: route reads remove stale submission forms, failed routes offer safe navigation, drafts survive, same-route refresh content and session/generation recovery remain intact');

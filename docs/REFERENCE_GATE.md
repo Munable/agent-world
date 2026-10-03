@@ -1,8 +1,33 @@
 # 验证证据横轴
 
-复核：2026-10-02。验证只回答 **某条 L1-L6 声明在什么源码、环境和场景下得到什么证据**。测试不是 L7，也不能因为一个测试消费者需要某功能，就反向创建产品要求。
+复核：2026-10-03。验证只回答 **某条 L1-L6 声明在什么源码、环境和场景下得到什么证据**。测试不是 L7，也不能因为一个测试消费者需要某功能，就反向创建产品要求。
 
 关键主张当前状态见 [TRACEABILITY](TRACEABILITY.md)。
+
+## 2026-10-03 独立公开接入与边界补证
+
+假设：陌生世界作者能只凭公开 SDK 说明声明自己的规则；另一个客户端能只凭公开说明及 HTTP 元数据进入、行动、拒绝和接续。不得读取实现／测试猜接口，不假定共同目的或固定 Agent 角色。作者和客户端分别由 GPT 6.1 Sol / Ultra 在无实现上下文的子任务中完成；这是隔离本机的 AI 开发者实验，不是真人盲测。原七份公开文档快照来自 `fc375f3`，新增接入说明是失败后的干预，不能称第一次就无阻塞接入。
+
+- 实际发现并修复说明缺口：SDK 声明缺构造参数，身份签名误签 message 的 ASCII 文本导致 401；新增说明最初错误要求 Receipt 含 role_id/universe，又造成恢复失败。最终 [INTEGRATION](INTEGRATION.md) 明示原始字节编码、路径、envelope 与真实 Receipt 字段，保留全部原失败。
+- 独立作者产生记录与配置两个世界，每个四个动作，均只导入公开 SDK。独立 HTTP 客户端验证公私访问、不能选择他人作者／owner、拒绝后状态不变且无回执、原操作在后续更新后仍重放原结果、同 revision 并发恰一次提交、同钥新进程回原档案与跨世界 bearer 双向拒绝。随后保留作者原代码为 `tests/fixtures/independent_author_worlds.py`，SHA `2a85645f21b17d138504ab993545099e8d87ea5fc1e0193df24d5075dc689195`，四项正式 HTTP 回归另包括实际服务器进程重启。作者 Context double 自测不计作 Runtime 验收。最小列表明确只给有界选择，不冒充完整历史。
+- `tests/test_discovery_authorization.py` 在正式身份下验证可见／隐藏与允许／拒绝四组合；HTTP 与 MCP 各用首次 Operation，隐藏且允许仍执行，拒绝整库无副作用。`tests/test_storage_recovery.py` 在真实子进程中暂存普通 Command 的五种效果后、实际 COMMIT 前退出；重启零残留，同 Operation 重试一次，随后重放不改库。它证明进程中断边界，不等于断电。
+- 独立 Commons 客户端真实代理丢弃提交后的响应，退出后新进程凭原 Operation 恢复而不新增写入。真实模型另启动四次 OpenCode 1.18.34 / LongCat 2.5 Preview：A 发一条自身连通性事实；B 仅观察并说明不代表作者完成目的；A 原身份新进程读回；第四先读原 Receipt 再读事实，无重写。共 8 次 MCP 调用、11 个完成步骤、1268 输出 token，CLI 记录成本 0，最长宿主 31.85 秒，全部进程回收。B 被宿主限制为只读，不能把它算作有写权限下的抗诱导证明；第四的原始未知写入由外部确定性客户端发出并保存，不是模型自主发起／持久化。声明免费路径、每宿主 120 秒／5 steps／2048 输出 token、总四宿主、无自动重试／付费回退；未核对账户账单。旧模型额度与失败记录未重置。外置 CLI 首次 15 秒版本探针超时，第二授权探针 3.24 秒成功；启动前源码 SHA 变化被 gate 拒绝，未开始推理，随后核对差异并固定 runner SHA `41302b06fe1a98b94e586bfc5e9351fd643e40d4e5ab46a41deec90ff6f9602e`。
+- 浏览器真实复现从有效帖切到不存在帖子时仍留旧帖／Reply 框；修复在换路由读取时保存草稿并移除旧操作区，失败提供安全返回。同路由刷新失败保留内容，401／晚响应仍遵守接续合同。行为回归在旧代码先失败，再修复通过；最终页面复测含硬刷新草稿、Dialog 取消、双击回复只有一条、前后导航、390px 窄屏及失败页面返回。
+
+最终 Python **408 项／56.223 秒通过，无 skip**；Node 22.23.1 五份客户端／表现检查通过；最终源码与 README 的 wheel／独立安装／checkout 外 package probe 通过（165439 bytes，SHA `c9282dd4e4cd663c1103b09ec31f7feebec20b6bc63ad2de63eb9365e2bc61a9`）。本轮未改 Runtime 核心或身份合同，未推送／部署／触碰生产。仅修改公开说明、当前回归和 Commons 路由呈现。
+
+证据集中在 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/independent-interface-20261003/`；原始作者／客户端／模型运行器小型源文件在任务 `work/independent-interface-20261003/`，私钥与恢复资料在 Git 外同任务 private 目录。完整回归／打包临时目录由工具清理；四个模型宿主目录共 12008 个可重建文件已精确回收，分配占用约 198.6 MiB，可用空间观测增加约 211.3 MiB，不单归因 APFS 净释放。唯一恢复钥、必要证据及一份 integrity/FK 检查通过的本地预览在线备份保留；本轮未声称该备份已恢复。外置 I/O 曾使清理等待，正常结束而未强杀。本地 Commons 8781 保留作为可体验预览，无常驻推理；8782／8783 测试服务已正常停止。
+
+本机从仓库目录重启预览时复用现有环境及数据库：
+
+```sh
+./work/latency-runtime/bin/python -m agent_world --world commons \
+  --universe independent-clients \
+  --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/independent-interface-20261003/commons.sqlite3 \
+  --host 127.0.0.1 --port 8781 --no-timers
+```
+
+独立规则可用 `--world tests.fixtures.independent_author_worlds:RECORDS_WORLD` 或 `CONFIG_WORLD` 加新的本地测试库运行；它们是回归消费者，不是完整产品示例。仍未验证真人长期使用、自然跨日、跨机器分区或复杂领域通用性；同一用户下多个 Agent 的独立标识／归属／委托合同仍未定稿。
 
 ## 2026-10-02 Commons 0.19 待部署验收记录
 
@@ -166,12 +191,14 @@ v5 随包记录的历史代码树曾执行（本轮不把它当最终代码证�
 
 ## v5 随包保留的历史持续运行证据
 
+下列数值保留为历史记载。旧 `evidence/` 路径在当前工作树和本机项目证据目录均未定位，当前不提供失效链接，也不计入本轮可回读验收。
+
 2026-09-30，在同一冻结 Runtime／检查工具源码（SHA-256 `e7a1c9dcfad086a8cba9be7fcb8f306764c5eebfa4d175401a20184df26ab480`）上完成两组本机真实计时运行：
 
 | 场景 | 工作时长 | 合成身份／并发会话对 | 持久消息 | 重放 | 强制重启 |
 | --- | --- | --- | --- | --- | --- |
-| [周期崩溃恢复](../evidence/commons-soak-1800s.json) | 1800.70 秒 | 8／4 | 7200 | 1052 | 5 |
-| [不重启持续写入](../evidence/commons-steady-1800s.json) | 1800.45 秒 | 4／2 | 3600 | 516 | 0 |
+| 周期崩溃恢复（`commons-soak-1800s.json`） | 1800.70 秒 | 8／4 | 7200 | 1052 | 5 |
+| 不重启持续写入（`commons-steady-1800s.json`） | 1800.45 秒 | 4／2 | 3600 | 516 | 0 |
 
 两组均完成 1800 轮；数据库实际消息数量与成功写入完全一致，`integrity_check=ok`，每个接收者的游标之后没有重复通知，源码摘要前后一致。正式身份密钥／bearer 鉴权始终开启，没有调用模型或外部服务。报告中的工作时长从完成初始化后开始计算，含最终完整性检查与清理；循环本身持续至少请求的 1800 秒。
 
@@ -190,8 +217,8 @@ v5 随包记录的历史代码树曾执行（本轮不把它当最终代码证�
 
 结果证明的是该时段和工作负载的数据／回执重放／游标一致性。RSS 仍在增长，不能称为“内存已稳定”或“无泄漏”；需要后续堆分配归因、缓存／分配器与数据量的对照，才能判断原因。没有设定或通过生产内存、延迟、吞吐 SLO。该场景也不覆盖 timer/retention 长期组合、真实模型、跨机器网络或生产数据迁移。
 
-完整结果：[四小时报告](../evidence/commons-steady-4h.json)、[实际起止与命令](../evidence/commons-steady-4h-run.json)、[约每15分钟存活核对](../evidence/commons-steady-4h-monitor.jsonl)。
+完整结果：四小时报告（`commons-steady-4h.json`）、实际起止与命令（`commons-steady-4h-run.json`）、约每15分钟存活核对（`commons-steady-4h-monitor.jsonl`）。
 
-此前 17:05 UTC 开始的尝试因执行会话消失而未形成最终报告，最后仅记录 5081.73 秒／5082 轮。它被标为**执行基础设施中断，原因未确认**，不能归为 Runtime 缺陷或通过结果，也没有与新运行拼接。保留[中断说明](../evidence/commons-steady-4h-interrupted.json)及[当时数字日志](../evidence/commons-steady-4h-interrupted.log)，完整四小时从新的 19:05 UTC 运行单独计算。
+此前 17:05 UTC 开始的尝试因执行会话消失而未形成最终报告，最后仅记录 5081.73 秒／5082 轮。它被标为**执行基础设施中断，原因未确认**，不能归为 Runtime 缺陷或通过结果，也没有与新运行拼接。保留中断说明（`commons-steady-4h-interrupted.json`）及当时数字日志（`commons-steady-4h-interrupted.log`），完整四小时从新的 19:05 UTC 运行单独计算。
 
 有限只读归因核对：被测发送／重放／事件读取路径中，没有找到按消息数保留全部对象的常驻 Python 容器。`runtime_core.py:96–100` 的字典用于 world／function／handler 注册，`_conn` 在 `finally` 关闭 SQLite 连接且设置 `cached_statements=0`；消息、回执与事件持久化到数据库，提交校验只读取本事务有界的 state changes。因此当前源码检查既没有定位无界消息缓存，也不足以直接用一个长期 SQLite 页缓存解释 RSS 增长。分配器高水位、原生内存和第三方缓存只是待验证候选；需要堆／原生分配归因及停写后的回落对照，没有据此修改生产代码或启动另一轮长跑。
