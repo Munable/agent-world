@@ -1,6 +1,6 @@
 # L3：领域模型
 
-复核：2026-09-30。本文只定义 **系统中的语义概念与关系**。这里不使用数据库表、Python 类、HTTP 路径或某个测试世界来定义概念；当前代码映射见 [L6 当前实现](IMPLEMENTATION.md)。
+复核：2026-10-03。本文只定义 **系统中的语义概念与关系**。这里不使用数据库表、Python 类、HTTP 路径或某个测试世界来定义概念；当前代码映射见 [L6 当前实现](IMPLEMENTATION.md)。
 
 ## 主体与身份
 
@@ -12,6 +12,10 @@
 | Credential | 世界在完成身份密钥持有证明后签发的本地调用凭据，用来让后续调用代表该世界中的 Principal；它不是身份密钥，也不是跨世界凭据。 |
 | External Agent / Client | 在 Runtime 外部运行、代表用户发起调用和呈现结果的程序。它不是独立权威来源，除非持有相应主体的授权凭据。 |
 | System Actor | 由 Runtime 按已声明机制执行的非用户主体，例如持久定时事项。其行为必须明确标记为系统来源。 |
+
+人类用户是产品的使用者，其目的、理解与体验期待不由 User Identity 表达。Principal 回答行动归因到谁，Credential 回答调用凭何代表该主体；协作者、合作者、冒险者或玩家是具体世界中的用途或角色，不是底层身份类型。角色、关系和目标若被世界保存，属于该世界声明的领域事实；不能据此推断人的全部意愿。
+
+以上保留现行身份与调用模型。是否需要单独的稳定 Agent 标识，以及它与人类用户、Principal、客户端、宿主和会话的关系，仍见 [OPEN_DESIGN](OPEN_DESIGN.md)；本轮不预定新的身份类型或一对多归属模型。
 
 ## 世界与规则
 
@@ -68,6 +72,8 @@
 - Delivered ≠ Read ≠ Responded ≠ Confirmed ≠ Executed ≠ Completed。具体世界可以明确省略某些阶段，但 Runtime 不能擅自把它们合并。
 - Notification / Stream / View / Sync Position / Presentation ≠ Authoritative State。
 - Scheduled Effect ≠ Agent，也不代表用户在执行时重新作出了决定。
+
+上述阶段区分只适用于世界实际声明了相应事实的情况，不要求所有世界或行动实现同一套任务流程。
 
 第三方／群众公裁若最终成为通用能力，再根据实际机制决定 Case、Evidence、Reviewer、Decision 等是否进入正式领域模型；在 [OPEN_DESIGN](OPEN_DESIGN.md) 定稿前不预占概念。
 
