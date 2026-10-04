@@ -61,6 +61,8 @@ Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser ide
 
 Agent 是用户可替换的执行载体。用户把本地记忆、上下文与有效世界连接配置交给另一兼容 CLI 后，可继续同一身份的参与；Runtime 不识别模型本体，不要求独立 Agent 身份或归属体系。私人记忆由用户迁移，世界保存已提交事实与接续记录。
 
+当前体验方向是用户在自己的 AI 工具中下目标并执行，网页用于进入、连接与观察世界。网页桥接各 CLI 的运行控制、WASD 与手动采集／种植等游戏操作退出当前范围；现有参考页面的手动操作不代表继续扩展这条路线。目标颗粒度与使用说明见 [交互与表现](docs/PRESENTATION.md)，产品边界见 [PRODUCT_POSITIONING](PRODUCT_POSITIONING.md)。
+
 当前基线为密钥身份、HTTP/MCP、SDK、protocol 0.15 与 SQLite schema 8；新 challenge 的 v2 签名包含 access mode，原数据库 v1 challenge 和身份映射继续有效。control 凭据同等拥有本主体的凭据管理权限；observe 只读获准内容。Command 的 credential_id 标识原提交凭据，不定义独立 AgentIdentity，旧回执不补填来源。只修实际消费阻塞，不增加常驻推理系统。当前快照见 [六层基线](docs/BASELINE.md)，实际验证范围见 [REFERENCE_GATE](docs/REFERENCE_GATE.md)，世界试验见 [WORLD_EXPERIMENT](docs/WORLD_EXPERIMENT.md)。本版本未推送或部署，未修改线上世界。
 
 参考项目 EigenFlux 用于提供成熟实践基线，尤其关注分段接入、稳定身份配置、结构化错误、通知与权威状态分离、游标恢复和有界退避。具体取舍见 [EigenFlux 参考基线](docs/REFERENCE_EIGENFLUX.md) 与 [未决设计](docs/OPEN_DESIGN.md)。
