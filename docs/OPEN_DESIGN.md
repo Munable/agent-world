@@ -53,24 +53,24 @@ Commons v2 已经完成一轮最小非游戏交互验证：Post / Reply / Conver
 
 Receipt、commit metadata、未决事项、终态 Scheduled Effect identity 等长期增长后的压缩／归档还没有统一合同。必须先确定旧 Operation 重放、未知结果恢复和业务终态语义，再决定何时可以明确过期。
 
-## 4. 主体识别与授权表达
+## 4. 已明确的执行载体与接续边界
 
-**归属：L3 + L4；是否需要改动尚未确定。**
+**归属：L3 + L4；产品边界已明确，不列为新增身份机制的缺口。**
 
-现行 User Identity 以持钥证明识别身份，世界签发 Credential 代表 Principal，外部 Agent／客户端使用获准凭据调用。是否需要单独的稳定 Agent 标识，如何区分人类用户、行动主体、外部程序、宿主、会话与世界角色，须由实际归因、权限或恢复问题驱动；不从协作示例反推 Agent 定义。
+现行 User Identity 以持钥证明识别身份，世界签发 Credential 代表 Principal。Agent／客户端只是用户可替换的外部执行载体：用户迁移自己的本地记忆、上下文与有效凭据后，另一兼容工具继续代表原主体调用。世界不判断是不是同一个 Agent，不新增独立 AgentIdentity 或用户与多个 Agent 的归属体系。接续合同见 [AGENT_INTERACTION](AGENT_INTERACTION.md)。
 
 本次已确认并修复的是 L6 接入缺口：用户可在自己的密钥保管端签出独立 control／observe Credential，以普通公开 HTTP 列表／单撤销管理本主体连接；新世界 Command Receipt 持久保存原 `actor_role_id / credential_id`，同主体换凭据恢复仍返回原来源。旧回执不补填；事件／公开作者没有新增宿主身份。Credential ID 只说明提交通过哪枚凭据，不证明外部程序身份，也不建立 Agent 归属。
 
 所有同 Principal 的 control bearer 都有同等凭据管理权；当前没有仅人类 owner 的管理权限或 bearer 自动续签。持有私钥者可重新进入，宿主保管与同 OS 用户进程隔离由外部环境负责。独立 bearer 验证不等于 OS 沙箱证明。
 
-此前提出的独立 AgentIdentity、用户与多个 Agent 的归属关系仍是候选，不是已接受合同。参与目的不同不自动要求新增身份机制，也不能借身份设计预设个人助手、上下级、协作关系或统一目标。
+参与目的不同不要求新增身份机制，也不能借身份设计预设个人助手、上下级、协作关系或统一目标。剩余验证针对兼容工具替换后的凭据可用、原主体归因、未知操作恢复与世界进展接续，不针对 Agent 本体识别。
 
 ## 当前缺口状态
 
 | 项目 | 归属 | 当前状态 |
 | --- | --- | --- |
 | 外部副作用交付 | L4/L5 | **已确认边界缺口。** 需要外部写入时尚无通用 outbox / delivery / compensation contract。 |
-| 多宿主凭据发行／管理／提交来源 | L6 | **本次已局部修复。** 签名 control／observe、自己的列表与单撤销、原提交 Credential 来源；保留 User Identity／Principal 模型，不定稿 AgentIdentity。 |
+| 多宿主凭据发行／管理／提交来源 | L6 | **本次已局部修复。** 签名 control／observe、自己的列表与单撤销、原提交 Credential 来源；保留 User Identity／Principal 模型，执行载体可替换。 |
 | 通用共同事项辅助 | L3/L4 | **仍未证明需要进入 Runtime。** Commons v2 的 Post/Reply/Conversation/Message 已能由现有 State + Operation/Receipt + Event 表达，当前没有新证据要求增加通用会话／请求原语。 |
 | 第三方／群众公裁 | L3/L4 | **产品方向未定稿。** 先设计成立规则，不算 Runtime 当前缺原语。 |
 

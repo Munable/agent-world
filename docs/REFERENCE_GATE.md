@@ -50,7 +50,7 @@
   --host 127.0.0.1 --port 8781 --no-timers
 ```
 
-独立规则可用 `--world tests.fixtures.independent_author_worlds:RECORDS_WORLD` 或 `CONFIG_WORLD` 加新的本地测试库运行；它们是回归消费者，不是完整产品示例。仍未验证真人长期使用、自然跨日、跨机器分区或复杂领域通用性；同一用户下多个 Agent 的独立标识／归属／委托合同仍未定稿。
+独立规则可用 `--world tests.fixtures.independent_author_worlds:RECORDS_WORLD` 或 `CONFIG_WORLD` 加新的本地测试库运行；它们是回归消费者，不是完整产品示例。仍未验证真人长期使用、自然跨日、跨机器分区或复杂领域通用性。Agent 是可替换执行载体；本地记忆由用户迁移，世界凭据保持原主体归因。独立 Agent 标识与归属体系不作为产品要求或验收缺口；这些历史实验也不证明任意 CLI 的本地记忆格式和连接配置都已兼容。
 
 ## 2026-10-02 Commons 0.19 待部署验收记录
 
