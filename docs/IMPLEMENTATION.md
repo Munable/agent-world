@@ -12,6 +12,8 @@
 - 组合入口可同时挂载 Web 产品原型、HTTP API、MCP、timer worker 和 retention maintenance。
 - Runtime 本身不调用模型，也没有用户 Agent 执行器。
 
+普通 HTTP 每次从请求 bearer 解析主体，不依赖上一段模型对话。当前 MCP 使用 `stateless_http=False`，`BearerIdentityMiddleware.sessions` 在进程内绑定 session_id 与 token_id；服务重启后客户端重新 initialize，但不改变用户身份或持久世界事实。组合入口对同一 SQLite 路径分别创建 HTTP、MCP 与产品页 Runtime，规则注册、锁及等待唤醒在进程内，世界状态和回执以数据库为准。这些通信／执行状态不保存用户的提示词、目的、私人记忆或模型推理进度。
+
 0.20 新增 [River Camp 有界世界实验](WORLD_EXPERIMENT.md)：自由意图、裁判、本人接受和资源后果由独立 World Definition 消费现有 SDK。组合应用公开身份默认签发 24 小时凭据；没有新增 Runtime 原语或托管推理循环。
 
 0.21 的 `examples.camp_campaign` 是独立的有限章节 World Definition，组合原 River Camp 的初桥规则。增加两趟固定外部补给、一次剧情涨水、共享仓库、一次应急箱和两种修复；共同目标与个人真实贡献分别派生，货运通行只是一项里程碑。第一趟补给关闭自由桥梁提案，后续使用已定义的章节行动；不宣称完整跑团或自动生成后续章节。`examples.river_camp_app --campaign` 选择独立 world_id／universe／8772，重用数据库前只读核对世界类型，不把原实验库改成新世界。前端显示当前阶段、可用行动与阻塞原因；回访对比仅缓存本浏览器的公开库存／路线／服务端时间，不缓存私注、权限或模型思考。该章节本身未改变 Runtime／protocol／SQLite schema。
