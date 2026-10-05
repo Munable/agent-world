@@ -4,13 +4,34 @@
 
 Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结构化接口，按世界开发者定义的规则操作同一持久世界。Runtime 不运行用户 Agent，也不把自然语言消息本身解释成确认、授权或完成。
 
-当前 0.22.0 支持同一身份签发多枚独立的 control／observe 凭据、列出并撤销自己的单枚凭据，并从新 Command 回执恢复原提交主体／凭据来源。Commons、River Camp 与 Camp Campaign 保留各自范围的消费证据。用户公钥跨世界代表同一个底层身份，各世界只保存自己的公钥→本地档案映射并签发自己的 bearer credential；正常进入不需要 operator 预建 Role 或 Join Ticket。
+当前官方世界是 **Living Frontier／渡鸦溪**：参与者探索、交流，并沿尚未探索的出口共创新地点；本地原型已有多人模型与网页的局部验收，整体可玩性仍在迭代。0.22.0 的 Runtime 支持同一身份签发多枚独立的 control／observe 凭据、列出并撤销自己的单枚凭据，并从新 Command 回执恢复原提交主体／凭据来源。用户公钥跨世界代表同一个底层身份，各世界签发自己的 bearer credential；正常进入不需要 operator 预建 Role 或 Join Ticket。
 
 > **开发／维护前先读 [AGENTS.md](AGENTS.md)。** 它定义仓库工作原则，包括“早期项目只维护现行事实、不背不存在的历史兼容债”。
 
-## Try participant-supplied decisions
+## Try Living Frontier
 
-当前先验证参与者的 Agent 能否在正常访问时，顺带领取并回答另一位参与者的待决事项。独立示例不设置全局 GM，不运行服务器模型、后台轮询、超时或自动改派；只提供派发、有限报价、本人接受和规则结算。它是协议实验，尚不代表自由生成的 D&D 世界。
+在源码目录复用本项目已有 Python 环境；先确认 DevDisk 已挂载。首次创建独立试玩库：
+
+```sh
+work/latency-runtime/bin/python -m examples.frontier_app --init-local \
+  --db /Volumes/DevDisk/DeveloperData/agent-world/frontier-play/data/world-v2.sqlite3 \
+  --private-dir /Volumes/DevDisk/DeveloperData/agent-world/private/frontier-play-v2 \
+  --port 8807
+```
+
+打开 [本地试玩](http://127.0.0.1:8807/)。已有服务运行时直接打开页面；已有库重启时去掉 `--init-local` 和 `--private-dir`，重用同一数据库，不并行启动两个写入进程。初始化只建立四个普通合成密钥身份，没有 GM；网页可创建或恢复自己的身份。
+
+用户在自己的 AI 工具中下目标、生成内容与推理，网页观察同一世界，也可直接提交已有的有限动作。未知出口通过结构化生成包成为可进入、可交互的共享地点；已有动作由代码结算，只有已有物件的新方法走另一参与者判断、本人接受的有限流程。没有预置章节、统一目标、固定主持人或服务器推理循环。当前只采用第五版一级角色与 d20 检定，不宣称完整 D&D。
+
+规则、身份／连接、完整启动方法、实际结果与未验证项见 [FRONTIER_WORLD](docs/FRONTIER_WORLD.md)。四密钥、12个有界真实宿主已经验证共享生成、物件交接和等待接续，同时暴露“检定成功但缺发现正文”的问题；新正文机制已修复并经网页与回归验证，修复后的真实模型连续游玩仍待验证。此前示例和证据保留其适用范围，不能代替本世界的多人、模型或趣味验收。
+
+## Earlier examples and scoped evidence
+
+以下入口保留已有世界与协议实验，不是当前官方世界的新玩家起点。已有数据库与运行中的服务继续保留，普通体验不需要启动所有示例。
+
+### Participant-supplied decisions
+
+此前隔离实验验证参与者的 Agent 能否在访问时领取并回答另一位参与者的待决事项。它不设置全局 GM，不运行服务器模型、后台轮询、超时或自动改派；只提供派发、有限报价、本人接受和规则结算。其短流程证据不等于自由世界完整验收。
 
 ```sh
 python -m examples.participant_app --init-local \
@@ -20,9 +41,9 @@ python -m examples.participant_app --init-local \
 
 初始化只建立 A/B/C 三个合成密钥身份。通过正式 HTTP/MCP 接入，先读取 `participant.handbook` 和函数 schema；`participant.visit` 是会领取附加题的写操作，必须使用稳定 Operation。历史 `received_intents` 不等于本次领题；只有 `additional_task` 表示当前待答事项。等待先取 bootstrap 通知锚点、再 look；通知到达后仍读取当前事实，超时只结束读取。重启已有库时去掉初始化参数。当前方案、实际验证和未验证边界见 [OPEN_DESIGN](docs/OPEN_DESIGN.md)。
 
-## Try the existing fifth-edition lighthouse
+### Existing fifth-edition lighthouse
 
-既有有限示例：**旧灯塔地城**。采用 SRD 5.1 的两种一级角色与原创六房间场景。网页可以直接探索、交谈、战斗，也可下载连接资料让自己的 CLI 使用同一身份行动。常规玩法不依赖外部 AI 裁决者在线；额外自由意图先展示有限裁决与风险，再由本人承诺。它保留已完成的规则／恢复证据，不作为下一版自由世界的新玩家起点。
+既有有限示例：**旧灯塔地城**。采用 SRD 5.1 的两种一级角色与原创六房间场景。网页可以直接探索、交谈、战斗，也可下载连接资料让自己的 CLI 使用同一身份行动。常规玩法不依赖外部 AI 裁决者在线；额外自由意图先展示有限裁决与风险，再由本人承诺。它保留已完成的规则／恢复证据，不作为当前官方世界的新玩家起点。
 
 ```sh
 python -m pip install -e .
@@ -33,7 +54,7 @@ python -m examples.dnd_app --init-local \
 
 数据父目录权限须为 `0700`。首次初始化仅创建四个本地合成测试身份，其中 GM 具备有限裁决权限；网页普通用户用自己的密钥进入。已有库重新启动时去掉 `--init-local` 和 `--private-dir`，不得重复启动进程写同一数据库。页面打开 `http://127.0.0.1:8796/`。第一次玩看 [试玩指南](docs/DND_PLAY.md)；维护者的完整规则、许可、启动与实际证据见 [DND_WORLD](docs/DND_WORLD.md)，Agent 按需阅读机制见 [WORLD_GUIDE](docs/WORLD_GUIDE.md)。
 
-## Try Commons
+### Commons
 
 ```sh
 python -m pip install -e .
@@ -52,9 +73,9 @@ Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser ide
 
 打开 `http://127.0.0.1:8766/`。该已有服务不因 River Camp 试验重启；同一端口不重复启动。此库保留上一轮示例讨论，进入页面不会启动推理。换新本地世界时使用受保护的新数据库，保留原库可继续已有身份和内容。
 
-## Try River Camp
+### River Camp
 
-当前 Mac 的独立实验世界在 `http://127.0.0.1:8770/`。页面观察库存、通行状态、提议与后果；参与者可以直接探索、提议、接受自己的获准方案或连接自己的外部 Agent。裁判须由可信初始化或创始者显式授权，世界不会自动运行裁判模型。规则、当前证据与限制见 [WORLD_EXPERIMENT](docs/WORLD_EXPERIMENT.md)。
+既有独立实验入口为 `http://127.0.0.1:8770/`。页面观察库存、通行状态、提议与后果；参与者可以直接探索、提议、接受自己的获准方案或连接自己的外部 Agent。裁判须由可信初始化或创始者显式授权，世界不会自动运行裁判模型。该实验的历史证据与限制见 [WORLD_EXPERIMENT](docs/WORLD_EXPERIMENT.md)。
 
 已有服务运行时直接打开页面。需要重新启动同一世界时，在源码目录重用原数据库：
 
@@ -65,9 +86,9 @@ Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser ide
 
 不要并行启动两个进程写同一数据库。仅创建全新隔离世界时，显式选择尚不存在的新数据库，再传 `--init-local --private-dir /安全的私密身份目录`；该命令建立五个合成测试身份，并非五名真人或五个常驻自治宿主。恢复已有世界不传 `--init-local`，不重置身份、授权或状态。
 
-## Try Camp Campaign
+### Camp Campaign
 
-普通用户的本地交付入口为 `http://127.0.0.1:8772/`，使用独立的持续营地世界。交付库通过正规提议、裁判与本人接受接口预置一座安全货运桥，用户进入后即可选择个人目标，参与补给、建仓、剧情涨水与修复，无需取得离线裁判密钥。原 8770 实验世界继续保留；8773 只用于隔离验收。
+上一轮有限营地入口为 `http://127.0.0.1:8772/`。原交付库通过正规提议、裁判与本人接受接口预置一座安全货运桥，可继续已有补给、建仓、剧情涨水与修复状态。这些固定章节不作为当前官方世界的设计目标；原 8770 实验世界继续保留，8773 是此前隔离验收入口。
 
 已有 8772 服务运行时直接打开页面。需要重新启动交付世界时，在源码目录重用同一数据库：
 
@@ -82,7 +103,7 @@ Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser ide
 
 ## 当前主线
 
-**当前先完成一个可一起游玩的官方自由世界，并据此检验底层。** 基于经典第五版规则按参与过程生成内容，不预设章节、共同目标和结局；先验证参与者贡献计算的裁决链。参与目的、职业与游戏角色仍由用户和具体世界决定，不提升为 Runtime 原语。Commons、营地和旧灯塔保留已有范围的消费证据。
+**当前完成渡鸦溪的真实多人体验验收，并据此检验底层。** 自由生成、共享地图、有限物件互动、参与者判断与网页已实现，接下来以最终代码的运行证据判断是否贯通；当前不宣称模型完整通过、真人趣味或长期运行成立。没有预置章节、共同目标、固定 GM 或后台模型。参与目的、职业与游戏角色仍由用户和具体世界决定，不提升为 Runtime 原语。
 
 Agent 是用户可替换的执行载体。用户把本地记忆、上下文与有效世界连接配置交给另一兼容 CLI 后，可继续同一身份的参与；Runtime 不识别模型本体，不要求独立 Agent 身份或归属体系。私人记忆由用户迁移，世界保存已提交事实与接续记录。
 
