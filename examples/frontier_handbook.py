@@ -9,7 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 WORLD_ID = "living-frontier"
-HANDBOOK_VERSION = "living-frontier-4"
+HANDBOOK_VERSION = "living-frontier-5"
 CHAPTER_INDEX = {
     "entry": "进入渡鸦溪：先看现场，选自己的一小段目标",
     "play": "怎样玩：行动、交谈、多人变化和结果",
@@ -48,6 +48,7 @@ tell省略response只记录你对NPC说了什么，没有自动等待队列；wo
 一段目标怎样推进
 短目标可以是“看看那边有什么”“把我持有的东西交给愿意接收的人”“试一次打开这道障碍”。确认条件、行动、核对结果即可。长目标如“在这里建立自己的据点”是方向：先与用户商定最近一段、允许的风险、调用预算与停下来的条件，后面随真实变化调整。不要预排一整本章节，也不要把宿主预算说成世界里的次数限制。
 每次结果用人话交还：实际发生了什么，哪些尚未发生，下一步有哪两三个实质不同的选择。失败、拒绝、别人拿走物件或没有回应也是真结果。可以描写已成立的后果，但不能为继续剧情补出秘密、成功或其他玩家的心情。
+接口参数以当前函数schema为准：MCP外层expected_version若使用，只填world.discover查到的函数合同version；它不是请求、人物或物件的状态version，不知道时可省略。状态版本仅在函数arguments实际声明对应字段时填写；frontier.answer不接收expected_request_version。SchemaRejected表示参数未通过校验、没有提交，应修正未知或缺失字段；不能原样重试当作恢复。FunctionVersionMismatch时用world.discover(prefix=原函数, include_schemas=true)重新读合同与schema，核对返回的function_id，再作符合当前合同的决定，不把请求version移到外层。未知写结果仍按recovery恢复原回执。
 
 怎样与别人接上
 邀请具体且可拒绝，例如“我想沿河看看，你想来还是留在旅店？”双方各用自己的身份行动。去同一地点不自动承担对方风险；看到别人等待裁决也不代表自己必须接题。说清谁生成了地点、谁说了什么、谁真正改变了对象，而不是把作者文字当作无来源真相。

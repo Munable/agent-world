@@ -35,7 +35,7 @@ MODELS = ("gpt-6-luna", "gpt-6.1-sol")
 LIMITS = {"max_hosts": MAX_RUNS, "world_calls_per_host": MAX_TOOLS,
           "seconds_per_host": MAX_SECONDS, "reported_output_tokens_per_host": MAX_OUTPUT,
           "waits_per_host": MAX_WAITS, "seconds_per_wait": 30}
-CORE_TOOLS = ("world.bootstrap", "world.get_changes", "world.wait_changes", "world.get_receipt")
+CORE_TOOLS = ("world.bootstrap", "world.discover", "world.get_changes", "world.wait_changes", "world.get_receipt")
 FRONTIER_TOOLS = tuple("frontier." + name for name in (
     "join", "look", "history", "map", "requests", "move", "expand", "say", "tell",
     "examine", "check", "take", "unlock", "transfer", "rest", "request", "visit", "answer",

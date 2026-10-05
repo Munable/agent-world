@@ -198,7 +198,10 @@ def core_schema(name, *, auth_required):
 def function_schema(desc, *, auth_required):
     props = {
         "arguments": embedded_arguments_schema(desc["input_schema"]),
-        "expected_version": {"type": "integer", "minimum": 1},
+        "expected_version": {
+            "type": "integer", "minimum": 1,
+            "description": "Optional function contract version from world.discover or the tool's function_version metadata. This is NOT a request, character or object state version; those belong in arguments only when the world schema declares them. Omit this field if you have not discovered the function version.",
+        },
     }
     required = ["arguments"]
     if not auth_required:

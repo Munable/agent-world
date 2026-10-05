@@ -8,7 +8,7 @@ const statuses={pending:'等待有人领取',assigned:'已有人领取，等待�
 const states={sealed:'尚未打开',open:'已经打开',taken:'已被拿取',obstructed:'仍有阻碍',resolved:'已经解决',unread:'尚未解读',read:'已经解读'};
 const kinds={cache:'可开启的容器',barrier:'可处理的阻碍',inscription:'可解读的文字'};
 const effects={resolve_object:'解决这一物件的当前状态',none:'不改变物件状态'};
-const actionNames={join:'进入',move:'前往',expand:'创作地点',say:'说话',tell:'交谈',check:'检定',unlock:'使用物件解锁',take:'拿取',transfer:'交付',rest:'休息',request:'提出自由行动',visit:'领取附加题',answer:'回答附加题',accept:'接受并结算',withdraw:'撤回'};
+const actionNames={join:'进入',move:'前往',expand:'创作地点',say:'说话',tell:'交谈',check:'检定',unlock:'使用物件解锁',take:'拿取',transfer:'交付',rest:'休息',request:'提出自由行动',visit:'领取附加题',assigned:'领取附加题',answer:'回答附加题',accept:'接受并结算',withdraw:'撤回'};
 const actionHints={
   'frontier.join':'创建人物，或接着上次的经历继续。',
   'frontier.move':'沿这条已知通路前往，人物位置会保存。',
@@ -28,7 +28,7 @@ const actionHints={
 };
 const chapters=[['entry','进入与接续'],['play','开始探索'],['creating','创作接续地点'],['helping','帮助判断他人的行动'],['recovery','断线、重试与身份']];
 const classes=[['fighter','战士','力量见长，适合处理重物与阻碍。'],['rogue','游荡者','敏捷见长，适合开启容器和灵活探索。']];
-let key=null,profile=null,snapshot=null,busy=false,generation=0,readSeq=0,timer=null,agentClient=null,lastRead=0;
+let key=null,profile=null,snapshot=null,busy=false,generation=0,readSeq=0,timer=null,agentClient=null,lastRead=0,readInterrupted=false;
 let mapItems=new Map(),mapCursor=0,mapMore=false,mapTotal=0,mapFlight=null;
 let history=new FrontierHistory(),latestHistoryFlight=null,olderHistoryFlight=null;
 let requestPages={own:{items:new Map(),cursor:0,more:false,total:0},received:{items:new Map(),cursor:0,more:false,total:0}};
@@ -43,13 +43,18 @@ function announce(value){$('message').textContent=value;$('message').hidden=!val
 function download(filename,value){const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)+'\n'],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function saveDrafts(){if(!profile)return;client.saveDraft('frontier-intent',$('intent').value);client.saveDraft('frontier-say',$('say-text').value);if($('intent-target').value)client.saveDraft('frontier-intent-target',$('intent-target').value);if(createContext)saveCreation();}
 function restoreDrafts(){if(!profile)return;$('intent').value=client.draft('frontier-intent');$('say-text').value=client.draft('frontier-say');}
+function renderFreshness(){
+  const last=lastRead?'最后成功读取 '+new Date(lastRead).toLocaleTimeString():'尚未读到完整现场';
+  $('freshness').textContent=readInterrupted?'读取中断 · '+last+'；当前显示旧现场，页面可见时会继续读取。':lastRead?'最后读取 '+new Date(lastRead).toLocaleTimeString()+' · 页面可见时每6秒读取已保存状态，不运行外部 Agent。':'正在读取完整现场…';
+}
 function showError(error){
   if(error.cancelled||error.staleAuth)return;
+  if(error.refreshRead&&error.status!==401){readInterrupted=true;renderFreshness();$('stale-state').textContent='现场读取暂时中断，当前显示上次读取的人物、地点和事项。页面可见时会继续读取，完整读取成功后此提示自动消失；原操作与草稿仍保留，写入结果不明时仍须核对原操作。';$('stale-state').hidden=false;if(current())schedule();controls();return;}
   const message=error.status===401?'这次访问的授权已到期或失效。请用同一密钥重连，核对最新状态后继续；身份、草稿和原操作仍已保留。':error.code==='StateConflict'?'局面已经改变，这次操作没有提交。解除被拒绝的请求，再读取最新状态后重新选择。':error.message||String(error);
   $('error').textContent=message;$('error').hidden=false;
   const inline=$('risk-dialog').open?$('risk-error'):$('create-dialog').open?$('create-error'):null;
   if(inline){inline.textContent=message;inline.hidden=false;inline.scrollIntoView({block:'nearest'});}
-  if(error.status===401&&profile){client.token=null;announce('');$('reconnect').hidden=false;$('connection-state').textContent='本页授权到期或失效，请同钥重连。';$('freshness').textContent='旧现场：当前显示上次读取的状态，重连后更新。';$('stale-state').hidden=false;$('credentials-status').textContent='旧连接列表：以下是上次读取的状态，标为“有效”也不代表当前仍有效。请同钥重连后重新核对。';$('agent-status').textContent='网页授权到期或失效，暂时无法签发新连接。以前下载的连接是否有效，请重连后核对。';}
+  if(error.status===401&&profile){readInterrupted=false;client.token=null;announce('');$('reconnect').hidden=false;$('connection-state').textContent='本页授权到期或失效，请同钥重连。';$('freshness').textContent='旧现场：当前显示上次读取的状态，重连后更新。';$('stale-state').textContent='当前显示上次读取的人物、现场、地图、事项和连接状态。网页授权到期或失效，请同钥重连后核对最新情况；身份、草稿和原操作仍已保留。';$('stale-state').hidden=false;$('credentials-status').textContent='旧连接列表：以下是上次读取的状态，标为“有效”也不代表当前仍有效。请同钥重连后重新核对。';$('agent-status').textContent='网页授权到期或失效，暂时无法签发新连接。以前下载的连接是否有效，请重连后核对。';}
   controls();
 }
 function pending(){
@@ -84,7 +89,7 @@ async function enter(candidate,displayName='',classId='fighter'){
   const nextKey=await validateKey(await candidate);active();const response=await client.authenticate(nextKey,{isCurrent:()=>session===generation});active();
   key=nextKey;await savedKey(key);active();profile=response.role_profile;
   $('entry').hidden=true;$('app').hidden=false;$('reconnect').hidden=true;$('connection-state').textContent='本页授权到期 '+time(client.expiresAt);$('who').textContent=profile.display_name;
-  $('stale-state').hidden=true;$('credentials-status').textContent='';$('agent-status').textContent='';
+  readInterrupted=false;lastRead=0;$('stale-state').hidden=true;$('credentials-status').textContent='';$('agent-status').textContent='';
   snapshot=null;sceneRenderKey='';taskRenderKey='';names.clear();objects.clear();mapItems.clear();mapCursor=0;mapMore=false;mapTotal=0;mapFlight=null;history=new FrontierHistory();latestHistoryFlight=null;olderHistoryFlight=null;
   for(const id of ['character-stats','character-abilities','inventory','character-detail','scene-npcs','scene-objects','available-actions','open-exits','nearby','my-requests','side-question','world-map','last-result','history-list','request-history','credentials'])$(id).replaceChildren();
   $('character-name').textContent='正在读取人物…';$('character-class').textContent='';$('scene-title').textContent='正在读取现场…';$('scene-description').textContent='';$('scene-author').textContent='';$('last-result-card').hidden=true;$('my-requests-card').hidden=true;
@@ -100,10 +105,18 @@ async function enter(candidate,displayName='',classId='fighter'){
 }
 function schedule(){clearTimeout(timer);timer=setTimeout(async()=>{if(current()&&!document.hidden&&!busy&&!$('risk-dialog').open&&!$('create-dialog').open){try{await refresh();}catch(error){showError(error);}}if(profile)schedule();},6000);}
 async function refresh(){
-  const session=generation,seq=++readSeq,value=await client.query('frontier.look');if(session!==generation||seq!==readSeq||!current())return;
-  if(value.world_id!=='living-frontier'||!Array.isArray(value.available_actions)||!Array.isArray(value.directory))throw new Error('世界现场信息不完整，请重连后读取。');
-  snapshot=value;lastRead=Date.now();render();
-  if(Number.isInteger(snapshot.history_latest_seq)){history.observeLatest(snapshot.history_latest_seq);renderHistory();if(pageId()==='history'&&history.needsLatest)await readLatestHistory();}
+  const session=generation,seq=++readSeq;
+  try{
+    const value=await client.query('frontier.look');if(session!==generation||seq!==readSeq||!current())return;
+    if(value.world_id!=='living-frontier'||!Array.isArray(value.available_actions)||!Array.isArray(value.directory))throw new Error('世界现场信息不完整，请重连后读取。');
+    snapshot=value;render();
+    if(Number.isInteger(snapshot.history_latest_seq)){history.observeLatest(snapshot.history_latest_seq);renderHistory();if(pageId()==='history'&&history.needsLatest)await readLatestHistory();}
+    if(session!==generation||seq!==readSeq||!current())return;
+    lastRead=Date.now();if(readInterrupted){readInterrupted=false;$('stale-state').hidden=true;}renderFreshness();
+  }catch(error){
+    if(error.cancelled||error.staleAuth||session!==generation||seq!==readSeq||(!current()&&error.status!==401))return;
+    error.refreshRead=true;throw error;
+  }
 }
 async function risk(title,description){
   if(!$('risk-dialog').showModal)throw new Error('此浏览器无法显示风险确认，请使用新版浏览器。');
@@ -187,7 +200,7 @@ function renderScene(){
   const scene=snapshot.scene,c=snapshot.character;if(!scene){$('scene-title').textContent='世界入口';$('scene-description').textContent='核对上次操作后，可以用同一身份创建人物。';for(const id of ['scene-npcs','scene-objects','available-actions','open-exits','nearby'])$(id).replaceChildren();return;}
   $('scene-title').textContent=scene.title;$('scene-description').textContent=scene.description;$('scene-state').textContent='已保存 · 版本 '+scene.version;$('scene-author').textContent='地点作者：'+name(scene.creator)+' · '+time(scene.created_at);
   const nearby=snapshot.nearby.filter(other=>other.role_id!==c.role_id);$('nearby').replaceChildren();if(nearby.length){$('nearby').append(text('span','同一地点：','small'));for(const other of nearby)$('nearby').append(text('span',other.name,'traveler-chip'));}else $('nearby').append(text('span','你暂时没有遇见其他旅人。','small'));
-  $('freshness').textContent='最后读取 '+new Date(lastRead).toLocaleTimeString()+' · 页面可见时每6秒读取已保存状态，不运行外部 Agent。';
+  renderFreshness();
   const signature=JSON.stringify([scene.id,scene.version,c.version,scene.objects.map(object=>[object.id,object.version,object.state,object.owner,object.key_requirement]),scene.exits.map(exit=>[exit.id,exit.version,exit.destination_id,exit.blocked]),scene.npcs.map(npc=>[npc.id,npc.version]),nearby.map(other=>[other.role_id,other.version]),snapshot.available_actions]);
   if(signature===sceneRenderKey)return;sceneRenderKey=signature;
   const focused=document.activeElement,focusedNpc=$('scene-npcs').contains(focused)?{id:focused.id,start:focused.selectionStart,end:focused.selectionEnd}:null;

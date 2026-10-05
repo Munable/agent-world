@@ -122,6 +122,45 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(result.is_error)
 
+    async def test_unknown_field_and_function_version_can_be_recovered_without_commit(self):
+        operation = 'correctable-contract-error'
+        wrong = {'operation_id': operation, 'arguments': {
+            'amount': 3, 'expected_request_version': 'private-value'}}
+        with httpx.Client(trust_env=False) as client:
+            response = client.post(self.server.url + '/v1/functions/counter.increment/invoke',
+                                   headers=self.auth, json=wrong)
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(response.json()['recovery'], 'fix_request')
+            self.assertIn('"expected_request_version"', response.json()['message'])
+            self.assertNotIn('private-value', response.text)
+            self.assertEqual(client.get(self.server.url + '/v1/receipts/' + operation,
+                                       headers=self.auth).status_code, 404)
+        async with self.server.session(self.identity) as (session, _):
+            rejected = await session.call_tool('counter.increment', arguments=wrong)
+            self.assertTrue(rejected.is_error)
+            self.assertIn('"expected_request_version"', rejected.structured_content['message'])
+            discovery = await session.call_tool('world.discover', arguments={
+                'prefix': 'counter.increment', 'include_schemas': True})
+            self.assertFalse(discovery.is_error, discovery.structured_content)
+            function = discovery.structured_content['functions'][0]
+            version = function['version']
+            corrected = {'operation_id': operation, 'expected_version': version + 1,
+                         'arguments': {'amount': 3}}
+            stale = await session.call_tool('counter.increment', arguments=corrected)
+            self.assertTrue(stale.is_error)
+            self.assertEqual(stale.structured_content['error'], 'FunctionVersionMismatch')
+            self.assertIn(f'current version {version}', stale.structured_content['message'])
+            missing = await session.call_tool('world.get_receipt', arguments={'operation_id': operation})
+            self.assertTrue(missing.is_error)
+            corrected['expected_version'] = version
+            saved = await session.call_tool('counter.increment', arguments=corrected)
+            self.assertFalse(saved.is_error, saved.structured_content)
+            self.assertEqual(saved.structured_content['result']['value'], 3)
+            replay = await session.call_tool('counter.increment', arguments=corrected)
+            self.assertFalse(replay.is_error)
+            self.assertTrue(replay.structured_content['replayed'])
+            self.assertEqual(replay.structured_content['result']['value'], 3)
+
     async def test_authenticated_requests_reject_supplied_role_id_and_old_bootstrap_route(self):
         with httpx.Client(trust_env=False) as client:
             for path in ("/v1/bootstrap", "/v1/discover", "/v1/functions"):

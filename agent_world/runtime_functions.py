@@ -458,7 +458,9 @@ class RuntimeFunctions:
                 raise AccessModeMismatch("query_function only accepts read functions")
             version = desc["version"]
             if expected_version is not None and version != expected_version:
-                raise FunctionVersionMismatch("function version changed")
+                raise FunctionVersionMismatch(
+                    f"expected function contract version {expected_version}, current version {version}; rediscover the function, not the world object's state version"
+                )
             if desc["availability"] != "available":
                 raise FunctionNotFound("function is unavailable")
             validate(desc["input_schema"], arguments)
@@ -536,7 +538,9 @@ class RuntimeFunctions:
                 raise AccessModeMismatch("invoke_function cannot execute a read function as a write")
             version = desc["version"]
             if expected_version is not None and expected_version != version:
-                raise FunctionVersionMismatch("function version changed")
+                raise FunctionVersionMismatch(
+                    f"expected function contract version {expected_version}, current version {version}; rediscover the function, not the world object's state version"
+                )
             if desc["availability"] != "available":
                 raise FunctionNotFound("function is unavailable")
             validate(desc["input_schema"], arguments)

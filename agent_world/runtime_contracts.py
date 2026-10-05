@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -142,7 +143,21 @@ def validate(
     except ValidationError as exc:
         path = "/".join(str(part) for part in exc.absolute_path) or "<root>"
         # Never echo rejected values: arguments may contain secrets.
-        raise SchemaRejected(f"schema violation at {path}: {exc.validator}") from exc
+        message = f"schema violation at {path}: {exc.validator}"
+        if exc.validator == "additionalProperties" and exc.validator_value is False and isinstance(exc.instance, dict):
+            properties = exc.schema.get("properties", {})
+            patterns = exc.schema.get("patternProperties", {})
+            unexpected = sorted(name for name in exc.instance if name not in properties
+                                and not any(re.search(pattern, name) for pattern in patterns))
+            if unexpected:
+                # Field names can also contain private data. Only bounded,
+                # ordinary identifiers are useful as public repair hints.
+                names = [name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", name)
+                         else "<redacted field name>" for name in unexpected[:8]]
+                message += "; unexpected fields: " + json.dumps(names, ensure_ascii=True)
+                if len(unexpected) > len(names):
+                    message += f"; {len(unexpected) - len(names)} more fields omitted"
+        raise SchemaRejected(message) from exc
     except Exception as exc:
         raise SchemaRejected("schema reference could not be resolved") from exc
 

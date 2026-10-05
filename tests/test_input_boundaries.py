@@ -9,12 +9,40 @@ import unittest
 import httpx
 
 from agent_world import WorldRuntime, WorldDefinition, FunctionSpec, StateRule, FunctionOutcome
-from agent_world.errors import InvalidArguments, OperationConflict
-from agent_world.runtime_contracts import duration, identifier, json_text
+from agent_world.errors import InvalidArguments, OperationConflict, SchemaRejected
+from agent_world.runtime_contracts import duration, identifier, json_text, validate
 from tests.live_server import LiveServer
 
 
 class InputBoundaryTests(unittest.TestCase):
+    def test_unknown_field_diagnostic_identifies_name_without_rejected_values(self):
+        schema = {'type': 'object', 'properties': {'arguments': {
+            'type': 'object', 'properties': {'request_id': {'type': 'string'}},
+            'patternProperties': {'^extension_': {'type': 'string'}},
+            'additionalProperties': False}}, 'additionalProperties': False}
+        good = {'arguments': {'request_id': 'r', 'extension_note': 'allowed'}}
+        validate(schema, good)
+        bad = {'arguments': {**good['arguments'], 'expected_request_version': 'private-value'}}
+        with self.assertRaises(SchemaRejected) as raised:
+            validate(schema, bad)
+        message = str(raised.exception)
+        self.assertIn('arguments: additionalProperties', message)
+        self.assertIn('"expected_request_version"', message)
+        self.assertNotIn('private-value', message)
+        self.assertNotIn('extension_note', message)
+
+    def test_unknown_field_diagnostic_bounds_untrusted_names(self):
+        schema = {'type': 'object', 'properties': {}, 'additionalProperties': False}
+        names = ['0unsafe\nname', 'A' * 65] + [f'field_{i}' for i in range(10)]
+        with self.assertRaises(SchemaRejected) as raised:
+            validate(schema, {name: 'never-echo-this' for name in names})
+        message = str(raised.exception)
+        self.assertIn('<redacted field name>', message)
+        self.assertNotIn('unsafe', message)
+        self.assertNotIn('A' * 65, message)
+        self.assertNotIn('never-echo-this', message)
+        self.assertLess(len(message), 350)
+
     def test_duration_rejects_unbounded_integers_without_overflow(self):
         for value in (10**400, -(10**400), math.inf, -math.inf, math.nan, True, -1, 86401):
             with self.subTest(value_type=type(value).__name__, negative=value < 0):
