@@ -8,9 +8,21 @@ Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结�
 
 > **开发／维护前先读 [AGENTS.md](AGENTS.md)。** 它定义仓库工作原则，包括“早期项目只维护现行事实、不背不存在的历史兼容债”。
 
-## Try the classic fifth-edition lighthouse
+## Try participant-supplied decisions
 
-本轮官方体验：**旧灯塔地城**。采用 SRD 5.1 的两种一级角色与原创六房间场景。网页可以直接探索、交谈、战斗，也可下载连接资料让自己的 CLI 使用同一身份行动。常规玩法不依赖外部 AI 裁决者在线；额外自由意图先展示有限裁决与风险，再由本人承诺。
+当前先验证参与者的 Agent 能否在正常访问时，顺带领取并回答另一位参与者的待决事项。独立示例不设置全局 GM，不运行服务器模型、后台轮询、超时或自动改派；只提供派发、有限报价、本人接受和规则结算。它是协议实验，尚不代表自由生成的 D&D 世界。
+
+```sh
+python -m examples.participant_app --init-local \
+  --db /安全的私密数据目录/participants.sqlite3 \
+  --private-dir /Git之外的空私密身份目录 --port 8802
+```
+
+初始化只建立 A/B/C 三个合成密钥身份。通过正式 HTTP/MCP 接入，先读取 `participant.handbook` 和函数 schema；`participant.visit` 是会领取附加题的写操作，必须使用稳定 Operation。重启已有库时去掉初始化参数。当前方案、实际验证和未验证边界见 [OPEN_DESIGN](docs/OPEN_DESIGN.md)。
+
+## Try the existing fifth-edition lighthouse
+
+既有有限示例：**旧灯塔地城**。采用 SRD 5.1 的两种一级角色与原创六房间场景。网页可以直接探索、交谈、战斗，也可下载连接资料让自己的 CLI 使用同一身份行动。常规玩法不依赖外部 AI 裁决者在线；额外自由意图先展示有限裁决与风险，再由本人承诺。它保留已完成的规则／恢复证据，不作为下一版自由世界的新玩家起点。
 
 ```sh
 python -m pip install -e .
@@ -70,7 +82,7 @@ Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser ide
 
 ## 当前主线
 
-**当前先完成一个可一起游玩的官方世界，并据此检验底层。** 经典第五版一级地城是当前明确切片；参与目的、职业与游戏角色仍由用户和具体世界决定，不提升为 Runtime 原语。Commons 与营地保留已有范围的消费证据，不继续扩展营地章节。
+**当前先完成一个可一起游玩的官方自由世界，并据此检验底层。** 基于经典第五版规则按参与过程生成内容，不预设章节、共同目标和结局；先验证参与者贡献计算的裁决链。参与目的、职业与游戏角色仍由用户和具体世界决定，不提升为 Runtime 原语。Commons、营地和旧灯塔保留已有范围的消费证据。
 
 Agent 是用户可替换的执行载体。用户把本地记忆、上下文与有效世界连接配置交给另一兼容 CLI 后，可继续同一身份的参与；Runtime 不识别模型本体，不要求独立 Agent 身份或归属体系。私人记忆由用户迁移，世界保存已提交事实与接续记录。
 
