@@ -7,5 +7,6 @@
 .world-map{overflow:auto;max-height:480px}.world-map svg{max-height:none}.inventory-list select{min-width:0;flex:1}.inventory-list .actions{align-items:flex-end}
 .startup-command{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.7;background:#edf0e2;border:1px solid var(--line);border-radius:8px;padding:13px 15px}
 .world-layout>*,.world-layout aside>*,.section-heading>*{min-width:0}.card{min-width:0;max-width:100%;overflow-wrap:anywhere}.world-map{min-width:0;max-width:100%}.world-layout .actions>*{min-width:0;max-width:100%}
+.key-requirement,.object-pairing{margin:12px 0;padding:12px 14px;border:1px solid #cbd6bf;border-radius:8px;background:#eef3e5;overflow-wrap:anywhere}.key-requirement strong{font-size:13px}.key-requirement p,.object-pairing p{margin:6px 0 0}.create-pair-choice{display:flex;align-items:flex-start;gap:10px;margin:0!important}.create-pair-choice input{width:auto;flex:0 0 auto;margin:4px 0;accent-color:var(--green)}.create-pair-choice span{min-width:0}select:disabled{background:#eef1e4;color:var(--muted)}
 @media(max-width:720px){.world-layout{grid-template-columns:minmax(0,1fr)}.world-layout aside{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:450px){.world-layout aside{grid-template-columns:minmax(0,1fr)}}

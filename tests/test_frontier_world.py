@@ -113,6 +113,160 @@ class FrontierWorldTests(unittest.TestCase):
         self.assertEqual(replay["result"], result)
         self.assertEqual(self.query("C", "map")["total"], 5)
 
+    def keyed_place(self):
+        spec = package(barrier=True)
+        spec["objects"][0]["discovery_text"] = "The case holds the sole iron release handle."
+        spec["objects"][1].update(key_object=0, discovery_text="The gate releases onto the upstream trail.")
+        created, _ = self.expand(spec=spec)
+        destination = created["created_scene"]["id"]
+        for actor in self.roles:
+            if actor != "A":
+                self.move(actor, "bell-market")
+            self.move(actor, destination)
+        scene = self.look()["scene"]
+        key, barrier = scene["objects"]
+        path = next(e for e in scene["exits"] if e["destination_id"] is None)
+        child = self.call("A", "expand", {"scene_id": destination, "exit_id": path["id"],
+                         "expected_exit_version": path["version"], "package": package("North terrace")})["result"]
+        return destination, key["id"], barrier["id"], child["created_scene"]["id"]
+
+    def unlock_args(self, actor, key_id, barrier_id):
+        seen = self.look(actor)
+        target = self.query(actor, "examine", {"target_id": barrier_id})["target"]
+        return {"object_id": barrier_id, "key_object_id": key_id,
+                "expected_character_version": seen["character"]["version"],
+                "expected_object_version": target["version"],
+                "expected_key_version": target["key_requirement"]["version"]}
+
+    def open_take_key(self, actor, key_id):
+        with patch("agent_world.world_context.secrets.randbelow", return_value=19):
+            self.object_action(actor, "check", key_id)
+        self.object_action(actor, "take", key_id)
+
+    def world_rows(self):
+        with sqlite3.connect(self.db) as database:
+            return database.execute("SELECT scope,state_key,value_json,version,updated_at,deleted FROM world_state WHERE universe='test' ORDER BY scope,state_key").fetchall()
+
+    def test_real_key_gift_opens_shared_path_once_and_survives_restart(self):
+        destination, key_id, barrier_id, child = self.keyed_place()
+        before = self.query("C", "examine", {"target_id": barrier_id})["target"]
+        self.assertEqual(before["key_object_id"], key_id)
+        self.assertEqual(before["key_requirement"]["state"], "sealed")
+        self.assertNotIn("discovery", before["key_requirement"])
+        self.assertIsNone(before["discovery"]["text"])
+        with self.assertRaises(RuleViolation):
+            self.move("C", child)
+        self.open_take_key("B", key_id)
+        self.call("B", "transfer", {"object_id": key_id, "recipient_id": self.roles["C"],
+                  "expected_character_version": self.look("B")["character"]["version"]})
+        args = self.unlock_args("C", key_id, barrier_id)
+        char_before = self.look("C")["character"]
+        with patch("agent_world.world_context.secrets.randbelow", side_effect=AssertionError("key use must not roll")):
+            receipt = self.call("C", "unlock", args, "unlock-once")
+        result = receipt["result"]
+        self.assertEqual(result["result"]["method"], "key_object")
+        self.assertEqual(result["character"], char_before)
+        self.assertEqual(result["key_object"]["version"], args["expected_key_version"])
+        self.assertEqual(result["object"]["discovery"]["text"], "The gate releases onto the upstream trail.")
+        self.assertEqual(result["object"]["discovery"]["discovered_by"], self.roles["C"])
+        self.assertFalse(next(e for e in self.look("A")["scene"]["exits"] if e["destination_id"] == child)["blocked"])
+        self.runtime = WorldRuntime(self.db)
+        self.runtime.install_world("test", WORLD)
+        replay = self.call("C", "unlock", args, "unlock-once")
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["result"], result)
+        self.assertEqual(self.look("C")["character"]["inventory"], [key_id])
+        self.move("A", child)
+        self.move("B", child)
+        events = self.query("C", "history", {"limit": 50})["items"]
+        unlocks = [e for e in events if e["kind"] == "unlock"]
+        self.assertEqual(len(unlocks), 1)
+        self.assertEqual(unlocks[0]["payload"]["operation_id"], "unlock-once")
+        self.assertEqual(unlocks[0]["payload"]["discovery"], result["object"]["discovery"])
+
+    def test_failed_strength_check_can_later_use_real_key_without_reroll(self):
+        _, key_id, barrier_id, _ = self.keyed_place()
+        with patch("agent_world.world_context.secrets.randbelow", return_value=0):
+            failed = self.object_action("A", "check", barrier_id)["result"]
+        self.assertFalse(failed["result"]["success"])
+        self.open_take_key("A", key_id)
+        with patch("agent_world.world_context.secrets.randbelow", side_effect=AssertionError("no reroll")):
+            result = self.call("A", "unlock", self.unlock_args("A", key_id, barrier_id))["result"]
+        self.assertEqual(result["object"]["state"], "resolved")
+        history = self.query("A", "history", {"limit": 50})["items"]
+        self.assertEqual(len([e for e in history if e["kind"] == "check" and e["payload"]["object_before_version"] == failed["result"]["object_before_version"] and e["payload"]["dc"] == 15]), 1)
+
+    def test_key_rejects_non_owner_wrong_location_and_stale_gift_versions_atomically(self):
+        destination, key_id, barrier_id, _ = self.keyed_place()
+        args = self.unlock_args("A", key_id, barrier_id)
+        before = self.world_rows()
+        with self.assertRaises(PermissionDenied):
+            self.call("A", "unlock", args)
+        self.assertEqual(self.world_rows(), before)
+        self.open_take_key("A", key_id)
+        held = self.unlock_args("A", key_id, barrier_id)
+        self.call("A", "transfer", {"object_id": key_id, "recipient_id": self.roles["B"],
+                  "expected_character_version": held["expected_character_version"]})
+        before = self.world_rows()
+        with self.assertRaises(StateConflict):
+            self.call("A", "unlock", held)
+        with self.assertRaises(PermissionDenied):
+            self.call("A", "unlock", self.unlock_args("A", key_id, barrier_id))
+        self.assertEqual(self.world_rows(), before)
+        b_args = self.unlock_args("B", key_id, barrier_id)
+        self.move("B", "bell-market")
+        b_args["expected_character_version"] = self.look("B")["character"]["version"]
+        before = self.world_rows()
+        with self.assertRaises(RuleViolation):
+            self.call("B", "unlock", b_args)
+        carried = self.query("B", "examine", {"target_id": key_id})
+        self.assertFalse(any(a["function_id"] == "frontier.unlock" for a in carried["available_actions"]))
+        self.assertEqual(self.world_rows(), before)
+        self.open_take_key("B", "market-cache")
+        self.move("B", destination)
+        wrong = self.unlock_args("B", key_id, barrier_id)
+        wrong["key_object_id"] = "market-cache"
+        wrong["expected_key_version"] = self.query("B", "examine", {"target_id": "market-cache"})["target"]["version"]
+        before = self.world_rows()
+        with self.assertRaises(RuleViolation):
+            self.call("B", "unlock", wrong)
+        self.assertEqual(self.world_rows(), before)
+
+    def test_generated_key_relation_rejects_invalid_references_without_partial_world(self):
+        self.move("A", "bell-market")
+        seen = self.look()
+        path = next(e for e in seen["scene"]["exits"] if e["destination_id"] is None)
+        for index, key_index, kind in ((1, 1, "barrier"), (1, 2, "barrier"), (1, 0, "inscription"), (0, 1, "cache")):
+            spec = package(barrier=True)
+            spec["objects"][index]["key_object"] = key_index
+            if kind == "inscription":
+                spec["objects"][0]["kind"] = kind
+                spec["objects"][0]["discovery_text"] = "Existing words"
+            before = self.world_rows()
+            with self.assertRaises((RuleViolation, SchemaRejected)):
+                self.call("A", "expand", {"scene_id": "bell-market", "exit_id": path["id"],
+                          "expected_exit_version": path["version"], "package": spec})
+            self.assertEqual(self.world_rows(), before)
+        self.assertIsNone(self.query("A", "examine", {"target_id": "market-cache"})["target"]["key_object_id"])
+
+    def test_same_key_concurrent_unlock_has_one_shared_consequence(self):
+        _, key_id, barrier_id, _ = self.keyed_place()
+        self.open_take_key("A", key_id)
+        args = self.unlock_args("A", key_id, barrier_id)
+        def execute(number):
+            runtime = WorldRuntime(self.db)
+            runtime.install_world("test", WORLD)
+            try:
+                return runtime.call_function("test", "frontier.unlock", self.roles["A"], args,
+                                             operation_id="concurrent-unlock-" + str(number))["result"]
+            except (StateConflict, RuleViolation):
+                return None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(execute, (1, 2)))
+        self.assertEqual(sum(r is not None for r in results), 1)
+        self.assertEqual(self.look()["character"]["inventory"], [key_id])
+        self.assertEqual(len([e for e in self.query("C", "history", {"limit": 50})["items"] if e["kind"] == "unlock"]), 1)
+
     def test_concurrent_creation_has_one_connected_winner_without_partial_entities(self):
         for actor in ("A", "B"):
             self.move(actor, "bell-market")
@@ -251,10 +405,13 @@ class FrontierWorldTests(unittest.TestCase):
     def test_registered_prior_contract_upgrades_without_losing_state_or_original_receipt(self):
         legacy_functions = []
         for function in WORLD.functions:
+            if function.name == "frontier.unlock":
+                continue
             schema = deepcopy(function.input_schema)
             if function.name == "frontier.expand":
                 object_schema = schema["properties"]["package"]["properties"]["objects"]["items"]
                 object_schema["properties"].pop("discovery_text")
+                object_schema["properties"].pop("key_object")
                 object_schema.pop("allOf", None)
             legacy_functions.append(replace(function, version=1, input_schema=schema, description="Prior discovery-free contract"))
         legacy_world = replace(WORLD, version=1, functions=tuple(legacy_functions))
@@ -272,7 +429,7 @@ class FrontierWorldTests(unittest.TestCase):
         before = runtime.query_function("prior", "frontier.look", role, {})["result"]
         runtime.install_world("prior", WORLD)
         after = runtime.query_function("prior", "frontier.look", role, {})
-        self.assertEqual(after["function_version"], 2)
+        self.assertEqual(after["function_version"], 3)
         self.assertEqual(after["result"], before)
         replay = call("expand", args, "prior-place")
         self.assertTrue(replay["replayed"])
@@ -282,7 +439,7 @@ class FrontierWorldTests(unittest.TestCase):
             call("expand", args, "new-place-with-old-schema")
 
     def test_registered_discovery_contract_updates_function_versions_without_reset(self):
-        prior = replace(WORLD, version=2, functions=tuple(replace(f, version=1) for f in WORLD.functions))
+        prior = replace(WORLD, version=3, functions=tuple(replace(f, version=2) for f in WORLD.functions if f.name != "frontier.unlock"))
         runtime = WorldRuntime(self.db.with_name("discovery-version.sqlite3"))
         role = runtime.create_role("Returning reader")["role_id"]
         runtime.install_world("reader", prior)
@@ -291,7 +448,7 @@ class FrontierWorldTests(unittest.TestCase):
         before = runtime.query_function("reader", "frontier.look", role, {})["result"]
         runtime.install_world("reader", WORLD)
         after = runtime.query_function("reader", "frontier.look", role, {})
-        self.assertEqual(after["function_version"], 2)
+        self.assertEqual(after["function_version"], 3)
         self.assertEqual(after["result"], before)
 
     def test_discovered_carried_content_has_exact_reader_after_inventory_summary(self):

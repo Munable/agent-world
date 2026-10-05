@@ -38,7 +38,7 @@ LIMITS = {"max_hosts": MAX_RUNS, "world_calls_per_host": MAX_TOOLS,
 CORE_TOOLS = ("world.bootstrap", "world.get_changes", "world.wait_changes", "world.get_receipt")
 FRONTIER_TOOLS = tuple("frontier." + name for name in (
     "join", "look", "history", "map", "requests", "move", "expand", "say", "tell",
-    "examine", "check", "take", "transfer", "rest", "request", "visit", "answer",
+    "examine", "check", "take", "unlock", "transfer", "rest", "request", "visit", "answer",
     "accept", "withdraw", "handbook",
 ))
 REQUIRED_TOOLS = {"frontier.join", "frontier.look", "frontier.history", "frontier.map",

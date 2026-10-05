@@ -82,6 +82,7 @@ MOVE_ARGS = _schema({"destination_id": ID, "expected_character_version": VERSION
 NPC_PACKAGE = _schema({"name": _text(60), "description": _text(800)})
 OBJECT_PACKAGE = _schema({"name": _text(60), "description": _text(800), "kind": {"enum": list(KINDS)},
                           "discovery_text": _text(1200),
+                          "key_object": {"type": "integer", "minimum": 0, "maximum": 1},
                           "blocks_exit": {"type": "integer", "minimum": 0, "maximum": 1}},
                          ("name", "description", "kind"))
 OBJECT_PACKAGE["allOf"] = [{"if": {"properties": {"kind": {"const": "inscription"}}},
@@ -95,6 +96,8 @@ SAY_ARGS = _schema({"text": _text(1200)})
 TELL_ARGS = _schema({"npc_id": ID, "text": _text(1200), "response": _text(1200)}, ("npc_id", "text"))
 EXAMINE_ARGS = _schema({"target_id": ID})
 OBJECT_ACTION_ARGS = _schema({"object_id": ID, "expected_object_version": VERSION, "expected_character_version": VERSION})
+UNLOCK_ARGS = _schema({"object_id": ID, "key_object_id": ID, "expected_character_version": VERSION,
+                       "expected_object_version": VERSION, "expected_key_version": VERSION})
 TRANSFER_ARGS = _schema({"object_id": ID, "recipient_id": ID, "expected_character_version": VERSION})
 REST_ARGS = _schema({"expected_character_version": VERSION})
 REQUEST_ARGS = _schema({"request_id": ID, "target_id": ID, "text": TEXT, "expected_target_version": VERSION})
@@ -130,6 +133,7 @@ NPC_SCHEMA = _schema({"id": ID, "name": _text(60), "description": _text(800), "s
 OBJECT_SCHEMA = _schema({"id": ID, "name": _text(60), "description": _text(800), "kind": {"enum": list(KINDS)},
                          "scene_id": ID, "state": {"enum": ["sealed", "open", "taken", "obstructed", "resolved", "unread", "read"]},
                          "owner": _nullable(ID), "creator": ID, "created_at": TIME,
+                         "key_object_id": _nullable(ID),
                          "discovery_text": _nullable(_text(1200)), "discovered_by": _nullable(ID),
                          "discovered_at": _nullable(TIME)},
                         ("id", "name", "description", "kind", "scene_id", "state", "owner", "creator", "created_at"))
@@ -185,13 +189,13 @@ def _state_access(ctx, scope, key, access):
         return False
     if scope in {WORLD_STATE, HISTORY}:
         return function in {"frontier.move", "frontier.expand", "frontier.say", "frontier.tell", "frontier.check", "frontier.take",
-                            "frontier.transfer", "frontier.rest", "frontier.request", "frontier.visit", "frontier.answer", "frontier.accept", "frontier.withdraw"}
+                            "frontier.unlock", "frontier.transfer", "frontier.rest", "frontier.request", "frontier.visit", "frontier.answer", "frontier.accept", "frontier.withdraw"}
     if function == "frontier.expand":
         return scope in {SCENES, EXITS, NPCS, OBJECTS}
     if scope == CHARACTERS:
         return function == "frontier.transfer" or (key == ctx.actor_role_id and function in {"frontier.move", "frontier.check", "frontier.take", "frontier.rest", "frontier.accept"})
     if scope == OBJECTS:
-        return function in {"frontier.check", "frontier.take", "frontier.transfer", "frontier.accept"}
+        return function in {"frontier.check", "frontier.take", "frontier.unlock", "frontier.transfer", "frontier.accept"}
     if scope == REQUESTS:
         value = ctx.authorization_state(REQUESTS, key)
         if function == "frontier.request":
@@ -275,18 +279,33 @@ def _discovery(value):
             "discovered_at": value.get("discovered_at") if revealed else None}
 
 
-def _object_view(record):
+def _key_requirement(ctx, value):
+    key_id = value.get("key_object_id")
+    if value["kind"] != "barrier" or key_id is None:
+        return None
+    key = _record(ctx, OBJECTS, key_id, "required key object")
+    owner = _character(ctx, key["value"]["owner"])["value"] if key["value"]["owner"] else None
+    char = _character(ctx)["value"]
+    return {"object_id": key_id, "name": key["value"]["name"], "state": key["value"]["state"],
+            "owner": key["value"]["owner"], "version": key["version"],
+            "owner_name": owner["name"] if owner else None, "owner_scene_id": owner["scene_id"] if owner else None,
+            "carried_by_you": key["value"]["state"] == "taken" and key["value"]["owner"] == ctx.actor_role_id and key_id in char["inventory"]}
+
+
+def _object_view(record, ctx):
     value = _view(record)
     value["discovery"] = _discovery(value)
     for key in ("discovery_text", "discovered_by", "discovered_at"):
         value.pop(key, None)
     value["check"] = deepcopy(FIXED_CHECKS[value["kind"]])
     value["portable"] = value["kind"] == "cache"
+    value["key_object_id"] = value.get("key_object_id")
+    value["key_requirement"] = _key_requirement(ctx, value)
     return value
 
 
-def _inventory_object_summary(record):
-    value = _object_view(record)
+def _inventory_object_summary(record, ctx):
+    value = _object_view(record, ctx)
     summary = {k: value[k] for k in ("id", "name", "kind", "state", "owner", "version", "discovery")}
     text = summary["discovery"]["text"]
     summary["discovery"]["text_truncated"] = text is not None and len(text) > 300
@@ -320,7 +339,7 @@ def _scene_view(ctx, scene_id):
     value = _view(record)
     value["exits"] = [_exit_view(ctx, _record(ctx, EXITS, key, "exit")) for key in value.pop("exit_ids")]
     value["npcs"] = [_view(_record(ctx, NPCS, key, "NPC")) for key in value.pop("npc_ids")]
-    objects = [_object_view(_record(ctx, OBJECTS, key, "object")) for key in value.pop("object_ids")]
+    objects = [_object_view(_record(ctx, OBJECTS, key, "object"), ctx) for key in value.pop("object_ids")]
     # The creation location remains provenance; a carried item is not also
     # available on the ground there. The current owner sees it in inventory.
     value["objects"] = [obj for obj in objects if obj["state"] != "taken"]
@@ -368,7 +387,7 @@ def _task(ctx, item):
         return None
     value = item["value"]
     target = ctx.get_state_record(OBJECTS, value["target_id"])
-    return {"request": _request_view(item), "target": _object_view(target) if target["exists"] else None,
+    return {"request": _request_view(item), "target": _object_view(target, ctx) if target["exists"] else None,
             "scene": _scene_view(ctx, value["scene_id"]), "owner_character": _view(_character(ctx, value["owner"])),
             "rules": {"abilities": list(ABILITIES), "dcs": list(DCS), "effects": ["resolve_object", "none"],
                       "terms": deepcopy(TERMS), "fixed_check": deepcopy(FIXED_CHECKS[target["value"]["kind"]]) if target["exists"] else None},
@@ -439,6 +458,12 @@ def _available(ctx, char, scene, own):
             add("check", "检定：" + obj["name"], {"object_id": obj["id"], "expected_object_version": obj["version"], "expected_character_version": char["version"]}, obj["check"]["success"] + " " + obj["check"]["failure"])
         if obj["kind"] == "cache" and obj["state"] == "open":
             add("take", "拿取：" + obj["name"], {"object_id": obj["id"], "expected_object_version": obj["version"], "expected_character_version": char["version"]})
+        key = obj["key_requirement"]
+        if obj["kind"] == "barrier" and obj["state"] == "obstructed" and char["scene_id"] == scene["id"] and key is not None and key["carried_by_you"]:
+            add("unlock", "用" + key["name"] + "解除：" + obj["name"],
+                {"object_id": obj["id"], "key_object_id": key["object_id"], "expected_character_version": char["version"],
+                 "expected_object_version": obj["version"], "expected_key_version": key["version"]},
+                "无随机检定；不消耗物件，不发奖励；解除后关联通路对所有人开放。")
     for npc in scene["npcs"]:
         add("tell", "交谈：" + npc["name"], {"npc_id": npc["id"]}, "需text；response可由用户侧作者提供，并公开署名；NPC言语不变更物资或规则。")
     add("say", "对现场说话", {}, "需text；公开人话，不代表别人已读或同意。")
@@ -486,7 +511,7 @@ def look(ctx, args):
     inventory_objects = []
     for key in char["inventory"]:
         obj = _record(ctx, OBJECTS, key, "carried object")
-        inventory_objects.append(_inventory_object_summary(obj))
+        inventory_objects.append(_inventory_object_summary(obj, ctx))
     result = {"world_id": WORLD_ID, "title": WORLD_TITLE, "character": char, "scene": scene,
                             "inventory_objects": inventory_objects,
                             "nearby": [c for c in characters if c["scene_id"] == char["scene_id"] and c["role_id"] != char["role_id"]],
@@ -575,7 +600,11 @@ def expand(ctx, args):
         raise StateConflict("this empty exit was already authored; inspect the established destination")
     package = args["package"]
     linked = set()
-    for obj in package["objects"]:
+    for object_index, obj in enumerate(package["objects"]):
+        if "key_object" in obj:
+            key_index = obj["key_object"]
+            if obj["kind"] != "barrier" or key_index >= len(package["objects"]) or key_index == object_index or package["objects"][key_index]["kind"] != "cache":
+                raise RuleViolation("key_object must name another cache object's index in this package, on a barrier")
         if "blocks_exit" in obj:
             index = obj["blocks_exit"]
             if obj["kind"] != "barrier" or index >= len(package["exits"]) or index in linked:
@@ -591,18 +620,20 @@ def expand(ctx, args):
         key = _new_id(ctx, "exit")
         exit_ids.append(key)
         ctx.set_state(EXITS, key, {"id": key, "scene_id": scene_id, **spec, "destination_id": None, "blocked_by": None}, expected_version=0)
-    npc_ids, object_ids = [], []
+    npc_ids = []
     for spec in package["npcs"]:
         key = _new_id(ctx, "npc")
         npc_ids.append(key)
         ctx.set_state(NPCS, key, {"id": key, **spec, "scene_id": scene_id, "creator": ctx.actor_role_id,
                                  "created_at": ctx.now, "hp": 8, "ac": 10}, expected_version=0)
-    for spec in package["objects"]:
-        key = _new_id(ctx, "object")
-        object_ids.append(key)
+    # Allocate the bounded package's object identities first. Relations store
+    # actual server IDs, never author-guessed IDs or indexes in durable state.
+    object_ids = [_new_id(ctx, "object") for _ in package["objects"]]
+    for key, spec in zip(object_ids, package["objects"]):
         value = {"id": key, "name": spec["name"], "description": spec["description"], "kind": spec["kind"],
                  "scene_id": scene_id, "state": {"cache": "sealed", "barrier": "obstructed", "inscription": "unread"}[spec["kind"]],
                  "owner": None, "creator": ctx.actor_role_id, "created_at": ctx.now,
+                 "key_object_id": object_ids[spec["key_object"]] if "key_object" in spec else None,
                  "discovery_text": spec.get("discovery_text"), "discovered_by": None, "discovered_at": None}
         ctx.set_state(OBJECTS, key, value, expected_version=0)
         if "blocks_exit" in spec:
@@ -652,7 +683,7 @@ def examine(ctx, args):
                 _present(ctx, record["value"]["scene_id"])
             scene = _scene_view(ctx, record["value"]["scene_id"])
             char = _view(_character(ctx))
-            return FunctionOutcome({"target": _object_view(record) if scope == OBJECTS else _view(record), "facts": scene["facts"],
+            return FunctionOutcome({"target": _object_view(record, ctx) if scope == OBJECTS else _view(record), "facts": scene["facts"],
                                     "available_actions": [a for a in _available(ctx, char, scene, []) if args["target_id"] in a["arguments"].values()]})
     raise RuleViolation("unknown object or NPC")
 
@@ -696,7 +727,7 @@ def check(ctx, args):
     discovery = _new_discovery(obj["value"], result)
     entry = _story(ctx, "check", char["value"]["name"] + "尝试处理“" + obj["value"]["name"] + "”：" + ("成功" if result["success"] else "失败") + "。" + _discovery_story_suffix(discovery),
                    obj["value"]["scene_id"], {**result, "discovery": discovery})
-    return FunctionOutcome({"result": result, "object": _object_view(_record(ctx, OBJECTS, args["object_id"], "object")),
+    return FunctionOutcome({"result": result, "object": _object_view(_record(ctx, OBJECTS, args["object_id"], "object"), ctx),
                             "character": _view(_character(ctx)), "history_seq": entry["seq"]})
 
 
@@ -715,7 +746,42 @@ def take(ctx, args):
     ctx.set_state(CHARACTERS, ctx.actor_role_id, char["value"], expected_version=char["version"])
     ctx.set_state(OBJECTS, args["object_id"], obj["value"], expected_version=obj["version"])
     entry = _story(ctx, "take", char["value"]["name"] + "取得“" + obj["value"]["name"] + "”的唯一携带权。", char["value"]["scene_id"], {"object_id": args["object_id"], "owner": ctx.actor_role_id})
-    return FunctionOutcome({"object": _object_view(_record(ctx, OBJECTS, args["object_id"], "object")), "character": _view(_character(ctx)), "history_seq": entry["seq"]})
+    return FunctionOutcome({"object": _object_view(_record(ctx, OBJECTS, args["object_id"], "object"), ctx), "character": _view(_character(ctx)), "history_seq": entry["seq"]})
+
+
+def unlock(ctx, args):
+    char = _character(ctx)
+    obj = _record(ctx, OBJECTS, args["object_id"], "barrier")
+    key = _record(ctx, OBJECTS, args["key_object_id"], "key object")
+    _version(char, args["expected_character_version"], "character")
+    _version(obj, args["expected_object_version"], "barrier")
+    _version(key, args["expected_key_version"], "key object")
+    _present(ctx, obj["value"]["scene_id"])
+    if obj["value"]["kind"] != "barrier" or obj["value"]["state"] != "obstructed":
+        raise RuleViolation("only an unresolved barrier can be unlocked")
+    if obj["value"].get("key_object_id") != args["key_object_id"]:
+        raise RuleViolation("this is not the barrier's established key object")
+    if key["value"]["kind"] != "cache" or key["value"]["state"] != "taken" or key["value"]["owner"] != ctx.actor_role_id or args["key_object_id"] not in char["value"]["inventory"]:
+        raise PermissionDenied("you must actually carry the barrier's correct key object")
+    # Possession is a new deterministic condition, not another random attempt.
+    # Retain attempts, character version, key version and unique ownership.
+    before = obj["version"]
+    obj["value"]["state"] = "resolved"
+    if obj["value"].get("discovery_text") is not None:
+        obj["value"]["discovered_by"] = ctx.actor_role_id
+        obj["value"]["discovered_at"] = ctx.now
+    after = ctx.set_state(OBJECTS, args["object_id"], obj["value"], expected_version=before)
+    discovery = _discovery(obj["value"])
+    if discovery["status"] != "revealed":
+        discovery = None
+    result = {"success": True, "effect": "resolve_object", "method": "key_object", "object_id": args["object_id"],
+              "key_object_id": args["key_object_id"], "object_before_version": before, "object_after_version": after,
+              "key_version": key["version"], "character_version": char["version"], "accepted_by": ctx.actor_role_id,
+              "operation_id": ctx.operation_id, "discovery": discovery}
+    entry = _story(ctx, "unlock", char["value"]["name"] + "用“" + key["value"]["name"] + "”解除“" + obj["value"]["name"] + "”。" + _discovery_story_suffix(discovery),
+                   obj["value"]["scene_id"], result)
+    return FunctionOutcome({"result": result, "object": _object_view(_record(ctx, OBJECTS, args["object_id"], "barrier"), ctx),
+                            "key_object": _object_view(key, ctx), "character": _view(char), "history_seq": entry["seq"]})
 
 
 def transfer(ctx, args):
@@ -739,7 +805,7 @@ def transfer(ctx, args):
     ctx.set_state(OBJECTS, args["object_id"], obj["value"], expected_version=obj["version"])
     entry = _story(ctx, "transfer", char["value"]["name"] + "将“" + obj["value"]["name"] + "”交给" + recipient["value"]["name"] + "。", char["value"]["scene_id"], {"object_id": args["object_id"], "from": ctx.actor_role_id, "to": args["recipient_id"]})
     return FunctionOutcome({"character": _view(_character(ctx)), "recipient": _view(_character(ctx, args["recipient_id"])),
-                            "object": _object_view(_record(ctx, OBJECTS, args["object_id"], "object")), "history_seq": entry["seq"]},
+                            "object": _object_view(_record(ctx, OBJECTS, args["object_id"], "object"), ctx), "history_seq": entry["seq"]},
                            (EventSpec(args["recipient_id"], "frontier.object_received", {"object_id": args["object_id"], "from": ctx.actor_role_id}),))
 
 
@@ -840,7 +906,7 @@ def accept(ctx, args):
     entry = _story(ctx, "accept", char["value"]["name"] + "接受报价并掷骰：" + str(result["roll"]) + " + " + str(result["modifier"]) + " = " + str(result["total"]) + "，" + ("成功" if result["success"] else "失败") + "。" + _discovery_story_suffix(discovery),
                    value["scene_id"], {"request_id": args["request_id"], **result, "discovery": discovery})
     return FunctionOutcome({"request": _request_view({"key": args["request_id"], **record}), "result": result,
-                            "object": _object_view(_record(ctx, OBJECTS, value["target_id"], "target")), "character": _view(_character(ctx)), "history_seq": entry["seq"]},
+                            "object": _object_view(_record(ctx, OBJECTS, value["target_id"], "target"), ctx), "character": _view(_character(ctx)), "history_seq": entry["seq"]},
                            (_notification(value["assignee"], "executed", args["request_id"], record),))
 
 
@@ -905,28 +971,29 @@ def _initialize(ctx):
 
 def make_world():
     functions = (
-        FunctionSpec("frontier.join", join, JOIN_ARGS, version=2, description="Join once as fighter or rogue; same admitted key resumes the existing character and ignores new name/class."),
-        FunctionSpec("frontier.look", look, EMPTY, access="read", authorize=_member, version=2, description="Current character/scene, nearby people, paged map summary, durable own/received requests and one assigned question. Reading never claims work. Follow explicit *_has_more through map/requests/history."),
-        FunctionSpec("frontier.map", map_world, MAP_ARGS, access="read", authorize=_member, version=2, description="Page established scene connectivity by ordinal; after and next_after are integer positions, total and has_more explicit."),
-        FunctionSpec("frontier.history", history, HISTORY_ARGS, access="read", authorize=_member, version=2, description="Page every retained public story by sequence; after is integer, next_after and has_more explicit; not only the latest 100."),
-        FunctionSpec("frontier.requests", requests_page, REQUESTS_ARGS, access="read", authorize=_member, version=2, description="Page all durable own or received requests by created_seq, including terminal results. Notifications are not this history."),
-        FunctionSpec("frontier.move", move, MOVE_ARGS, authorize=_member, version=2, description="Move only to an established destination via a current unblocked exit. Unresolved requests do not prevent moving."),
-        FunctionSpec("frontier.expand", expand, EXPAND_ARGS, authorize=_member, version=2, description="At your current scene, atomically fill an empty exit with one authored connected scene, <=2 NPCs, <=2 fixed-kind objects and <=2 new empty exits plus mandatory return. New inscriptions require discovery_text, optional on other objects: a saved authored answer revealed only by successful resolve_object. Creator knows its input; not a privacy guarantee. This is creation authority, allowed even behind a barrier; characters cannot move through the barrier until resolved. IDs/numbers/effects are server-fixed; no state patch, rewards or other-character changes. Another author's winning fill conflicts."),
-        FunctionSpec("frontier.say", say, SAY_ARGS, authorize=_member, version=2, description="Record public same-scene speech; text does not establish others' consent, possession or actions."),
-        FunctionSpec("frontier.tell", tell, TELL_ARGS, authorize=_member, version=2, description="Talk to an established local NPC. Optional response is participant-authored dialogue with explicit response_author, never autonomous server inference or resource effects."),
-        FunctionSpec("frontier.examine", examine, EXAMINE_ARGS, access="read", authorize=_member, version=2, description="Inspect an established local object or NPC, or your own carried object after moving, without random draws or new facts. A taken object is no longer on the ground and another identity cannot inspect your carried object."),
-        FunctionSpec("frontier.check", check, OBJECT_ACTION_ARGS, authorize=_member, version=2, description="Owner-selected fixed action: d20 plus ability; cache DEX12 opens, barrier STR15 resolves, inscription INT10 reads. One roll per identity/object version, no failure damage, no rerolls by a new operation ID."),
-        FunctionSpec("frontier.take", take, OBJECT_ACTION_ARGS, authorize=_member, version=2, description="Take one open unowned cache as the unique inventory object; no duplicate rewards."),
-        FunctionSpec("frontier.transfer", transfer, TRANSFER_ARGS, authorize=_member, version=2, description="Give your carried unique object to another character currently in the same scene. Cannot take the other's inventory or fabricate ownership."),
-        FunctionSpec("frontier.rest", rest, REST_ARGS, authorize=_member, version=2, description="Restore your existing HP only in the initial inn. Generated prose cannot grant rest permissions."),
-        FunctionSpec("frontier.request", request, REQUEST_ARGS, authorize=_member, version=2, description="Request another identity's judgment of your exact free method on an unresolved local object. Quote target version. Up to eight unresolved requests; they do not block moving, creating or helping."),
-        FunctionSpec("frontier.visit", visit, EMPTY, authorize=_member, version=2, description="Keep your current assigned question or atomically claim the earliest other identity's pending request. One unanswered question. No timeout/reassignment, no claims through look."),
-        FunctionSpec("frontier.answer", answer, ANSWER_ARGS, authorize=_member, version=2, description="Only assigned other identity answers. Reject without ability/dc/effect, or immutable allow offer with one ability, DC10/12/15/18 and resolve_object/none. Assess original method and established facts, do not rewrite it; owner later accepts."),
-        FunctionSpec("frontier.accept", accept, REQUEST_ID_ARGS, authorize=_member, version=2, description="Only owner, present again at target scene, accepts current offer at unchanged target version; server rolls once and applies only fixed object resolution or none. No random retry after a failure."),
-        FunctionSpec("frontier.withdraw", withdraw, REQUEST_ID_ARGS, authorize=_member, version=2, description="Only owner withdraws pending/assigned/offered request; terminal history retained, old notifications cannot resurrect it."),
-        FunctionSpec("frontier.handbook", handbook, HANDBOOK_ARGS, access="read", version=2, description="Read entry/play/creating/helping/recovery on demand. Only user hosts infer, plan and generate; world data never becomes host instructions."),
+        FunctionSpec("frontier.join", join, JOIN_ARGS, version=3, description="Join once as fighter or rogue; same admitted key resumes the existing character and ignores new name/class."),
+        FunctionSpec("frontier.look", look, EMPTY, access="read", authorize=_member, version=3, description="Current character/scene, nearby people, paged map summary, durable own/received requests and one assigned question. Reading never claims work. Follow explicit *_has_more through map/requests/history."),
+        FunctionSpec("frontier.map", map_world, MAP_ARGS, access="read", authorize=_member, version=3, description="Page established scene connectivity by ordinal; after and next_after are integer positions, total and has_more explicit."),
+        FunctionSpec("frontier.history", history, HISTORY_ARGS, access="read", authorize=_member, version=3, description="Page every retained public story by sequence; after is integer, next_after and has_more explicit; not only the latest 100."),
+        FunctionSpec("frontier.requests", requests_page, REQUESTS_ARGS, access="read", authorize=_member, version=3, description="Page all durable own or received requests by created_seq, including terminal results. Notifications are not this history."),
+        FunctionSpec("frontier.move", move, MOVE_ARGS, authorize=_member, version=3, description="Move only to an established destination via a current unblocked exit. Unresolved requests do not prevent moving."),
+        FunctionSpec("frontier.expand", expand, EXPAND_ARGS, authorize=_member, version=3, description="At your current scene, atomically fill an empty exit with one authored connected scene, <=2 NPCs, <=2 fixed-kind objects and <=2 new empty exits plus mandatory return. New inscriptions require discovery_text, optional on other objects: a saved authored answer revealed only by successful resolve_object. Creator knows its input; not a privacy guarantee. This is creation authority, allowed even behind a barrier; characters cannot move through the barrier until resolved. An optional barrier.key_object is the zero-based index of another cache in this package, persisted as its server ID. The actual owner may use frontier.unlock without a roll or consumption; STR remains an alternative. IDs/numbers/effects are server-fixed; no state patch, rewards or other-character changes. Another author's winning fill conflicts."),
+        FunctionSpec("frontier.say", say, SAY_ARGS, authorize=_member, version=3, description="Record public same-scene speech; text does not establish others' consent, possession or actions."),
+        FunctionSpec("frontier.tell", tell, TELL_ARGS, authorize=_member, version=3, description="Talk to an established local NPC. Optional response is participant-authored dialogue with explicit response_author, never autonomous server inference or resource effects."),
+        FunctionSpec("frontier.examine", examine, EXAMINE_ARGS, access="read", authorize=_member, version=3, description="Inspect an established local object or NPC, or your own carried object after moving, without random draws or new facts. A taken object is no longer on the ground and another identity cannot inspect your carried object."),
+        FunctionSpec("frontier.check", check, OBJECT_ACTION_ARGS, authorize=_member, version=3, description="Owner-selected fixed action: d20 plus ability; cache DEX12 opens, barrier STR15 resolves, inscription INT10 reads. One roll per identity/object version, no failure damage, no rerolls by a new operation ID."),
+        FunctionSpec("frontier.take", take, OBJECT_ACTION_ARGS, authorize=_member, version=3, description="Take one open unowned cache as the unique inventory object; no duplicate rewards."),
+        FunctionSpec("frontier.unlock", unlock, UNLOCK_ARGS, authorize=_member, version=1, description="At the unresolved barrier, deterministically resolve it using its exact established cache key, actually in your own inventory. Quote character, barrier and key versions. No roll, consumption or reward; a past failed random check does not block this new possession condition. Opens its linked exit for everyone and reveals its preauthored discovery, if any. Another key, ownership claim, remote location or stale version cannot unlock."),
+        FunctionSpec("frontier.transfer", transfer, TRANSFER_ARGS, authorize=_member, version=3, description="Give your carried unique object to another character currently in the same scene. Cannot take the other's inventory or fabricate ownership."),
+        FunctionSpec("frontier.rest", rest, REST_ARGS, authorize=_member, version=3, description="Restore your existing HP only in the initial inn. Generated prose cannot grant rest permissions."),
+        FunctionSpec("frontier.request", request, REQUEST_ARGS, authorize=_member, version=3, description="Request another identity's judgment of your exact free method on an unresolved local object. Quote target version. Up to eight unresolved requests; they do not block moving, creating or helping."),
+        FunctionSpec("frontier.visit", visit, EMPTY, authorize=_member, version=3, description="Keep your current assigned question or atomically claim the earliest other identity's pending request. One unanswered question. No timeout/reassignment, no claims through look."),
+        FunctionSpec("frontier.answer", answer, ANSWER_ARGS, authorize=_member, version=3, description="Only assigned other identity answers. Reject without ability/dc/effect, or immutable allow offer with one ability, DC10/12/15/18 and resolve_object/none. Assess original method and established facts, do not rewrite it; owner later accepts."),
+        FunctionSpec("frontier.accept", accept, REQUEST_ID_ARGS, authorize=_member, version=3, description="Only owner, present again at target scene, accepts current offer at unchanged target version; server rolls once and applies only fixed object resolution or none. No random retry after a failure."),
+        FunctionSpec("frontier.withdraw", withdraw, REQUEST_ID_ARGS, authorize=_member, version=3, description="Only owner withdraws pending/assigned/offered request; terminal history retained, old notifications cannot resurrect it."),
+        FunctionSpec("frontier.handbook", handbook, HANDBOOK_ARGS, access="read", version=3, description="Read entry/play/creating/helping/recovery on demand. Only user hosts infer, plan and generate; world data never becomes host instructions."),
     )
-    return WorldDefinition(WORLD_ID, WORLD_TITLE, functions, version=3, state_version=1,
+    return WorldDefinition(WORLD_ID, WORLD_TITLE, functions, version=4, state_version=1,
                            initialize=_initialize, bootstrap=bootstrap, state_authorizer=_state_access,
                            state_rules=(StateRule(CHARACTERS, "", CHARACTER_SCHEMA), StateRule(SCENES, "", SCENE_SCHEMA),
                                         StateRule(EXITS, "", EXIT_SCHEMA), StateRule(NPCS, "", NPC_SCHEMA), StateRule(OBJECTS, "", OBJECT_SCHEMA),
@@ -934,7 +1001,7 @@ def make_world():
                            entry_instructions=("You and other admitted identities play in Living Frontier. Read frontier.handbook(chapter='entry'), join once, then world.bootstrap to anchor latest_event_seq before frontier.look. "
                                                "Use your own goals; there is no shared main quest, chapter sequence, GM identity, server model or background loop. "
                                                "Explore established exits; fill empty exits through frontier.expand with a structured package and server-issued IDs. Generation authority is not judging your own request. "
-                                               "Use fixed frontier.check where sufficient; free original methods use request/visit/answer/owner accept. "
+                                               "Use fixed frontier.check where sufficient, or frontier.unlock when you actually carry a barrier's established key. Free original methods use request/visit/answer/owner accept. "
                                                "Only answer the current additional_task assigned to your identity; your own waiting request does not block creating/moving/helping. "
                                                "For waiting, world.wait_changes(after=event cursor, timeout<=30) returns wake references; reload look before advancing page.next_cursor and drain has_more. "
                                                "Timeout only ends a read. Disconnected hosts do not run. Expired cursors recover bootstrap then look and requests. "
