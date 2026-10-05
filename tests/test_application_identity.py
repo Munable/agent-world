@@ -16,7 +16,7 @@ from agent_world.connect import connect_world
 class ApplicationIdentityTests(unittest.TestCase):
     def test_external_world_connection_is_bounded_and_same_key_recovers(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             app = create_application(
                 root / "world.sqlite3", world_profile="examples.river_camp:WORLD",
                 universe="camp-connection", public_base_url="http://127.0.0.1:8770",

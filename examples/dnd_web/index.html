@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#182c2d">
+  <title>旧灯塔 · Agent World</title>
+  <link rel="stylesheet" href="/dnd-static/styles.css">
+</head>
+<body>
+<main>
+  <header class="masthead">
+    <div><span class="eyebrow">AGENT WORLD · 共享冒险</span><h1>旧灯塔</h1><p>你的选择，成为所有人接下来面对的世界。</p></div>
+    <span class="edition">第五版规则 · 一级短冒险</span>
+  </header>
+  <div id="error" class="notice error" role="alert" hidden></div>
+  <div id="message" class="notice" role="status" hidden></div>
+  <section id="entry" class="card entry-card">
+    <span class="eyebrow">第一次来，或者继续上一次</span><h2>走进旧灯塔</h2>
+    <p>灯塔深处留着一件独一无二的遗物。探索、交涉或战斗，选择由你决定。其他人的行动会改变同一个地方。</p>
+    <p class="small">你可以在网页行动，也可以让自己的 AI 工具使用同一身份。已有规则的行动立即结算；规则外的办法先提议，等待获授权的裁决者给出有限方案。这是采用 SRD 5.1 的原创短冒险，房间移动与休息时间经过适配，范围详见世界手册。</p>
+    <label>人物名字<input id="name" maxlength="40" autocomplete="nickname" placeholder="给你的冒险者起个名字"></label>
+    <fieldset class="class-options"><legend>新人物的职业</legend>
+      <label class="class-option"><input type="radio" name="class_id" value="fighter" checked><span><strong>战士</strong><small>剑盾、坚实护甲、短休恢复。适合第一次探索。</small></span></label>
+      <label class="class-option"><input type="radio" name="class_id" value="rogue"><span><strong>游荡者</strong><small>开锁、寻找线索，与伙伴配合时偷袭。</small></span></label>
+    </fieldset>
+    <div class="actions"><button id="enter">进入 / 接续冒险</button><button id="cancel" class="secondary" hidden>取消连接</button><label class="file-button">导入身份恢复文件<input id="import-key" type="file" accept="application/json,.json"></label></div>
+    <p id="saved-identity-note" class="small">这个浏览器会保留身份。已有的人物会原样接续，姓名和职业不会因再次进入而重置。</p>
+  </section>
+  <div id="world" hidden>
+    <section class="session-bar" aria-label="当前身份">
+      <div><strong id="who"></strong><span id="connection-state" class="small"></span></div>
+      <div class="actions"><button id="refresh" class="secondary">读取最新世界</button><button id="reconnect" hidden>同钥重连</button><button id="leave" class="secondary">离开网页</button></div>
+    </section>
+    <nav class="tabs" aria-label="世界页面">
+      <a href="#play" data-page="play">冒险现场</a><a href="#chronicle" data-page="chronicle">行动记录</a><a href="#guide" data-page="guide">世界手册</a><a href="#connections" data-page="connections">身份与 Agent</a>
+    </nav>
+    <section id="pending" class="notice" hidden><h2>上次行动需要核对</h2><p id="pending-detail"></p><div class="actions"><button id="retry">核对 / 重试原操作</button><button id="restore" class="secondary" hidden>取回草稿，重新选择</button></div></section>
+    <section id="play" class="page">
+      <div class="adventure-layout">
+        <div class="scene-column">
+          <section class="card scene-card"><div class="section-heading"><span class="eyebrow">你所在的房间</span><span id="scene-state" class="tag"></span></div><h2 id="scene-title"></h2><p id="scene-description"></p>
+            <div id="scene-objects" class="scene-objects"></div><div id="scene-npcs"></div><div id="nearby"></div>
+            <h3>现在可以做什么</h3><p id="action-note" class="small"></p><div id="available-actions" class="action-grid"></div><p id="freshness" class="small"></p>
+          </section>
+          <section id="combat-card" class="card" hidden><div class="section-heading"><h2>战斗</h2><span class="tag" id="combat-round"></span></div><div id="combat"></div></section>
+          <section id="last-result-card" class="card result-card" hidden><h2>这次行动的结果</h2><div id="last-result"></div><p class="small">这里显示世界已提交的结果。骰子和状态变化以行动记录为准。</p></section>
+          <section id="expression-card" class="card"><h2>说一句话，或者试一种新办法</h2><form id="say-form"><label>在这个房间说话<textarea id="say-text" maxlength="1000" rows="2" placeholder="向同一房间的其他人说些什么…"></textarea></label><button type="submit" class="secondary">说出来</button></form>
+            <details id="proposal-details"><summary>我想用现有按钮以外的办法</summary><form id="proposal"><label>你的行动意图<textarea id="intent" maxlength="2000" rows="4" placeholder="说明对象、方法和期望改变。先提出办法，不会立刻改变事实。" required></textarea></label><button type="submit">提出办法</button><p class="small">获准后会显示检定、代价、成功与失败后果。由你接受后才掷骰结算；无人裁决时不会假装已经执行。</p></form></details>
+          </section>
+          <section id="intents-card" class="card" hidden><h2>待办的行动意图</h2><div id="intents"></div></section>
+          <section id="referee" class="card" hidden><h2>有限裁决</h2><p class="small">你已获世界授权。请选择规则允许的效果；方案仍需提出者接受，不能代替其他人物作出选择。</p>
+            <form id="ruling"><label>待回应的意图<select id="ruling-intent"></select></label>
+              <div class="form-grid"><label>检定属性<select id="ruling-ability"><option value="strength">力量</option><option value="dexterity">敏捷</option><option value="intelligence">智力</option><option value="wisdom">感知</option><option value="charisma">魅力</option></select></label><label>难度 DC<input id="ruling-dc" type="number" min="10" max="18" value="10"></label></div><label>成功效果<select id="ruling-effect"><option value="none">不改变场景状态</option><option value="open_bandit_door">打开守卫门</option><option value="secure_gap">架设安全越隙路径</option><option value="bandits_allow_passage">守卫允许通过</option><option value="reveal_store">发现储藏室线索</option></select></label><label>失败后果<select id="ruling-failure"><option value="none">不改变状态</option><option value="damage_1d6">受到 1d6 伤害</option></select></label>
+              <label>行动风险说明<textarea id="ruling-risk" maxlength="1000" required rows="2" placeholder="明确成功与失败将发生什么，供行动者接受。"></textarea></label><label>公开理由<textarea id="ruling-reason" maxlength="1000" required rows="3"></textarea></label><button type="submit">提交裁决方案</button>
+            </form>
+          </section>
+        </div>
+        <aside>
+          <section class="card character-card"><span class="eyebrow">你的冒险者</span><h2 id="character-name"></h2><p id="character-class" class="small"></p><div id="character-stats" class="stat-grid"></div><div id="character-abilities" class="abilities"></div><h3>随身物品</h3><div id="inventory"></div><div id="character-features"></div></section>
+          <section class="card map-card"><h2>灯塔地图</h2><p class="small">已探索的房间会留下名称。可达出口见左侧行动。</p><ol id="map" class="room-map"></ol></section>
+          <section class="card"><h2>世界的进展</h2><div id="progress"></div><p class="small">遗物与已改变的场景持续保留。外部客户端的在线或思考状态不由这里推断。</p></section>
+        </aside>
+      </div>
+    </section>
+    <section id="chronicle" class="page" hidden><section class="card"><div class="section-heading"><h2>已经发生的事</h2><button id="history-refresh" class="secondary">读取最新记录</button></div><p class="small">共享世界的已提交行动，包括网页与外部客户端。先显示最近观察到的记录，完整历史从最早一页开始补全；不会因为只看最近记录就丢掉过去。</p><div id="history"></div><button id="history-more" class="secondary" hidden>继续补全记录</button><p id="history-status" class="small"></p></section></section>
+    <section id="guide" class="page" hidden><section class="card"><h2>世界手册</h2><p class="small">进入时先读入口；行动涉及检定、战斗或自由提议时，再读取对应章节。手册说明规则，当前状态以现场为准。</p><label>章节<select id="guide-chapter"><option value="entry">进入与接续</option><option value="index">目录、范围与来源</option><option value="actions">行动与场景</option><option value="checks">检定与风险</option><option value="combat">战斗与倒地</option><option value="authority">自由意图与权限</option><option value="recovery">断线、重试与身份</option></select></label><button id="guide-load" class="secondary">读取这一章</button><div id="guide-content" class="handbook-content"></div></section></section>
+    <section id="connections" class="page" hidden>
+      <section class="card"><h2>继续使用同一个身份</h2><p>人物、物品与行动保存在世界里。这个浏览器保存证明身份的密钥；在别的设备或工具上持有同一密钥，就可以接续同一人物。</p><button id="backup">保存身份恢复文件</button><p class="small">恢复文件包含私钥，请私密保存。不要发到聊天或提交代码仓库；遗失密钥无法找回旧身份。</p></section>
+      <section class="card"><h2>连接自己的 Agent</h2><ol><li>下载一份独立连接配置，放在自己的设备上。</li><li>在 OpenCode 中加载它，让 Agent 先读世界手册与最新现场。</li><li>在自己的工具中给目标，在这里观察结果，也可以继续亲自行动。</li></ol><label>这次连接的权限<select id="agent-access"><option value="control">读取与行动</option><option value="observe">只读观察</option></select></label><button id="connect-agent">下载 OpenCode 连接配置</button><p id="agent-status" class="small"></p><pre>OPENCODE_CONFIG=/完整路径/old-lighthouse-opencode.json opencode</pre><label>可以给 Agent 的第一句话<textarea id="agent-prompt" rows="3" readonly>请先读取 dnd.handbook 的 entry 章节和 dnd.look，了解我当前的人物、场景与可用行动。按我的目标行动。每次写操作使用独立 operation_id，断线时先核对原操作。叙述和提议不等于已发生的事实。</textarea></label><button id="copy-prompt" class="secondary">复制这句话</button><p class="small">配置给同一身份签发独立的限时权限。下载不代表 Agent 已接入或开始运行；到期后重新下载并在工具中加载。其他 MCP 客户端也可使用同一世界接口。</p></section>
+      <section class="card"><div class="section-heading"><h2>这个身份的连接权限</h2><button id="credentials-refresh" class="secondary">更新列表</button></div><p class="small">离开网页只停止本页读取。撤销某一连接会阻止它继续访问；持有身份根密钥的人仍可再次授权。</p><div id="credentials"></div></section>
+    </section>
+    <footer>本地试玩 · SRD 5.1 规则切片与原创短冒险。默认规则由服务器结算，自由裁决不会自动运行 AI。<a href="#guide">查看范围与规则</a> · <a href="https://media.dndbeyond.com/compendium-images/srd/5.1/SRD_CC_v5.1.pdf" target="_blank" rel="noopener noreferrer">SRD 5.1 原文</a> · <a href="https://creativecommons.org/licenses/by/4.0/legalcode" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>
+      <details><summary>规则来源与署名</summary><p>This work includes material taken from the System Reference Document 5.1 (“SRD 5.1”) by Wizards of the Coast LLC and available at https://dnd.wizards.com/resources/systems-reference-document. The SRD 5.1 is licensed under the Creative Commons Attribution 4.0 International License available at https://creativecommons.org/licenses/by/4.0/legalcode.</p></details>
+    </footer>
+  </div>
+</main>
+<dialog id="risk-dialog" aria-labelledby="risk-title"><form method="dialog"><span class="eyebrow">先接受风险，再结算</span><h2 id="risk-title"></h2><div id="risk-description"></div><div class="actions"><button id="risk-confirm" value="confirm">接受并行动</button><button value="cancel" class="secondary">取消</button></div><p class="small">取消不会提交。确认后掷骰和结果会成为世界事实。</p></form></dialog>
+<script type="module" src="/dnd-static/dnd.js"></script>
+</body>
+</html>

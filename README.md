@@ -8,6 +8,19 @@ Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结�
 
 > **开发／维护前先读 [AGENTS.md](AGENTS.md)。** 它定义仓库工作原则，包括“早期项目只维护现行事实、不背不存在的历史兼容债”。
 
+## Try the classic fifth-edition lighthouse
+
+本轮官方体验：**旧灯塔地城**。采用 SRD 5.1 的两种一级角色与原创六房间场景。网页可以直接探索、交谈、战斗，也可下载连接资料让自己的 CLI 使用同一身份行动。常规玩法不依赖外部 AI 裁决者在线；额外自由意图先展示有限裁决与风险，再由本人承诺。
+
+```sh
+python -m pip install -e .
+python -m examples.dnd_app --init-local \
+  --db /安全的私密数据目录/lighthouse.sqlite3 \
+  --private-dir /Git之外的空私密身份目录 --port 8796
+```
+
+数据父目录权限须为 `0700`。首次初始化仅创建四个本地合成测试身份，其中 GM 具备有限裁决权限；网页普通用户用自己的密钥进入。已有库重新启动时去掉 `--init-local` 和 `--private-dir`，不得重复启动进程写同一数据库。页面打开 `http://127.0.0.1:8796/`。完整规则、许可、启动与实际证据见 [DND_WORLD](docs/DND_WORLD.md)，Agent 按需阅读机制见 [WORLD_GUIDE](docs/WORLD_GUIDE.md)。
+
 ## Try Commons
 
 ```sh
@@ -57,11 +70,11 @@ Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser ide
 
 ## 当前主线
 
-**当前验证多用户、各自多个外部客户端能按不同目的持续行动、独立撤权并接续。** Agent World 的产品主体仍是持久世界 Runtime；参与目的和体验角色由用户与具体世界决定。Commons 与营地保留为有限范围的消费证据，不默认继续扩展玩法。
+**当前先完成一个可一起游玩的官方世界，并据此检验底层。** 经典第五版一级地城是当前明确切片；参与目的、职业与游戏角色仍由用户和具体世界决定，不提升为 Runtime 原语。Commons 与营地保留已有范围的消费证据，不继续扩展营地章节。
 
 Agent 是用户可替换的执行载体。用户把本地记忆、上下文与有效世界连接配置交给另一兼容 CLI 后，可继续同一身份的参与；Runtime 不识别模型本体，不要求独立 Agent 身份或归属体系。私人记忆由用户迁移，世界保存已提交事实与接续记录。
 
-当前体验方向是用户在自己的 AI 工具中下目标并执行，网页用于进入、连接与观察世界。网页桥接各 CLI 的运行控制、WASD 与手动采集／种植等游戏操作退出当前范围；现有参考页面的手动操作不代表继续扩展这条路线。目标颗粒度与使用说明见 [交互与表现](docs/PRESENTATION.md)，产品边界见 [PRODUCT_POSITIONING](PRODUCT_POSITIONING.md)。
+当前体验方向是网页直接行动与用户在自己的 AI 工具中下目标并执行两条路径并行，使用同一接口与权威世界状态。网页桥接各 CLI 的运行控制、WASD 与采集／种植动作系统退出当前范围。目标颗粒度与使用说明见 [交互与表现](docs/PRESENTATION.md)，产品边界见 [PRODUCT_POSITIONING](PRODUCT_POSITIONING.md)。
 
 当前基线为密钥身份、HTTP/MCP、SDK、protocol 0.15 与 SQLite schema 8；新 challenge 的 v2 签名包含 access mode，原数据库 v1 challenge 和身份映射继续有效。control 凭据同等拥有本主体的凭据管理权限；observe 只读获准内容。Command 的 credential_id 标识原提交凭据，不定义独立 AgentIdentity，旧回执不补填来源。只修实际消费阻塞，不增加常驻推理系统。当前快照见 [六层基线](docs/BASELINE.md)，实际验证范围见 [REFERENCE_GATE](docs/REFERENCE_GATE.md)，世界试验见 [WORLD_EXPERIMENT](docs/WORLD_EXPERIMENT.md)。本版本未推送或部署，未修改线上世界。
 
