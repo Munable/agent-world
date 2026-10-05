@@ -153,6 +153,20 @@ class DndWorldTests(unittest.TestCase):
         with self.assertRaises(RuleViolation):
             self.call("A", "dnd.withdraw", {"intent_id": "method"})
 
+    def test_other_player_can_leave_without_invalidating_door_quote(self):
+        self.move("A", "entry")
+        self.move("B", "entry")
+        self.propose()
+        self.offer()
+        before = self.look()["scene"]["version"]
+        self.move("B", "store")
+        self.assertEqual(self.look("B")["scene"]["id"], "store")
+        self.assertEqual(self.look()["scene"]["version"], before)
+        with patch("agent_world.world_context.secrets.randbelow", return_value=19):
+            result = self.call("A", "dnd.commit", {"intent_id": "method"})
+        self.assertTrue(result["result"]["check"]["success"])
+        self.assertFalse(self.look()["scene"]["locked"])
+
     def test_chat_does_not_invalidate_quote_but_changed_scene_does(self):
         self.move("A", "entry")
         self.propose()

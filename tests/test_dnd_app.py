@@ -65,6 +65,23 @@ class DndApplicationTests(unittest.TestCase):
             self.assertEqual(replay.status_code, 200, replay.text)
             self.assertTrue(replay.json()["replayed"])
 
+    def test_handbook_revision_and_new_public_chapters_are_discoverable_before_join(self):
+        with TestClient(create_dnd_application(self.db), base_url=self.origin) as client:
+            _, control = self.connect(client)
+            schemas = client.get("/v1/functions", headers=control).json()["functions"]
+            guide = next(item for item in schemas if item["function_id"] == "dnd.handbook")
+            for chapter in ("play", "agent", "together"):
+                response = self.call(client, control, "dnd.handbook", {"chapter": chapter})
+                self.assertEqual(response.status_code, 200, response.text)
+                result = response.json()["result"]
+                self.assertEqual(result["version"], 2)
+                self.assertEqual(result["handbook_id"], "old-lighthouse-2")
+                self.assertIn(chapter, result["chapters"])
+                self.assertNotIn("gm", result["chapters"])
+                self.assertIn(chapter, guide["input_schema"]["properties"]["chapter"]["enum"])
+            self.assertEqual(self.call(client, control, "dnd.handbook", {"chapter": "gm"}).status_code, 403)
+            self.assertFalse(client.get("/v1/bootstrap", headers=control).json()["world_entry_state"]["view"]["joined"])
+
     def test_observe_and_ordinary_player_cannot_gain_referee_authority(self):
         with TestClient(create_dnd_application(self.db), base_url=self.origin) as client:
             _, control = self.connect(client)

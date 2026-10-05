@@ -27,7 +27,7 @@ WORLD_STATE = "dnd:world"
 SUCCESS_EFFECTS = ("open_bandit_door", "secure_gap", "bandits_allow_passage", "reveal_store", "none")
 FAILURE_EFFECTS = ("none", "damage_1d6")
 ACTIONS = ("move", "search", "unlock", "force", "set_rope", "jump", "negotiate", "attack", "join_combat", "dodge", "help", "end_turn", "retreat", "heal", "rest", "take", "transfer", "deliver", "stabilize", "death_save")
-CHAPTER_IDS = ("index", "entry", "checks", "combat", "actions", "authority", "recovery", "gm")
+CHAPTER_IDS = ("index", "entry", "play", "agent", "together", "checks", "combat", "actions", "authority", "recovery", "gm")
 
 
 def _schema(properties, required=()):
@@ -584,8 +584,9 @@ def look(ctx, args):
 def handbook(ctx, args):
     if args["chapter"] == "gm" and not _judge(ctx):
         raise PermissionDenied("the referee chapter is available only to explicitly configured referee identities")
-    from .dnd_handbook import CHAPTERS
-    return _outcome(ctx, {"chapter": args["chapter"], "text": CHAPTERS[args["chapter"]], "version": 1,
+    from .dnd_handbook import CHAPTERS, HANDBOOK_REVISION, HANDBOOK_VERSION
+    return _outcome(ctx, {"chapter": args["chapter"], "text": CHAPTERS[args["chapter"]], "version": HANDBOOK_REVISION,
+                         "handbook_id": HANDBOOK_VERSION,
                          "rules": "2014 fifth edition SRD 5.1", "chapters": [key for key in CHAPTER_IDS if key != "gm" or _judge(ctx)]})
 
 
@@ -990,11 +991,14 @@ def act(ctx, args):
                 other_changes[role] = (value, snapshots[role]["version"])
         result["ends_turn"] = True
 
-    # Scene versions change for material actions, not chat. In-room movement,
-    # inventory transfers and combat consequences invalidate stale quotations.
-    material_action = action not in {"rest"} or char != original_char
-    if room != original_room or material_action:
+    # A quotation about this room must expire when its actual conditions change.
+    # Another person's movement or rest changes their character, not the door,
+    # objects or combat. The owner's version separately protects their position,
+    # inventory, Help and injury; public history still records every action.
+    if room != original_room:
         result["scene_version"] = _save_scene(ctx, scene_id, room, room_record["version"])
+    else:
+        result["scene_version"] = room_record["version"]
     if char != original_char:
         result["character_version"] = _save_char(ctx, ctx.actor_role_id, char, own_record["version"])
     else:
@@ -1209,7 +1213,7 @@ def make_world(*, judge_role_ids=()):
     functions = (
         FunctionSpec("dnd.join", join, JOIN_ARGS, description="Create one ordinary level-one human fighter or rogue for your existing identity. A repeat restores that same immutable character; it grants no referee privilege."),
         FunctionSpec("dnd.look", look, EMPTY, access="read", authorize=_viewer, description="Read your current character and scene versions, actual available actions, shared characters, progress, combat initiative and pending public intentions. Configured referee without a character receives a read-only observer projection (character=null). Use this before choosing or recovering an action."),
-        FunctionSpec("dnd.handbook", handbook, HANDBOOK_ARGS, access="read", description="Read a small versioned world instruction chapter. Start with index and entry; request actions/checks/combat when relevant. The gm chapter is restricted to configured referees."),
+        FunctionSpec("dnd.handbook", handbook, HANDBOOK_ARGS, version=2, access="read", description="Read a versioned world chapter. Start with index/entry; AI assistants read agent, players read play, and shared participation uses together. Read actions/checks/combat when relevant. The gm chapter is restricted to configured referees."),
         FunctionSpec("dnd.act", act, ACT_ARGS, authorize=_member, description="Commit a published deterministic game action, with optional current character/scene versions. Known paths require no AI referee. Check disclosed risks before checks/combat. Initial attack establishes initiative; attack again only on your legal turn. Same failed method without changed evidence/Help cannot reroll. Unknown actions are unsupported, not fictional failures. Transport retries MUST reuse the same operation_id."),
         FunctionSpec("dnd.propose", propose, PROPOSE_ARGS, authorize=_member, description="Record a public novel method pending an externally configured referee, outside combat. It changes no world fact. Include current character and scene versions; only one unresolved proposal per owner."),
         FunctionSpec("dnd.rule", rule, RULE_ARGS, authorize=_judge, visible_to=lambda ctx: _judge(ctx), description="Configured external referee offers an ability/DC10..18 check, explicit reason/risk and finite listed effects. No dice, no arbitrary state patch, no other player's consent. An offered quotation cannot be replaced. secure_gap requires the actual rope. All reasoning fields are public."),
@@ -1220,7 +1224,8 @@ def make_world(*, judge_role_ids=()):
     )
     entry = ("Welcome to the original Old Lighthouse adventure, a small shared world using classic 2014 fifth-edition SRD 5.1. "
              "Your human user's goals and local memory remain in your own AI tool; this server does not run your inference. "
-             "Read dnd.handbook(index), then entry. Call dnd.join(name,class_id=fighter|rogue) once and dnd.look; existing credentials resume the same character across clients. "
+             "Read dnd.handbook(index), then entry; assistants also read agent and participants read together when interacting. Players can read play for their first decision. "
+             "Call dnd.join(name,class_id=fighter|rogue) before an ordinary unjoined player's dnd.look; existing credentials resume the same character across clients. "
              "The optional shared objective is returning the unique beacon_seal to camp. Other users need not share your goal. "
              "Choose actual available_actions[].args with the current character.version and scene.version. Known actions work without a referee. "
              "Rope, potion, ledger and seal are finite persistent objects. Dice are server-recorded; retries reuse operation_id. "
@@ -1229,7 +1234,7 @@ def make_world(*, judge_role_ids=()):
              "Never claim prose, a plan or an uncommitted offer is an executed event. Offline referees do not prevent normal actions. "
              "On a new model context, compaction, reconnection or conflict, reload bootstrap/handbook index and look, reconcile receipts/history, and continue from actual state. "
              "Fictional rest hours are explicitly a story-time simplification, never evidence of real cross-day persistence. This slice excludes PvP, spells, leveling, grid movement and full campaign scheduling.")
-    return WorldDefinition("old-lighthouse-dnd", WORLD_TITLE, functions, initialize=initialize, bootstrap=bootstrap,
+    return WorldDefinition("old-lighthouse-dnd", WORLD_TITLE, functions, version=2, initialize=initialize, bootstrap=bootstrap,
                            state_authorizer=_state_access,
                            state_rules=(StateRule(WORLD_STATE, "authority", _schema({"judges": {"type": "array", "items": ID, "maxItems": 8, "uniqueItems": True}, "epoch": VERSION}, ("judges", "epoch"))),
                                         StateRule(WORLD_STATE, "chronicle", _schema({"last_seq": {"type": "integer", "minimum": 0}}, ("last_seq",))),

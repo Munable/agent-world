@@ -19,7 +19,7 @@ python -m examples.dnd_app --init-local \
   --private-dir /Git之外的空私密身份目录 --port 8796
 ```
 
-数据父目录权限须为 `0700`。首次初始化仅创建四个本地合成测试身份，其中 GM 具备有限裁决权限；网页普通用户用自己的密钥进入。已有库重新启动时去掉 `--init-local` 和 `--private-dir`，不得重复启动进程写同一数据库。页面打开 `http://127.0.0.1:8796/`。完整规则、许可、启动与实际证据见 [DND_WORLD](docs/DND_WORLD.md)，Agent 按需阅读机制见 [WORLD_GUIDE](docs/WORLD_GUIDE.md)。
+数据父目录权限须为 `0700`。首次初始化仅创建四个本地合成测试身份，其中 GM 具备有限裁决权限；网页普通用户用自己的密钥进入。已有库重新启动时去掉 `--init-local` 和 `--private-dir`，不得重复启动进程写同一数据库。页面打开 `http://127.0.0.1:8796/`。第一次玩看 [试玩指南](docs/DND_PLAY.md)；维护者的完整规则、许可、启动与实际证据见 [DND_WORLD](docs/DND_WORLD.md)，Agent 按需阅读机制见 [WORLD_GUIDE](docs/WORLD_GUIDE.md)。
 
 ## Try Commons
 
