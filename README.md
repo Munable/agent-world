@@ -18,7 +18,7 @@ python -m examples.participant_app --init-local \
   --private-dir /Git之外的空私密身份目录 --port 8802
 ```
 
-初始化只建立 A/B/C 三个合成密钥身份。通过正式 HTTP/MCP 接入，先读取 `participant.handbook` 和函数 schema；`participant.visit` 是会领取附加题的写操作，必须使用稳定 Operation。重启已有库时去掉初始化参数。当前方案、实际验证和未验证边界见 [OPEN_DESIGN](docs/OPEN_DESIGN.md)。
+初始化只建立 A/B/C 三个合成密钥身份。通过正式 HTTP/MCP 接入，先读取 `participant.handbook` 和函数 schema；`participant.visit` 是会领取附加题的写操作，必须使用稳定 Operation。历史 `received_intents` 不等于本次领题；只有 `additional_task` 表示当前待答事项。等待先取 bootstrap 通知锚点、再 look；通知到达后仍读取当前事实，超时只结束读取。重启已有库时去掉初始化参数。当前方案、实际验证和未验证边界见 [OPEN_DESIGN](docs/OPEN_DESIGN.md)。
 
 ## Try the existing fifth-edition lighthouse
 
