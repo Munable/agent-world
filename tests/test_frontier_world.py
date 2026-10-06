@@ -262,18 +262,42 @@ class FrontierWorldTests(unittest.TestCase):
             return database.execute("SELECT scope,state_key,value_json,version,updated_at,deleted FROM world_state WHERE universe='test' ORDER BY scope,state_key").fetchall()
 
     def test_dropped_keepsake_can_be_taken_by_someone_else_and_spent_for_a_shared_path(self):
+        # Reproduce the actual running world's saved initial description,
+        # including its obsolete claim that the disc is still unowned.
+        with sqlite3.connect(self.db) as database:
+            raw = database.execute("SELECT value_json FROM world_state WHERE universe=? AND scope=? AND state_key=?",
+                                   ("test", "frontier:scenes", "bell-market")).fetchone()[0]
+            scene = json.loads(raw)
+            scene["description"] = "一枚渡鸦铜盘嵌在褪色的绒布上，还没有主人。"
+            database.execute("UPDATE world_state SET value_json=? WHERE universe=? AND scope=? AND state_key=?",
+                             (json.dumps(scene), "test", "frontier:scenes", "bell-market"))
         self.move("A", "bell-market")
         self.object_action("A", "take", "raven-disc")
+        market = self.look("A")["scene"]
+        # The saved prose still describes the initial unowned disc. Current
+        # presence must explicitly contradict that prose after the real take.
+        self.assertIn("还没有主人", market["description"])
+        self.assertEqual(market["current_ground"]["objects"], [{"id": "market-cache", "name": "铜扣旅行匣", "state": "sealed", "owner": None}])
+        self.assertEqual(market["current_ground"]["count"], 1)
+        self.assertTrue(market["current_ground"]["complete"])
+        self.assertLess(list(market).index("current_ground"), list(market).index("description"))
         held = self.query("A", "examine", {"target_id": "raven-disc"})["target"]
         self.move("A", "elm-inn")
         args = {"object_id": "raven-disc", "expected_object_version": held["version"],
                 "expected_character_version": self.look("A")["character"]["version"]}
         dropped = self.call("A", "drop", args, "leave-keepsake")
         self.assertNotIn("raven-disc", self.look("A")["character"]["inventory"])
+        self.assertEqual(dropped["result"]["scene"]["current_ground"]["objects"], [
+            {"id": "inn-ledger", "name": "旅人簿", "state": "unread", "owner": None},
+            {"id": "raven-disc", "name": "渡鸦铜盘", "state": "open", "owner": None}])
         self.move("A", "bell-market")
+        self.assertEqual(self.look("A")["scene"]["current_ground"]["count"], 1)
         self.move("A", "moss-edge")
         self.object_action("B", "take", "raven-disc")
         self.assertFalse(any(o["id"] == "raven-disc" for o in self.look("C")["scene"]["objects"]))
+        self.assertEqual(self.look("C")["scene"]["current_ground"]["objects"], [
+            {"id": "inn-ledger", "name": "旅人簿", "state": "unread", "owner": None}])
+        self.assertEqual(self.look("C")["scene"]["current_ground"]["count"], 1)
         local = self.look("C")["recent_scene_activity"]
         self.assertEqual(local["items"][0]["kind"], "take")
         self.assertEqual(local["items"][0]["actor_name"], "B")
@@ -308,6 +332,8 @@ class FrontierWorldTests(unittest.TestCase):
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["result"], result)
         self.move("C", "bell-market")
+        self.assertEqual(self.look("C")["scene"]["current_ground"]["count"], 1)
+        self.assertNotIn("raven-disc", [o["id"] for o in self.look("C")["scene"]["current_ground"]["objects"]])
         self.move("C", "moss-edge")
         self.move("C", destination)
         events = self.query("C", "history", {"limit": 50})["items"]
@@ -627,7 +653,7 @@ class FrontierWorldTests(unittest.TestCase):
         before = runtime.query_function("prior", "frontier.look", role, {})["result"]
         runtime.install_world("prior", WORLD)
         after = runtime.query_function("prior", "frontier.look", role, {})
-        self.assertEqual(after["function_version"], 5)
+        self.assertEqual(after["function_version"], 6)
         # Installing a new capability changes discovery, not the saved world.
         self.assertEqual({k: v for k, v in after["result"].items() if k != "directory"},
                          {k: v for k, v in before.items() if k != "directory"})
@@ -648,7 +674,7 @@ class FrontierWorldTests(unittest.TestCase):
         before = runtime.query_function("reader", "frontier.look", role, {})["result"]
         runtime.install_world("reader", WORLD)
         after = runtime.query_function("reader", "frontier.look", role, {})
-        self.assertEqual(after["function_version"], 5)
+        self.assertEqual(after["function_version"], 6)
         self.assertEqual({k: v for k, v in after["result"].items() if k != "directory"},
                          {k: v for k, v in before.items() if k != "directory"})
 

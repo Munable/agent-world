@@ -9,7 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 WORLD_ID = "living-frontier"
-HANDBOOK_VERSION = "living-frontier-12"
+HANDBOOK_VERSION = "living-frontier-13"
 CHAPTER_INDEX = {
     "entry": "进入渡鸦溪：先看现场，选自己的一小段目标",
     "play": "怎样玩：行动、交谈、多人变化和结果",
@@ -31,7 +31,7 @@ NPC不会自动回复。想展开交谈时，你可以根据已成立的现场�
 给玩家下一步建议时，先对上当前available_actions里的实际动作。描写或NPC说“转齿轮架试一试”，不能让不存在的维修、拼装、演奏或等待天气变成游戏功能；可以作为对话的风味，不可许诺会推进状态。失败后，同一人物不能重抽同版物件；可以问人、换一条真实路、处理另一件物品，也可以暂停。NPC回应同样要给现在能做的选择，不用一句未实现的办法把玩家引进死路。
 共创不必把每个东西锁在骰子后面。新cache可用initial_state="open"成为可直接拿取的实物；新inscription可用initial_state="read"直接公开正文。让旅人选择是否拿走、留给别人、商量或继续前进，本身就是游玩。已有物件与失败记录不能靠新创作重写。
 玩家想继续调查当前地方的一个细节时，不必因为这里没有空出口就结束。按creating，可以用frontier.add_objects在当前地点创作1–2件新的可交互内容，如有正文的文字或可携带物件。先读当前事实，保存本次创作并读回，让玩家真的能查看或处理；在已保存设定的留白里，可以创作具体的新线索、旧物来历和过去的故事；新物件可以在故事中由来已久，作者与创建时间记录的是何时将它加入共同世界，不要求故事刚刚发生。别只写重复已知现象的观察札记或“仍然未知”，要给值得追问、可能影响选择的内容。保存后再呈现，不声称服务器此前存有它；不改旧装置、旧铃、旧正文或失败。
-每次到访先看look.recent_scene_activity里的真实现场记录，辨认谁说过或做过什么；它只覆盖近期，不是全部历史。正文标了text_truncated时，按detail_arguments读取frontier.history原记录。需要追踪更早的物件去向时再读历史，不把固定场景描写当当前所有权：description/facts是作者保存的设定，物件可能已经被拿走，通路可能已经改变，当前objects、key_requirement、出口状态和正式行动记录优先。地面列表没有的物件不能仅凭旧描写宣布无人持有，也不能猜持有者。
+每次到访先看scene.current_ground：它完整列出当前实际在这个地点地面的物件，没有列出的物件就不在这里地面，不能凭旧描写说仍在盒里、无人持有或可以拿走。description/facts是作者保存的设定，物件可能已经被拿走、放到别处或耗尽，当前objects、key_requirement和出口状态优先。需要追踪某件物件时，可从对应barrier的key_requirement核对实际归属，或读它相关的公开行动记录；不必为一次普通观察全扫历史，也不凭缺席猜持有者。再看look.recent_scene_activity里的真实现场记录，辨认谁说过或做过什么；它只覆盖近期，不是全部历史。正文标了text_truncated时，按detail_arguments读取frontier.history原记录。
 成功发现内容后，读object.discovery的实际正文和来源，告诉用户读到了什么、它可能影响什么选择；旧物件not_authored时不临时补写答案。
 """,
     "play": """先让用户知道自己正在什么地方，然后让行动改变同一个地方。

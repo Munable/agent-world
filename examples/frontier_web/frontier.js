@@ -38,12 +38,31 @@ let history=new FrontierHistory(),latestHistoryFlight=null,olderHistoryFlight=nu
 let requestPages={own:{items:new Map(),cursor:0,more:false,total:0},received:{items:new Map(),cursor:0,more:false,total:0}};
 let names=new Map(),objects=new Map(),sceneRenderKey='',taskRenderKey='',createContext=null,createMode='expand';
 let entryCheckpoint=null,checkpointWarning='',returnHistoryFlight=null,activityRenderKey='',lastCheckpointSignature='';
+let entryKeyState='checking',entryIdentityRead=0,entryCharacter=null;
 
 const text=(tag,value,cls='')=>{const node=document.createElement(tag);node.textContent=value??'';if(cls)node.className=cls;return node;};
 const time=value=>Number.isFinite(value)?new Date(value*1000).toLocaleString():'时间未提供';
 const signed=value=>(value>=0?'+':'')+value;
 const name=id=>{const label=names.get(id);if(label&&[...names.values()].filter(value=>value===label).length>1)return label+'（'+(id===profile?.role_id?'你':id.slice(-6))+'）';return label||(id==='system:installer'?'世界初始设定':id?'旅人 '+id.slice(-6):'未知参与者');};
 const current=()=>!!profile&&!!client.token;
+function renderEntryIdentity(){
+  $('enter').dataset.unavailable=String(!['saved','new'].includes(entryKeyState));
+  $('entry-identity-status').textContent=entryKeyState==='saved'
+    ? (entryCharacter?'接续本机身份：'+entryCharacter.name+' · '+entryCharacter.className+'（本页上次实际读取）。':'本机已有密钥，点击会接续这个身份；人物将在进入后核对。')+' 已有角色的名字和职业保持原样。'
+    : entryKeyState==='new'?'本机尚未保存身份。首次进入时将创建身份，并使用下方名字和职业创建人物。'
+    : entryKeyState==='error'?'本机身份暂时无法读取，请检查站点存储，或导入自己的恢复文件；不会自动新建身份。'
+    : '正在读取本机保存的身份…';
+  controls();
+}
+async function readEntryIdentity(){
+  const read=++entryIdentityRead;entryKeyState='checking';renderEntryIdentity();
+  try{
+    const stored=await savedKey();if(read!==entryIdentityRead)return;
+    if(!stored||entryCharacter?.publicKey!==stored.public_key)entryCharacter=null;
+    entryKeyState=stored?'saved':'new';
+  }catch{if(read!==entryIdentityRead)return;entryKeyState='error';entryCharacter=null;}
+  renderEntryIdentity();
+}
 function announce(value){$('message').textContent=value;$('message').hidden=!value;}
 function download(filename,value){const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)+'\n'],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function saveDrafts(){if(!profile)return;client.saveDraft('frontier-intent',$('intent').value);client.saveDraft('frontier-say',$('say-text').value);if($('intent-target').value)client.saveDraft('frontier-intent-target',$('intent-target').value);if(createContext)saveCreation();}
@@ -93,7 +112,7 @@ function controls(){
     const offline=profile&&!client.token&&node.closest('#app')&&!['reconnect','leave','backup','restore','copy-prompt'].includes(node.id);
     node.disabled=node.dataset.unavailable==='true'||(busy&&!keep)||!!offline||(unresolved&&node.dataset.write==='true');
   });
-  $('enter').textContent=busy&&!$('entry').hidden?'正在连接…':'走进 / 接续渡鸦溪';
+  $('enter').textContent=busy&&!$('entry').hidden?'正在连接…':entryKeyState==='saved'?'接续本机密钥身份':entryKeyState==='new'?'创建身份，走进渡鸦溪':entryKeyState==='error'?'本机身份读取失败':'正在读取本机身份…';
   $('agent-access').disabled=busy;
 }
 function clearError(id){$(id).textContent='';$(id).hidden=true;}
@@ -109,11 +128,12 @@ async function enter(candidate,displayName='',classId='fighter'){
   announce('');const session=++generation,active=()=>{if(session!==generation){const error=new Error('本页连接已取消。');error.cancelled=true;throw error;}};
   const nextKey=await validateKey(await candidate);active();const response=await client.authenticate(nextKey,{isCurrent:()=>session===generation});active();
   key=nextKey;await savedKey(key);active();profile=response.role_profile;
+  ++entryIdentityRead;entryKeyState='saved';if(entryCharacter?.publicKey!==key.public_key)entryCharacter=null;renderEntryIdentity();
   loadCheckpoint();activityRenderKey='';returnHistoryFlight=null;
   $('entry').hidden=true;$('app').hidden=false;$('reconnect').hidden=true;$('connection-state').textContent='本页授权到期 '+time(client.expiresAt);$('who').textContent=profile.display_name;
   readInterrupted=false;lastRead=0;$('stale-state').hidden=true;$('credentials-status').textContent='';$('agent-status').textContent='';
   snapshot=null;sceneRenderKey='';taskRenderKey='';names.clear();objects.clear();mapItems.clear();mapCursor=0;mapMore=false;mapTotal=0;mapFlight=null;history=new FrontierHistory();latestHistoryFlight=null;olderHistoryFlight=null;
-  for(const id of ['character-stats','character-abilities','inventory','character-detail','scene-npcs','scene-objects','available-actions','open-exits','nearby','my-requests','side-question','world-map','last-result','history-list','request-history','credentials','scene-activity','scene-activity-more','return-differences','return-changes'])$(id).replaceChildren();
+  for(const id of ['character-stats','character-abilities','inventory','character-detail','scene-npcs','scene-objects','scene-current-ground','available-actions','open-exits','nearby','my-requests','side-question','world-map','last-result','history-list','request-history','credentials','scene-activity','scene-activity-more','return-differences','return-changes'])$(id).replaceChildren();
   $('return-card').hidden=true;$('return-details').open=false;$('scene-activity-details').open=false;$('scene-activity-details').hidden=true;$('map-details').open=false;$('scene-activity-status').textContent='正在读取真实记录…';
   $('character-name').textContent='正在读取人物…';$('character-class').textContent='';$('scene-title').textContent='正在读取现场…';$('scene-description').textContent='';$('scene-author').textContent='';$('last-result-card').hidden=true;$('my-requests-card').hidden=true;
   requestPages={own:{items:new Map(),cursor:0,more:false,total:0},received:{items:new Map(),cursor:0,more:false,total:0}};
@@ -132,7 +152,7 @@ async function refresh(){
   try{
     const value=await client.query('frontier.look');if(session!==generation||seq!==readSeq||!current())return;
     if(value.world_id!=='living-frontier'||!Array.isArray(value.available_actions)||!Array.isArray(value.directory))throw new Error('世界现场信息不完整，请重连后读取。');
-    snapshot=value;render();
+    snapshot=value;entryCharacter=value.character?{publicKey:key.public_key,name:value.character.name,className:value.character.class_name}:null;render();
     if(Number.isInteger(snapshot.history_latest_seq)){history.observeLatest(snapshot.history_latest_seq);renderHistory();if(['world','history'].includes(pageId())&&history.needsLatest)await readLatestHistory();}
     if(session!==generation||seq!==readSeq||!current())return;
     lastRead=Date.now();if(readInterrupted){readInterrupted=false;$('stale-state').hidden=true;}renderFreshness();
@@ -289,8 +309,13 @@ function renderCharacter(){
   if(!list.children.length)list.append(text('li','还没有拿到独立物件。'));$('inventory').append(list);$('character-detail').append(text('p','人物和背包会保留。离开网页后，你的其他连接仍可继续行动。'));
 }
 function renderScene(){
-  const scene=snapshot.scene,c=snapshot.character;if(!scene){$('scene-title').textContent='世界入口';$('scene-description').textContent='核对上次操作后，可以用同一身份创建人物。';for(const id of ['scene-npcs','scene-objects','available-actions','open-exits','nearby'])$(id).replaceChildren();return;}
+  const scene=snapshot.scene,c=snapshot.character;if(!scene){$('scene-title').textContent='世界入口';$('scene-description').textContent='核对上次操作后，可以用同一身份创建人物。';for(const id of ['scene-npcs','scene-objects','scene-current-ground','available-actions','open-exits','nearby'])$(id).replaceChildren();return;}
   $('scene-title').textContent=scene.title;$('scene-description').textContent=scene.description;$('scene-state').textContent='已保存 · 版本 '+scene.version;$('scene-author').textContent='地点作者：'+name(scene.creator)+' · '+time(scene.created_at);
+  const ground=scene.current_ground;$('scene-current-ground').replaceChildren();
+  if(ground?.complete===true&&Array.isArray(ground.objects)&&ground.count===ground.objects.length){
+    $('scene-current-ground').append(text('strong',ground.count?'地面现有：'+ground.objects.map(object=>object.name+'（'+(states[object.state]||object.state)+'）').join('、'):'这里目前没有地面物件。'),text('p','这是当前完整地面列表。未列出的物件不在这里的地面上，不能按旧描写直接拿取。','small'));
+  }
+  $('scene-current-ground').hidden=!$('scene-current-ground').children.length;
   const nearby=snapshot.nearby.filter(other=>other.role_id!==c.role_id);$('nearby').replaceChildren();if(nearby.length){$('nearby').append(text('span','同一地点：','small'));for(const other of nearby)$('nearby').append(text('span',name(other.role_id),'traveler-chip'));}else $('nearby').append(text('span','你暂时没有遇见其他旅人。','small'));
   renderFreshness();
   const signature=JSON.stringify([scene.id,scene.version,c.version,scene.objects.map(object=>[object.id,object.version,object.state,object.owner,object.key_requirement,object.key_required,object.consume_key]),scene.exits.map(exit=>[exit.id,exit.version,exit.destination_id,exit.blocked]),scene.npcs.map(npc=>[npc.id,npc.version]),nearby.map(other=>[other.role_id,other.version]),snapshot.available_actions]);
@@ -407,7 +432,7 @@ async function readGuide(){const session=generation,chapter=$('guide-chapter').v
 async function readCredentials(){const session=generation,page=await client.listCredentials({isCurrent:()=>session===generation&&current()});if(session!==generation)return;$('credentials-status').textContent='连接状态读取于 '+new Date().toLocaleTimeString()+'；不代表外部 Agent 正在运行。';const host=$('credentials');host.replaceChildren();for(const row of page.credentials){const item=text('div','','credential'),detail=text('div');detail.append(text('strong',row.is_current?'当前网页':'连接 '+row.token_id.slice(-6)),text('small',(row.access_mode==='observe'?'只读观察':'读取与行动')+' · '+({active:'有效',expired:'已到期',revoked:'已撤销'}[row.status])),text('small','签发 '+time(row.created_at)+' · 到期 '+time(row.expires_at)));item.append(detail);if(!row.is_current&&row.status==='active')item.append(button('撤销',async()=>{if(!await risk('撤销这一连接','该连接将无法继续访问；这不会停止对方本地的 AI 工具。持钥者仍可重新授权。'))return;await client.revokeCredential(row.token_id,{isCurrent:()=>session===generation&&current()});announce('已撤销这一连接的访问权限。');await readCredentials();}));host.append(item);}}
 function pageId(){const id=location.hash.slice(1);return ['world','history','guide','connections'].includes(id)?id:'world';}
 async function showPage(){const id=pageId(),session=generation;for(const page of ['world','history','guide','connections'])$(page).hidden=id!==page;document.querySelectorAll('.tabs a').forEach(link=>link.dataset.page===id?link.setAttribute('aria-current','page'):link.removeAttribute('aria-current'));if(!current())return;if(id==='world'){await refresh();if(session!==generation||!current()||pageId()!==id)return;renderActivity();}if(id==='history'){await refresh();if(session!==generation||!current()||pageId()!==id)return;await readLatestHistory();if(session!==generation||!current()||pageId()!==id)return;await readRequests();}if(id==='guide')await readGuide();if(id==='connections')await readCredentials();}
-function leave(){try{saveDrafts();}catch(error){showError(error);}++generation;++readSeq;clearTimeout(timer);client.cancelRequests();agentClient?.cancelRequests();if($('risk-dialog').open)$('risk-dialog').close('cancel');if($('create-dialog').open)$('create-dialog').close();client.token=null;profile=null;snapshot=null;mapItems.clear();history=new FrontierHistory();latestHistoryFlight=null;olderHistoryFlight=null;names.clear();objects.clear();sceneRenderKey='';taskRenderKey='';createContext=null;$('entry').hidden=false;$('app').hidden=true;$('error').hidden=true;$('last-result-card').hidden=true;announce('已离开网页。角色与已提交内容继续保留，其他连接的权限没有被撤销。');controls();}
+function leave(){try{saveDrafts();}catch(error){showError(error);}++generation;++readSeq;clearTimeout(timer);client.cancelRequests();agentClient?.cancelRequests();if($('risk-dialog').open)$('risk-dialog').close('cancel');if($('create-dialog').open)$('create-dialog').close();client.token=null;profile=null;snapshot=null;mapItems.clear();history=new FrontierHistory();latestHistoryFlight=null;olderHistoryFlight=null;names.clear();objects.clear();sceneRenderKey='';taskRenderKey='';createContext=null;$('entry').hidden=false;$('app').hidden=true;$('error').hidden=true;$('last-result-card').hidden=true;announce('已离开网页。角色与已提交内容继续保留，其他连接的权限没有被撤销。');readEntryIdentity();controls();}
 
 function creationRoute(){return 'frontier-create:'+createContext.scene_id+':'+(createMode==='objects'?'add-objects':createContext.exit_id);}
 function creationValue(){const value={title:$('create-name').value,description:$('create-description').value,facts:$('create-facts').value,paired_barrier:$('create-object-use-key').checked,npcs:[],objects:[],exits:[]};for(let i=0;i<2;i++){value.npcs.push({name:$('create-npc-name-'+i).value,description:$('create-npc-description-'+i).value});value.objects.push({name:$('create-object-name-'+i).value,description:$('create-object-description-'+i).value,kind:$('create-object-kind-'+i).value,initial_state:$('create-object-state-'+i).value,blocks_exit:$('create-object-block-'+i).value,key_required:i===1&&$('create-key-required').checked,consume_key:i===1&&$('create-consume-key').checked,discovery_text:$('create-object-discovery-'+i).value});value.exits.push({label:$('create-exit-name-'+i).value,description:$('create-exit-description-'+i).value});}return value;}
@@ -511,4 +536,4 @@ $('connect-agent').addEventListener('click',()=>run(async()=>{const session=gene
 $('copy-prompt').addEventListener('click',()=>run(async()=>{try{await navigator.clipboard.writeText($('agent-prompt').value);announce('已复制，可以粘贴给自己的助手。');}catch{$('agent-prompt').focus();$('agent-prompt').select();announce('浏览器未允许自动复制，文字已选中，可以手动复制。');}}));
 window.addEventListener('hashchange',()=>showPage().catch(showError));window.addEventListener('pagehide',()=>{try{saveDrafts();}catch{}client.cancelRequests();agentClient?.cancelRequests();});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&current()&&!busy)refresh().catch(showError);});
-showPage().catch(showError);controls();
+showPage().catch(showError);controls();readEntryIdentity();
