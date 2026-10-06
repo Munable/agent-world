@@ -1,6 +1,6 @@
-"""Open the user's existing Codex CLI with a browser-issued world connection.
+"""Open the user's existing Codex CLI with a private world connection.
 
-The downloaded JSON stays unchanged. Only the launched process receives its
+The connection JSON stays unchanged. Only the launched process receives its
 bearer token. A fresh MCP name avoids inheriting a user's same-name static
 headers or environment settings; personal Codex settings and login still load.
 """
@@ -48,17 +48,17 @@ def read_connection(config_path: Path):
                 raise LaunchError("连接文件需要仅自己可读，请将文件权限设为 600 后重试。")
             raw = stream.read(MAX_CONFIG_BYTES + 1)
     except FileNotFoundError:
-        raise LaunchError("找不到连接文件；请使用网页下载的连接 JSON 路径。") from None
+        raise LaunchError("找不到连接文件；请使用网页或接入助手保存的连接 JSON 路径。") from None
     except PermissionError:
         raise LaunchError("无法读取连接文件；请检查文件归属和读取权限。") from None
     except OSError:
         raise LaunchError("连接文件无法安全打开；请使用真实的普通文件路径。") from None
     if not raw or len(raw) > MAX_CONFIG_BYTES:
-        raise LaunchError("连接文件为空或超过 64 KiB；请使用网页下载的原 JSON。")
+        raise LaunchError("连接文件为空或超过 64 KiB；请使用世界连接的原 JSON。")
     try:
         value = json.loads(raw)
     except (ValueError, UnicodeError):
-        raise LaunchError("连接文件不是有效的 UTF-8 JSON；请重新选择网页下载的文件。") from None
+        raise LaunchError("连接文件不是有效的 UTF-8 JSON；请重新选择世界连接文件。") from None
     try:
         if (not isinstance(value, dict) or set(value) != {"$schema", "mcp"}
                 or value["$schema"] != "https://opencode.ai/config.json"
@@ -89,7 +89,7 @@ def read_connection(config_path: Path):
         if parts.scheme != "https" and not (parts.scheme == "http" and loopback):
             raise ValueError
     except (ValueError, TypeError, KeyError):
-        raise LaunchError("连接格式不匹配；需要网页下载的 remote Agent World JSON，远程地址使用 HTTPS。") from None
+        raise LaunchError("连接格式不匹配；需要网页或接入助手保存的 remote Agent World JSON，远程地址使用 HTTPS。") from None
     return url, authorization.removeprefix("Bearer "), hashlib.sha256(raw).hexdigest()
 
 
@@ -150,8 +150,8 @@ def build_launch(config_path: Path, *, codex: Path | None = None, model=DEFAULT_
 
 
 def main(argv=None):
-    parser = Parser(description="用网页下载的连接文件打开已有 Codex；保留个人设置、登录和本地对话。")
-    parser.add_argument("--config", type=Path, required=True, help="网页下载的私密 ravenbrook-opencode.json 路径")
+    parser = Parser(description="用世界连接文件打开已有 Codex；保留个人设置、登录和本地对话。")
+    parser.add_argument("--config", type=Path, required=True, help="网页或接入助手保存的私密 Agent World JSON 路径")
     parser.add_argument("--codex", type=Path, help="可选：已安装 Codex CLI 的路径；不会安装或重新登录")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="现有登录可用的模型；默认 gpt-6-luna，无隐藏 fallback")
     parser.add_argument("--reasoning-effort", help="可选推理档位；未指定时沿用个人设置，例如 medium")

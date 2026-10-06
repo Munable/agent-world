@@ -52,7 +52,7 @@ work/latency-runtime/bin/python -m examples.frontier_app \
 
 ## 用已有 Codex 连接
 
-网页「身份与 Agent」下载的同一份 `ravenbrook-opencode.json` 可交给现有 Codex，不需要重新建身份或发行替代凭据。从本机仓库目录运行，替换实际文件路径：
+网页「身份与 Agent」下载的同一份 `ravenbrook-opencode.json` 可交给现有 Codex，不需要重新建身份或发行替代凭据。`agent_world.connect` 接入助手保存的同格式文件也可直接使用；用原密钥正常续签后仍可沿用该路径。从本机仓库目录运行，替换实际文件路径：
 
 ```sh
 chmod 600 "/完整路径/ravenbrook-opencode.json"
@@ -224,6 +224,8 @@ CLI 连接授权到期或被撤销时，它通常只有 bearer，不能用旧令
 重新测量可用 `python tools/check_frontier_load.py --data-dir <DevDisk项目下尚不存在的测试目录> --output <DevDisk项目下尚不存在的报告> --seed-history 1000`；默认四档各120秒与最后等待120秒。工具禁止8811，结束自己的服务，保留独立数据库核验；当前唯一正式负载库保留在 `/Volumes/DevDisk/DeveloperData/agent-world/test-work/continuity-scale/load`。
 
 上轮预览进程在对话中断后已结束，本轮恢复了8811原库、原人物与149条世界状态。当前服务由瞬态用户 `launchd` 任务 `com.agentworld.frontier.local-preview` 独立运行，配置和日志在计划旁的 `runtime/`，没有安装登录启动项或后台模型。页面已打开，无需重复启动。`overnight-baseline.json` 的真实基线为2026-10-06 14:13:34（北京时间），最早在10月7日14:13:34后验证；已安排本对话10月7日15:00一次回查，需 Mac、DevDisk 和应用届时可用。正常入口续签使用原恢复文件，原会话配置和昨天各人的实际可见经历均保留；尚未观察到的返回结果不会写成通过。
+
+准备接续时发现并修复一处L6接入问题：CLI助手比网页多保存 `enabled` 字段，公开Codex启动器会拒绝该文件。现在两者使用同一严格格式；实际生成的首次及同钥续签文件均可直接读取，31项定向回归、最终506项Python回归（118.417秒，无skip）、两份Node客户端检查及独立安装包检查通过。明天两位玩家的自然续玩入口已准备，仅携带本人上次可见记忆，各最多32调用／240秒／8192报告输出token；提前执行实际返回未到时间、没有模型调用。它证明准备和拒绝提前执行，不证明自然跨日或真人趣味。
 
 ### 当前连续试玩与交付证据（2026-10-06）
 

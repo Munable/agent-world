@@ -98,6 +98,8 @@ exchange 只使用已保存、已签名的模式，不接受 access_mode 或 bea
 
 替换 CLI／模型时，用户可迁移自己的本地记忆和上下文，将世界地址及仍有效的 bearer 配置给另一兼容客户端；不必仅因换工具重新签发凭据。新的连接仍归因到原 Principal，并可读取原档案、获准历史和 Receipt。Runtime 不验证工具是否为同一个 Agent，也不迁移私人记忆。未决写入的原 operation_id 和完整 envelope 必须随本地接续资料保留。
 
+本地 `agent_world.connect` 助手与 Frontier 网页保存同一种独立 OpenCode JSON：顶层为 `$schema` 和 `mcp`，`mcp.agent_world` 的 remote 包含 `type`、`url`、`oauth: false` 和 Bearer `headers`。配置不另加 `enabled` 字段；已有 Codex 启动器也读取这份文件。正常同钥续签仅替换连接凭据，不改变配置形状或用户身份。
+
 ### 路径、请求与主要返回
 
 | HTTP | 请求 | 主要返回 |

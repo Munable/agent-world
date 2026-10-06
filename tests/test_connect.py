@@ -69,11 +69,15 @@ class ConnectionHelperTests(unittest.TestCase):
         config = self.saved_config()
         self.assertEqual(config["$schema"], CONFIG_SCHEMA)
         mcp = config["mcp"]["agent_world"]
-        self.assertEqual({k: mcp[k] for k in ("type", "url", "enabled", "oauth")}, {
-            "type": "remote", "url": self.origin + "/mcp", "enabled": True, "oauth": False,
+        self.assertEqual(set(mcp), {"type", "url", "oauth", "headers"})
+        self.assertEqual({k: mcp[k] for k in ("type", "url", "oauth")}, {
+            "type": "remote", "url": self.origin + "/mcp", "oauth": False,
         })
         token = mcp["headers"]["Authorization"].removeprefix("Bearer ")
         self.assertEqual(self.runtime.resolve_identity_token(token)["role_id"], result.role_id)
+        from tools.play_frontier_codex import read_connection
+        launch_url, launch_token, _ = read_connection(self.output_path)
+        self.assertEqual((launch_url, launch_token), (self.origin + "/mcp", token))
         for path in (self.key_path, self.output_path):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.key_path.parent.stat().st_mode & 0o777, 0o700)
@@ -89,6 +93,10 @@ class ConnectionHelperTests(unittest.TestCase):
         self.assertEqual((first.role_id, first.public_key), (second.role_id, second.public_key))
         self.assertEqual(key_bytes, self.key_path.read_bytes())
         self.assertNotEqual(first_config, self.saved_config())
+        from tools.play_frontier_codex import read_connection
+        launch_url, launch_token, _ = read_connection(self.output_path)
+        self.assertEqual(launch_url, self.origin + "/mcp")
+        self.assertEqual(self.runtime.resolve_identity_token(launch_token)["role_id"], first.role_id)
 
     def test_observe_connection_retains_identity_and_requested_server_authority(self):
         first = self.connect(new_identity=True)

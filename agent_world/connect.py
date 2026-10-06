@@ -366,7 +366,7 @@ def connect_world(
     else:
         result = _exchange(client, origin, key, access_mode)
     config = {"$schema": CONFIG_SCHEMA, "mcp": {"agent_world": {
-        "type": "remote", "url": result["mcp_url"], "enabled": True, "oauth": False,
+        "type": "remote", "url": result["mcp_url"], "oauth": False,
         "headers": {"Authorization": "Bearer " + result["identity"]["token"]},
     }}}
     _atomic_json(output_path, config, replace=replace_config)
