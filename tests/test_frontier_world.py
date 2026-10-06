@@ -147,6 +147,87 @@ class FrontierWorldTests(unittest.TestCase):
         with sqlite3.connect(self.db) as database:
             return database.execute("SELECT scope,state_key,value_json,version,updated_at,deleted FROM world_state WHERE universe='test' ORDER BY scope,state_key").fetchall()
 
+    def test_dropped_keepsake_can_be_taken_by_someone_else_and_spent_for_a_shared_path(self):
+        self.move("A", "bell-market")
+        self.object_action("A", "take", "raven-disc")
+        held = self.query("A", "examine", {"target_id": "raven-disc"})["target"]
+        self.move("A", "elm-inn")
+        args = {"object_id": "raven-disc", "expected_object_version": held["version"],
+                "expected_character_version": self.look("A")["character"]["version"]}
+        dropped = self.call("A", "drop", args, "leave-keepsake")
+        self.assertNotIn("raven-disc", self.look("A")["character"]["inventory"])
+        self.move("A", "bell-market")
+        self.move("A", "moss-edge")
+        self.object_action("B", "take", "raven-disc")
+        self.assertFalse(any(o["id"] == "raven-disc" for o in self.look("C")["scene"]["objects"]))
+        local = self.look("C")["recent_scene_activity"]
+        self.assertEqual(local["items"][0]["kind"], "take")
+        self.assertEqual(local["items"][0]["actor_name"], "B")
+        self.assertEqual(local["items"][0]["detail_arguments"], {"after": local["items"][0]["seq"]-1, "limit": 1})
+        self.assertFalse(local["scene_history_complete"])
+        self.assertIn("当前", self.look("C")["scene"]["narrative_scope"])
+        replay = self.call("A", "drop", args, "leave-keepsake")
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["result"], dropped["result"])
+        self.assertEqual(self.query("B", "examine", {"target_id": "raven-disc"})["target"]["owner"], self.roles["B"])
+        with self.assertRaises(PermissionDenied):
+            self.call("A", "unlock", self.unlock_args("A", "raven-disc", "forest-seal"))
+        self.move("B", "bell-market")
+        self.move("B", "moss-edge")
+        unlock_args = self.unlock_args("B", "raven-disc", "forest-seal")
+        with patch("agent_world.world_context.secrets.randbelow", side_effect=AssertionError("possession must not roll")):
+            unlocked = self.call("B", "unlock", unlock_args, "spend-keepsake")
+        result = unlocked["result"]
+        self.assertTrue(result["result"]["key_consumed"])
+        self.assertNotIn("raven-disc", result["character"]["inventory"])
+        self.assertEqual(result["key_object"]["state"], "spent")
+        self.assertEqual(result["key_object"]["spent_by"], self.roles["B"])
+        self.assertEqual(result["key_object"]["spent_on_barrier_id"], "forest-seal")
+        self.assertEqual(result["key_object"]["version"], unlock_args["expected_key_version"] + 1)
+        path = next(e for e in self.look("B")["scene"]["exits"] if e["id"] == "forest-east")
+        self.assertFalse(path["blocked"])
+        destination = self.call("B", "expand", {"scene_id": "moss-edge", "exit_id": path["id"],
+            "expected_exit_version": path["version"], "package": package("East-bank hideaway")})["result"]["created_scene"]["id"]
+        self.runtime = WorldRuntime(self.db)
+        self.runtime.install_world("test", WORLD)
+        replay = self.call("B", "unlock", unlock_args, "spend-keepsake")
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["result"], result)
+        self.move("C", "bell-market")
+        self.move("C", "moss-edge")
+        self.move("C", destination)
+        events = self.query("C", "history", {"limit": 50})["items"]
+        self.assertEqual(len([e for e in events if e["kind"] == "drop"]), 1)
+        self.assertEqual(len([e for e in events if e["kind"] == "unlock"]), 1)
+
+    def test_required_keepsake_cannot_be_replaced_by_a_roll_or_a_free_method(self):
+        self.move("A", "bell-market")
+        self.move("A", "moss-edge")
+        before = self.world_rows()
+        with patch("agent_world.world_context.secrets.randbelow", side_effect=AssertionError("required possession must not roll")):
+            with self.assertRaises(RuleViolation):
+                self.object_action("A", "check", "forest-seal")
+            with self.assertRaises(RuleViolation):
+                self.request(target="forest-seal")
+        self.assertEqual(self.world_rows(), before)
+        self.assertFalse(any(a["function_id"] in {"frontier.check", "frontier.request"} and
+                             a.get("arguments", {}).get("object_id", a.get("arguments", {}).get("target_id")) == "forest-seal"
+                             for a in self.look()["available_actions"]))
+        spec = package(barrier=True)
+        spec["objects"][1].update(key_required=True, consume_key=True)
+        self.move("A", "bell-market")
+        before = self.world_rows()
+        exit = next(e for e in self.look()["scene"]["exits"] if e["id"] == "market-road")
+        args = {"scene_id": "bell-market", "exit_id": exit["id"], "expected_exit_version": exit["version"], "package": spec}
+        with self.assertRaises(RuleViolation):
+            self.call("A", "expand", args)
+        self.assertEqual(self.world_rows(), before)
+        spec["objects"][1]["key_object"] = 0
+        created = self.call("A", "expand", args)["result"]
+        barrier = next(o for o in created["created_scene"]["objects"] if o["kind"] == "barrier")
+        self.assertTrue(barrier["key_required"])
+        self.assertTrue(barrier["consume_key"])
+
     def test_real_key_gift_opens_shared_path_once_and_survives_restart(self):
         destination, key_id, barrier_id, child = self.keyed_place()
         before = self.query("C", "examine", {"target_id": barrier_id})["target"]
@@ -405,13 +486,15 @@ class FrontierWorldTests(unittest.TestCase):
     def test_registered_prior_contract_upgrades_without_losing_state_or_original_receipt(self):
         legacy_functions = []
         for function in WORLD.functions:
-            if function.name == "frontier.unlock":
+            if function.name in {"frontier.unlock", "frontier.drop"}:
                 continue
             schema = deepcopy(function.input_schema)
             if function.name == "frontier.expand":
                 object_schema = schema["properties"]["package"]["properties"]["objects"]["items"]
                 object_schema["properties"].pop("discovery_text")
                 object_schema["properties"].pop("key_object")
+                object_schema["properties"].pop("key_required")
+                object_schema["properties"].pop("consume_key")
                 object_schema.pop("allOf", None)
             legacy_functions.append(replace(function, version=1, input_schema=schema, description="Prior discovery-free contract"))
         legacy_world = replace(WORLD, version=1, functions=tuple(legacy_functions))
@@ -429,7 +512,7 @@ class FrontierWorldTests(unittest.TestCase):
         before = runtime.query_function("prior", "frontier.look", role, {})["result"]
         runtime.install_world("prior", WORLD)
         after = runtime.query_function("prior", "frontier.look", role, {})
-        self.assertEqual(after["function_version"], 3)
+        self.assertEqual(after["function_version"], 5)
         self.assertEqual(after["result"], before)
         replay = call("expand", args, "prior-place")
         self.assertTrue(replay["replayed"])
@@ -439,7 +522,7 @@ class FrontierWorldTests(unittest.TestCase):
             call("expand", args, "new-place-with-old-schema")
 
     def test_registered_discovery_contract_updates_function_versions_without_reset(self):
-        prior = replace(WORLD, version=3, functions=tuple(replace(f, version=2) for f in WORLD.functions if f.name != "frontier.unlock"))
+        prior = replace(WORLD, version=3, functions=tuple(replace(f, version=2) for f in WORLD.functions if f.name not in {"frontier.unlock", "frontier.drop"}))
         runtime = WorldRuntime(self.db.with_name("discovery-version.sqlite3"))
         role = runtime.create_role("Returning reader")["role_id"]
         runtime.install_world("reader", prior)
@@ -448,7 +531,7 @@ class FrontierWorldTests(unittest.TestCase):
         before = runtime.query_function("reader", "frontier.look", role, {})["result"]
         runtime.install_world("reader", WORLD)
         after = runtime.query_function("reader", "frontier.look", role, {})
-        self.assertEqual(after["function_version"], 3)
+        self.assertEqual(after["function_version"], 5)
         self.assertEqual(after["result"], before)
 
     def test_discovered_carried_content_has_exact_reader_after_inventory_summary(self):

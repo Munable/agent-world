@@ -38,7 +38,7 @@ LIMITS = {"max_hosts": MAX_RUNS, "world_calls_per_host": MAX_TOOLS,
 CORE_TOOLS = ("world.bootstrap", "world.discover", "world.get_changes", "world.wait_changes", "world.get_receipt")
 FRONTIER_TOOLS = tuple("frontier." + name for name in (
     "join", "look", "history", "map", "requests", "move", "expand", "say", "tell",
-    "examine", "check", "take", "unlock", "transfer", "rest", "request", "visit", "answer",
+    "examine", "check", "take", "drop", "unlock", "transfer", "rest", "request", "visit", "answer",
     "accept", "withdraw", "handbook",
 ))
 REQUIRED_TOOLS = {"frontier.join", "frontier.look", "frontier.history", "frontier.map",
@@ -66,8 +66,10 @@ HOST_INSTRUCTIONS = (
     "a stable outer sibling of arguments, never a field inside arguments. If the "
     "result is unknown, recover its original receipt or replay the identical "
     "envelope under the original operation_id; never make a new ID to resolve an "
-    "unknown result. For an explicit StateConflict guaranteeing no commit, read "
-    "current facts and allow at most one corrected attempt with a new operation_id; "
+    "unknown result. For an explicit StateConflict, SchemaRejected, RuleViolation "
+    "or PermissionDenied rejection, read current facts and the function schema; "
+    "allow at most one corrected attempt with a new operation_id within the "
+    "user's original authority, without bypassing a refusal or assuming consent; "
     "otherwise report the actual blocker. A notification is only a hint: read "
     "current frontier.look before acting. Advance the returned next_cursor and "
     "follow has_more; bootstrap and read current facts if a cursor expired. "

@@ -43,3 +43,18 @@ assert.throws(()=>bounded.merge({items:[],next_after:4,has_more:true,latest_seq:
 assert.throws(()=>bounded.merge({items:[{seq:5}],next_after:6,has_more:false,latest_seq:6},4),/位置/);
 assert.equal(bounded.olderAfter,4);
 console.log('Frontier history: newest activity, independent old cursor, byte-short pages, overlap and gap rejection passed');
+
+const observationSource=readFileSync(new URL('../examples/frontier_web/frontier-observation.js',import.meta.url),'utf8');
+const {parseCheckpoint,makeCheckpoint,characterChanges,observedRange}=await import('data:text/javascript;base64,'+Buffer.from(observationSource).toString('base64'));
+const before={world_id:'living-frontier',character:{role_id:'keeper',scene_id:'market',hp:10,max_hp:10,inventory:['keepsake']},scene:{title:'Market'},inventory_objects:[{id:'keepsake',name:'Old disc'}]};
+const checkpoint=makeCheckpoint(before,40,1000);
+assert.deepEqual(parseCheckpoint(JSON.stringify(checkpoint),{worldId:'living-frontier',roleId:'keeper'}),checkpoint);
+assert.throws(()=>parseCheckpoint(JSON.stringify(checkpoint),{worldId:'living-frontier',roleId:'visitor'}),/格式/);
+const returned={...before,character:{...before.character,scene_id:'forest',inventory:[]},scene:{title:'Forest'},inventory_objects:[]};
+assert.deepEqual(characterChanges(checkpoint,returned),['位置从“Market”变为“Forest”。','“Old disc”已不在你的背包里；具体去向以已读记录和当前物件状态为准。']);
+const seen=new Map([[43,{seq:43,scene_id:'forest'}],[44,{seq:44,scene_id:'market'}]]);
+assert.deepEqual(observedRange(seen,40,44).gaps,[{from:41,to:42}]);
+seen.set(41,{seq:41});seen.set(42,{seq:42});
+assert.equal(observedRange(seen,40,44).complete,true);
+assert.equal(observedRange(seen,40,39).rolledBack,true);
+console.log('Frontier return observation: identity scope, actual possession changes, cross-scene gaps and restored snapshot detection passed');
