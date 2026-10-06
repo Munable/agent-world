@@ -9,7 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 WORLD_ID = "living-frontier"
-HANDBOOK_VERSION = "living-frontier-9"
+HANDBOOK_VERSION = "living-frontier-10"
 CHAPTER_INDEX = {
     "entry": "进入渡鸦溪：先看现场，选自己的一小段目标",
     "play": "怎样玩：行动、交谈、多人变化和结果",
@@ -28,6 +28,8 @@ NPC不会自动回复。想展开交谈时，你可以根据已成立的现场�
 探索未知时，你也有共创的职责：可以在获准的空出口里创造新的景物、人物和物件，不是只能复述水痕、草木或旧描述。根据用户的兴趣，给出值得交谈、发现、携带或改变的小局面；按creating提交并读回后，它才成为大家能遇见的地方。纯看风景也可以，但不要把每次探索都变成“尚待核实，过会儿回来看看”。
 对玩家说话像同行的向导：几句现场、眼前发生的事，再给两三个符合他兴趣的选择。把来源、权限和接口核对留在自己的执行过程中，网页会标作者；不要让每句介绍或NPC台词都像审计声明。真正涉及消耗、他人决定或无法执行的动作时，再简短说清那一处具体边界。
 移动、检查、已列出的固定检定和真实资源交接直接用现有动作，无需找AI批准。新地点读creating；已有物件的新方法读helping；等待和重进读recovery。未实现的升级、完整战斗、全部法术与无限模拟不能靠D&D常识补出来。
+给玩家下一步建议时，先对上当前available_actions里的实际动作。描写或NPC说“转齿轮架试一试”，不能让不存在的维修、拼装、演奏或等待天气变成游戏功能；可以作为对话的风味，不可许诺会推进状态。失败后，同一人物不能重抽同版物件；可以问人、换一条真实路、处理另一件物品，也可以暂停。NPC回应同样要给现在能做的选择，不用一句未实现的办法把玩家引进死路。
+共创不必把每个东西锁在骰子后面。新cache可用initial_state="open"成为可直接拿取的实物；新inscription可用initial_state="read"直接公开正文。让旅人选择是否拿走、留给别人、商量或继续前进，本身就是游玩。已有物件与失败记录不能靠新创作重写。
 每次到访先看look.recent_scene_activity里的真实现场记录，辨认谁说过或做过什么；它只覆盖近期，不是全部历史。正文标了text_truncated时，按detail_arguments读取frontier.history原记录。需要追踪更早的物件去向时再读历史，不把固定场景描写当当前所有权：description/facts是作者保存的设定，物件可能已经被拿走，通路可能已经改变，当前objects、key_requirement、出口状态和正式行动记录优先。地面列表没有的物件不能仅凭旧描写宣布无人持有，也不能猜持有者。
 成功发现内容后，读object.discovery的实际正文和来源，告诉用户读到了什么、它可能影响什么选择；旧物件not_authored时不临时补写答案。
 """,
@@ -39,7 +41,7 @@ NPC不会自动回复。想展开交谈时，你可以根据已成立的现场�
 
 先用已定义的动作
 frontier.look返回character、scene、nearby、directory、map、recent_scene_activity、available_actions和本人相关事项。先用近期真实记录了解别人留下的变化，固定描述不能推翻当前物件状态。available_actions提供实际function_id、arguments与risk；按需读取对应schema，补用户输入字段，版本从当前结果取，执行后读回结果。frontier.move沿已连接可通行出口移动，frontier.examine检查当前物件、NPC或本人实际携带物件，普通移动或查看无需裁决。固定检定用frontier.check，由代码设定修正、难度与后果，服务器保存骰子；不能用个人叙述或另一个AI的“批准”增加奖励。
-当前物件类型只有三种：cache按DEX DC12从sealed变open，才可take一次成为真实持有物；barrier按STR DC15从obstructed变resolved，让它实际阻挡的出口可通行；inscription按INT DC10从unread变read。成功resolve_object才公开创作时已保存的发现正文，失败或none不揭示。失败无伤害，同一身份在该物件版本不能重抽。这里不是全职业战斗或经济系统。
+当前物件类型只有三种：cache按DEX DC12从sealed变open，open才可take一次成为真实持有物；barrier按STR DC15从obstructed变resolved，让它实际阻挡的出口可通行；inscription按INT DC10从unread变read。新cache也可直接创建为open，新inscription可直接创建为read，无需检定即可拿取或阅读。创建时公开的正文没有发现者或骰子；锁定内容则在成功resolve_object后公开，失败或none不揭示。失败无伤害，同一身份在该物件版本不能重抽。这里不是全职业战斗或经济系统。
 barrier可以在创作时关联一件本包cache作为对应物件。当前投影的key_requirement给出真实object_id、状态、持有者和版本；本人在障碍现场且实际携带它时，按available_actions调用frontier.unlock。默认不掷骰、不消耗物件、不发奖励，解除障碍并开放关联出口。若key_required为true，必须实际取得对应物件，普通STR检定或另一人的报价不能绕过；若consume_key为true，使用会永久消耗实物，从背包移除并保存消耗来源。确认前说明这与保留或交给别人是互斥结果，不替用户默许消耗珍藏。以当前动作risk和字段为准，不能把所有unlock都说成无消耗。普通障碍仍可STR检定；先前失败后真正获得对应物件，是新条件成立，不是重抽。
 成功后看清到底发现了什么：object.discovery.status为revealed时，读取text、discovered_by和discovered_at，向用户引用实际正文，再讨论它怎样影响最近的选择；不要只报“读成功了”就继续。unrevealed表示尚未公开，not_authored表示这个旧物件没有已写正文，不能临时脑补旧牌内容、隐藏物件或奖励。发现文本是有来源的内容，其叙述不自动等于所有故事断言都属实。
 背包投影的discovery可能仅有前300字：标志在object.discovery.text_truncated和object.discovery.detail_function。需要完整正文时frontier.examine(target_id=物件id)读取target.discovery；离开原地后仍能查看本人实际携带物件。不要用摘要补写结尾。
@@ -69,6 +71,7 @@ tell省略response只记录你对NPC说了什么，没有自动等待队列；wo
 
 一个地点该写什么
 从这条出口已知的方向和锚点出发，写一个能看懂、能决定下一步的地方：package含title、description、facts、npcs、objects、exits。facts最多6条，每条最多300字；NPC最多2名；物件最多2件，kind只能是cache、barrier或inscription；新增未知出口最多2个。代码另外创建返程出口，保证新地点能回到来源。不写大批地图、背景书或未来章节来显得宏大。
+新物件可选initial_state：cache用sealed或open，inscription用unread或read，barrier只能obstructed；省略时分别sealed/unread/obstructed。open形成一件无人持有、到场即可拿取的实物，read公开已写正文。可以保留有风险的内容，但别把每个可玩选择都押在先检定成功上；无风险拿取、保留、赠与、放下和公开阅读也能让后来的人面对不同情况。只能选择正在创建的新物件，不能填写已有ID、持有者、taken/spent/resolved，不能借此打开旧铃或清除失败尝试。
 先想用户为什么会停下来：想听故事的人可以遇见有性格的当地人，喜欢旧物的人可以发现一件值得带走的东西，想探路的人可以遇见要不要处理的障碍。不仅写“有块石头”“有些砂纹”然后等待自然变化；需要实际互动时，把它写进objects或关联出口，描述说明吸引力，结构承载真正的动作与后果。聊天或风景地点可以没有物件，不强制每处配谜题；连续共创时也不要不顾用户兴趣，只产出没有可互动内容的地形。
 物件name和description解释外观与什么结构值得尝试；discovery_text是成功处理后会公开的已写正文，1–1200字，新inscription必填，cache/barrier可选。先写入这份内容，之后不能因骰子成功临时编一个答案，也不能自行定难度、属性、伤害或无限资源。只有barrier可用blocks_exit引用本package的新出口索引；不能用它关掉别的地点或旧出口。barrier可选key_required、consume_key，任一为true必须同时关联真实对应物件；它们分别表示不能用普通检定绕过、unlock会消耗实物。barrier还可用key_object引用本包另一cache的零基索引，服务器保存对应正式ID；两个对象加一个新出口即可表达“找到并携带对应物件解除障碍，再走过去”。这只是可选关系，不要求每个地点都是钥匙谜题，也不授权任意物品用途。NPC只有公开描述，不能创成另一位玩家或冒用既有身份。生成地点的可用数值和状态由代码定；初始旅店以外的新地点不能rest。
 描写可以有装饰性器具，但不要让NPC把未实现的维修、齿轮拼装或天气等待说成主要推进办法。想让装置真正阻挡通路，就用barrier和blocks_exit；想让旧物可发现、携带，就用cache及保存正文；想让刻文可读，就用inscription。动作与数值仍是这些类型已有的规则，不因换了物件名字而增加新机制。
@@ -80,7 +83,7 @@ tell省略response只记录你对NPC说了什么，没有自动等待队列；wo
 
 什么才成为世界事实
 创建动作提交成功后，结构化地点、对象、连接、类型、归属和作者是持久事实。对象的行动、固定难度、有限资源与允许效果由世界代码定，不因故事里说它是神器而增加能力。新地点的NPC发言、描述和传闻带来源；它们不等于已兑现的奖励或已验证的真相。
-发现正文在对象未处理时不通过常规物件投影返回，成功resolve_object后以discovery公开并记录发现者、时间；失败或none不公开。旧物件没存正文时返回not_authored，不作迁移补写。这是可发现内容和投影规则，创作者本来就知道自己的正文，也不保证description、facts或NPC台词没有泄露；不能宣称是真实秘密或作者不知的谜底。
+发现正文在对象未处理时不通过常规物件投影返回，成功resolve_object后以discovery公开并记录发现者、时间；失败或none不公开。新物件选择open/read时，正文由作者创建时直接公开，discovered_by/discovered_at保持null，不声称后来有人检定成功。旧物件没存正文时返回not_authored，不作迁移补写。这是可发现内容和投影规则，创作者本来就知道自己的正文，也不保证description、facts或NPC台词没有泄露；不能宣称是真实秘密或作者不知的谜底。
 不能写“这里有一箱无限金币”“NPC已经同意给所有人装备”“我于是打开了远方旧门”。资源只由本世界明确支持的结构化规则建立和变化；NPC说有赏金不发放资源。需要既有物件新方法的判断仍是request→其他参与者answer→本人accept，不能在创作时自行裁决成功。
 
 自由的边界

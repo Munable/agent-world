@@ -80,6 +80,66 @@ class FrontierWorldTests(unittest.TestCase):
         return self.call(actor, "answer", {"request_id": request_id, "decision": "allow", "reason": "Use the established clasp; no extra materials.",
                          "ability": "dexterity", "dc": 12, "effect": "resolve_object"}, operation)
 
+    def test_public_authored_objects_enable_other_player_choices_without_reroll(self):
+        self.move("A", "bell-market")
+        with patch("agent_world.world_context.secrets.randbelow", return_value=0):
+            failure = self.object_action("A", "check", "market-cache")["result"]
+        old_attempts = self.look()["character"]["attempts"]
+        self.assertFalse(failure["result"]["success"])
+        self.move("A", "elm-inn")
+        spec = package()
+        spec["objects"][0].update(initial_state="open", discovery_text="A single traveller's keepsake, left here to be carried or left behind.")
+        spec["objects"][1]["initial_state"] = "read"
+        with patch("agent_world.world_context.secrets.randbelow", side_effect=AssertionError("Public creation does not roll")):
+            created, args = self.expand(spec=spec, operation="public-place")
+        destination = created["created_scene"]["id"]
+        objects = created["created_scene"]["objects"]
+        portable = next(o for o in objects if o["kind"] == "cache")
+        writing = next(o for o in objects if o["kind"] == "inscription")
+        self.assertEqual(portable["state"], "open")
+        self.assertIsNone(portable["owner"])
+        self.assertEqual(writing["state"], "read")
+        for obj in objects:
+            self.assertEqual(obj["creator"], self.roles["A"])
+            self.assertEqual(obj["discovery"]["status"], "revealed")
+            self.assertIsNone(obj["discovery"]["discovered_by"])
+            self.assertIsNone(obj["discovery"]["discovered_at"])
+        self.move("B", "bell-market")
+        self.move("B", destination)
+        actions = self.look("B")["available_actions"]
+        self.assertTrue(any(a["function_id"] == "frontier.take" and a["arguments"]["object_id"] == portable["id"] for a in actions))
+        self.assertFalse(any(a["function_id"] == "frontier.check" for a in actions))
+        with patch("agent_world.world_context.secrets.randbelow", side_effect=AssertionError("Taking an open object does not roll")):
+            self.object_action("B", "take", portable["id"], operation="public-keepsake")
+        self.move("A", destination)
+        self.assertFalse(any(o["id"] == portable["id"] for o in self.look()["scene"]["objects"]))
+        self.assertEqual(self.look("B")["character"]["inventory"], [portable["id"]])
+        self.assertEqual(self.look()["character"]["attempts"], old_attempts)
+        self.move("A", "bell-market")
+        self.assertEqual(self.query("A", "examine", {"target_id": "market-cache"})["target"]["state"], "sealed")
+        with self.assertRaises(RuleViolation):
+            self.object_action("A", "check", "market-cache")
+        self.runtime = WorldRuntime(self.db)
+        self.runtime.install_world("test", WORLD)
+        replay = self.call("A", "expand", args, operation="public-place")
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["result"]["created_scene"]["id"], destination)
+        self.assertEqual(self.look("B")["character"]["inventory"], [portable["id"]])
+        self.assertEqual(self.look()["character"]["attempts"], old_attempts)
+
+    def test_creation_rejects_initial_states_of_another_object_kind(self):
+        self.move("A", "bell-market")
+        seen = self.look()
+        exit = next(e for e in seen["scene"]["exits"] if e["destination_id"] is None)
+        for kind, state in (("cache", "read"), ("inscription", "open"), ("barrier", "resolved")):
+            spec = package(barrier=kind == "barrier")
+            obj = spec["objects"][1 if kind != "cache" else 0]
+            obj["initial_state"] = state
+            with self.assertRaises(SchemaRejected):
+                self.call("A", "expand", {"scene_id": seen["scene"]["id"], "exit_id": exit["id"],
+                          "expected_exit_version": exit["version"], "package": spec})
+            self.assertEqual(next(e for e in self.look()["scene"]["exits"] if e["id"] == exit["id"]), exit)
+
     def test_authored_scene_is_an_actual_other_player_destination(self):
         result, args = self.expand(spec=package(barrier=True), operation="create-crossing")
         destination = result["created_scene"]["id"]

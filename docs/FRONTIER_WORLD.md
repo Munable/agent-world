@@ -48,7 +48,7 @@ work/latency-runtime/bin/python -m examples.frontier_app \
   --port 8807
 ```
 
-正常停止此服务后可用同一命令重启，人物和地点由原数据库接续。若提示已有库、路径权限或世界身份不符合要求，检查实际路径，不能通过清空已有内容绕过保护。当前世界合同版本为 6、`look / expand` 函数版本为 5、其余18个原函数版本为 4、`frontier.unlock` 版本为 2、`frontier.drop` 版本为 1、状态版本为 1。已有库按正常安装流程升级；未保存的正文、铜盘和石阶门不会事后补进旧世界。本轮实物选择实验在独立的 [8811世界](http://127.0.0.1:8811/) 运行，不重置此前的8807/8808库。
+正常停止此服务后可用同一命令重启，人物和地点由原数据库接续。若提示已有库、路径权限或世界身份不符合要求，检查实际路径，不能通过清空已有内容绕过保护。当前世界合同版本为 7、`look` 函数版本为 5、`expand` 为 6、其余18个原函数版本为 4、`frontier.unlock` 版本为 2、`frontier.drop` 版本为 1、状态版本为 1。已有库按正常安装流程升级；未保存的正文、铜盘和石阶门不会事后补进旧世界。本轮实物选择实验在独立的 [8811世界](http://127.0.0.1:8811/) 运行，不重置此前的8807/8808库。
 
 ## 用已有 Codex 连接
 
@@ -66,7 +66,7 @@ work/latency-runtime/bin/python tools/play_frontier_codex.py \
 
 ## 按需说明书
 
-`frontier.handbook` 默认返回 `entry`，包含版本、章索引和该章正文，不包含全部函数或状态 schema；当前手册版本为 `living-frontier-9`。初次入场读 `entry`；准备共创时读 `creating`；领到别人的题时读 `helping`；恢复或等待时读 `recovery`。宿主可以按世界与手册版本缓存章节，压缩上下文后重新加载相关规则。当前现场每次从 `frontier.look` 取得。
+`frontier.handbook` 默认返回 `entry`，包含版本、章索引和该章正文，不包含全部函数或状态 schema；当前手册版本为 `living-frontier-10`。初次入场读 `entry`；准备共创时读 `creating`；领到别人的题时读 `helping`；恢复或等待时读 `recovery`。宿主可以按世界与手册版本缓存章节，压缩上下文后重新加载相关规则。当前现场每次从 `frontier.look` 取得。
 
 | 章 | 用途 |
 | --- | --- |
@@ -119,9 +119,9 @@ work/latency-runtime/bin/python tools/play_frontier_codex.py \
 
 | 类型 | 固定检定与后果 |
 | --- | --- |
-| `cache` | DEX DC12：`sealed → open`；打开后 `take` 一次变为 `taken`，成为一个真实持有物。 |
+| `cache` | DEX DC12：`sealed → open`；`open` 后可 `take` 一次成为真实持有物。新创作也可直接建立 `open` 物件，无需骰子。 |
 | `barrier` | STR DC15：`obstructed → resolved`；或者实际持有指定物件时用 `unlock` 确定性解除。若关联出口，该出口对所有人可通行。 |
-| `inscription` | INT DC10：`unread → read`；成功后公开创作时已保存的正文，再引用真实发现。 |
+| `inscription` | INT DC10：`unread → read`；成功后公开预存正文。新创作可直接建立 `read` 文字，创建时即公开。 |
 
 服务器掷 d20 加人物对应修正，总值达到 DC 成功。失败无伤害；每个身份在一个物件版本最多一次真实检定，固定 `check` 与自由 `accept` 共享限制，`none` 成功也算一次。新 Operation、换属性、换说法或新工具不刷新机会。成功效果与资源变化看正式结果；“听说有赏金”不会自动发钱。
 
@@ -129,7 +129,7 @@ work/latency-runtime/bin/python tools/play_frontier_codex.py \
 
 新开局的市集保留可检定的铜扣旅行匣，另有已经打开、无人持有的渡鸦铜盘。林缘的渡鸦石阶封锁必须使用铜盘并将它永久耗尽，开放的东径随后属于所有人；北径和商路保持自由。收藏、交接、放下、用掉和换路均是有效选择，没有默认的共同开门任务。`drop` 后物件成为当前地点的真实无主物件，别人可以抢先拿取；每处最多8件地面物件，满时不提交任何改变。
 
-物件的 `discovery={status,text,discovered_by,discovered_at}` 区分三种情况：`unrevealed` 尚未公开，`revealed` 已公开保存正文及发现者、时间，`not_authored` 没有预存正文。成功 `resolve_object` 才揭示内容，失败或 `none` 不揭示。助手应报告“实际读到了什么”，再根据正文讨论下一步；不能把检定成功变成临时写出旧牌内容、额外物件或奖励的许可。
+物件的 `discovery={status,text,discovered_by,discovered_at}` 区分三种情况：`unrevealed` 尚未公开，`revealed` 已公开保存正文；检定揭示时有发现者与时间，创建时公开的正文这两项为空，`not_authored` 没有预存正文。未处理物件在成功 `resolve_object` 后揭示内容，失败或 `none` 不揭示。新 `open/read` 物件在创建时直接公开，不伪造骰子或发现者。助手应报告“实际读到了什么”，再根据正文讨论下一步；不能把检定成功变成临时写出旧牌内容、额外物件或奖励的许可。
 
 背包中的物件可能只显示正文前 300 字，标志在该物件的 `discovery.text_truncated / discovery.detail_function`。需要完整正文时用 `frontier.examine(target_id=物件ID)` 读取 `target.discovery`，不能从摘要推测结尾；本人实际携带物件离开原地点后仍可查看。已公开正文是世界保存的作者内容，不保证其中每个故事主张都属实。
 
@@ -145,7 +145,8 @@ work/latency-runtime/bin/python tools/play_frontier_codex.py \
 | `facts` | 0–6 条，每条 1–300 字，解释新地点而非改写旧事实。 |
 | `npcs` | 0–2 名，包含名字与公开描述；不是另一玩家或真实独立运行的模型。 |
 | `objects` | 0–2 件，包含名字、描述与 `cache / barrier / inscription` 类型；数值由代码定。 |
-| `objects[].discovery_text` | 1–1200 字，新 `inscription` 必填，`cache / barrier` 可选；是成功处理后公开的预存正文，外观描述不能替代它。 |
+| `objects[].discovery_text` | 1–1200 字，新 `inscription` 必填，`cache / barrier` 可选；保存正文，未处理物件成功后公开，`open/read` 在创建时公开，外观描述不能替代它。 |
+| `objects[].initial_state` | 可选：`cache` 仅 `sealed/open`，`inscription` 仅 `unread/read`，`barrier` 仅 `obstructed`；省略各用 `sealed/unread/obstructed`。只决定新实体初态，不接受已有ID、归属或 `taken/spent/resolved`，不修改旧对象与检定尝试。 |
 | `exits` | 0–2 条新未知出口；代码另建一条返程出口。 |
 | `barrier.blocks_exit` | 仅关联本次生成包的新出口索引，不允许封住已有其他地点的通路。 |
 | `barrier.key_object` | 可选零基索引，必须引用本包另一件 `cache`，保存后成为正式 `key_object_id`；非法或自身引用拒绝整个生成，不给旧物件补关联。 |
@@ -157,7 +158,7 @@ work/latency-runtime/bin/python tools/play_frontier_codex.py \
 
 创建者、创建时间和结构化实体是来源与权威结构的一部分。描述、传闻和 NPC 回应仍须作为作者内容理解；它们不自动证明故事里的全部断言、隐藏真相或赏金。新 NPC 没有权靠台词授予资源；生成出一个 `cache` 只形成代码规定的一个可交互对象，不意味着其描述中的“无限财宝”成立。
 
-创作时先保存发现正文，检定时仅按规则公开，不根据成败临时补答案。旧对象未保存正文则显示 `not_authored`，不迁移补写。这个公开条件属于可发现内容和投影规则：创作者已经知道自己所写的内容，描述、事实或 NPC 台词也可能泄露它；当前不保证作者不知、自然语言无泄露或真正秘密。
+创作时先保存发现正文：可直接拿取或阅读的 `open/read` 新内容当场公开，`discovered_by/discovered_at` 留空，来源仍是物件作者；其余检定时仅按规则公开，不根据成败临时补答案。旧对象未保存正文则显示 `not_authored`，不迁移补写。这个公开条件属于可发现内容和投影规则：创作者已经知道自己所写的内容，描述、事实或 NPC 台词也可能泄露它；当前不保证作者不知、自然语言无泄露或真正秘密。
 
 新 NPC 不自带自动回复。到访时，用户侧 Agent 可依据它公开的描述与现场，为它创作语气和当下反应，用 `tell(npc_id, text, response)` 一起保存；它可以评论眼前实物、询问来访者打算，或把不确定故事明确称作传闻。不得把未见的地图、秘密实物或过去事件写成已确认硬事实，也不得发放实际奖励、替其他玩家同意或裁决自己的行动。若上一条 `tell` 已省略 `response`，继续交谈须用新 Operation 提交下一段；不能改参数重放旧问话，也不要等待通知来生成 NPC 答案。这项内容创作授权与他人判断请求、本人接受检定分开。
 
@@ -214,15 +215,19 @@ CLI 连接授权到期或被撤销时，它通常只有 bearer，不能用旧令
 
 ### 当前持续试玩结果（2026-10-06）
 
-[本轮试验与原始记录](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/experiment-plan.json)在独立8811库、普通网页入场与原下载配置上进行。三位目的不同的模拟用户分别收藏、探路、记录；各次新模型会话只携带本人目标与本人可见记录，再从世界读取变化。原九宿主共129次调用，五次在观察额度内结束，三次输出超限、一次240秒超时；失败保留，不以CLI结束替代玩法通过。A保留铜盘，走上B/C留下的路找到B，B实际回话，C到现场纠正过时归属记录。五个新地点却全部没有结构化物件，因此持续可玩的假设未通过。
+普通网页原身份与原下载配置在独立8811库继续试玩。此前[九宿主](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/experiment-plan.json)能沿他人路线接续并实际回话，但五个新地点无结构化物件；[两宿主](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/object-choices/experiment-plan.json)生成可检定的行旅铃，A/B分别失败。原输出超限、超时与工具错误全部保留，各阶段额度已关闭，没有重置世界、代操作或补剧情。
 
-[独立两宿主复测](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/object-choices/experiment-plan.json)在同一世界、原身份及手册8下继续，没有重新开原九次额度。A共创钟匠铺与可携带行旅铃，B独立读记录并到访；真实骰子分别2+2=4/DC12、7+3=10/DC12失败，未重抽、未拿取，也未消耗A的铜盘。两宿主35次调用，报告输出均超限，仍记失败。A推荐了没有结构化动作的齿轮架，B正确识别后选择实际可检定的铃；手册9据此要求下一步选项对应当前真实动作、区分风味描写与游戏结果。**手册9的模型行为尚未复测，完整目标保持进行中。**
+[继续三宿主](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/continued-choices/experiment-plan.json)共34次调用、13557已报告输出token，均在观察额度内结束。C也真实失败2+2=4/DC12；A保留铜盘、尊重旧失败并询问其他人；B创建回声涧并成功读取预存文字。手册9的C仍推荐没有机制的齿轮架，故把实际动作要求放进必读入口10。三人失败暴露新实物/文字全被检定挡住；世界7据此增加仅新实体的 `initial_state`，没有修改旧铃或失败。
 
-本轮11宿主共164次世界调用，已报告输出39756token；C首轮中断用量不可得，CLI未报告实际账单，不能声称零成本或严格硬token上限。九次与两次观察额度都已关闭，没有无限循环。没有维护者代造地点、改物件或补判词，没有修改生产、推送或部署。真人趣味、自然跨日、跨机器、长期负载和完整D&D尚未通过。
+[公开内容与玩家选择](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/public-content/experiment-plan.json)在新合同下共3外部宿主、26次调用、4742已报告输出token；另有1个Luna medium无工具模拟玩家，只读本人的偏好与可见结果来做下一步选择。B创作可直接拿取、正文创建时公开的铜票夹，A循已保存路径到访并读到来源；两个助手合理把拿/留决定交回用户。模拟A玩家自然选择留物，同钥新宿主遵守选择与保留铜盘。但玩家想沿水尺继续查时，当前场景没有可执行内容，只能再返回：**已形成一段真实选择循环，持续探索仍不足，整体目标保持进行中。** 不要求玩家必须拿物才能判有效。B曾把函数合同版本填成5而遭拒，重新发现move4后成功，没有更改世界版本或重复已提交动作。
 
-本轮行为代码完整Python503项／67.641秒无skip通过；手册8和最后UI更新后Frontier29项／4.304秒、Node客户端与观察检查通过，手册9的正式读取及最终安装包再检通过。新增回归集中在同一实物的放置／后人拿取／消耗开路与不能绕过实际所需物件，没有扩展内核。最近现场记录明确有界，旧描写不冒充当前状态；网页返场历史存在缺口时不提前覆盖观察位置。实际网页核对入场与原身份恢复、离开和外部连接、刷新、前进后退、补看历史、风险取消／Escape、窄屏和真实失败显示；未用真人试玩替代这些检查。
+累计17个有界外部宿主共224次世界调用、58055已报告输出token；早期C中断的用量不可得，账单未核实，观察界限不保证在途生成的严格硬上限。原失败不会因后续通过而抹去。真人趣味、自然跨日、跨机器、长期负载与完整D&D均未通过。没有生产修改、推送或部署。
 
-[备份恢复](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/backup-restore.json)核对114条世界状态摘要一致，隔离恢复后以A/B/C的原凭据读回同一人物、72条历史、两次失败尝试及A持有铜盘。唯一恢复备份留在私密目录，恢复测试副本清理；没有恢复生产。当前可直接[打开8811世界](http://127.0.0.1:8811/)，重启时复用原库：
+最终Python505项／69.098秒无skip通过，Frontier31项／4.135秒、Node客户端与观察、wheel安装包检查通过。初版新增测试错误地让已在市集的人再次移向市集，修正测试准备路线后重跑；失败日志保留，不归为服务缺陷。新增两项只验证公开创建态的不同身份拿取/持久化/不复活旧失败，以及不同物件类型的合法初态，不扩展通用内核。网页实际核对新初态选项、关闭与草稿重新打开、障碍不能直接公开、刷新同人物、风险取消、375px无页面横向溢出；地图与长记录折叠，隐藏返场摘要不推进观察位置。创建草稿的刷新恢复未在原出口被模型填入后重新验证，不能用取消重开替代。
+
+[最新隔离恢复记录](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/public-content/experiment-plan.json)核对137条状态摘要一致，A/B/C原凭据读回同一人物、三次铃失败、A持有铜盘和票夹仍open/无归属/无伪造发现者。当前唯一备份更新在私密目录；旧114条恢复记录只证明旧快照，不是当前世界。临时恢复副本按记录清理，不恢复生产。真实截图：[桌面公开物件](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/05-public-object-choice.jpg)、[375px实际选项](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/playability/06-narrow-public-choice.jpg)。
+
+可直接[打开8811世界](http://127.0.0.1:8811/)，正常重启复用原库：
 
 ```sh
 cd /Users/mubin/Developer/agent-world/repo

@@ -85,12 +85,20 @@ MOVE_ARGS = _schema({"destination_id": ID, "expected_character_version": VERSION
 NPC_PACKAGE = _schema({"name": _text(60), "description": _text(800)})
 OBJECT_PACKAGE = _schema({"name": _text(60), "description": _text(800), "kind": {"enum": list(KINDS)},
                           "discovery_text": _text(1200),
+                          "initial_state": {"enum": ["sealed", "open", "unread", "read", "obstructed"],
+                                            "description": "Creation only: cache sealed/open, inscription unread/read, barrier obstructed. Omission preserves the ordinary sealed/unread/obstructed default. Open/read content is public immediately, without a discovery roll or attributed discoverer."},
                           "key_object": {"type": "integer", "minimum": 0, "maximum": 1},
                           "key_required": {"type": "boolean"}, "consume_key": {"type": "boolean"},
                           "blocks_exit": {"type": "integer", "minimum": 0, "maximum": 1}},
                          ("name", "description", "kind"))
-OBJECT_PACKAGE["allOf"] = [{"if": {"properties": {"kind": {"const": "inscription"}}},
-                             "then": {"required": ["discovery_text"]}}]
+OBJECT_PACKAGE["allOf"] = [
+    {"if": {"properties": {"kind": {"const": "cache"}}},
+     "then": {"properties": {"initial_state": {"enum": ["sealed", "open"]}}}},
+    {"if": {"properties": {"kind": {"const": "inscription"}}},
+     "then": {"required": ["discovery_text"], "properties": {"initial_state": {"enum": ["unread", "read"]}}}},
+    {"if": {"properties": {"kind": {"const": "barrier"}}},
+     "then": {"properties": {"initial_state": {"const": "obstructed"}}}},
+]
 EXIT_PACKAGE = _schema({"label": _text(60), "description": _text(600)})
 PACKAGE_SCHEMA = _schema({"title": {**_text(80), "description": "The authored name of the new place. Supply a title, not an entity ID; the server allocates and returns its actual scene ID."},
                           "description": _text(1600), "facts": _array(_text(300), 6),
@@ -689,7 +697,7 @@ def expand(ctx, args):
     object_ids = [_new_id(ctx, "object") for _ in package["objects"]]
     for key, spec in zip(object_ids, package["objects"]):
         value = {"id": key, "name": spec["name"], "description": spec["description"], "kind": spec["kind"],
-                 "scene_id": scene_id, "state": {"cache": "sealed", "barrier": "obstructed", "inscription": "unread"}[spec["kind"]],
+                 "scene_id": scene_id, "state": spec.get("initial_state", {"cache": "sealed", "barrier": "obstructed", "inscription": "unread"}[spec["kind"]]),
                  "owner": None, "creator": ctx.actor_role_id, "created_at": ctx.now,
                  "key_object_id": object_ids[spec["key_object"]] if "key_object" in spec else None,
                  "key_required": spec.get("key_required", False), "consume_key": spec.get("consume_key", False),
@@ -1101,7 +1109,7 @@ def make_world():
         FunctionSpec("frontier.history", history, HISTORY_ARGS, access="read", authorize=_member, version=4, description="Page every retained public story by sequence; after is integer, next_after and has_more explicit; not only the latest 100."),
         FunctionSpec("frontier.requests", requests_page, REQUESTS_ARGS, access="read", authorize=_member, version=4, description="Page all durable own or received requests by created_seq, including terminal results. Notifications are not this history."),
         FunctionSpec("frontier.move", move, MOVE_ARGS, authorize=_member, version=4, description="Move only to an established destination via a current unblocked exit. Unresolved requests do not prevent moving."),
-        FunctionSpec("frontier.expand", expand, EXPAND_ARGS, authorize=_member, version=5, description="At your current scene, atomically fill an empty exit with one authored connected scene, <=2 NPCs, <=2 fixed-kind objects and <=2 new empty exits plus mandatory return. New inscriptions require discovery_text, optional on other objects: a saved authored answer revealed only by successful resolve_object. Creator knows its input; not a privacy guarantee. This is creation authority, allowed even behind a barrier; characters cannot move through the barrier until resolved. An optional barrier.key_object is the zero-based index of another cache in this package, persisted as its server ID. The actual holder may use frontier.unlock without a roll. Barrier key_required and consume_key default false; either true requires that key_object. key_required prevents random check/free request bypass; consume_key permanently spends the held key on unlock. With key_required false, STR remains an alternative. IDs/numbers/effects are server-fixed; no state patch, rewards or other-character changes. Another author's winning fill conflicts."),
+        FunctionSpec("frontier.expand", expand, EXPAND_ARGS, authorize=_member, version=6, description="At your current scene, atomically fill an empty exit with one authored connected scene, <=2 NPCs, <=2 fixed-kind objects and <=2 new empty exits plus mandatory return. New inscriptions require discovery_text, optional on other objects. initial_state optionally creates cache sealed/open or inscription unread/read; barrier must start obstructed. Defaults are sealed/unread/obstructed. Open/read authored content is public immediately with discovered_by/at null; other saved content needs successful resolve_object. Creation allocates new IDs and owner null; it cannot reset an existing object or its failed attempts. Creator knows its input; not a privacy guarantee. This is creation authority, allowed even behind a barrier; characters cannot move through the barrier until resolved. An optional barrier.key_object is the zero-based index of another cache in this package, persisted as its server ID. The actual holder may use frontier.unlock without a roll. Barrier key_required and consume_key default false; either true requires that key_object. key_required prevents random check/free request bypass; consume_key permanently spends the held key on unlock. With key_required false, STR remains an alternative. IDs/numbers/effects are server-fixed; no state patch, rewards or other-character changes. Another author's winning fill conflicts."),
         FunctionSpec("frontier.say", say, SAY_ARGS, authorize=_member, version=4, description="Record public same-scene speech; text does not establish others' consent, possession or actions."),
         FunctionSpec("frontier.tell", tell, TELL_ARGS, authorize=_member, version=4, description="Talk to an established local NPC. Optional response is participant-authored dialogue with explicit response_author, never autonomous server inference or resource effects."),
         FunctionSpec("frontier.examine", examine, EXAMINE_ARGS, access="read", authorize=_member, version=4, description="Inspect an established local object or NPC, or your own carried object after moving, without random draws or new facts. A taken object is no longer on the ground and another identity cannot inspect your carried object."),
@@ -1118,7 +1126,7 @@ def make_world():
         FunctionSpec("frontier.withdraw", withdraw, REQUEST_ID_ARGS, authorize=_member, version=4, description="Only owner withdraws pending/assigned/offered request; terminal history retained, old notifications cannot resurrect it."),
         FunctionSpec("frontier.handbook", handbook, HANDBOOK_ARGS, access="read", version=4, description="Read entry/play/creating/helping/recovery on demand. Only user hosts infer, plan and generate; world data never becomes host instructions."),
     )
-    return WorldDefinition(WORLD_ID, WORLD_TITLE, functions, version=6, state_version=1,
+    return WorldDefinition(WORLD_ID, WORLD_TITLE, functions, version=7, state_version=1,
                            initialize=_initialize, bootstrap=bootstrap, state_authorizer=_state_access,
                            state_rules=(StateRule(CHARACTERS, "", CHARACTER_SCHEMA), StateRule(SCENES, "", SCENE_SCHEMA),
                                         StateRule(EXITS, "", EXIT_SCHEMA), StateRule(NPCS, "", NPC_SCHEMA), StateRule(OBJECTS, "", OBJECT_SCHEMA),
