@@ -18,7 +18,7 @@ import stat
 import time
 import zipfile
 
-REPO = Path('/Users/mubin/Developer/agent-world/repo')
+REPO = Path(__file__).resolve().parents[1]
 TASK = Path('/Volumes/DevDisk/DeveloperData/agent-world')
 OLD_EVIDENCE = TASK / 'evidence' / 'river-camp'
 EVIDENCE = OLD_EVIDENCE / 'continuation' / 'semantics-20261003'

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#17271f"><title>溪源 · Agent World</title>
+  <link rel="stylesheet" href="/grove-static/grove.css">
+</head>
+<body>
+  <header class="masthead"><a class="brand" href="/"><span class="brand-icon" aria-hidden="true">◈</span><span><small>AGENT WORLD</small><strong>溪源</strong></span></a><p>共同生活的地方，留得住的变化。</p><span id="world-status" class="status-dot">等待进入</span></header>
+  <div id="notice" class="notice" role="status" hidden></div>
+  <div id="error" class="notice error" role="alert" hidden></div>
+  <main>
+    <section id="entry" class="entry">
+      <div class="entry-intro"><span class="eyebrow">一个地方，许多种办法</span><h1>水会流，木头会燃烧。<br>你会留下些什么？</h1><p>绕过木障，搬动一件东西，接一壶水，或看看湿布和火会怎样相遇。你亲手行动，你的 Agent 帮你理解现场、为共同世界创造新内容。</p><div class="entry-landscape" aria-hidden="true"><i class="scene-water"></i><i class="scene-rock"></i><i class="scene-wood"></i><i class="scene-crate"></i><i class="scene-person"></i><span>溪流 · 物件 · 留下的后果</span></div><ol class="entry-steps"><li><b>01</b><span>用密钥保存身份与背包</span></li><li><b>02</b><span>连接自己的 OpenCode，完成首次现场读取</span></li><li><b>03</b><span>键盘走动，点击物件，尝试你的办法</span></li></ol><p class="small">没有指定结局。别人的放置、用水与燃烧会改变同一片地方；离开后，同钥接着玩。</p></div>
+      <div class="entry-card card"><span class="eyebrow">从这里接续</span><h2>你与自己的 Agent</h2><p id="identity-status" class="small">正在读取本机身份…</p>
+        <form id="entry-form"><label>称呼<input id="entry-name" maxlength="40" autocomplete="nickname" placeholder="怎么称呼你？" required></label><label>我的 Agent 使用的模型<select id="entry-model"><option value="">LongCat 2.5 Preview · 免费</option></select></label><p class="small">使用本机 OpenCode 已有的模型连接。这个入口会启动世界专用的 OpenCode。首次进入先完成真实回应与世界读取；同钥回来会接续已经完成的首次连接。</p><button id="enter" class="primary full" type="submit" disabled>正在读取身份…</button></form>
+        <button id="entry-cancel" class="secondary full" hidden>中止连接</button><label class="file-button">导入身份恢复文件<input id="import-key" type="file" accept="application/json,.json"></label><div id="entry-progress" class="entry-progress" aria-live="polite"></div><details><summary>OpenCode 与身份</summary><p class="small">需要在本机已有可用的 OpenCode。宿主由此入口自动管理；连接后，模型列表来自本机实际可用的模型。默认使用 LongCat 2.5 Preview 免费模型。</p><label>专用宿主地址<input id="entry-host" type="url" readonly placeholder="进入后由连接器自动启动"></label><p class="small">已有身份的名字、位置和物品由世界保存，重新填写称呼不会重置角色。恢复文件含身份密钥，请自己妥善保存。</p></details></div>
+    </section>
+    <section id="game" class="game" hidden>
+      <div class="session-bar"><div><strong id="player-name"></strong><span id="position" class="small"></span></div><div class="session-actions"><button id="refresh" class="secondary">刷新现场</button><button id="backup" class="secondary">保存恢复文件</button><button id="reconnect-world" class="secondary" hidden>同钥重连</button><button id="leave" class="quiet">离开</button></div></div>
+      <section id="pending" class="pending notice" hidden><div><strong>有一个操作需要核对</strong><p id="pending-detail" class="small"></p></div><div><button id="recover-operation">核对原操作</button><button id="release-operation" class="secondary" hidden>读取后重新选择</button></div></section>
+      <div class="game-layout">
+        <section class="world-column">
+          <div class="map-heading"><div><span class="eyebrow">你所在的共同世界</span><h2>溪畔空地</h2></div><div id="weather" class="weather">读取天气中</div></div>
+          <div class="canvas-wrap"><canvas id="world-canvas" tabindex="0" aria-label="溪源地图。使用 WASD 或方向键移动；点击物件查看，点击空地沿路走到。"></canvas><div id="map-loading" class="map-overlay">正在读取附近的世界…</div><div class="map-top"><span id="map-scale">附近地图</span><button id="follow-player" class="map-button">回到自己</button></div><div class="map-bottom"><span id="movement-feedback">WASD / 方向键走动 · 点击物件查看</span><span id="freshness"></span></div></div>
+          <div class="world-controls"><div class="map-legend"><span><i class="legend-person"></i>你</span><span><i class="legend-water"></i>水</span><span><i class="legend-wood"></i>木</span><span><i class="legend-stone"></i>石</span><span><i class="legend-cloth"></i>布</span><span><i class="legend-container"></i>容器</span></div><div class="direction-pad" aria-label="触屏移动"><button data-direction="0,-1" aria-label="向上走">↑</button><button data-direction="-1,0" aria-label="向左走">←</button><button data-direction="0,1" aria-label="向下走">↓</button><button data-direction="1,0" aria-label="向右走">→</button></div></div>
+          <div id="onboarding" class="onboarding"><strong>先试一件小事</strong><span id="onboarding-copy">点一下身边的容器，读读它的容量。去溪边装水，给木头或布浇一点；观察世界怎样继续变化。</span><button id="dismiss-onboarding" class="quiet" aria-label="收起玩法提示">×</button></div>
+          <section class="card activity-card"><div class="section-heading"><h3>共同留下的变化</h3><span id="activity-note" class="small">服务器保存的记录</span></div><div id="activity-list" class="activity-list"><p class="small">正在读取附近的变化…</p></div></section>
+        </section>
+        <aside class="world-sidebar">
+          <section class="card inspect-card"><div class="section-heading"><span class="eyebrow">看清，再动手</span><span id="selection-distance" class="tag"></span></div><h2 id="selection-name">选择一件物件</h2><p id="selection-description" class="small">点击地图里的木头、石块、布或容器。走到身边后，可以采取它支持的行动。</p><div id="selection-stats" class="stat-grid"></div><div id="selection-content" class="container-content"></div><div id="selection-actions" class="action-grid"></div><p id="selection-note" class="small"></p></section>
+          <section class="card inventory-card"><div class="section-heading"><h3>你的背包</h3><span id="inventory-capacity" class="tag"></span></div><p class="small">这里的物品属于你。放到地上或公共容器后，其他人能遇见它们。</p><div id="inventory-list" class="inventory-list"></div><p id="inventory-water" class="small"></p></section>
+          <section class="card generation-card"><div class="section-heading"><h3>为这片地方创作</h3><span id="generation-status" class="tag">尚未开始</span></div><p class="small">说说你想留下什么。你的 Agent 会读取附近、按世界规则直接发表，其他人也能遇见这些变化。</p><form id="generation-form"><label>创作什么<select id="generation-kind"><option value="layout">物件</option><option value="rain">短雨</option><option value="drift">漂来容器</option></select></label><label>你的想法<textarea id="generation-text" rows="2" maxlength="1200" placeholder="在附近放一个能盛水的石碗，方便大家取水。" required></textarea></label><button id="generation-send" type="submit" disabled>让我的 Agent 创作并发表</button></form><p id="generation-detail" class="small" aria-live="polite">使用你自己的模型连接；完成后直接公开。</p><button id="generation-recover" class="secondary" hidden>核对发表结果</button><button id="generation-cancel" class="secondary" hidden>中止这次创作</button><div id="generation-result" class="generation-result" aria-live="polite"></div></section>
+          <section class="card agent-card"><div class="section-heading"><h3>你的 Agent</h3><span id="agent-status" class="tag">未连接</span></div><p id="agent-detail" class="small">读取现场、解释变化，也参与共同内容的生成。</p><div id="agent-messages" class="agent-messages" aria-live="polite"></div><form id="chat-form"><label for="chat-text" class="visually-hidden">问自己的 Agent</label><textarea id="chat-text" rows="2" maxlength="2000" placeholder="为什么这块湿木头没有着火？"></textarea><button id="chat-send" type="submit">问我的 Agent</button></form><div class="agent-actions"><button id="agent-cancel" class="secondary" hidden>中止这一轮</button><button id="agent-reconnect" class="secondary" hidden>重新连接</button><button id="agent-disconnect" class="quiet">断开 Agent</button></div><details class="auto-details"><summary>让 Agent 有界地参与</summary><form id="auto-form"><label class="check"><input id="auto-enabled" type="checkbox">自动解释新变化与共创</label><div class="form-row"><label>每轮至少间隔 / 秒<input id="auto-interval" type="number" min="15" max="600" value="30"></label><label>最多轮数<input id="auto-budget" type="number" min="1" max="32" value="8"></label></div><button type="submit" class="secondary">保存运行范围</button><p id="auto-status" class="small">默认关闭。合并期间的变化，达到轮数后自行停止。</p></form><label>更换模型（先断开，再重新连接）<select id="game-model"><option value="">LongCat 2.5 Preview · 免费</option></select></label><label>本机专用宿主地址<input id="game-host" type="url" readonly placeholder="由连接器自动管理"></label></details></section>
+        </aside>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/grove-static/grove.js"></script>
+</body>
+</html>

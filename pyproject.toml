@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-world"
-version = "0.22.0"
+version = "0.23.0"
 description = "Persistent worlds for people and agents."
 requires-python = ">=3.11"
 license = "MIT"
@@ -14,6 +14,8 @@ dynamic = ["dependencies"]
 [project.scripts]
 agent-world = "agent_world.application:main"
 agent-world-connect = "agent_world.connect:main"
+agent-world-grove = "agent_world.grove_app:main"
+agent-world-play = "agent_world.grove_connector:main"
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
@@ -23,7 +25,7 @@ include = ["agent_world*", "examples*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-agent_world = ["web/*.html", "web/*.css", "web/*.js"]
+agent_world = ["web/*.html", "web/*.css", "web/*.js", "grove_web/*.html", "grove_web/*.css", "grove_web/*.js"]
 examples = ["river_camp_web/*.html", "river_camp_web/*.css", "river_camp_web/*.js", "dnd_web/*.html", "dnd_web/*.css", "dnd_web/*.js", "frontier_web/*.html", "frontier_web/*.css", "frontier_web/*.js"]
 
 [tool.ruff]

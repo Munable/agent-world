@@ -4,26 +4,34 @@
 
 Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结构化接口，按世界开发者定义的规则操作同一持久世界。Runtime 不运行用户 Agent，也不把自然语言消息本身解释成确认、授权或完成。
 
-当前官方世界是 **Living Frontier／渡鸦溪**：参与者探索、交流，并沿尚未探索的出口共创新地点；本地原型已有多人模型与网页的局部验收，整体可玩性仍在迭代。0.22.0 的 Runtime 支持同一身份签发多枚独立的 control／observe 凭据、列出并撤销自己的单枚凭据，并从新 Command 回执恢复原提交主体／凭据来源。用户公钥跨世界代表同一个底层身份，各世界签发自己的 bearer credential；正常进入不需要 operator 预建 Role 或 Join Ticket。
+当前正式产品主线是 **Shared Grove／溪源**：人类在二维地图亲自移动、选物、装水、泼水、点火和处理容器；每个用户连接自己的 OpenCode，作为个人解释者及公共内容贡献者。多个助手读取同一个已有世界，发布能被其他人实际使用的物件或事件。服务器执行材料与元素规则、保存共同后果，不运行用户模型。新版本的实施与验收边界见 [SHARED_GROVE](docs/SHARED_GROVE.md)。
 
-> **开发／维护前先读 [AGENTS.md](AGENTS.md)。** 它定义仓库工作原则，包括“早期项目只维护现行事实、不背不存在的历史兼容债”。
+> **开发／维护前先读 [AGENTS.md](AGENTS.md)。** Runtime仍是世界中立的底层；本世界的空间、材质和入口要求不自动成为所有世界规则。
 
-## Try Living Frontier
+## 游玩溪源
 
-在源码目录复用本项目已有 Python 环境；先确认 DevDisk 已挂载。首次创建独立试玩库：
+当前可直接打开 [溪源 8891](http://127.0.0.1:8891/)。需要重新启动已有世界时，先进入源码目录，重用当前库且不加 `--init`：
 
 ```sh
-work/latency-runtime/bin/python -m examples.frontier_app --init-local \
-  --db /Volumes/DevDisk/DeveloperData/agent-world/frontier-play/data/world-v2.sqlite3 \
-  --private-dir /Volumes/DevDisk/DeveloperData/agent-world/private/frontier-play-v2 \
-  --port 8807
+cd /Users/mubin/Developer/agent-world/shared-grove
+/Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python -m agent_world.grove_app \
+  --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/play/world.sqlite3 \
+  --port 8890
 ```
 
-打开 [本地试玩](http://127.0.0.1:8807/)。已有服务运行时直接打开页面；已有库重启时去掉 `--init-local` 和 `--private-dir`，重用同一数据库，不并行启动两个写入进程。初始化只建立四个普通合成密钥身份，没有 GM；网页可创建或恢复自己的身份。
+在另一个终端、同一源码目录启动自己的连接器：
 
-用户在自己的 AI 工具中下目标、生成内容与推理，网页观察同一世界，也可直接提交已有的有限动作。未知出口通过结构化生成包成为可进入、可交互的共享地点；已有动作由代码结算，只有已有物件的新方法走另一参与者判断、本人接受的有限流程。没有预置章节、统一目标、固定主持人或服务器推理循环。当前只采用第五版一级角色与 d20 检定，不宣称完整 D&D。
+```sh
+cd /Users/mubin/Developer/agent-world/shared-grove
+/Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python -m agent_world.grove_connector \
+  --world-url http://127.0.0.1:8890 --port 8891
+```
 
-规则、身份／连接、完整启动方法、实际结果与未验证项见 [FRONTIER_WORLD](docs/FRONTIER_WORLD.md)。四密钥、12个有界真实宿主已经验证共享生成、物件交接和等待接续，同时暴露“检定成功但缺发现正文”的问题；新正文机制已修复并经网页与回归验证，修复后的真实模型连续游玩仍待验证。此前示例和证据保留其适用范围，不能代替本世界的多人、模型或趣味验收。
+新建世界时使用不同的私有父目录和尚不存在的数据库，再加 `--init`；不初始化当前库。OpenCode 配置和验收范围见 [SHARED_GROVE](docs/SHARED_GROVE.md)。每个人运行自己的连接器，连接同一个世界；模型凭据与私人会话留在本机，普通移动与操作不调用模型。第一次进入须完成实际 MCP 世界读取与助手回应，下载配置不代表接入成功。
+
+显式生成由本机连接器把当前公共事实、实际机会、坐标和素材目录交给自己的 OpenCode，在每机会独立且禁止所有工具的蓝图会话中取得结构化结果，再用同一身份自动发布并读回。用户不用审提案；规则负责校验，普通提问和移动不会被包装成内容发布。本轮双方真实生成并使用彼此的箱中物件，雨与漂流也留下了可读回的共享后果。
+
+**已授权本地切片验收通过；真人趣味性、跨机器和负载未验证。** 本轮是两个本地模拟玩家、真实模型与实际浏览器验证，不是两名真人或完整 MMO。旧 Living Frontier／D&D 文本场景是已隔离保护的原型，不再追加对话实验或作为新玩家入口；既有源码、未提交改动、存档与服务仍保留。其既有范围见 [FRONTIER_WORLD](docs/FRONTIER_WORLD.md)。
 
 ## Earlier examples and scoped evidence
 
@@ -103,11 +111,11 @@ Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser ide
 
 ## 当前主线
 
-**当前完成渡鸦溪的真实多人体验验收，并据此检验底层。** 自由生成、共享地图、有限物件互动、参与者判断与网页已实现，接下来以最终代码的运行证据判断是否贯通；当前不宣称模型完整通过、真人趣味或长期运行成立。没有预置章节、共同目标、固定 GM 或后台模型。参与目的、职业与游戏角色仍由用户和具体世界决定，不提升为 Runtime 原语。
+**Shared Grove／溪源的已授权本地切片验收通过。** 玩家用键盘和鼠标亲自行动，自己的 OpenCode 解释现场与贡献内容，中心服务器统一结算材料和共享后果。没有预置章节、共同目标、固定 GM 或后台模型。本轮证据与未验证边界见 [SHARED_GROVE](docs/SHARED_GROVE.md)，不借旧原型结果扩大结论。
 
-Agent 是用户可替换的执行载体。用户把本地记忆、上下文与有效世界连接配置交给另一兼容 CLI 后，可继续同一身份的参与；Runtime 不识别模型本体，不要求独立 Agent 身份或归属体系。私人记忆由用户迁移，世界保存已提交事实与接续记录。
+Runtime 保持世界中立：只认密钥身份，不识别模型本体，也不建立 AgentIdentity。私人记忆由用户与宿主保管，世界保存已提交事实与接续记录；本产品的 OpenCode 入口、二维地图和材料规则不成为所有世界的前提。
 
-当前体验方向是网页直接行动与用户在自己的 AI 工具中下目标并执行两条路径并行，使用同一接口与权威世界状态。网页桥接各 CLI 的运行控制、WASD 与采集／种植动作系统退出当前范围。目标颗粒度与使用说明见 [交互与表现](docs/PRESENTATION.md)，产品边界见 [PRODUCT_POSITIONING](PRODUCT_POSITIONING.md)。
+体验按实际沟通／交互轮次、功能发现、探索路径和共享后果的深度推进，玩家决定下一步，Agent 不代玩。雨、湿度与燃烧保留一秒逻辑步的必要计时，批量扫描不能延长规则时长；运行天数、日活和每日任务不衡量产品完成。使用说明见 [交互与表现](docs/PRESENTATION.md)，产品边界见 [PRODUCT_POSITIONING](PRODUCT_POSITIONING.md)。
 
 当前基线为密钥身份、HTTP/MCP、SDK、protocol 0.15 与 SQLite schema 8；新 challenge 的 v2 签名包含 access mode，原数据库 v1 challenge 和身份映射继续有效。control 凭据同等拥有本主体的凭据管理权限；observe 只读获准内容。Command 的 credential_id 标识原提交凭据，不定义独立 AgentIdentity，旧回执不补填来源。只修实际消费阻塞，不增加常驻推理系统。当前快照见 [六层基线](docs/BASELINE.md)，实际验证范围见 [REFERENCE_GATE](docs/REFERENCE_GATE.md)，世界试验见 [WORLD_EXPERIMENT](docs/WORLD_EXPERIMENT.md)。本版本未推送或部署，未修改线上世界。
 
