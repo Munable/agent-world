@@ -80,6 +80,60 @@ class FrontierWorldTests(unittest.TestCase):
         return self.call(actor, "answer", {"request_id": request_id, "decision": "allow", "reason": "Use the established clasp; no extra materials.",
                          "ability": "dexterity", "dc": 12, "effect": "resolve_object"}, operation)
 
+    def test_current_scene_creation_continues_a_dead_end_without_rewriting_old_facts(self):
+        spec = package()
+        spec["exits"] = []
+        created, _ = self.expand(spec=spec)
+        scene_id = created["created_scene"]["id"]
+        self.move("A", scene_id)
+        self.move("B", "bell-market")
+        self.move("B", scene_id)
+        original = self.look()["scene"]
+        old_cache = next(o for o in original["objects"] if o["kind"] == "cache")
+        with patch("agent_world.world_context.secrets.randbelow", return_value=0):
+            self.object_action("A", "check", old_cache["id"])
+        attempts = self.look()["character"]["attempts"]
+        args = {"scene_id": scene_id, "expected_scene_version": original["version"], "objects": [
+            {"name": "A readable water marker", "description": "A new participant-authored note beside the faded marks.",
+             "kind": "inscription", "initial_state": "read", "discovery_text": "This note was composed during this visit, not a recovered old secret."},
+            {"name": "A small token", "description": "One object a visitor can take or leave.",
+             "kind": "cache", "initial_state": "open", "discovery_text": "A newly authored keepsake, with no extra numerical power."}]}
+        with patch("agent_world.world_context.secrets.randbelow", side_effect=AssertionError("Appending public content does not roll")):
+            added = self.call("A", "add_objects", args, operation="current-scene-note")["result"]
+        self.assertEqual(len(added["created_objects"]), 2)
+        self.assertEqual(added["author"], self.roles["A"])
+        self.assertEqual(added["authorship_kind"], "present_participant_creation")
+        after = self.look("B")["scene"]
+        for field in ("title", "description", "facts", "exits", "npcs", "creator", "created_at"):
+            self.assertEqual(after[field], original[field])
+        self.assertGreater(after["version"], original["version"])
+        self.assertEqual(len(after["objects"]), 4)
+        for obj in added["created_objects"]:
+            self.assertEqual(obj["creator"], self.roles["A"])
+            self.assertEqual(obj["discovery"]["status"], "revealed")
+            self.assertIsNone(obj["discovery"]["discovered_by"])
+        preserved = self.query("A", "examine", {"target_id": old_cache["id"]})["target"]
+        self.assertEqual(preserved, old_cache)
+        with self.assertRaises(RuleViolation):
+            self.object_action("A", "check", old_cache["id"])
+        replay = self.call("A", "add_objects", args, operation="current-scene-note")
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["result"], added)
+        with self.assertRaises(StateConflict):
+            self.call("B", "add_objects", args)
+        forbidden = dict(args, expected_scene_version=after["version"], objects=[{
+            "name": "No old exit modification", "description": "A barrier is outside this creation ability.",
+            "kind": "barrier", "initial_state": "obstructed", "blocks_exit": 0}])
+        with self.assertRaises(SchemaRejected):
+            self.call("A", "add_objects", forbidden)
+        portable = next(o for o in added["created_objects"] if o["kind"] == "cache")
+        self.object_action("B", "take", portable["id"])
+        self.runtime = WorldRuntime(self.db)
+        self.runtime.install_world("test", WORLD)
+        self.assertEqual(self.look("B")["character"]["inventory"], [portable["id"]])
+        self.assertEqual(self.look()["character"]["attempts"], attempts)
+        self.assertEqual(self.query("A", "examine", {"target_id": old_cache["id"]})["target"], old_cache)
+
     def test_public_authored_objects_enable_other_player_choices_without_reroll(self):
         self.move("A", "bell-market")
         with patch("agent_world.world_context.secrets.randbelow", return_value=0):
@@ -546,7 +600,7 @@ class FrontierWorldTests(unittest.TestCase):
     def test_registered_prior_contract_upgrades_without_losing_state_or_original_receipt(self):
         legacy_functions = []
         for function in WORLD.functions:
-            if function.name in {"frontier.unlock", "frontier.drop"}:
+            if function.name in {"frontier.unlock", "frontier.drop", "frontier.add_objects"}:
                 continue
             schema = deepcopy(function.input_schema)
             if function.name == "frontier.expand":
@@ -555,6 +609,7 @@ class FrontierWorldTests(unittest.TestCase):
                 object_schema["properties"].pop("key_object")
                 object_schema["properties"].pop("key_required")
                 object_schema["properties"].pop("consume_key")
+                object_schema["properties"].pop("initial_state")
                 object_schema.pop("allOf", None)
             legacy_functions.append(replace(function, version=1, input_schema=schema, description="Prior discovery-free contract"))
         legacy_world = replace(WORLD, version=1, functions=tuple(legacy_functions))
@@ -573,7 +628,9 @@ class FrontierWorldTests(unittest.TestCase):
         runtime.install_world("prior", WORLD)
         after = runtime.query_function("prior", "frontier.look", role, {})
         self.assertEqual(after["function_version"], 5)
-        self.assertEqual(after["result"], before)
+        # Installing a new capability changes discovery, not the saved world.
+        self.assertEqual({k: v for k, v in after["result"].items() if k != "directory"},
+                         {k: v for k, v in before.items() if k != "directory"})
         replay = call("expand", args, "prior-place")
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["function_version"], 1)
@@ -582,7 +639,7 @@ class FrontierWorldTests(unittest.TestCase):
             call("expand", args, "new-place-with-old-schema")
 
     def test_registered_discovery_contract_updates_function_versions_without_reset(self):
-        prior = replace(WORLD, version=3, functions=tuple(replace(f, version=2) for f in WORLD.functions if f.name not in {"frontier.unlock", "frontier.drop"}))
+        prior = replace(WORLD, version=3, functions=tuple(replace(f, version=2) for f in WORLD.functions if f.name not in {"frontier.unlock", "frontier.drop", "frontier.add_objects"}))
         runtime = WorldRuntime(self.db.with_name("discovery-version.sqlite3"))
         role = runtime.create_role("Returning reader")["role_id"]
         runtime.install_world("reader", prior)
@@ -592,7 +649,8 @@ class FrontierWorldTests(unittest.TestCase):
         runtime.install_world("reader", WORLD)
         after = runtime.query_function("reader", "frontier.look", role, {})
         self.assertEqual(after["function_version"], 5)
-        self.assertEqual(after["result"], before)
+        self.assertEqual({k: v for k, v in after["result"].items() if k != "directory"},
+                         {k: v for k, v in before.items() if k != "directory"})
 
     def test_discovered_carried_content_has_exact_reader_after_inventory_summary(self):
         spec = package()

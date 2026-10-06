@@ -99,6 +99,15 @@ OBJECT_PACKAGE["allOf"] = [
     {"if": {"properties": {"kind": {"const": "barrier"}}},
      "then": {"properties": {"initial_state": {"const": "obstructed"}}}},
 ]
+ADD_OBJECT_PACKAGE = deepcopy(OBJECT_PACKAGE)
+ADD_OBJECT_PACKAGE["properties"]["kind"] = {"enum": ["cache", "inscription"]}
+ADD_OBJECT_PACKAGE["properties"]["initial_state"] = {
+    "enum": ["sealed", "open", "unread", "read"],
+    "description": "New cache sealed/open or inscription unread/read only; omitted defaults to sealed/unread. Open/read content is public immediately without a discovery roll or attributed discoverer.",
+}
+for _field in ("key_object", "key_required", "consume_key", "blocks_exit"):
+    ADD_OBJECT_PACKAGE["properties"].pop(_field)
+ADD_OBJECT_PACKAGE["allOf"] = ADD_OBJECT_PACKAGE["allOf"][:2]
 EXIT_PACKAGE = _schema({"label": _text(60), "description": _text(600)})
 PACKAGE_SCHEMA = _schema({"title": {**_text(80), "description": "The authored name of the new place. Supply a title, not an entity ID; the server allocates and returns its actual scene ID."},
                           "description": _text(1600), "facts": _array(_text(300), 6),
@@ -107,6 +116,9 @@ PACKAGE_SCHEMA = _schema({"title": {**_text(80), "description": "The authored na
 EXPAND_ARGS = _schema({"scene_id": {**ID, "description": "The existing current location's ID, copied from frontier.look.scene.id. Never use the new place's title or an invented destination ID."},
                        "exit_id": {**ID, "description": "The existing unexplored exit ID from frontier.look.scene.exits at that current scene. Its destination_id must still be null; do not invent an exit ID."},
                        "expected_exit_version": VERSION, "package": PACKAGE_SCHEMA})
+ADD_OBJECTS_ARGS = _schema({"scene_id": {**ID, "description": "The current existing location's ID, copied from frontier.look.scene.id. Do not invent a scene or object ID."},
+                            "expected_scene_version": VERSION,
+                            "objects": {**_array(ADD_OBJECT_PACKAGE, 2), "minItems": 1}})
 SAY_ARGS = _schema({"text": _text(1200)})
 TELL_ARGS = _schema({"npc_id": ID, "text": _text(1200), "response": _text(1200)}, ("npc_id", "text"))
 EXAMINE_ARGS = _schema({"target_id": ID})
@@ -136,7 +148,7 @@ CHARACTER_SCHEMA = _schema({"role_id": ID, "name": _text(40), "class_id": {"enum
                             "class_name": _text(40), "level": {"const": 1}, "hp": {"type": "integer", "minimum": 0, "maximum": 20},
                             "max_hp": {"type": "integer", "minimum": 1, "maximum": 20}, "ac": {"type": "integer", "minimum": 1, "maximum": 20},
                             "abilities": ABILITY_SCHEMA, "scene_id": ID, "inventory": _array(ID, MAX_INVENTORY),
-                            "attempts": _array(_text(200), MAX_SCENES * 2), "joined_at": TIME})
+                            "attempts": _array(_text(200), MAX_SCENES * MAX_SCENE_OBJECTS), "joined_at": TIME})
 SCENE_SCHEMA = _schema({"id": ID, "title": _text(80), "description": _text(1600), "facts": _array(_text(300), 6),
                         "exit_ids": _array(ID, 3), "npc_ids": _array(ID, 2), "object_ids": _array(ID, MAX_SCENE_OBJECTS),
                         "creator": ID, "created_at": TIME, "ordinal": {"type": "integer", "minimum": 1, "maximum": MAX_SCENES},
@@ -206,10 +218,12 @@ def _state_access(ctx, scope, key, access):
     if member is None:
         return False
     if scope in {WORLD_STATE, HISTORY}:
-        return function in {"frontier.move", "frontier.expand", "frontier.say", "frontier.tell", "frontier.check", "frontier.take",
+        return function in {"frontier.move", "frontier.expand", "frontier.add_objects", "frontier.say", "frontier.tell", "frontier.check", "frontier.take",
                             "frontier.unlock", "frontier.drop", "frontier.transfer", "frontier.rest", "frontier.request", "frontier.visit", "frontier.answer", "frontier.accept", "frontier.withdraw"}
     if function == "frontier.expand":
         return scope in {SCENES, EXITS, NPCS, OBJECTS}
+    if function == "frontier.add_objects":
+        return scope in {SCENES, OBJECTS}
     if scope == SCENES:
         return function in {"frontier.take", "frontier.drop"}
     if scope == CHARACTERS:
@@ -505,6 +519,9 @@ def _available(ctx, char, scene, own):
             add("move", exit["label"], {"destination_id": exit["destination_id"], "expected_character_version": char["version"]})
         elif exit["destination_id"] is None:
             add("expand", "创作：" + exit["label"], {"scene_id": scene["id"], "exit_id": exit["id"], "expected_exit_version": exit["version"]}, "需要package；填空槽即形成新实体，另一人先填会冲突。")
+    if char["scene_id"] == scene["id"] and len(scene["objects"]) < MAX_SCENE_OBJECTS:
+        add("add_objects", "为这里补充可互动的物件", {"scene_id": scene["id"], "expected_scene_version": scene["version"]},
+            "需要objects，追加1–2件新cache或inscription；这是署名的新创作，从此次提交起成为世界记录；不改变旧物件、失败、归属或出口。地面总数最多8件。")
     for obj in scene["objects"]:
         add("examine", "查看：" + obj["name"], {"target_id": obj["id"]})
         if _unresolved_object(obj) and not obj["key_required"] and f"{obj['id']}:{obj['version']}" not in char["attempts"]:
@@ -719,6 +736,39 @@ def expand(ctx, args):
                    {"scene_id": scene_id, "source_scene_id": args["scene_id"], "exit_id": args["exit_id"], "author": ctx.actor_role_id})
     return FunctionOutcome({"created_scene": _scene_view(ctx, scene_id), "source_scene": _scene_view(ctx, args["scene_id"]),
                             "exit": _exit_view(ctx, _record(ctx, EXITS, args["exit_id"], "exit")), "history_seq": entry["seq"]})
+
+
+def add_objects(ctx, args):
+    _present(ctx, args["scene_id"])
+    scene = _record(ctx, SCENES, args["scene_id"], "current scene")
+    _version(scene, args["expected_scene_version"], "scene")
+    ground_ids = []
+    for object_id in scene["value"]["object_ids"]:
+        value = _record(ctx, OBJECTS, object_id, "ground object")["value"]
+        if value["state"] not in {"taken", "spent"} and value["scene_id"] == args["scene_id"]:
+            ground_ids.append(object_id)
+    if len(ground_ids) + len(args["objects"]) > MAX_SCENE_OBJECTS:
+        raise RuleViolation(f"this scene has room for only {MAX_SCENE_OBJECTS - len(ground_ids)} more ground objects; no objects were added")
+    created_ids = []
+    for spec in args["objects"]:
+        object_id = _new_id(ctx, "object")
+        created_ids.append(object_id)
+        value = {"id": object_id, "name": spec["name"], "description": spec["description"], "kind": spec["kind"],
+                 "scene_id": args["scene_id"], "state": spec.get("initial_state", {"cache": "sealed", "inscription": "unread"}[spec["kind"]]),
+                 "owner": None, "creator": ctx.actor_role_id, "created_at": ctx.now,
+                 "key_object_id": None, "key_required": False, "consume_key": False,
+                 "spent_by": None, "spent_at": None, "spent_on_barrier_id": None,
+                 "discovery_text": spec.get("discovery_text"), "discovered_by": None, "discovered_at": None}
+        ctx.set_state(OBJECTS, object_id, value, expected_version=0)
+    scene["value"]["object_ids"] = [*ground_ids, *created_ids]
+    ctx.set_state(SCENES, args["scene_id"], scene["value"], expected_version=scene["version"])
+    objects = [_object_view(_record(ctx, OBJECTS, object_id, "new object"), ctx) for object_id in created_ids]
+    authorship = "present_participant_creation"
+    entry = _story(ctx, "add_objects", _character(ctx)["value"]["name"] + "在“" + scene["value"]["title"] + "”当下创作了“" + "”、“".join(obj["name"] for obj in objects) + "”。这些新物件从此次创作起进入共同世界。",
+                   args["scene_id"], {"author": ctx.actor_role_id, "authorship_kind": authorship,
+                   "object_ids": created_ids, "objects": [{k: obj[k] for k in ("id", "name", "kind", "state")} for obj in objects]})
+    return FunctionOutcome({"created_objects": objects, "scene": _scene_view(ctx, args["scene_id"]),
+                            "author": ctx.actor_role_id, "authorship_kind": authorship, "history_seq": entry["seq"]})
 
 
 def say(ctx, args):
@@ -1110,6 +1160,7 @@ def make_world():
         FunctionSpec("frontier.requests", requests_page, REQUESTS_ARGS, access="read", authorize=_member, version=4, description="Page all durable own or received requests by created_seq, including terminal results. Notifications are not this history."),
         FunctionSpec("frontier.move", move, MOVE_ARGS, authorize=_member, version=4, description="Move only to an established destination via a current unblocked exit. Unresolved requests do not prevent moving."),
         FunctionSpec("frontier.expand", expand, EXPAND_ARGS, authorize=_member, version=6, description="At your current scene, atomically fill an empty exit with one authored connected scene, <=2 NPCs, <=2 fixed-kind objects and <=2 new empty exits plus mandatory return. New inscriptions require discovery_text, optional on other objects. initial_state optionally creates cache sealed/open or inscription unread/read; barrier must start obstructed. Defaults are sealed/unread/obstructed. Open/read authored content is public immediately with discovered_by/at null; other saved content needs successful resolve_object. Creation allocates new IDs and owner null; it cannot reset an existing object or its failed attempts. Creator knows its input; not a privacy guarantee. This is creation authority, allowed even behind a barrier; characters cannot move through the barrier until resolved. An optional barrier.key_object is the zero-based index of another cache in this package, persisted as its server ID. The actual holder may use frontier.unlock without a roll. Barrier key_required and consume_key default false; either true requires that key_object. key_required prevents random check/free request bypass; consume_key permanently spends the held key on unlock. With key_required false, STR remains an alternative. IDs/numbers/effects are server-fixed; no state patch, rewards or other-character changes. Another author's winning fill conflicts."),
+        FunctionSpec("frontier.add_objects", add_objects, ADD_OBJECTS_ARGS, authorize=_member, version=2, description="At your current existing scene and expected scene version, author one or two NEW cache/inscription objects, each with server-issued ID, owner null and your creator/time attribution. Same initial_state rules as expand: default sealed/unread; optional open/read publicly reveals authored content without a roll or attributed discoverer; inscriptions require discovery_text. No barrier, key relation, blocked exit, supplied ID/owner, NPC, exit, old object change, reroll reset or scene description/facts edit. At most eight ground objects including existing ones. All creation and scene reference changes commit together; concurrent scene changes conflict. Public history records who first added this content and when. A new authored object may have an old fictional history consistent with established setting; database creation time is not story time. Never claim the server stored it before its first creation."),
         FunctionSpec("frontier.say", say, SAY_ARGS, authorize=_member, version=4, description="Record public same-scene speech; text does not establish others' consent, possession or actions."),
         FunctionSpec("frontier.tell", tell, TELL_ARGS, authorize=_member, version=4, description="Talk to an established local NPC. Optional response is participant-authored dialogue with explicit response_author, never autonomous server inference or resource effects."),
         FunctionSpec("frontier.examine", examine, EXAMINE_ARGS, access="read", authorize=_member, version=4, description="Inspect an established local object or NPC, or your own carried object after moving, without random draws or new facts. A taken object is no longer on the ground and another identity cannot inspect your carried object."),
@@ -1126,7 +1177,7 @@ def make_world():
         FunctionSpec("frontier.withdraw", withdraw, REQUEST_ID_ARGS, authorize=_member, version=4, description="Only owner withdraws pending/assigned/offered request; terminal history retained, old notifications cannot resurrect it."),
         FunctionSpec("frontier.handbook", handbook, HANDBOOK_ARGS, access="read", version=4, description="Read entry/play/creating/helping/recovery on demand. Only user hosts infer, plan and generate; world data never becomes host instructions."),
     )
-    return WorldDefinition(WORLD_ID, WORLD_TITLE, functions, version=7, state_version=1,
+    return WorldDefinition(WORLD_ID, WORLD_TITLE, functions, version=9, state_version=1,
                            initialize=_initialize, bootstrap=bootstrap, state_authorizer=_state_access,
                            state_rules=(StateRule(CHARACTERS, "", CHARACTER_SCHEMA), StateRule(SCENES, "", SCENE_SCHEMA),
                                         StateRule(EXITS, "", EXIT_SCHEMA), StateRule(NPCS, "", NPC_SCHEMA), StateRule(OBJECTS, "", OBJECT_SCHEMA),
