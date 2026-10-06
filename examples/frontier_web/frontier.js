@@ -16,7 +16,7 @@ const actionHints={
   'frontier.move':'沿这条已知通路前往，人物位置会保存。',
   'frontier.expand':'创作出口另一端的地点，让其他旅人也能走进去。',
   'frontier.add_objects':'为当前地点加入新物件或可读内容，留下其他旅人也能使用的选择。',
-  'frontier.say':'写一句话，说给同一地点的旅人听。',
+  'frontier.say':'保存公开现场留言，不会自动唤醒对方 Agent，也不代表对方已读或同意。',
   'frontier.tell':'向这位当地人说话；回应可由你的 Agent 创作。',
   'frontier.examine':'看看物件和已有事实，不改变现场。',
   'frontier.take':'拿取这件已打开的物品，放进你的背包。',
@@ -294,7 +294,7 @@ function showResult(result){
   if(result.object)appendDiscovery(host,result.object.discovery,{objectId:result.object.id});else appendDiscovery(host,result.result?.discovery,{showEmpty:false});
   appendNpcContinuation(host,result);
 }
-function actionButton(action){const node=button(action.label,()=>perform(action),{cls:'action-tile'+(action.function_id==='frontier.check'?' risky':''),write:action.function_id!=='frontier.examine'});if(action.function_id==='frontier.check'){const object=objects.get(action.arguments.object_id),check=object?.check;if(check)node.append(text('small',(abilities[check.ability]||check.ability)+' '+signed(Math.floor((snapshot.character.abilities[check.ability]-10)/2))+' · DC '+check.dc));}else{const hint=typeof action.hint==='string'?action.hint:actionHints[action.function_id];if(hint)node.append(text('small',hint));}return node;}
+function actionButton(action){const node=button(action.label,()=>perform(action),{cls:'action-tile'+(action.function_id==='frontier.check'?' risky':''),write:action.function_id!=='frontier.examine'});if(action.function_id==='frontier.check'){const object=objects.get(action.arguments.object_id),check=object?.check;if(check)node.append(text('small',(abilities[check.ability]||check.ability)+' '+signed(Math.floor((snapshot.character.abilities[check.ability]-10)/2))+' · DC '+check.dc));}else{const hint=action.function_id==='frontier.say'?actionHints[action.function_id]:typeof action.hint==='string'?action.hint:actionHints[action.function_id];if(hint)node.append(text('small',hint));}return node;}
 async function perform(action){
   if(!action||typeof action.function_id!=='string'||!action.arguments)throw new Error('行动信息缺失，请读取最新现场。');
   if(action.function_id==='frontier.examine'){await examine(action.arguments.target_id);return;}
@@ -336,7 +336,7 @@ function renderScene(){
     $('scene-current-ground').append(text('strong',ground.count?'地面现有：'+ground.objects.map(object=>object.name+'（'+(states[object.state]||object.state)+'）').join('、'):'这里目前没有地面物件。'),text('p','这是当前完整地面列表。未列出的物件不在这里的地面上，不能按旧描写直接拿取。','small'));
   }
   $('scene-current-ground').hidden=!$('scene-current-ground').children.length;
-  const nearby=snapshot.nearby.filter(other=>other.role_id!==c.role_id);$('nearby').replaceChildren();if(nearby.length){$('nearby').append(text('span','同一地点：','small'));for(const other of nearby)$('nearby').append(text('span',name(other.role_id),'traveler-chip'));}else $('nearby').append(text('span','你暂时没有遇见其他旅人。','small'));
+  const nearby=snapshot.nearby.filter(other=>other.role_id!==c.role_id);$('nearby').replaceChildren();if(nearby.length){$('nearby').append(text('span','其他角色留在这里：','small'));for(const other of nearby)$('nearby').append(text('span',name(other.role_id),'traveler-chip'));$('nearby').append(text('p','这是保存的位置，不代表在线。留言会保留，是否回应由对方决定。','small'));}else $('nearby').append(text('p','当前保存的位置显示：这里没有其他角色。','small'));
   renderFreshness();
   const signature=JSON.stringify([scene.id,scene.version,c.version,scene.objects.map(object=>[object.id,object.version,object.state,object.owner,object.key_requirement,object.key_required,object.consume_key]),scene.exits.map(exit=>[exit.id,exit.version,exit.destination_id,exit.blocked]),scene.npcs.map(npc=>[npc.id,npc.version]),nearby.map(other=>[other.role_id,other.version]),snapshot.available_actions]);
   if(signature===sceneRenderKey)return;sceneRenderKey=signature;
