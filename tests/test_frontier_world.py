@@ -104,7 +104,7 @@ class FrontierWorldTests(unittest.TestCase):
         self.assertEqual(added["author"], self.roles["A"])
         self.assertEqual(added["authorship_kind"], "present_participant_creation")
         after = self.look("B")["scene"]
-        for field in ("title", "description", "facts", "exits", "npcs", "creator", "created_at"):
+        for field in ("title", "authored_description", "facts", "exits", "npcs", "creator", "created_at"):
             self.assertEqual(after[field], original[field])
         self.assertGreater(after["version"], original["version"])
         self.assertEqual(len(after["objects"]), 4)
@@ -276,11 +276,11 @@ class FrontierWorldTests(unittest.TestCase):
         market = self.look("A")["scene"]
         # The saved prose still describes the initial unowned disc. Current
         # presence must explicitly contradict that prose after the real take.
-        self.assertIn("还没有主人", market["description"])
+        self.assertIn("还没有主人", market["authored_description"])
+        self.assertNotIn("description", market)
         self.assertEqual(market["current_ground"]["objects"], [{"id": "market-cache", "name": "铜扣旅行匣", "state": "sealed", "owner": None}])
         self.assertEqual(market["current_ground"]["count"], 1)
         self.assertTrue(market["current_ground"]["complete"])
-        self.assertLess(list(market).index("current_ground"), list(market).index("description"))
         held = self.query("A", "examine", {"target_id": "raven-disc"})["target"]
         self.move("A", "elm-inn")
         args = {"object_id": "raven-disc", "expected_object_version": held["version"],
@@ -618,7 +618,8 @@ class FrontierWorldTests(unittest.TestCase):
         self.assertEqual(before["discovery"]["status"], "not_authored")
         with patch("agent_world.world_context.secrets.randbelow", return_value=19):
             read = self.object_action("A", "check", "inn-ledger")["result"]
-        self.assertEqual(read["object"]["description"], old["description"])
+        self.assertEqual(read["object"]["authored_description"], old["description"])
+        self.assertNotIn("description", read["object"])
         self.assertEqual(read["object"]["state"], "read")
         self.assertEqual(read["object"]["discovery"]["status"], "not_authored")
         self.assertIsNone(read["object"]["discovery"]["text"])
@@ -653,7 +654,7 @@ class FrontierWorldTests(unittest.TestCase):
         before = runtime.query_function("prior", "frontier.look", role, {})["result"]
         runtime.install_world("prior", WORLD)
         after = runtime.query_function("prior", "frontier.look", role, {})
-        self.assertEqual(after["function_version"], 6)
+        self.assertEqual(after["function_version"], 7)
         # Installing a new capability changes discovery, not the saved world.
         self.assertEqual({k: v for k, v in after["result"].items() if k != "directory"},
                          {k: v for k, v in before.items() if k != "directory"})
@@ -674,7 +675,7 @@ class FrontierWorldTests(unittest.TestCase):
         before = runtime.query_function("reader", "frontier.look", role, {})["result"]
         runtime.install_world("reader", WORLD)
         after = runtime.query_function("reader", "frontier.look", role, {})
-        self.assertEqual(after["function_version"], 6)
+        self.assertEqual(after["function_version"], 7)
         self.assertEqual({k: v for k, v in after["result"].items() if k != "directory"},
                          {k: v for k, v in before.items() if k != "directory"})
 
@@ -719,7 +720,10 @@ class FrontierWorldTests(unittest.TestCase):
         self.assertNotIn("coins", self.look()["character"])
 
     def test_unique_generated_object_is_taken_once_and_given_without_duplicate(self):
-        created, _ = self.expand()
+        spec = package()
+        old_prose = "铃舌卡住，轻晃时只发出一声闷响。"
+        spec["objects"][0]["description"] = old_prose
+        created, _ = self.expand(spec=spec)
         destination = created["created_scene"]["id"]
         self.move("A", destination)
         self.move("B", "bell-market")
@@ -728,6 +732,9 @@ class FrontierWorldTests(unittest.TestCase):
         with patch("agent_world.world_context.secrets.randbelow", return_value=19):
             self.object_action("B", "check", cache["id"])
         open_cache = next(o for o in self.look("B")["scene"]["objects"] if o["id"] == cache["id"])
+        self.assertEqual(open_cache["state"], "open")
+        self.assertEqual(open_cache["authored_description"], old_prose)
+        self.assertNotIn("description", open_cache)
         b_version = self.look("B")["character"]["version"]
         self.object_action("A", "take", cache["id"], "take-once")
         with self.assertRaises((RuleViolation, StateConflict)):
@@ -740,7 +747,17 @@ class FrontierWorldTests(unittest.TestCase):
         self.assertNotIn(cache["id"], [o["id"] for o in self.look()["scene"]["objects"]])
         self.move("B", "bell-market")
         self.move("B", "elm-inn")
-        self.assertEqual(self.query("B", "examine", {"target_id": cache["id"]})["target"]["owner"], self.roles["B"])
+        held = self.query("B", "examine", {"target_id": cache["id"]})["target"]
+        self.assertEqual(held["owner"], self.roles["B"])
+        self.assertEqual(held["state"], "taken")
+        self.assertEqual(held["authored_description"], old_prose)
+        self.assertNotIn("description", held)
+        with sqlite3.connect(self.db) as database:
+            stored = json.loads(database.execute(
+                "SELECT value_json FROM world_state WHERE universe=? AND scope=? AND state_key=?",
+                ("test", "frontier:objects", cache["id"])).fetchone()[0])
+        self.assertEqual(stored["description"], old_prose)
+        self.assertNotIn("authored_description", stored)
         with self.assertRaises(RuleViolation):
             self.call("A", "transfer", {"object_id": cache["id"], "recipient_id": self.roles["B"],
                       "expected_character_version": self.look()["character"]["version"]})

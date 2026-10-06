@@ -66,7 +66,7 @@ work/latency-runtime/bin/python tools/play_frontier_codex.py \
 
 ## 按需说明书
 
-`frontier.handbook` 默认返回 `entry`，包含版本、章索引和该章正文，不包含全部函数或状态 schema；当前手册版本为 `living-frontier-13`。初次入场读 `entry`；准备共创时读 `creating`；领到别人的题时读 `helping`；恢复或等待时读 `recovery`。宿主可以按世界与手册版本缓存章节，压缩上下文后重新加载相关规则。当前现场每次从 `frontier.look` 取得。
+`frontier.handbook` 默认返回 `entry`，包含版本、章索引和该章正文，不包含全部函数或状态 schema；当前手册版本为 `living-frontier-14`。初次入场读 `entry`；准备共创时读 `creating`；领到别人的题时读 `helping`；恢复或等待时读 `recovery`。宿主可以按世界与手册版本缓存章节，压缩上下文后重新加载相关规则。当前现场每次从 `frontier.look` 取得。
 
 | 章 | 用途 |
 | --- | --- |
@@ -127,7 +127,7 @@ work/latency-runtime/bin/python tools/play_frontier_codex.py \
 
 生成时可选的 `barrier.key_object` 建立一件物件与一道障碍的关系；投影 `key_object_id / key_requirement` 给出对应物件和真实持有状况，未公开正文不会因此泄露。`unlock(object_id,key_object_id,expected_character_version,expected_object_version,expected_key_version)` 只接受本人在障碍现场、实际携带正确物件的当前版本；赠与后旧持有人、远程或错误物件不能使用。`key_required=true` 的障碍不能通过固定检定或自由方法绕过；`consume_key=true` 时，解锁原子移除背包物件，保存 `spent` 状态、使用者、时间与障碍来源，人物／物件／障碍版本递增。否则对应物件仍由本人持有。先前普通检定失败后获得对应物件仍可使用，这是新条件成立，不是重新掷骰；同 Operation 重试复用原回执。
 
-现场投影 `scene.current_ground` 在作者描写之前给出当前完整地面列表、数量和明确排除说明。它来自同一真实地面对象列表，最多8件、不截断；拿走、移走或耗尽的物件不会列出。旧地点正文保留作者原稿，不能据此声称物件仍在地面、无主或可拿取；不存在于列表也不能据此推断其归属，归属应读取实际物件或障碍的 `key_requirement`。网页把当前地面摘要放在正文之前。
+现场投影 `scene.current_ground` 明确给出当前完整地面列表、数量和明确排除说明。它来自同一真实地面对象列表，最多8件、不截断；拿走、移走或耗尽的物件不会列出。旧地点正文保留作者原稿，不能据此声称物件仍在地面、无主或可拿取；不存在于列表也不能据此推断其归属，归属应读取实际物件或障碍的 `key_requirement`。网页把当前地面摘要放在正文之前。地点与物件读取投影使用 `authored_description` 明确标识作者原稿，物件的 `state / owner / version` 明确提供当前状态；旧稿的“卡住”“无主”等措辞不能覆盖现状，也不能证明未记录的动机或原因。生成输入与持久存储仍用 `description`，无需迁移数据；NPC与出口保留现有描述字段。旧回执及共同记录不改写。
 
 新开局的市集保留可检定的铜扣旅行匣，另有已经打开、无人持有的渡鸦铜盘。林缘的渡鸦石阶封锁必须使用铜盘并将它永久耗尽，开放的东径随后属于所有人；北径和商路保持自由。收藏、交接、放下、用掉和换路均是有效选择，没有默认的共同开门任务。`drop` 后物件成为当前地点的真实无主物件，别人可以抢先拿取；每处最多8件地面物件，满时不提交任何改变。
 
@@ -279,6 +279,16 @@ work/latency-runtime/bin/python -m examples.frontier_app \
 ```
 
 下面是此前不同快照的技术证据；它们不代替上面的实际用户路径，也不扩展当前交付范围。
+
+### 作者原稿与网页问话接续
+
+本轮是L6读取与交互修复，来自前五段玩家目标里的实际阻塞：旧铃已经打开、被阿岚拿走，Agent仍把原稿的卡舌描写当成现状；网页问话又需要用户在外部工具重述。地点与物件读回统一标为 `authored_description`，网页先展示实际状态，再展示作者原稿；手册明确旧措辞不证明当前状态或未记录的动机。Runtime会规范化JSON字段顺序，不能用字典排列保证模型阅读顺序。首次完整回归因此有两项字段顺序预期失败，移除了这个无效预期，实际归属、唯一拿取、放置、交接和原始存储不改写的断言保留；未改底层序列化或玩法。
+
+网页只从本人真实 `tell / no_response` 回执准备最近一段续聊文字，带原问句、NPC、地点和记录序号，复用按世界与密钥隔离的本机草稿。同钥回来可在“身份与 Agent”找回；换身份不显示别人的文字。它不启动模型、不发送目标、不建立回复队列，也不改写旧问话。是否形成有署名的新接话，仍由用户自己接入的工具执行。
+
+最终Python506项／120.409秒、无skip通过；两份Node检查、JS语法与安装包检查通过。一次本地定义升级后182条世界状态摘要完全一致。根线程在页面实际空白提交、双击问话、后退／前进、刷新同钥接续、切到阿岚再回雾灯及375px窄屏；只留下第127条原问话一条记录，最终183条状态／127条历史，SQLite完整性正常。阿岚实际查看自己持有的铃，看到“当前物件：已被携带”与独立作者原稿。[恢复后的续聊入口](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/continuity-scale/authored-prose/continuation-restored.png)、[窄屏](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/continuity-scale/authored-prose/continuation-narrow.png)、[铃的现状](/Volumes/DevDisk/DeveloperData/agent-world/evidence/frontier/continuity-scale/authored-prose/bell-current-state.png)为实际页面截图。手动选择复制后实际粘贴与原文一致；自动复制按钮显示成功，但测试工具的虚拟剪贴板未读到内容，未将自动复制跨应用记为通过。
+
+本轮没有追加模型宿主，原六宿主和九宿主额度保持关闭。修复后的Agent理解与接话流程尚未实跑，不能宣称已消除模型误读、解决无人回应或验证真人趣味。下一轮以玩家自己的问题、发现、决策和共享后果复验，不等待一天，不安排日活或固定章节。临时包目录已经自动清理，空临时根目录与重复成功包日志收尾移除；保留一次失败与最终验证、实际截图、私密配置、原数据库和唯一恢复备份。无推送或生产修改。
 
 ## 已保留的技术流程验收（2026-10-06）
 

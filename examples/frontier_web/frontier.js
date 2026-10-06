@@ -66,7 +66,22 @@ async function readEntryIdentity(){
 function announce(value){$('message').textContent=value;$('message').hidden=!value;}
 function download(filename,value){const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)+'\n'],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download=filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function saveDrafts(){if(!profile)return;client.saveDraft('frontier-intent',$('intent').value);client.saveDraft('frontier-say',$('say-text').value);if($('intent-target').value)client.saveDraft('frontier-intent-target',$('intent-target').value);if(createContext)saveCreation();}
-function restoreDrafts(){if(!profile)return;$('intent').value=client.draft('frontier-intent');$('say-text').value=client.draft('frontier-say');}
+function restoreDrafts(){if(!profile)return;$('intent').value=client.draft('frontier-intent');$('say-text').value=client.draft('frontier-say');renderAgentContinuation(client.draft('frontier-agent-continuation'));}
+function renderAgentContinuation(value){$('agent-continuation').value=value;$('agent-continuation-card').hidden=!value;$('copy-continuation').dataset.unavailable=String(!value);}
+async function copyPrompt(field){try{await navigator.clipboard.writeText(field.value);announce('已复制，可以粘贴给自己的助手。');}catch{field.focus();field.select();announce('浏览器未允许自动复制，文字已选中，可以手动复制。');}}
+function appendNpcContinuation(host,result){
+  const entry=result.entry,payload=entry?.payload;
+  if(entry?.kind!=='tell'||entry.actor!==profile?.role_id||payload?.response_kind!=='no_response'||!Number.isInteger(entry.seq))return;
+  const title=snapshot?.scene?.id===entry.scene_id?snapshot.scene.title:mapItems.get(entry.scene_id)?.title;
+  const where=(title?'“'+title+'”':'这个地点')+'（地点 '+entry.scene_id+'）';
+  const value='我刚在渡鸦溪的'+where+'对'+payload.npc_name+'（NPC '+payload.npc_id+'）说：“'+payload.text+'”。这句话已经保存为共同记录第 '+entry.seq+' 条，原记录只包含我的问话。\n\n陪我把这段聊下去。先读当前世界和这条记录，核对原话及后来有没有回应。若仍适合继续，就按这里的共创规则，新增一条明确署名的 NPC 接话，别再次只发布同一个问题，也不要改写旧记录或把台词当成物品、道路真的变了。如果连接只读、我已离开这里，或现在的事实对不上，先告诉我，别替我移动。这次只接一轮，再让我看实际保存的结果。';
+  renderAgentContinuation(value);
+  const field=document.createElement('textarea');field.rows=5;field.readOnly=true;field.value=value;
+  const copy=button('复制给我的 Agent，接着聊',()=>copyPrompt(field));copy.dataset.local='true';
+  host.append(label('给已接入 Agent 的续聊文字',field),copy,text('p','复制后粘贴到自己的 AI 工具。这只准备文字，不会启动 Agent 或自动回答；同钥回来可在“身份与 Agent”找回最近一条。','small'));
+  try{client.saveDraft('frontier-agent-continuation',value);}catch{host.append(text('p','本机未能保存续聊文字，请现在复制；世界中的原问话仍已保存。','small'));}
+}
+function appendAuthoredDescription(host,value){host.append(text('p','作者原稿（当前状态另行核对）','small'),text('p',value.authored_description));}
 function loadCheckpoint(){
   entryCheckpoint=null;checkpointWarning='';lastCheckpointSignature='';
   try{entryCheckpoint=parseCheckpoint(client.draft('frontier-observation'),{worldId:'living-frontier',roleId:profile.role_id});}
@@ -109,7 +124,7 @@ function controls(){
   $('cancel').hidden=!busy||$('entry').hidden;
   document.querySelectorAll('button').forEach(node=>{
     const keep=['leave','cancel','create-close','create-cancel'].includes(node.id)||!!node.closest('#risk-dialog');
-    const offline=profile&&!client.token&&node.closest('#app')&&!['reconnect','leave','backup','restore','copy-prompt'].includes(node.id);
+    const offline=profile&&!client.token&&node.closest('#app')&&node.dataset.local!=='true'&&!['reconnect','leave','backup','restore','copy-prompt'].includes(node.id);
     node.disabled=node.dataset.unavailable==='true'||(busy&&!keep)||!!offline||(unresolved&&node.dataset.write==='true');
   });
   $('enter').textContent=busy&&!$('entry').hidden?'正在连接…':entryKeyState==='saved'?'接续本机密钥身份':entryKeyState==='new'?'创建身份，走进渡鸦溪':entryKeyState==='error'?'本机身份读取失败':'正在读取本机身份…';
@@ -129,6 +144,7 @@ async function enter(candidate,displayName='',classId='fighter'){
   const nextKey=await validateKey(await candidate);active();const response=await client.authenticate(nextKey,{isCurrent:()=>session===generation});active();
   key=nextKey;await savedKey(key);active();profile=response.role_profile;
   ++entryIdentityRead;entryKeyState='saved';if(entryCharacter?.publicKey!==key.public_key)entryCharacter=null;renderEntryIdentity();
+  renderAgentContinuation('');
   loadCheckpoint();activityRenderKey='';returnHistoryFlight=null;
   $('entry').hidden=true;$('app').hidden=false;$('reconnect').hidden=true;$('connection-state').textContent='本页授权到期 '+time(client.expiresAt);$('who').textContent=profile.display_name;
   readInterrupted=false;lastRead=0;$('stale-state').hidden=true;$('credentials-status').textContent='';$('agent-status').textContent='';
@@ -264,7 +280,7 @@ function showResult(result){
   announce('这次操作已提交，以下为服务器保存的结果。');const host=$('last-result');host.replaceChildren();$('last-result-card').hidden=false;
   if(result.result?.method==='key_object'){host.append(text('p','用“'+(result.key_object?.name||'对应物件')+'”解除了“'+(result.object?.name||'这道障碍')+'”。'+(result.result.key_consumed?'这件对应物件已永久耗尽，并从你的背包移除，不能再收藏或交接。':'本次未消耗对应物件。')+'若障碍挡着通路，对应通路已经对所有旅人开放。'),text('p','按对应物件直接解锁，没有掷骰或奖励。','small'));}
   else if(result.created_scene){host.append(text('p','“'+result.created_scene.title+'”已经进入共享世界。提交者：'+name(result.created_scene.creator)+'。'+(result.exit?.blocked?'原出口仍被物件阻挡，先处理障碍才能前往。':'现在可以从原出口前往。')));}
-  else if(Array.isArray(result.created_objects)){host.append(text('p','已为“'+result.scene.title+'”加入 '+result.created_objects.length+' 件新内容。作者：'+name(result.author)+'；它们来自这次创作。'));for(const object of result.created_objects){const item=text('section','','scene-item');item.append(text('h3',object.name+' · '+(states[object.state]||object.state)),text('p',object.description));appendDiscovery(item,object.discovery,{objectId:object.id});host.append(item);}}
+  else if(Array.isArray(result.created_objects)){host.append(text('p','已为“'+result.scene.title+'”加入 '+result.created_objects.length+' 件新内容。作者：'+name(result.author)+'；它们来自这次创作。'));for(const object of result.created_objects){const item=text('section','','scene-item');item.append(text('h3',object.name+' · '+(states[object.state]||object.state)));appendAuthoredDescription(item,object);appendDiscovery(item,object.discovery,{objectId:object.id});host.append(item);}}
   else if(result.entry){host.append(text('p',result.entry.text||'这句话已经保存在共同记录中。'));}
   else if(result.request){host.append(text('p',statuses[result.request.status]||result.request.status));if(result.request.reason)host.append(text('p',result.request.reason));}
   else if(result.scene&&result.object?.state==='open'&&result.object.owner===null){host.append(text('p','“'+result.object.name+'”已放在 '+result.scene.title+'，不再归你持有；其他到场旅人可以拿取。'));}
@@ -276,6 +292,7 @@ function showResult(result){
   if(Number.isInteger(result.result?.roll)){host.append(text('p',result.result.success?'检定结果已结算；实际影响见最新物件和记录。':'检定失败，按本世界规则没有伤害；同一人物不能在这个物件版本上重复掷骰。','small'));}
   appendKeyRequirement(host,result.object);
   if(result.object)appendDiscovery(host,result.object.discovery,{objectId:result.object.id});else appendDiscovery(host,result.result?.discovery,{showEmpty:false});
+  appendNpcContinuation(host,result);
 }
 function actionButton(action){const node=button(action.label,()=>perform(action),{cls:'action-tile'+(action.function_id==='frontier.check'?' risky':''),write:action.function_id!=='frontier.examine'});if(action.function_id==='frontier.check'){const object=objects.get(action.arguments.object_id),check=object?.check;if(check)node.append(text('small',(abilities[check.ability]||check.ability)+' '+signed(Math.floor((snapshot.character.abilities[check.ability]-10)/2))+' · DC '+check.dc));}else{const hint=typeof action.hint==='string'?action.hint:actionHints[action.function_id];if(hint)node.append(text('small',hint));}return node;}
 async function perform(action){
@@ -297,7 +314,10 @@ async function perform(action){
 }
 async function examine(targetId){
   const session=generation,result=await client.query('frontier.examine',{target_id:targetId});if(session!==generation||!current())return;
-  const host=$('last-result');host.replaceChildren(text('h3',result.target.name),text('p',result.target.description));appendKeyRequirement(host,result.target);appendDiscovery(host,result.target.discovery,{objectId:result.target.id});for(const fact of result.facts||[])host.append(text('p','• '+fact,'small'));for(const action of result.available_actions||[])host.append(actionButton(action));$('last-result-card').hidden=false;controls();
+  const host=$('last-result');host.replaceChildren(text('h3',result.target.name));
+  if(Object.hasOwn(kinds,result.target.kind)){host.append(text('p','当前物件：'+(states[result.target.state]||result.target.state),'small'));appendAuthoredDescription(host,result.target);appendKeyRequirement(host,result.target);appendDiscovery(host,result.target.discovery,{objectId:result.target.id});}
+  else host.append(text('p','NPC 设定','small'),text('p',result.target.description));
+  for(const fact of result.facts||[])host.append(text('p','作者设定：'+fact,'small'));for(const action of result.available_actions||[])host.append(actionButton(action));$('last-result-card').hidden=false;controls();
 }
 function renderCharacter(){
   const c=snapshot.character;for(const id of ['character-stats','character-abilities','inventory','character-detail'])$(id).replaceChildren();
@@ -310,7 +330,7 @@ function renderCharacter(){
 }
 function renderScene(){
   const scene=snapshot.scene,c=snapshot.character;if(!scene){$('scene-title').textContent='世界入口';$('scene-description').textContent='核对上次操作后，可以用同一身份创建人物。';for(const id of ['scene-npcs','scene-objects','scene-current-ground','available-actions','open-exits','nearby'])$(id).replaceChildren();return;}
-  $('scene-title').textContent=scene.title;$('scene-description').textContent=scene.description;$('scene-state').textContent='已保存 · 版本 '+scene.version;$('scene-author').textContent='地点作者：'+name(scene.creator)+' · '+time(scene.created_at);
+  $('scene-title').textContent=scene.title;$('scene-description').textContent=scene.authored_description;$('scene-state').textContent='已保存 · 版本 '+scene.version;$('scene-author').textContent='地点原稿作者：'+name(scene.creator)+' · '+time(scene.created_at);
   const ground=scene.current_ground;$('scene-current-ground').replaceChildren();
   if(ground?.complete===true&&Array.isArray(ground.objects)&&ground.count===ground.objects.length){
     $('scene-current-ground').append(text('strong',ground.count?'地面现有：'+ground.objects.map(object=>object.name+'（'+(states[object.state]||object.state)+'）').join('、'):'这里目前没有地面物件。'),text('p','这是当前完整地面列表。未列出的物件不在这里的地面上，不能按旧描写直接拿取。','small'));
@@ -321,9 +341,9 @@ function renderScene(){
   const signature=JSON.stringify([scene.id,scene.version,c.version,scene.objects.map(object=>[object.id,object.version,object.state,object.owner,object.key_requirement,object.key_required,object.consume_key]),scene.exits.map(exit=>[exit.id,exit.version,exit.destination_id,exit.blocked]),scene.npcs.map(npc=>[npc.id,npc.version]),nearby.map(other=>[other.role_id,other.version]),snapshot.available_actions]);
   if(signature===sceneRenderKey)return;sceneRenderKey=signature;
   const focused=document.activeElement,focusedNpc=$('scene-npcs').contains(focused)?{id:focused.id,start:focused.selectionStart,end:focused.selectionEnd}:null;
-  $('scene-npcs').replaceChildren();for(const npc of scene.npcs){const item=text('article','','scene-item');item.append(text('h3',npc.name),text('p',npc.description),text('p','设定作者：'+name(npc.creator),'small'));const form=document.createElement('form');form.id='npc-form-'+npc.id;const input=document.createElement('textarea');input.id='npc-text-'+npc.id;input.rows=2;input.maxLength=1200;input.placeholder='想问点什么？';input.value=client.draft('frontier-npc:'+npc.id);input.addEventListener('input',()=>{try{client.saveDraft('frontier-npc:'+npc.id,input.value);}catch(error){showError(error);}});form.append(label('对 '+npc.name+' 说',input));const submit=text('button','说给 TA 听','secondary');submit.type='submit';submit.dataset.write='true';form.append(submit,text('p','这会记录你的话。网页不会自动推理 NPC 的回答；用户侧 Agent 可提供有作者署名的回应。','small'));form.addEventListener('submit',event=>{event.preventDefault();run(async()=>{const value=input.value.trim();if(!value)return;const draft=input.value;showResult(await mutate('frontier.tell',{npc_id:npc.id,text:value},{route:'frontier-npc:'+npc.id,draft_text:draft}));input.value=client.draft('frontier-npc:'+npc.id);await refresh();});});item.append(form);$('scene-npcs').append(item);}
+  $('scene-npcs').replaceChildren();for(const npc of scene.npcs){const item=text('article','','scene-item');item.append(text('h3',npc.name),text('p',npc.description),text('p','设定作者：'+name(npc.creator),'small'));const form=document.createElement('form');form.id='npc-form-'+npc.id;const input=document.createElement('textarea');input.id='npc-text-'+npc.id;input.rows=2;input.maxLength=1200;input.placeholder='想问点什么？';input.value=client.draft('frontier-npc:'+npc.id);input.addEventListener('input',()=>{try{client.saveDraft('frontier-npc:'+npc.id,input.value);}catch(error){showError(error);}});form.append(label('对 '+npc.name+' 说',input));const submit=text('button','说给 TA 听','secondary');submit.type='submit';submit.dataset.write='true';form.append(submit,text('p','这会保存你的问话，不会自动回答。提交后，可以把续聊文字复制给自己的 Agent，让它按世界规则创作有署名的接话。','small'));form.addEventListener('submit',event=>{event.preventDefault();run(async()=>{const value=input.value.trim();if(!value)return;const draft=input.value;showResult(await mutate('frontier.tell',{npc_id:npc.id,text:value},{route:'frontier-npc:'+npc.id,draft_text:draft}));input.value=client.draft('frontier-npc:'+npc.id);await refresh();});});item.append(form);$('scene-npcs').append(item);}
   if(focusedNpc&&$(focusedNpc.id)){const input=$(focusedNpc.id);input.focus({preventScroll:true});if(Number.isInteger(focusedNpc.start))input.setSelectionRange(focusedNpc.start,focusedNpc.end);}
-  $('scene-objects').replaceChildren();for(const object of scene.objects){const item=text('article','','scene-item');const heading=text('div','','section-heading');heading.append(text('h3',object.name),text('span',states[object.state]||object.state,'tag'));item.append(heading,text('p',object.description),text('p',(kinds[object.kind]||object.kind)+' · 作者 '+name(object.creator),'small'));appendKeyRequirement(item,object);appendDiscovery(item,object.discovery,{objectId:object.id});const actions=text('div','','actions');actions.append(button('仔细看',()=>examine(object.id)));for(const action of snapshot.available_actions.filter(a=>a.arguments.object_id===object.id||a.arguments.target_id===object.id)){if(action.function_id==='frontier.examine')continue;actions.append(actionButton(action));}item.append(actions);$('scene-objects').append(item);}
+  $('scene-objects').replaceChildren();for(const object of scene.objects){const item=text('article','','scene-item');const heading=text('div','','section-heading');heading.append(text('h3',object.name),text('span',states[object.state]||object.state,'tag'));item.append(heading);appendAuthoredDescription(item,object);item.append(text('p',(kinds[object.kind]||object.kind)+' · 原稿作者 '+name(object.creator),'small'));appendKeyRequirement(item,object);appendDiscovery(item,object.discovery,{objectId:object.id});const actions=text('div','','actions');actions.append(button('仔细看',()=>examine(object.id)));for(const action of snapshot.available_actions.filter(a=>a.arguments.object_id===object.id||a.arguments.target_id===object.id)){if(action.function_id==='frontier.examine')continue;actions.append(actionButton(action));}item.append(actions);$('scene-objects').append(item);}
   $('available-actions').replaceChildren();for(const action of snapshot.available_actions){if(['frontier.transfer','frontier.accept','frontier.withdraw'].includes(action.function_id))continue;$('available-actions').append(actionButton(action));}
   $('action-note').textContent=$('available-actions').children.length?'选一件想做的事。有风险或消耗时，先核对后果。':'这里暂时没有可用按钮；可以阅读现场与已有记录。';
   const selected=$('intent-target').value||client.draft('frontier-intent-target'),targets=scene.objects.filter(object=>!object.key_required&&['sealed','obstructed','unread'].includes(object.state)&&!c.attempts.includes(object.id+':'+object.version));$('intent-target').replaceChildren();if($('intent').value&&selected&&!targets.some(o=>o.id===selected)){const missing=text('option','原草稿的对象已不可用，请重新选择');missing.value='';$('intent-target').append(missing);}for(const object of targets){const option=text('option',object.name+' · '+(states[object.state]||object.state));option.value=object.id;$('intent-target').append(option);}if(targets.some(o=>o.id===selected))$('intent-target').value=selected;$('proposal').querySelector('button[type=submit]').dataset.unavailable=String(!$('intent-target').value);
@@ -393,7 +413,7 @@ function renderTask(){
   if(!task){host.append(text('p','目前没有你正在处理的附加题。领取后，它会在同一身份回来时继续保留。','small'));return;}
   host.append(requestCard(task.request,{historical:true}),text('p',task.guidance,'helper-guidance'));
   if(task.request.status!=='assigned'||task.request.assignee!==profile.role_id){host.append(text('p','这道题已不再等待你的回答。过往方案只作记录。','small'));return;}
-  if(task.target){host.append(text('p','当前对象：'+task.target.name+' · '+task.target.description,'small'));appendTaskKeyRequirement(host,task);}if(task.scene){host.append(text('p','地点：'+task.scene.title+'\n'+task.scene.description,'helper-guidance'));for(const fact of task.scene.facts)host.append(text('p','事实：'+fact,'small'));}
+  if(task.target){host.append(text('p','当前对象：'+task.target.name,'small'));appendAuthoredDescription(host,task.target);appendTaskKeyRequirement(host,task);}if(task.scene){host.append(text('p','地点：'+task.scene.title,'helper-guidance'));appendAuthoredDescription(host,task.scene);for(const fact of task.scene.facts)host.append(text('p','作者设定：'+fact,'small'));}
   const form=document.createElement('form');form.className='helper-form';const decision=select([['reject','不允许这个办法'],['allow','允许有限检定']]);const reason=document.createElement('textarea');reason.rows=3;reason.maxLength=2000;reason.required=true;reason.value=client.draft('frontier-answer:'+task.request.request_id);reason.addEventListener('input',()=>{try{client.saveDraft('frontier-answer:'+task.request.request_id,reason.value);}catch(error){showError(error);}});
   const ability=select(task.rules.abilities.map(id=>[id,abilities[id]||id]),task.rules.fixed_check?.ability);const dc=select(task.rules.dcs.map(value=>[String(value),'DC '+value]),task.rules.fixed_check?.dc);const effect=select(task.rules.effects.map(id=>[id,effects[id]||id]));const fields=text('div');fields.hidden=true;const grid=text('div','','form-grid');grid.append(label('检定属性',ability),label('难度',dc));fields.append(grid,label('允许的效果',effect),text('p',terms(task.rules.terms),'helper-guidance'));decision.addEventListener('change',()=>fields.hidden=decision.value!=='allow');form.append(label('你的判断',decision),fields,label('公开理由',reason));const submit=text('button','提交回答','secondary');submit.type='submit';submit.dataset.write='true';form.append(submit,text('p','只判断原办法，不把新工具、法术或别人的同意写成已有事实。需要改办法时，应拒绝并建议原提出者重新提议。','small'));
   form.addEventListener('submit',event=>{event.preventDefault();run(async()=>{const value=reason.value.trim();if(!value)return;const args={request_id:task.request.request_id,decision:decision.value,reason:value};if(decision.value==='allow')Object.assign(args,{ability:ability.value,dc:Number(dc.value),effect:effect.value});showResult(await mutate('frontier.answer',args,{route:'frontier-answer:'+task.request.request_id,draft_text:reason.value}));await refresh();});});host.append(form);
@@ -533,7 +553,8 @@ $('map-more').addEventListener('click',()=>run(readMap));$('history-more').addEv
 $('return-more').addEventListener('click',()=>run(readReturnHistory));
 for(const id of ['scene-activity-details','return-details'])$(id).addEventListener('toggle',()=>{if(snapshot)renderActivity();});
 $('connect-agent').addEventListener('click',()=>run(async()=>{const session=generation,accessMode=$('agent-access').value,agent=new FrontierClient();agentClient=agent;try{await agent.authenticate(key,{accessMode,isCurrent:()=>session===generation&&current()});if(session!==generation)return;download('ravenbrook-opencode.json',{$schema:'https://opencode.ai/config.json',mcp:{agent_world:{type:'remote',url:location.origin+'/mcp',oauth:false,headers:{Authorization:'Bearer '+agent.token}}}});$('agent-status').textContent=(accessMode==='observe'?'只读观察':'读取与行动')+'连接已签发，到期 '+time(agent.expiresAt)+'。请按上方启动方式在自己的 OpenCode 中加载，再复制与该权限对应的第一句话；下载没有启动 Agent。';await readCredentials();}finally{if(agentClient===agent)agentClient=null;}}));
-$('copy-prompt').addEventListener('click',()=>run(async()=>{try{await navigator.clipboard.writeText($('agent-prompt').value);announce('已复制，可以粘贴给自己的助手。');}catch{$('agent-prompt').focus();$('agent-prompt').select();announce('浏览器未允许自动复制，文字已选中，可以手动复制。');}}));
+$('copy-prompt').addEventListener('click',()=>run(()=>copyPrompt($('agent-prompt'))));
+$('copy-continuation').addEventListener('click',()=>run(()=>copyPrompt($('agent-continuation'))));
 window.addEventListener('hashchange',()=>showPage().catch(showError));window.addEventListener('pagehide',()=>{try{saveDrafts();}catch{}client.cancelRequests();agentClient?.cancelRequests();});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&current()&&!busy)refresh().catch(showError);});
 showPage().catch(showError);controls();readEntryIdentity();
