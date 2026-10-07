@@ -2,6 +2,7 @@
 from pathlib import Path
 import asyncio
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -71,6 +72,117 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected.exception.code, 'HostTimeout')
         self.assertLess(time.monotonic() - observations[0], 1)
         self.assertIs(self.session.process, owned)
+        self.assertEqual(self.session.initialization[-1]['last_probe_error_type'], 'TimeoutError')
+
+    async def test_retry_waits_for_owned_host_without_replacing_conversation(self):
+        owned = Mock(returncode=None)
+        self.session.process = owned
+        capability = self.session.capability
+        self.session.world_read = self.session.first_response_success = True
+        self.session.automatic_started = True
+        self.session.inference_count = 5
+        self.session.remember()
+        self.session.world = AsyncMock(return_value={'functions': []})
+        self.session.join = AsyncMock()
+        self.session.observe_automatic = AsyncMock()
+        self.session.start_automatic_loop = Mock()
+        self.session.watch_events = AsyncMock()
+        self.session.launch = AsyncMock()
+        self.session.stop_host = AsyncMock()
+        self.session.turn = AsyncMock()
+        calls = []
+
+        async def recovering(method, path, body=None, timeout=15):
+            calls.append((method, path))
+            if path == '/global/health':
+                if sum(path == item[1] for item in calls) == 1:
+                    raise httpx.ReadTimeout('still initializing')
+                return {'healthy': True}
+            if path == '/config/providers':
+                return {'providers': [{'id': 'provider', 'models': {'model': {}}}]}
+            if path == '/session/test-session':
+                return {'id': 'test-session', 'permission': self.session.permissions()}
+            if path == '/session/test-session/message?limit=4':
+                return []
+            self.fail('Unexpected host operation: ' + method + ' ' + path)
+
+        self.session.host = recovering
+        await self.session.prepare()
+        await self.session.event_worker
+        self.session.launch.assert_not_awaited()
+        self.session.stop_host.assert_not_awaited()
+        self.session.turn.assert_not_awaited()
+        self.assertIs(self.session.process, owned)
+        self.assertEqual(self.session.capability, capability)
+        self.assertEqual(self.session.session_id, 'test-session')
+        self.assertEqual(self.session.inference_count, 5)
+        self.assertFalse(self.session.automatic['enabled'])
+        self.assertTrue(all(method == 'GET' for method, _ in calls))
+        saved = json.loads(self.session.memory_file.read_text())
+        self.assertEqual((saved['session_id'], saved['inference_count']), ('test-session', 5))
+
+    async def test_saved_session_errors_do_not_start_a_replacement_or_spend_request(self):
+        self.session.process = Mock(returncode=None)
+        self.session.world = AsyncMock(return_value={'functions': []})
+        self.session.inference_count = 5
+        self.session.remember()
+        saved = self.session.memory_file.read_bytes()
+        original_client = httpx.AsyncClient
+        for status, code in ((404, 'SavedSessionMissing'), (500, 'OpenCodeError'),
+                             (503, 'OpenCodeError'), (401, 'HostAuthenticationFailed')):
+            with self.subTest(status=status):
+                calls = []
+
+                def upstream(request):
+                    calls.append((request.method, request.url.path))
+                    if request.url.path == '/global/health':
+                        return httpx.Response(200, json={'healthy': True})
+                    if request.url.path == '/config/providers':
+                        return httpx.Response(200, json={'providers': [
+                            {'id': 'provider', 'models': {'model': {}}}]})
+                    if request.url.path == '/session/test-session':
+                        return httpx.Response(status, json={'detail': 'private upstream material'})
+                    self.fail('Unexpected operation: ' + request.method + ' ' + request.url.path)
+
+                with patch('agent_world.grove_connector.httpx.AsyncClient',
+                           side_effect=lambda **kwargs: original_client(
+                               **kwargs, transport=httpx.MockTransport(upstream))):
+                    with self.assertRaises(ConnectorError) as rejected:
+                        await self.session.prepare()
+                self.assertEqual(rejected.exception.code, code)
+                self.assertEqual(self.session.session_id, 'test-session')
+                self.assertEqual(self.session.inference_count, 5)
+                self.assertEqual(self.session.memory_file.read_bytes(), saved)
+                self.assertTrue(all(method == 'GET' for method, _ in calls))
+                self.assertNotIn('private upstream material', json.dumps(self.session.state()))
+
+    async def test_explicit_runtime_root_is_absolute_isolated_and_does_not_move_memory(self):
+        self.session.remember()
+        original = self.session.memory_file.read_bytes()
+        relative = Path(os.path.relpath(self.manager.storage / 'runtime', Path.cwd()))
+        app = create_connector_app(storage=self.manager.storage, runtime_storage=relative, wrapper=None)
+        manager = app.state.connector
+        manager.binary = Path('/usr/bin/true')
+        session = GroveSession(manager, self.session.identity, '', 'Test', 'provider/model')
+        other = GroveSession(manager, {'role_id': 'different-user'}, '', 'Other', 'provider/model')
+        self.assertTrue(manager.runtime_storage.is_absolute())
+        self.assertEqual(session.profile, self.session.profile)
+        self.assertEqual(session.memory_file.read_bytes(), original)
+        self.assertEqual(session.session_id, 'test-session')
+        self.assertEqual(self.session.runtime_profile, self.session.profile)
+        self.assertNotEqual(other.runtime_profile, session.runtime_profile)
+        owned = Mock(returncode=None)
+        session.host = AsyncMock(return_value={'healthy': True})
+        with patch('asyncio.create_subprocess_exec', AsyncMock(return_value=owned)) as spawn:
+            await session.launch()
+        env = spawn.await_args.kwargs['env']
+        for kind in ('CONFIG', 'CACHE'):
+            self.assertEqual(env['XDG_' + kind + '_HOME'], str(session.profile / ('xdg-' + kind.lower())))
+        for kind in ('DATA', 'STATE'):
+            self.assertEqual(env['XDG_' + kind + '_HOME'], str(session.runtime_profile / ('xdg-' + kind.lower())))
+        self.assertEqual(env['TMPDIR'], str(session.runtime_profile / 'tmp'))
+        self.assertEqual(env['OPENCODE_CONFIG_DIR'], str(session.profile / 'xdg-config/opencode'))
+        self.assertEqual(session.memory_file.read_bytes(), original)
 
     async def test_host_authentication_failure_is_not_hidden_as_initialization_timeout(self):
         self.manager.binary = Path('/usr/bin/true')

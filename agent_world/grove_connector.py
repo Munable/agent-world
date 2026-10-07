@@ -242,6 +242,10 @@ class GroveSession:
         self.role_id = str(identity["role_id"])
         digest = hashlib.sha256((manager.world_url + "\0" + self.role_id).encode()).hexdigest()[:32]
         self.profile = safe_directory(manager.storage / "profiles" / digest)
+        # An explicit override splits small runtime data from this same profile.
+        # It never moves data or replaces a missing saved conversation.
+        self.runtime_profile = (safe_directory(manager.runtime_storage / "profiles" / digest)
+                                if manager.runtime_storage else self.profile)
         self.memory_file = self.profile / "memory.json"
         self.name, self.model = name, checked_model(model)
         self.session_id = ""
@@ -282,6 +286,7 @@ class GroveSession:
                            "entities": [], "process": None, "readback": None, "error": None}
         self.messages: list[dict] = []
         self.progress: list[dict] = []
+        self.initialization: list[dict] = []
         self.catalog: dict[str, dict] = {}
         self.available_models: list[str] = []
         self.model_metadata: dict = {}
@@ -351,6 +356,7 @@ class GroveSession:
                 "pending_changes": len(self.pending_changes)}, "error": self.error, "role_id": self.role_id,
             "unknown_operations": len(self.unknown), "available_models": self.available_models,
             "model_metadata": self.model_metadata,
+            "initialization": self.initialization[-8:],
             "session_id": self.session_id, "message_id": self.last_completion.get("message_id"),
             "blueprint_session_id": self.blueprint_session_id,
             "response_session_id": self.response_diagnostics.get("session_id", self.last_completion.get("session_id")),
@@ -486,6 +492,8 @@ class GroveSession:
             response = await client.request(method, self.host_url + path, json=body)
         if response.status_code in {401, 403}:
             raise ConnectorError("HostAuthenticationFailed", "本机伙伴认证失败；请恢复连接后重试。", 502)
+        if response.status_code == 404 and method == "GET" and path.startswith("/session/") and path.count("/") == 2:
+            raise ConnectorError("SavedSessionMissing", "本机伙伴找不到原会话；请核对原运行数据的位置，记录已保留。", 409)
         if not response.is_success:
             # OpenCode's error details may contain provider material. Never relay them.
             raise ConnectorError("OpenCodeError", f"OpenCode request failed ({response.status_code}); inspect the local host.", 502)
@@ -499,17 +507,18 @@ class GroveSession:
         if requested_host and requested_host != self.host_url:
             raise ConnectorError("DedicatedHostRequired", "Leave the host address empty to start this game's restricted OpenCode session.")
         if self.process and self.process.returncode is None:
-            try:
-                await self.host("GET", "/global/health", timeout=3)
-            except (ConnectorError, httpx.HTTPError) as exc:
-                if isinstance(exc, ConnectorError) and exc.code == "HostAuthenticationFailed":
-                    raise
-                await self.stop_host()
-                self.capability = secrets.token_urlsafe(40)
-                await self.launch()
+            # A previous startup deadline does not mean its owned process died.
+            # Keep initialization and its capability intact while waiting again.
+            await self.wait_for_host()
         else:
             await self.launch()
-        providers = await self.host("GET", "/config/providers")
+        providers_started = time.monotonic()
+        try:
+            providers = await self.host("GET", "/config/providers")
+        except (ConnectorError, httpx.HTTPError) as exc:
+            self.initialization_phase("providers", providers_started, error=exc)
+            raise
+        self.initialization_phase("providers", providers_started)
         self.available_models = [provider["id"] + "/" + model_id
             for provider in providers.get("providers", [])
             for model_id in provider.get("models", {})
@@ -524,6 +533,7 @@ class GroveSession:
             "cost": {key: selected.get("cost", {}).get(key) for key in ("input", "output", "cache_read", "cache_write")}}
         await self.recover_receipts()
         if self.session_id:
+            session_started = time.monotonic()
             try:
                 session = await self.host("GET", "/session/" + quote(self.session_id, safe=""))
                 if self.restore_permissions:
@@ -532,10 +542,12 @@ class GroveSession:
                     self.restore_permissions = False
                 if not session_permissions_match(session.get("permission"), self.permissions()):
                     raise ConnectorError("UnsafeSession", "The saved session permissions have changed.", 409)
-            except ConnectorError as exc:
-                if exc.code == "UnsafeSession":
-                    raise
-                self.session_id = ""
+            except (ConnectorError, httpx.HTTPError) as exc:
+                self.initialization_phase("saved_session", session_started, error=exc)
+                # A transient upstream error or a different database must not
+                # silently replace the user's conversation and its context.
+                raise
+            self.initialization_phase("saved_session", session_started)
         if not self.session_id:
             session = await self.host("POST", "/session", {"title": "溪源 · 本人世界伙伴",
                 "agent": AGENT, "permission": self.permissions()})
@@ -603,15 +615,30 @@ class GroveSession:
     def blueprint_permissions(self):
         return [{"permission": "*", "pattern": "*", "action": "deny"}]
 
+    def initialization_phase(self, phase: str, started: float, *, error=None, attempts: int = 0):
+        value = {"phase": phase, "elapsed_seconds": round(time.monotonic() - started, 3),
+                 "status": "failed" if error else "ready"}
+        if attempts:
+            value["attempts"] = attempts
+        if error:
+            # Never retain upstream text, config, headers, environment or keys.
+            value["error_type"] = type(error).__name__
+            if isinstance(error, ConnectorError):
+                value["error_code"] = error.code
+        self.initialization = (self.initialization + [value])[-8:]
+
     async def launch(self):
+        setup_started = time.monotonic()
         binary = self.manager.binary
         if not binary.is_file() or not os.access(binary, os.X_OK):
             raise ConnectorError("OpenCodeMissing", "OpenCode is not installed at the configured path; install your own OpenCode first.", 503)
         if self.manager.wrapper and not self.manager.wrapper.is_file():
             raise ConnectorError("CredentialWrapperMissing", "The configured safe OpenCode credential launcher is missing.", 503)
         workspace = safe_directory(self.profile / "workspace")
-        for kind in ("config", "data", "cache", "state"):
+        for kind in ("config", "cache"):
             safe_directory(self.profile / ("xdg-" + kind))
+        for kind in ("data", "state"):
+            safe_directory(self.runtime_profile / ("xdg-" + kind))
         config_directory = safe_directory(self.profile / "xdg-config" / "opencode")
         # The private gateway capability remains in the process environment, not config.
         permission = {"*": "deny", MCP_NAME + "_*": "allow"}
@@ -639,7 +666,7 @@ class GroveSession:
             port = reserved.getsockname()[1]
         self.host_url = f"http://127.0.0.1:{port}"
         env = {"PATH": os.environ.get("PATH", "/opt/homebrew/bin:/usr/bin:/bin"),
-            "HOME": str(Path.home()), "TMPDIR": str(safe_directory(self.profile / "tmp")),
+            "HOME": str(Path.home()), "TMPDIR": str(safe_directory(self.runtime_profile / "tmp")),
             "OPENCODE_CONFIG": str(config_file), "OPENCODE_CONFIG_DIR": str(config_directory),
             "OPENCODE_SERVER_USERNAME": "opencode", "OPENCODE_SERVER_PASSWORD": self.server_password,
             "GROVE_MCP_CAPABILITY": self.capability,
@@ -648,7 +675,9 @@ class GroveSession:
             "OPENCODE_DISABLE_AUTOUPDATE": "true", "OPENCODE_DISABLE_AUTOCOMPACT": "true",
             "OPENCODE_DISABLE_MODELS_FETCH": "true", "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "4096",
             **{f"XDG_{kind.upper()}_HOME": str(self.profile / ("xdg-" + kind))
-               for kind in ("config", "data", "cache", "state")}}
+               for kind in ("config", "cache")},
+            **{f"XDG_{kind.upper()}_HOME": str(self.runtime_profile / ("xdg-" + kind))
+               for kind in ("data", "state")}}
         # For user-provided installations without a wrapper, inherit only provider auth
         # through their existing environment; never ask for or save a new credential.
         if not self.manager.wrapper:
@@ -658,30 +687,49 @@ class GroveSession:
             "--pure", "--hostname", "127.0.0.1", "--port", str(port), "--log-level", "ERROR"]
         self.process = await asyncio.create_subprocess_exec(*command, cwd=workspace, env=env,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+        self.initialization_phase("configuration_and_spawn", setup_started)
         self.note("initializing", "正在准备本机伙伴；首次打开可能需要稍等")
-        deadline = time.monotonic() + HOST_START_SECONDS
+        await self.wait_for_host()
+
+    async def wait_for_host(self):
+        started = time.monotonic()
+        deadline = started + HOST_START_SECONDS
+        attempts = 0
+        last_probe_error = None
         while (remaining := deadline - time.monotonic()) > 0:
-            if self.process.returncode is not None:
-                raise ConnectorError("HostStartFailed", "OpenCode could not start with the existing local credentials.", 503)
+            if not self.process or self.process.returncode is not None:
+                error = ConnectorError("HostStartFailed", "OpenCode could not start with the existing local credentials.", 503)
+                self.initialization_phase("authenticated_health", started, error=error, attempts=attempts)
+                raise error
             try:
+                attempts += 1
                 request_timeout = min(1, remaining)
                 health = await asyncio.wait_for(self.host("GET", "/global/health", timeout=request_timeout),
                                                 timeout=request_timeout)
                 if isinstance(health, dict) and health.get("healthy"):
+                    self.initialization_phase("authenticated_health", started, attempts=attempts)
                     self.note("host", "本机 OpenCode 已连接 · " + str(health.get("version", "")))
                     return
             except ConnectorError as exc:
+                last_probe_error = exc
                 if exc.code == "HostAuthenticationFailed":
+                    self.initialization_phase("authenticated_health", started, error=exc, attempts=attempts)
                     raise
-            except (httpx.HTTPError, asyncio.TimeoutError):
-                pass
+            except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+                last_probe_error = exc
             if (remaining := deadline - time.monotonic()) > 0:
                 await asyncio.sleep(min(0.25, remaining))
         # Keep this session's owned process available for an ordinary recovery.
         # A cold filesystem may finish initialization just after the deadline;
         # reconnect checks health before launching a replacement. Disconnect and
         # application shutdown still stop only this owned process group.
-        raise ConnectorError("HostTimeout", "本机伙伴初始化仍未就绪；稍后重新连接即可继续。", 503)
+        error = ConnectorError("HostTimeout", "本机伙伴初始化仍未就绪；稍后重新连接即可继续。", 503)
+        self.initialization_phase("authenticated_health", started, error=error, attempts=attempts)
+        if last_probe_error is not None:
+            self.initialization[-1]["last_probe_error_type"] = type(last_probe_error).__name__
+            if isinstance(last_probe_error, ConnectorError):
+                self.initialization[-1]["last_probe_error_code"] = last_probe_error.code
+        raise error
 
     async def join(self):
         await self.invoke("grove.join", {"name": self.name or "旅人"})
@@ -1457,11 +1505,17 @@ class GroveSession:
 
 
 class ConnectorManager:
-    def __init__(self, *, world_url: str, local_url: str, storage: Path, binary: Path, wrapper: Path | None):
+    def __init__(self, *, world_url: str, local_url: str, storage: Path, binary: Path, wrapper: Path | None,
+                 runtime_storage: Path | None = None):
         self.world_url, self.local_url = checked_world_url(world_url), local_url.rstrip("/")
         if str(storage).startswith("/Volumes/DevDisk/") and not Path("/Volumes/DevDisk").is_mount():
             raise ConnectorError("ExternalStorageUnavailable", "DevDisk is unavailable; connector data will not fall back to the system disk.", 503)
         self.storage, self.binary, self.wrapper = storage, binary, wrapper
+        # The host runs from its workspace, so native XDG paths must be absolute.
+        self.runtime_storage = Path(os.path.abspath(runtime_storage)) if runtime_storage is not None else None
+        if (self.runtime_storage and str(self.runtime_storage).startswith("/Volumes/DevDisk/")
+                and not Path("/Volumes/DevDisk").is_mount()):
+            raise ConnectorError("ExternalStorageUnavailable", "DevDisk is unavailable; runtime data will not fall back to the system disk.", 503)
         self.sessions: dict[str, GroveSession] = {}
         self.tokens: dict[str, str] = {}
         self.binding_lock = asyncio.Lock()
@@ -1528,10 +1582,12 @@ def bearer_from(request: Request, body: dict | None = None) -> str:
 
 
 def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
-                         storage=DEFAULT_STORAGE, binary=DEFAULT_BINARY, wrapper=DEFAULT_WRAPPER) -> FastAPI:
+                         storage=DEFAULT_STORAGE, binary=DEFAULT_BINARY, wrapper=DEFAULT_WRAPPER,
+                         runtime_storage: Path | None = None) -> FastAPI:
     local_url = f"http://127.0.0.1:{port}"
     manager = ConnectorManager(world_url=world_url, local_url=local_url, storage=Path(storage),
-                               binary=Path(binary), wrapper=Path(wrapper) if wrapper else None)
+                               binary=Path(binary), wrapper=Path(wrapper) if wrapper else None,
+                               runtime_storage=runtime_storage)
     app = FastAPI(title="Shared Grove local companion", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.connector = manager
 
@@ -1748,6 +1804,8 @@ def main(argv=None):
     parser.add_argument("--world-url", default="http://127.0.0.1:8890")
     parser.add_argument("--port", type=int, default=8891)
     parser.add_argument("--storage", type=Path, default=DEFAULT_STORAGE)
+    parser.add_argument("--runtime-storage", type=Path,
+                        help="Explicit private root for OpenCode data/state/temp; does not move existing sessions")
     parser.add_argument("--opencode", type=Path, default=DEFAULT_BINARY)
     parser.add_argument("--credential-wrapper", type=Path, default=DEFAULT_WRAPPER)
     args = parser.parse_args(argv)
@@ -1757,7 +1815,8 @@ def main(argv=None):
         parser.error("DevDisk is unavailable; no connector data will be placed on the system disk")
     import uvicorn
     uvicorn.run(create_connector_app(world_url=args.world_url, port=args.port, storage=args.storage,
-        binary=args.opencode, wrapper=args.credential_wrapper), host="127.0.0.1", port=args.port,
+        binary=args.opencode, wrapper=args.credential_wrapper, runtime_storage=args.runtime_storage),
+        host="127.0.0.1", port=args.port,
         access_log=False)
 
 
