@@ -1,6 +1,6 @@
 # 六层关键主张追溯
 
-复核：2026-10-03。这里不是新的规格层，而是把关键 L1/L2 主张追到 L3-L6 与现有证据。状态只描述当前仓库，不是质量评分。
+复核：2026-10-07。这里将关键L1/L2主张追到L3-L6与证据，不新增规格或质量评分。最终562项本地检查、访问回归、实际UI局部动作／截图、安装probe及独立恢复通过；模型14次仍未完整通过可靠指导，最佳0.24不变。最后页面读回与临时副本清理已完成，最终文字版本的包记录及本地交付提交见唯一外置索引；原失败保留范围。
 
 | 主张 | 下层落点 | 当前状态 | 核心证据／限制 |
 | --- | --- | --- | --- |
@@ -19,6 +19,8 @@
 | I8 派生观察不创造事实 | View、Stream、Sync Position、Presentation 横轴 | **已实现主要边界** | view/stream/client tests 覆盖缓存、乱序、撤权、retention gap；具体 UI 仍需按世界正确命名业务状态。 |
 | I9 world instance 默认隔离 | World Instance、instance-scoped state/action | **支持接口层已实现；不是敌对代码安全沙箱** | `test_world_instances_are_isolated`、cross-universe write 回归存在。FunctionContext 不再公开数据库连接；但受信任 Python World Package 仍与 Runtime 同进程，因此这不是恶意租户沙箱。 |
 | I10 Runtime 领域中立 | Domain Object 由世界定义；核心不含固定玩法 | **当前代码结构基本符合** | architecture boundary test 防止 core 反向依赖示例／adapter；有限示例只能证明未立即耦合，不能证明未来不会退化。 |
+| 官方世界可组合后果 | 世界自有构造数据、可选模拟层、数量与关系、固定阶段 | **本地检查／局部UI／独立恢复通过，保留原失败** | 最终562项／186.956秒、0 fail／error／skip；前一562项2个runner截止失败、owned child reaped、同断言两项4.014秒通过，断言未改。两Node／9个访问函数回归／语法通过；原独立／549／分页／密度失败保留。实际原布入B袋、private403、移动／drop原ID和数量保持；独立恢复5实体／5Receipts精确一致，wheel安装probe通过。唯一索引为外置 `implementation.json` 的 `composable_candidate`。 |
+| 私人主持承接共同事实 | 本机意图、公共 anchors／contributions／outcomes、当前观察与提交条件 | **发表接续与共享后果成立；可靠指导未完整通过** | A布兜、B两部件及浅溪过载保留原IDs；最终双方content18／2贡献／16后果、A(5,2)／B(5,3)。模型14＝A5＋B9，第13路由ID错误、第14Zen有单次改善，但已读载荷160＞承载48、过载112／不能漂浮，仍反向建议装入。原Go／LongCat／session／计数恢复，两auto false，两页ready零新推理，冷启动及健康后读取失败保留；截图为代理局部覆盖，人类趣味／跨机／规模未验，最佳0.24不变。 |
 
 ## Runtime 能力矩阵
 

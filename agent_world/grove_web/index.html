@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#17271f"><title>溪源 · Agent World</title>
-  <link rel="stylesheet" href="/grove-static/grove.css?v=materials">
+  <link rel="stylesheet" href="/grove-static/grove.css?v=composable">
 </head>
 <body>
   <header class="masthead"><a class="brand" href="/"><span class="brand-icon" aria-hidden="true">◈</span><span><small>AGENT WORLD</small><strong>溪源</strong></span></a><p>一起动手，让这个地方变得不同。</p><span id="world-status" class="status-dot">等待进入</span></header>
@@ -12,11 +12,11 @@
   <main>
     <section id="entry" class="entry">
       <div class="entry-intro">
-        <span class="eyebrow">一个地方，许多种办法</span><h1>木铺路，布遮雨，石围火。<br>你会怎样用这片地方？</h1>
-        <p>采集身边的材料，搬开倒木，搭一处雨棚，或给石炉添柴。你亲手决定怎样行动，你的 Agent 解释现场、回应想法，也为共同世界贡献有限内容。</p>
+        <span class="eyebrow">一个地方，许多种办法</span><h1>同一片地方，<br>接着彼此的改变去玩。</h1>
+        <p>材料会被搬动、吸水、消耗；装载与绑定会改变物件的承载和下水资格。你亲手决定怎样行动，你自带的 Agent 是私人主持：理解你的想法，按共同规则创作，也接续别人留下的真实内容。</p>
         <div class="entry-landscape" aria-hidden="true"><i class="scene-water"></i><i class="scene-rock"></i><i class="scene-wood"></i><i class="scene-crate"></i><i class="scene-person"></i><span>浅溪 · 材料 · 留下的后果</span></div>
         <ol class="entry-steps"><li><b>01</b><span>用密钥保存身份与背包</span></li><li><b>02</b><span>连接自己的 OpenCode，完成首次现场读取</span></li><li><b>03</b><span>键盘走动，点击物件或地面，选择你的办法</span></li></ol>
-        <p class="small">浅溪可以涉过，铺路是为了免受湿。遮雨、集水、添柴或等它自然干燥，由你选择；别人的搭建、取用和照料会改变同一片地方。</p>
+        <p class="small">没有统一任务或规定顺序。你和别人可以有不同目的，行动与后果留在同一个世界里；离开再回来，继续看这里已经变成什么样。</p>
       </div>
       <div class="entry-card card"><span class="eyebrow">从这里接续</span><h2>你与自己的 Agent</h2><p id="identity-status" class="small">正在读取本机身份…</p>
         <form id="entry-form"><label>称呼<input id="entry-name" maxlength="40" autocomplete="nickname" placeholder="怎么称呼你？" required></label><label>我的 Agent 使用的模型<select id="entry-model"><option value="">LongCat 2.5 Preview · 免费</option></select></label><p class="small">使用本机 OpenCode 已有的模型连接。这个入口会启动世界专用的 OpenCode。首次进入先完成真实回应与世界读取；同钥回来会接续已经完成的首次连接。</p><button id="enter" class="primary full" type="submit" disabled>正在读取身份…</button></form>
@@ -30,35 +30,34 @@
         <section class="world-column">
           <div class="map-heading"><div><span class="eyebrow">你所在的共同世界</span><h2>溪畔空地</h2></div><div id="weather" class="weather">读取天气中</div></div>
           <div class="world-tools">
-          <p id="material-caption" class="material-caption">可用：现在能投料的件数。持有：背包里的原料件数，包含暂不能用的湿料。</p>
-          <div class="material-bar" aria-label="材料的可投入件数与持有件数，以及水量与用品">
-            <div class="material-count"><i class="legend-wood" aria-hidden="true"></i><span>木</span><strong id="material-wood">—</strong></div>
-            <div class="material-count"><i class="legend-stone" aria-hidden="true"></i><span>石</span><strong id="material-stone">—</strong></div>
-            <div class="material-count"><i class="legend-cloth" aria-hidden="true"></i><span>布</span><strong id="material-cloth">—</strong></div>
-            <div class="supply-count"><span>存水</span><strong id="supply-water">—</strong></div>
+          <p id="material-caption" class="material-caption">查看本人可投入的真实材料数量；水、原料与已消耗材料分别记账。</p>
+          <div class="material-bar" aria-label="材料的可投入数量与持有数量，按数量单位计，以及水量与用品">
+            <div id="material-quantities" class="material-quantities"><p class="small">正在读取材料数量…</p></div>
+            <div class="supply-count"><span>本页存水</span><strong id="supply-water">—</strong></div>
             <div class="supply-count"><span>背包</span><strong id="supply-capacity">—</strong></div>
-            <div class="supply-count tools-count"><span>工具</span><strong id="supply-tools">—</strong></div>
+            <div class="supply-count tools-count"><span>本页工具</span><strong id="supply-tools">—</strong></div>
           </div>
-          <div class="companion-strip"><div><strong>Agent 有限参与</strong><p id="auto-summary" role="status">有新变化才参与，自动最多 4 次模型请求，失败与纠正也计入。</p></div><div class="companion-controls"><button id="auto-stop" class="secondary" type="button">停止自动参与</button><button id="agent-toggle" class="secondary" type="button" aria-controls="agent-panel" aria-expanded="false">与 Agent 聊聊</button></div></div>
+          <div class="companion-strip"><div><strong>私人主持 · 有限参与</strong><p id="auto-summary" role="status">实际探索与操作才唤醒，自动最多 4 次模型请求，失败与纠正也计入。</p></div><div class="companion-controls"><button id="auto-stop" class="secondary" type="button">停止自动参与</button><button id="agent-toggle" class="secondary" type="button" aria-controls="agent-panel" aria-expanded="false">与主持聊聊</button></div></div>
           <p id="companion-update" class="companion-update" aria-live="polite" hidden></p>
           </div>
           <p id="map-hint" class="map-hint">WASD / 方向键走动。点物件查看；点地面选择走近或搭建，双击地面沿路前往。</p>
           <div class="canvas-wrap"><canvas id="world-canvas" tabindex="0" aria-label="溪源地图。使用 WASD 或方向键移动；点击物件或地面查看可用行动。"></canvas><div id="map-loading" class="map-overlay">正在读取附近的世界…</div><div class="map-top"><span id="map-scale">附近地图</span><button id="follow-player" class="map-button">回到自己</button></div><div class="map-bottom"><span id="movement-feedback">选择身边的物件或一块地面</span><span id="freshness"></span></div></div>
           <div class="world-controls"><div class="map-legend"><span><i class="legend-person"></i>你</span><span><i class="legend-water"></i>可涉浅溪</span><span><i class="legend-walkway"></i>木板路</span><span><i class="legend-canopy"></i>遮雨棚</span><span><i class="legend-hearth"></i>石炉</span><span><i class="legend-node"></i>采集点</span><span><i class="legend-container"></i>容器</span></div><div class="direction-pad" aria-label="触屏移动"><button data-direction="0,-1" aria-label="向上走">↑</button><button data-direction="-1,0" aria-label="向左走">←</button><button data-direction="0,1" aria-label="向下走">↓</button><button data-direction="1,0" aria-label="向右走">→</button></div></div>
-          <div id="onboarding" class="onboarding"><strong>办法由你来选</strong><span id="onboarding-copy">倒木可以绕过、搬走或烧毁，火会消耗燃料并可能蔓延。浅溪能涉过；木板路免受湿，棚可遮雨或集水，石炉用木加快干燥。点击地面查看成本，也可以等它自然干燥。</span><button id="dismiss-onboarding" class="quiet" aria-label="收起玩法提示">×</button></div>
+          <div id="onboarding" class="onboarding"><strong>办法由你来选</strong><span id="onboarding-copy">先看当前物质、容纳与绑定关系，再选择行动。装载、吸水、燃烧和破损都有真实后果；主持能留下供人使用的内容，装卸、绑定、下水仍由你亲手决定。</span><button id="dismiss-onboarding" class="quiet" aria-label="收起玩法提示">×</button></div>
           <details class="card activity-card"><summary class="section-heading"><h3>共同留下的变化</h3><span id="activity-note" class="small">查看附近记录</span></summary><div id="activity-list" class="activity-list"><p class="small">正在读取附近的变化…</p></div></details>
+          <details class="card public-content-card"><summary class="section-heading"><h3>共同现场与创作来源</h3><span id="public-content-note" class="small">正在读取公共内容</span></summary><div id="public-content-list" class="public-content-list" aria-live="polite"></div></details>
         </section>
         <aside class="world-sidebar">
           <section class="card inspect-card" aria-label="当前选择与行动"><div class="section-heading"><span class="eyebrow">看清，再动手</span><div class="selection-heading-actions"><span id="selection-distance" class="tag"></span><button id="selection-close" class="quiet" type="button" aria-label="收起当前选择">×</button></div></div><h2 id="selection-name">选择物件或地面</h2><p id="selection-description" class="small">浅溪可以直接涉过，但会弄湿随身木料和布；湿料要先干燥才能投料。通路免去涉水受湿，棚可以遮雨保护地面材料，也可以切成集雨换得存水。点物件或地面，看看你想保留什么、改变什么。</p><div id="selection-stats" class="stat-grid"></div><div id="selection-effects" class="selection-effects" aria-live="polite"></div><div id="selection-content" class="container-content"></div><div id="selection-actions" class="action-grid"></div><p id="selection-note" class="small"></p><button id="ask-selection" class="secondary full" type="button">问 Agent 这件事</button><details class="selection-history-details"><summary>来源与发表时的说明</summary><div id="selection-history" class="small"></div></details></section>
-          <details class="card inventory-card"><summary class="section-heading"><h3>你的背包</h3><span id="inventory-capacity" class="tag"></span></summary><div class="inventory-body"><p class="small">随身物件属于你。放到地面或公共容器后，其他人可以取用。</p><div id="inventory-list" class="inventory-list"></div><p id="inventory-water" class="small"></p></div></details>
-          <section id="agent-panel" class="card agent-card"><div class="section-heading"><h3>你的 Agent</h3><span id="agent-status" class="tag">未连接</span></div><p id="agent-detail" class="small">解释你看到的事，回应想法，贡献有限内容。</p><div id="agent-messages" class="agent-messages" aria-live="polite"></div><form id="chat-form"><label for="chat-text" class="visually-hidden">问自己的 Agent</label><textarea id="chat-text" rows="2" maxlength="2000" placeholder="这条路怎么走？这里适合搭什么？"></textarea><button id="chat-send" type="submit">问我的 Agent</button></form><div class="agent-actions"><button id="agent-cancel" class="secondary" hidden>中止这一轮</button><button id="agent-reconnect" class="secondary" hidden>重新连接</button><button id="agent-disconnect" class="quiet">断开 Agent</button></div>
+          <details class="card inventory-card"><summary class="section-heading"><h3>你的背包</h3><span id="inventory-capacity" class="tag"></span></summary><div class="inventory-body"><p class="small">背包内容只向你开放。放到公共地面意味着可被他人使用；物件的保管边界以服务器当前事实为准。</p><p id="inventory-page-note" class="small"></p><div id="inventory-list" class="inventory-list"></div><div class="inventory-pagination"><button id="inventory-first" class="secondary" type="button">第一页</button><button id="inventory-previous" class="secondary" type="button">上一页</button><button id="inventory-next" class="secondary" type="button">下一页</button></div><p id="inventory-water" class="small"></p></div></details>
+          <section id="agent-panel" class="card agent-card"><div class="section-heading"><h3>你的私人主持</h3><span id="agent-status" class="tag">未连接</span></div><p id="agent-detail" class="small">理解你的想法，创作与接续内容；行动由你亲手决定。</p><form id="intent-form" class="intent-form"><label for="host-intent">我想在这里做什么（可选）</label><textarea id="host-intent" rows="2" maxlength="4000" placeholder="告诉主持你在意什么，或留空边走边看。"></textarea><p class="small">只保存在本机，不作为公开事实。保存不调用模型，供主持下一轮理解与创作。</p><button id="intent-save" class="secondary" type="submit">保存我的想法</button></form><div id="agent-messages" class="agent-messages" aria-live="polite"></div><form id="chat-form"><label for="chat-text" class="visually-hidden">问自己的主持</label><textarea id="chat-text" rows="2" maxlength="2000" placeholder="我看到的变化是什么意思？我可以怎么做？"></textarea><button id="chat-send" type="submit">问我的主持</button></form><div class="agent-actions"><button id="agent-cancel" class="secondary" hidden>中止这一轮</button><button id="agent-reconnect" class="secondary" hidden>重新连接</button><button id="agent-disconnect" class="quiet">断开主持</button></div>
             <details class="auto-details"><summary>参与范围与连接</summary><form id="auto-form"><label class="check"><input id="auto-enabled" type="checkbox" checked>解释新变化并有限共创</label><label>自动最多模型请求次数<input id="auto-budget" type="number" min="1" max="32" value="4"></label><label hidden>内部最短间隔<input id="auto-interval" type="number" min="15" max="600" value="30"></label><button type="submit" class="secondary">保存参与范围</button><p id="auto-status" class="small">自动默认最多 4 次模型请求，失败与纠正也计入；无变化不消耗。显式提问和高级创作另发请求。</p></form><label>更换模型（先断开，再重新连接）<select id="game-model"><option value="">LongCat 2.5 Preview · 免费</option></select></label><label>本机专用宿主地址<input id="game-host" type="url" readonly placeholder="由连接器自动管理"></label></details>
-            <details id="advanced-creation" class="advanced-creation"><summary>高级：请 Agent 留下内容</summary><section class="generation-card"><div class="section-heading"><h3>为这片地方创作</h3><span id="generation-status" class="tag">尚未开始</span></div><p class="small">提出一个想法。你的 Agent 读取附近、按有限目录和世界规则直接发表，其他人也能遇见。</p><form id="generation-form"><label>创作什么<select id="generation-kind"><option value="layout">物件</option><option value="rain">短雨</option><option value="drift">漂来容器</option></select></label><label>你的想法<textarea id="generation-text" rows="2" maxlength="1200" placeholder="在附近留一个能盛水的石碗，方便大家取用。" required></textarea></label><button id="generation-send" type="submit" disabled>让我的 Agent 创作并发表</button></form><p id="generation-detail" class="small" aria-live="polite">使用你自己的模型连接；完成后直接公开。</p><button id="generation-recover" class="secondary" hidden>核对发表结果</button><button id="generation-cancel" class="secondary" hidden>中止这次创作</button><div id="generation-result" class="generation-result" aria-live="polite"></div></section></details>
+            <details id="advanced-creation" class="advanced-creation"><summary>请主持留下内容</summary><section class="generation-card"><div class="section-heading"><h3>为这片地方创作</h3><span id="generation-status" class="tag">尚未开始</span></div><p class="small">主持读取同一公共现场，用真实资源组合已注册的材料与构造，直接留下可用内容或承接别人的贡献。它不能替你装卸、绑定或使用，也不能决定结果。</p><form id="generation-form"><label>创作什么<select id="generation-kind"><option value="layout">材料与构造组合</option><option value="rain">短雨</option><option value="drift">漂来容器</option></select></label><label>你的想法<textarea id="generation-text" rows="2" maxlength="1200" placeholder="结合这里已经发生的变化，留下能让我尝试另一种办法的内容。" required></textarea></label><button id="generation-send" type="submit" disabled>让我的主持创作并发表</button></form><p id="generation-detail" class="small" aria-live="polite">使用你自己的模型连接；完成后直接公开。</p><button id="generation-recover" class="secondary" hidden>核对发表结果</button><button id="generation-cancel" class="secondary" hidden>中止这次创作</button><div id="generation-result" class="generation-result" aria-live="polite"></div></section></details>
           </section>
         </aside>
       </div>
     </section>
   </main>
-  <script type="module" src="/grove-static/grove.js?v=materials-leave"></script>
+  <script type="module" src="/grove-static/grove.js?v=composable-object-access"></script>
 </body>
 </html>

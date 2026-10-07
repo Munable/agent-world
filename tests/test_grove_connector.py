@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 
 from agent_world.grove_connector import (
     ConnectorError, ConnectorManager, GroveSession, create_connector_app, session_permissions_match,
+    companion_projection,
 )
 from agent_world.worlds.shared_grove.catalog import CONTENT_SCHEMA
 
@@ -38,6 +39,122 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected.exception.code, "WorldReadRequired")
         self.assertFalse(self.session.entered)
         self.session.invoke.assert_not_awaited()
+
+    async def test_completed_entry_world_timeout_preserves_answer_and_original_receipt(self):
+        self.session.world_read = True
+        self.session.catalog = {"grove.join": {"access": "write"}}
+        self.session.host = AsyncMock(return_value={
+            "info": {"role": "assistant", "finish": "stop", "time": {"completed": 1}},
+            "parts": [{"type": "text", "text": "先看看溪边能用的材料。"}]})
+        with patch("agent_world.grove_connector.httpx.AsyncClient.request",
+                   AsyncMock(side_effect=httpx.ReadTimeout("private transport details"))):
+            with self.assertRaises(ConnectorError) as rejected:
+                await self.session.turn("进入世界", initial=True)
+        self.assertEqual(rejected.exception.code, "WorldUnavailable")
+        self.session.fail(rejected.exception)
+        self.assertEqual(self.session.text, "先看看溪边能用的材料。")
+        self.assertTrue(self.session.first_response_success)
+        self.assertEqual(self.session.inference_count, 1)
+        self.assertEqual(self.session.session_id, "test-session")
+        self.assertEqual(self.session.host.await_count, 1)
+        self.assertEqual(self.session.unknown[0]["function_id"], "grove.join")
+        original = self.session.unknown[0]["envelope"]["operation_id"]
+        self.session.world = AsyncMock(return_value={"ok": True, "operation_id": original,
+                                                   "result": {"joined": True}})
+        await self.session.recover_receipts()
+        self.session.world.assert_awaited_once_with("GET", "/v1/receipts/" + original)
+        self.assertEqual(self.session.unknown, [])
+        self.assertEqual(self.session.inference_count, 1)
+        self.assertNotIn("private transport details", json.dumps(self.session.state()))
+
+    async def test_unavailable_model_is_counted_and_keeps_original_history(self):
+        original = {"completed": True, "message_id": "original-answer", "session_id": "test-session"}
+        self.session.last_completion = original.copy()
+        self.session.messages = [{"role": "assistant", "text": "原来已经完成的回答"}]
+        response = {"info": {"role": "assistant", "time": {"completed": 1},
+                    "error": {"name": "APIError", "data": {
+                        "statusCode": 400, "message": "Upstream request failed: Model is unavailable.",
+                        "responseBody": "private provider details"}}}, "parts": []}
+        entry = self.session.inference_started("explain")
+        self.session.inference_finished(entry, response)
+        with self.assertRaises(ConnectorError) as rejected:
+            self.session.complete_model_answer(response)
+        self.assertEqual(rejected.exception.code, "ModelUnavailable")
+        self.session.fail(rejected.exception)
+        self.assertEqual(self.session.inference_count, 1)
+        self.assertEqual(self.session.session_id, "test-session")
+        self.assertEqual(self.session.last_completion, original)
+        self.assertEqual(self.session.messages[0]["text"], "原来已经完成的回答")
+        self.assertFalse(self.session.response_diagnostics["validated_final"])
+        self.assertNotIn("private provider details", json.dumps(self.session.state()))
+        # A different bad request must retain its ordinary error classification.
+        response["info"]["error"]["data"]["message"] = "Invalid request payload."
+        with self.assertRaises(ConnectorError) as ordinary:
+            self.session.complete_model_answer(response)
+        self.assertEqual(ordinary.exception.code, "IncompleteResponse")
+        response["info"]["error"]["data"]["message"] = "Upstream request failed: Model is unavailable."
+        self.session.current_turn_facts = AsyncMock(return_value={"scene": "current"})
+        self.session.host = AsyncMock(return_value=response)
+        with self.assertRaises(ConnectorError) as ordinary_turn:
+            await self.session.turn("现在还能怎样利用现场这些东西？")
+        self.assertEqual(ordinary_turn.exception.code, "ModelUnavailable")
+        self.assertEqual(self.session.inference_count, 2)
+        self.assertEqual(self.session.session_id, "test-session")
+        self.assertEqual(self.session.last_completion, original)
+        self.session.host.assert_awaited_once()
+
+    async def test_enabling_automatic_returns_after_baseline_and_keeps_first_new_action(self):
+        self.session.entered = True
+        self.session.status = "ready"
+        self.session.catalog = {"map.viewport": {"access": "read"},
+            "grove.interact": {"input_schema": {"properties": {"action": {"enum": ["harvest"]}}}}}
+        scene = {"result": {"player": {"x": 3, "y": 2}}}
+        event = {"seq": 2, "event_id": "first-new-action", "kind": "interact", "actor_role_id": "test-user",
+                 "payload": {"action": "harvest", "x": 4, "y": 2, "entity_id": "reed"}}
+        self.session.world = AsyncMock(side_effect=[
+            {"cursor": "before-enable", "events": [{"seq": 1}]}, scene,
+            {"cursor": "after-action", "events": [event]}, scene])
+        self.session.schedule = Mock()
+        app = create_connector_app(storage=self.manager.storage, wrapper=None)
+        app.state.connector.authorized = Mock(return_value=self.session)
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://127.0.0.1:8891") as client:
+                response = await client.post("/connector/automatic", json={"enabled": True, "max_count": 2},
+                                             headers={"Authorization": "Bearer test-private-bearer"})
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(self.session.needs_observation_baseline)
+            self.assertEqual(self.session.automatic["last_observed_seq"], 1)
+            self.session.schedule.assert_not_called()
+            await self.session.observe_automatic()
+            self.assertEqual(self.session.pending_changes[0]["event_id"], "first-new-action")
+            self.session.schedule.assert_called_once()
+            self.assertEqual(self.session.inference_count, 0)
+        finally:
+            self.session.automatic["enabled"] = False
+            if self.session.automatic_worker:
+                self.session.automatic_worker.cancel()
+                await asyncio.gather(self.session.automatic_worker, return_exceptions=True)
+
+    async def test_private_intent_survives_reconnect_without_a_model_or_world_write(self):
+        self.session.host = AsyncMock()
+        self.session.world = AsyncMock()
+        self.session.configure_private_context({"intent": "想看看别人留下的器皿能怎么用",
+                                               "preferences": ["先解释真实后果", "别替我决定"]})
+        self.session.remember_user_request("这件东西为什么变重了？")
+        original = self.session.private_context
+        restored = GroveSession(self.manager, {"role_id": "test-user", "access_mode": "control"},
+                                "test-private-bearer", "Test", "provider/model")
+        self.assertEqual(restored.private_context, original)
+        self.assertEqual(restored.state()["context"]["intent"], original["intent"])
+        self.assertEqual(restored.session_id, "test-session")
+        self.assertEqual(restored.inference_count, 0)
+        self.session.host.assert_not_awaited()
+        self.session.world.assert_not_awaited()
+        self.assertNotIn("test-private-bearer", self.session.memory_file.read_text())
+        other = GroveSession(self.manager, {"role_id": "other-user", "access_mode": "control"},
+                             "other-private-bearer", "Other", "provider/model")
+        self.assertEqual(other.private_context["intent"], "")
 
     async def test_lost_write_keeps_original_operation_until_receipt_recovery(self):
         self.session.catalog = {"grove.content_submit": {"access": "write"}}
@@ -227,6 +344,50 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             await self.session.turn('What has changed?')
         self.session.host.assert_not_awaited()
         self.assertEqual(self.session.inference_count, 0)
+
+    def test_inspect_projection_only_references_strictly_identical_fields(self):
+        options = [{"action": "store", "input": {"candidates": [{"id": "item", "preview": {
+            "version_fingerprint": "a"*64, "physics": {"known": True, "overloaded": True}}}]}}]
+        original = {"result": {"entity": {"id": "box", "version": 7, "simulation": {"total": 160},
+            "action_options": options, "available_actions": ["store"]}, "action_options": options,
+            "available_actions": ["store"], "contents": [], "public_content": {"version": 8}}}
+        result = companion_projection("grove.inspect", original)["result"]
+        self.assertNotIn("action_options", result["entity"])
+        self.assertEqual(result["entity"]["field_references"]["action_options"], "#/action_options")
+        self.assertEqual(result["action_options"], options)
+        self.assertEqual(result["entity"]["simulation"], {"total": 160})
+        self.assertEqual(result["public_content"], {"version": 8})
+        self.assertIn("action_options", original["result"]["entity"])
+        original["result"]["entity"]["available_actions"] = ["close"]
+        original["result"]["entity"]["action_options"] = [{"action": "close"}]
+        differing = companion_projection("grove.inspect", original)["result"]["entity"]
+        self.assertEqual(differing["available_actions"], ["close"])
+        self.assertEqual(differing["action_options"], [{"action": "close"}])
+
+    async def test_selected_inspection_is_authorized_before_model_request(self):
+        self.session.entered = True
+        self.session.catalog = {"map.viewport": {"access": "read"}, "grove.inspect": {"access": "read"}}
+        self.session.world = AsyncMock(return_value={"events": []})
+        preview = {"physics": {"known": True, "overloaded": True}, "version_fingerprint": "a"*64}
+        selected = {"entity": {"id": "box", "version": 7, "simulation": {"total": 160}},
+                    "action_options": [{"action": "store", "input": {"candidates": [{"id": "item", "preview": preview}]}}],
+                    "contents": []}
+        scene = {"player": {"id": "test-user", "x": 3, "y": 1}, "entities": [], "inventory": []}
+        self.session.invoke = AsyncMock(side_effect=[scene, selected])
+        self.session.host = AsyncMock(return_value={"info": {"id": "selected-answer", "role": "assistant",
+            "finish": "stop", "time": {"completed": 1}}, "parts": [{"type": "text", "text": "先看组合载荷。"}]})
+        await self.session.turn("能装吗？", context_entity_id="box")
+        facts = json.loads(self.session.host.await_args.args[2]["parts"][1]["text"].rsplit("\n", 1)[1])
+        self.assertEqual(facts["selected_inspection"]["action_options"][0]["input"]["candidates"][0]["preview"], preview)
+        self.session.invoke.assert_any_await("grove.inspect", {"entity_id": "box"})
+        self.assertEqual(self.session.inference_count, 1)
+        self.session.host.reset_mock()
+        self.session.invoke = AsyncMock(side_effect=[scene, ConnectorError("PermissionDenied", "私有物件", 403)])
+        with self.assertRaises(ConnectorError) as denied:
+            await self.session.turn("看看别人的背包", context_entity_id="private-box")
+        self.assertEqual(denied.exception.code, "PermissionDenied")
+        self.session.host.assert_not_awaited()
+        self.assertEqual(self.session.inference_count, 1)
 
     async def test_companion_cannot_move_or_act_as_person(self):
         self.session.catalog = {"grove.move": {"access": "write", "input_schema": {}},

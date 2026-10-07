@@ -1,10 +1,10 @@
 # L6：当前实现
 
-复核：2026-10-04。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-10-07。本文描述当前分支实际代码与公开表面。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
-- Python package：`agent-world` 0.22.0，要求 Python 3.11+。
+- Python package：`agent-world` 0.25.0候选，要求Python 3.11+。最终Python562项／186.956秒、两Node文件／9个访问函数回归／JS语法、实际UI局部链与截图、独立恢复及wheel安装全部probe已通过。模型14次仍非可靠指导完整通过，最佳0.24不变；最后页面读回与副本清理已完成；最终文字版本的安装包检查及本地交付提交见唯一外置索引。8896世界与A／B 8897／8898两页ready，原session保留。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
@@ -87,9 +87,26 @@ schema 8 的新增 nullable access_mode 列保留原数据库 pending／used v1 
 | Identity / onboarding adapters | `identity_auth.py`、`identity_admin.py`、`onboarding_app.py`、`product_app.py` |
 | Web 安全／诊断 | `web_safety.py`、`diagnostics.py` |
 | Web prototype | `agent_world/web/` |
+| 可选可信模拟辅助层 | `agent_world/simulation/`：注册、组合编译、材料批次、固定阶段快照与类型化效果；中立 Runtime 不依赖它。 |
+| 当前官方世界 | `agent_world/worlds/shared_grove/`：材料参数与构造数据、准入、动作、过程、公共内容接续。 |
+| 私人主持／玩家页面 | `grove_connector.py`、`agent_world/grove_web/`；私人意图本机持久化，服务器描述驱动真实操作。 |
 | 仓库内 demo/test consumers | `demo_universe.py`、`commons_universe.py`、`world_zero_universe.py`、`examples/` |
 
 仓库内 demo、示例和 Reference Application 都不是架构来源。只有仍被当前测试执行的场景才提供当前证据；失去当前用途的消费者直接删除。
+
+### Shared Grove 候选实现
+
+官方世界通过原 SDK、事务、版本、Receipt、Stream 与持久 Timer 消费可选模拟辅助层。材料定义、构造组件／数量／成本／缩放和规则版本留在世界的 `definitions.py`；编译器根据这些数据生成已有能力组合，新构造键不需要新增名称分支。
+
+权威物质是整数数量的 `matter` 批次，分别属于本体、内容、表面和吸附槽；旧水量、湿度、燃料字段只作派生投影。物理父关系唯一，装卸、绑定、过载、燃烧与破损共用同一对象 ID 与当前保护边界。固定阶段只处理有界活动闭包；预算和准确行为合同集中在 [SHARED_GROVE](SHARED_GROVE.md)。
+
+`grove.generation_context / grove.content_submit / grove.content_history` 提供真实材料预算、注册组合、公共锚点、贡献与后果的分页接续；创建兼容部件不代替人的绑定或使用。私人连接器的 `/connector/context` 保存本机意图和偏好，并分别注入解释与创作会话，未作为服务器事实发布。前端由 `grove.inspect` 的 `action_options` 生成物件／批次／数量操作，使用当前版本并保留未知提交的原回执。
+
+原独立构造失败、549首跑失败、分页fixture漏读16／17及96根timer拒绝保留；第二side_pouch仅加数据的4项获认可，阶段557与后续相关结果保留源码范围。最终完整562项／186.956秒、0 fail／error／skip通过；此前同562项／351.363秒有2 fail为旧runner 0.3秒输出截止，owned child均reaped，断言源码未改、两单项同断言4.014秒通过。最终两Node文件、9个401／403／404 target／item／combination实际函数回归及JS语法通过；当前缓存 `composable-object-access`。最终文字版本的wheel build／install全部probe通过，记录为 `composable-package-release-final.log`，SHA只在唯一外置索引。
+
+两真实 entry、原 join Receipt 200 与同身份／主会话零推理 recover 已成立，冷启动 45 秒超时仍在。A 布兜装真实 40u 木到 (4,2)，B 公共可读、携带时 403；B 输出长度与纠正机会超时的失败后，单请求实际接续 3 条 outcome、content 4→5 并发表两部件。实际附接与浅溪吸水使原布兜过载破损，bag／cargo／float IDs 保留公开可取，未成功运过溪。
+
+模型最终 **14＝A5＋B9**。第13是目录／路由ID不匹配；第14正式Zen路径单次回答改善，但已读水壶载荷160＞木箱承载48、过载112／不能漂浮后仍建议装入，原A5归责／容量及B6／B7浮材死重错误保留，可靠指导未完整通过、best0.24不变。原Go／LongCat／main／计数已恢复，两auto false、零新推理，两页最终ready；45秒冷启动与健康后读取超时保留。实际UI将A原干布store进B袋，B close／open／pickup时A403，移动／drop后原袋v6、32／16／32／100和原干布ID保持，双方content18／2贡献／16后果。子物件刷新选择、关闭拒绝／打开可读与草稿历史接续通过；桌面／窄屏截图已检查，只是代理局部覆盖。独立8899关闭timer、原credentials HTTP恢复两人player／inventory／content、5实体和5原Receipts精确一致，备份20000768 bytes；恢复服务TERM退出143，临时恢复副本已清理。最后页面读回确认原身份／会话／计数保留，两页ready；最终包记录及本地交付提交见唯一外置索引，不push。
 
 ### Commons Reference Application
 

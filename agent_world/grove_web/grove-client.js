@@ -7,7 +7,11 @@ export class GroveClient extends CommonsClient {
   constructor(fetcher=globalThis.fetch.bind(globalThis), storage=localStorage, locks=navigator.locks) {
     super(fetcher,storage,locks);
     this.controllers=new Set();
+    this.cancelledControllers=new WeakSet();
     this.world=new WorldClient('',()=>this.token,fetcher);
+    this.inventoryAfter=null;
+    this.inventoryLimit=16;
+    this.inventoryWasReset=false;
   }
   async request(path,body,method,{signal,timeout=15000}={}) {
     const controller=new AbortController();
@@ -19,13 +23,13 @@ export class GroveClient extends CommonsClient {
     catch(error){
       if(controller.signal.aborted){
         const interrupted=new Error('连接中断；原操作编号已保留。核对结果后再行动。');
-        interrupted.cancelled=!!signal?.aborted;
+        interrupted.cancelled=!!signal?.aborted||this.cancelledControllers.has(controller);
         throw interrupted;
       }
       throw error;
     }finally{clearTimeout(deadline);signal?.removeEventListener('abort',stop);this.controllers.delete(controller);}
   }
-  cancel(){for(const controller of this.controllers)controller.abort();this.world.view=null;}
+  cancel(){for(const controller of this.controllers){this.cancelledControllers.add(controller);controller.abort();}this.world.view=null;this.inventoryAfter=null;this.inventoryWasReset=false;}
   async retry() {
     const key=this.pendingKey, original=this.pending();
     try{return await super.retry();}
@@ -70,9 +74,19 @@ export class GroveClient extends CommonsClient {
       throw error;
     }
   }
-  async viewport({reset=false,cx,cy,radius=8}={}) {
-    if(reset || !this.world.view)return this.world.loadView('grove.map',{radius,...(cx===undefined?{}:{cx,cy})});
-    return this.world.syncView();
+  async viewport({reset=false,cx,cy,radius=8,inventory_after,inventory_limit}={}) {
+    if(inventory_after!==undefined&&inventory_after!==this.inventoryAfter){this.inventoryAfter=inventory_after;reset=true;}
+    if(inventory_limit!==undefined&&inventory_limit!==this.inventoryLimit){this.inventoryLimit=inventory_limit;reset=true;}
+    const args={radius,inventory_limit:this.inventoryLimit,...(this.inventoryAfter?{inventory_after:this.inventoryAfter}:{}),...(cx===undefined?{}:{cx,cy})};
+    try{return reset||!this.world.view?await this.world.loadView('grove.map',args):await this.world.syncView();}
+    catch(error){
+      if(this.inventoryAfter&&error.code==='RuleViolation'&&error.message?.includes('背包分页位置')){
+        this.inventoryAfter=null;this.inventoryWasReset=true;this.world.view=null;
+        delete args.inventory_after;
+        return this.world.loadView('grove.map',args);
+      }
+      throw error;
+    }
   }
   unpackView(view) {
     if(!view?.snapshot)return null;
