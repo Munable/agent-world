@@ -88,7 +88,56 @@
 
 候选世界8896、私人入口 [A8897](http://127.0.0.1:8897/)／[B8898](http://127.0.0.1:8898/) 已运行，两页最终ready、零新推理；A(5,2)、B(5,3)，原session／Go wrapper／LongCat保留，两侧automatic=false。实际UI局部链、截图、恢复和本地检查通过，第14次指导已读过载预览仍反向建议装入，最佳0.24不变。冷启动45秒／健康后的读取超时仍是已观察失败。旧 [8891](http://127.0.0.1:8891/) 连接8894原0.24库继续保护，不用候选源码运行或修改旧库。
 
-候选使用独立新库与A／B private profile，复用已有解释器与OpenCode，不复用旧研究库或复制A私人记忆给B。实际数据路径与启停参数由唯一外置索引记录；新库首次才 `--init`，已有库不重复初始化。
+候选使用独立库与A／B private profile，复用已有解释器与OpenCode，不复用旧研究库或复制A私人记忆给B。以下命令由本轮三个活动服务的实际argv和源码cwd读回，供本机服务停止后恢复；当前8896／8897／8898仍在运行，无需重复启动。DevDisk须已挂载，原数据库、private和runtime目录须仍在。**已有库恢复不加 `--init`**；该参数只用于首次建立另一个新库。
+
+先在终端核对端口和原数据库的打开进程；若仍有原服务监听或使用该库，沿用它，避免重复启动同一世界或连接器：
+
+```sh
+cd /Users/mubin/Developer/agent-world/grove-composable-rules
+lsof -nP -iTCP:8896 -iTCP:8897 -iTCP:8898 -sTCP:LISTEN
+lsof /Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/composable/world.sqlite3
+```
+
+确认旧服务已退出后，依次在三个独立终端前台启动世界、A、B，每个终端均使用下列源码cwd。世界使用原独立数据库：
+
+```sh
+cd /Users/mubin/Developer/agent-world/grove-composable-rules
+env PYTHONDONTWRITEBYTECODE=1 \
+  /Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python \
+  -m agent_world.grove_app \
+  --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/composable/world.sqlite3 \
+  --port 8896
+```
+
+A沿用原私人身份、记忆、OpenCode运行目录及既有安全注入包装器：
+
+```sh
+cd /Users/mubin/Developer/agent-world/grove-composable-rules
+env PYTHONDONTWRITEBYTECODE=1 \
+  /Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python \
+  -m agent_world.grove_connector \
+  --world-url http://127.0.0.1:8896 --port 8897 \
+  --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/composable/connector-a \
+  --runtime-storage /Users/mubin/Developer/agent-world/work/composable-runtime-a \
+  --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode \
+  --credential-wrapper /Users/mubin/.local/bin/opencode-env
+```
+
+B使用自己的原目录，其余连接参数相同：
+
+```sh
+cd /Users/mubin/Developer/agent-world/grove-composable-rules
+env PYTHONDONTWRITEBYTECODE=1 \
+  /Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python \
+  -m agent_world.grove_connector \
+  --world-url http://127.0.0.1:8896 --port 8898 \
+  --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/composable/connector-b \
+  --runtime-storage /Users/mubin/Developer/agent-world/work/composable-runtime-b \
+  --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode \
+  --credential-wrapper /Users/mubin/.local/bin/opencode-env
+```
+
+打开上方A／B入口，沿用各自原本的本机身份接续；凭据由原包装器注入，命令不含密钥。停止时在相应服务终端按 `Ctrl+C`，等进程退出、端口释放后再恢复；退出网页与停止服务仍是不同操作。实际参数同时保存在唯一外置索引的 `composable_candidate.final_delivery.startup`，不新增启动管理层。
 
 | 完整验收 | 明确失败判据 | 当前状态 |
 | --- | --- | --- |
