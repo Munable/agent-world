@@ -47,7 +47,9 @@ def create_application(
     mcp_app, _, mcp_runtime = create_mcp_app(
         db_path, universe, auth_required=True, installer=installer, host=parsed.hostname
     )
-    http_app = create_http_app(db_path, universe, auth_required=True, installer=installer)
+    # One host uses one installed Runtime and its existing transaction lock.
+    # Separate processes still coordinate through SQLite as before.
+    http_app = create_http_app(db_path, universe, auth_required=True, runtime=mcp_runtime)
     web_app = create_product_app(
         db_path,
         universe,
@@ -59,6 +61,7 @@ def create_application(
         # Public key entry must satisfy the bounded session contract of the
         # portable connection helper, independently of the selected UI/world.
         identity_ttl_seconds=86400,
+        runtime=mcp_runtime,
     )
     mcp_base = mcp_app.app if isinstance(mcp_app, BearerIdentityMiddleware) else mcp_app
 

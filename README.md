@@ -4,19 +4,19 @@
 
 Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结构化接口，按世界开发者定义的规则操作同一持久世界。Runtime 不运行用户 Agent，也不把自然语言消息本身解释成确认、授权或完成。
 
-当前正式产品主线是 **Shared Grove／溪源**：人类在二维地图亲自移动、选物、装水、泼水、点火和处理容器；每个用户连接自己的 OpenCode，作为个人解释者及公共内容贡献者。多个助手读取同一个已有世界，发布能被其他人实际使用的物件或事件。服务器执行材料与元素规则、保存共同后果，不运行用户模型。新版本的实施与验收边界见 [SHARED_GROVE](docs/SHARED_GROVE.md)。
+当前正式产品主线是 **Shared Grove／溪源**：人类在二维地图亲自采集、建设、装水、养护和处理物件；每个用户连接自己的 OpenCode，作为个人解释者及有限公共内容贡献者。0.24.0 是本地当前最佳已验证切片，具有真实材料代价、跨玩家后果、普通解释复验、恢复与实际 Chrome 交互证据；0.23 保留为历史参考。服务器保存材料与共享后果，不运行用户模型。唯一当前记录见 [SHARED_GROVE](docs/SHARED_GROVE.md#当前研发记录)。
 
 > **开发／维护前先读 [AGENTS.md](AGENTS.md)。** Runtime仍是世界中立的底层；本世界的空间、材质和入口要求不自动成为所有世界规则。
 
 ## 游玩溪源
 
-当前可直接打开 [溪源 8891](http://127.0.0.1:8891/)。需要重新启动已有世界时，先进入源码目录，重用当前库且不加 `--init`：
+当前可打开 [溪源 8891](http://127.0.0.1:8891/)，连接 8894 的 0.24 研究世界。旧 8890／0.23 世界保留为历史基线。需要重新启动已有研究世界时，先进入源码目录，重用当前库且不加 `--init`：
 
 ```sh
 cd /Users/mubin/Developer/agent-world/shared-grove
 /Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python -m agent_world.grove_app \
-  --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/play/world.sqlite3 \
-  --port 8890
+  --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/research/world.sqlite3 \
+  --port 8894
 ```
 
 在另一个终端、同一源码目录启动自己的连接器：
@@ -24,14 +24,15 @@ cd /Users/mubin/Developer/agent-world/shared-grove
 ```sh
 cd /Users/mubin/Developer/agent-world/shared-grove
 /Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python -m agent_world.grove_connector \
-  --world-url http://127.0.0.1:8890 --port 8891
+  --world-url http://127.0.0.1:8894 --port 8891 \
+  --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/research/connector-a
 ```
 
-新建世界时使用不同的私有父目录和尚不存在的数据库，再加 `--init`；不初始化当前库。OpenCode 配置和验收范围见 [SHARED_GROVE](docs/SHARED_GROVE.md)。每个人运行自己的连接器，连接同一个世界；模型凭据与私人会话留在本机，普通移动与操作不调用模型。第一次进入须完成实际 MCP 世界读取与助手回应，下载配置不代表接入成功。
+新建世界时使用不同的私有父目录和尚不存在的数据库，再加 `--init`；不初始化当前库。OpenCode 配置和验收范围见 [SHARED_GROVE](docs/SHARED_GROVE.md)。每个人运行自己的连接器，连接同一个世界；模型凭据与私人会话留在本机，普通移动与操作由服务器直接处理，不等待模型。第一次进入须完成实际 MCP 世界读取与助手回应，下载配置不代表接入成功。
 
-显式生成由本机连接器把当前公共事实、实际机会、坐标和素材目录交给自己的 OpenCode，在每机会独立且禁止所有工具的蓝图会话中取得结构化结果，再用同一身份自动发布并读回。用户不用审提案；规则负责校验，普通提问和移动不会被包装成内容发布。本轮双方真实生成并使用彼此的箱中物件，雨与漂流也留下了可读回的共享后果。
+首次实际入场后，Agent 因新探索或附近真实材料行动自动有限参与，默认最多 4 个 OpenCode message 请求，失败与纠正计入，可以停止；无变化不推理，正常行动不等待模型。显式创作保留在高级入口，普通提问只解释。实物贡献消耗真实公共库存，符合规则才自动发表并读回，不要求用户审提案。
 
-**已授权本地切片验收通过；真人趣味性、跨机器和负载未验证。** 本轮是两个本地模拟玩家、真实模型与实际浏览器验证，不是两名真人或完整 MMO。旧 Living Frontier／D&D 文本场景是已隔离保护的原型，不再追加对话实验或作为新玩家入口；既有源码、未提交改动、存档与服务仍保留。其既有范围见 [FRONTIER_WORLD](docs/FRONTIER_WORLD.md)。
+**0.24 本轮本地验证通过。** 第 12 次失实保留，第 13 次同模型复问正确；实际用授权 14 次中的 13 次，自动参与均关闭。最终源码 535 项通过（107.444 秒），4 份 Node 测试文件、语法／diff、实际安装的 0.24.0 wheel 通过；最新备份独立还原与正常桌面接续通过。Git 内首次 535 和修复前旧 533 的失败仍保留，不作为最终结果。冷启动仍偶发超时，真人乐趣、移动端、跨机器、负载及炉的实际玩家价值未验证；原型继续受保护，见 [FRONTIER_WORLD](docs/FRONTIER_WORLD.md)。
 
 ## Earlier examples and scoped evidence
 
@@ -111,7 +112,7 @@ Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser ide
 
 ## 当前主线
 
-**Shared Grove／溪源的已授权本地切片验收通过。** 玩家用键盘和鼠标亲自行动，自己的 OpenCode 解释现场与贡献内容，中心服务器统一结算材料和共享后果。没有预置章节、共同目标、固定 GM 或后台模型。本轮证据与未验证边界见 [SHARED_GROVE](docs/SHARED_GROVE.md)，不借旧原型结果扩大结论。
+**Shared Grove／溪源当前为 0.24 本地最佳已验证切片。** 玩家用键盘和鼠标亲自行动，自己的 OpenCode 解释现场与有限贡献内容，中心服务器统一结算材料和共享后果。没有预置章节、共同目标、固定 GM 或后台模型。0.23 保留为历史参考；本轮通过不等于整体理想产品或真人乐趣已完成，当前证据与边界见 [SHARED_GROVE](docs/SHARED_GROVE.md)。
 
 Runtime 保持世界中立：只认密钥身份，不识别模型本体，也不建立 AgentIdentity。私人记忆由用户与宿主保管，世界保存已提交事实与接续记录；本产品的 OpenCode 入口、二维地图和材料规则不成为所有世界的前提。
 
@@ -178,6 +179,7 @@ python tools/check_package.py
 node tests/view_client.test.mjs
 node tests/stream_client.test.mjs
 node tests/commons_client.test.mjs
+node tests/grove_client.test.mjs
 node tests/river_camp_client.test.mjs
 node tests/river_camp_presentation.test.mjs
 ```

@@ -35,9 +35,14 @@ def create_app(
     test_mode=False,
     auth_required=False,
     installer=None,
+    runtime: WorldRuntime | None = None,
 ) -> FastAPI:
-    runtime = WorldRuntime(db_path)
-    (installer or get_universe_installer("demo"))(runtime, universe)
+    """Use an already installed Runtime when composing multiple transports."""
+    if runtime is None:
+        runtime = WorldRuntime(db_path)
+        (installer or get_universe_installer("demo"))(runtime, universe)
+    elif pathlib.Path(db_path).expanduser().resolve() != pathlib.Path(runtime.db_path).resolve():
+        raise ValueError("injected runtime must use the requested database path")
     gateway = WorldGateway(runtime, universe, auth_required=auth_required)
     app = FastAPI(title="Agent World HTTP", version=PROTOCOL_VERSION)
     app.state.runtime, app.state.universe = runtime, universe

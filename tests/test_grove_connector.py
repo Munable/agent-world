@@ -1,9 +1,11 @@
 """Local companion gates/recovery, without invoking a real model in unit tests."""
 from pathlib import Path
+import asyncio
 import json
 import tempfile
+import time
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from starlette.testclient import TestClient
@@ -50,6 +52,69 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         replay = self.session.world.await_args_list[1]
         self.assertEqual(replay.args[2], original)
         self.assertEqual(self.session.unknown, [])
+
+    async def test_unready_host_has_real_deadline_and_remains_recoverable(self):
+        self.manager.binary = Path('/usr/bin/true')
+        owned = Mock(returncode=None)
+
+        observations = []
+
+        async def stalled_health(*args, **kwargs):
+            observations.append(time.monotonic())
+            await asyncio.sleep(10)
+
+        self.session.host = AsyncMock(side_effect=stalled_health)
+        with patch('agent_world.grove_connector.HOST_START_SECONDS', 0.05), \
+                patch('asyncio.create_subprocess_exec', AsyncMock(return_value=owned)):
+            with self.assertRaises(ConnectorError) as rejected:
+                await self.session.launch()
+        self.assertEqual(rejected.exception.code, 'HostTimeout')
+        self.assertLess(time.monotonic() - observations[0], 1)
+        self.assertIs(self.session.process, owned)
+
+    async def test_host_authentication_failure_is_not_hidden_as_initialization_timeout(self):
+        self.manager.binary = Path('/usr/bin/true')
+        owned = Mock(returncode=None)
+        self.session.host = AsyncMock(side_effect=ConnectorError('HostAuthenticationFailed', 'Rejected', 502))
+        with patch('asyncio.create_subprocess_exec', AsyncMock(return_value=owned)):
+            with self.assertRaises(ConnectorError) as rejected:
+                await self.session.launch()
+        self.assertEqual(rejected.exception.code, 'HostAuthenticationFailed')
+        self.session.host.assert_awaited_once()
+        self.assertIs(self.session.process, owned)
+
+    async def test_return_question_receives_current_stock_and_other_players_facility(self):
+        self.session.entered = True
+        self.session.catalog = {'map.viewport': {'access': 'read'}}
+        self.session.messages.append({'role': 'assistant', 'text': 'There is no bridge and stock is 2.'})
+        self.session.world = AsyncMock(return_value={'events': []})
+        self.session.invoke = AsyncMock(return_value={
+            'player': {'id': 'test-user', 'x': 3, 'y': 1}, 'players': [], 'chunks': [],
+            'entities': [
+                {'id': 'bridge', 'x': 7, 'y': 0, 'created_by': 'other-player',
+                 'state': {'recipe': 'walkway'}, 'capabilities': ['structure']},
+                {'id': 'willow', 'x': 4, 'y': 5, 'state': {'kind': 'resource_node', 'stock': 0},
+                 'capabilities': ['harvestable']}], 'inventory': []})
+        self.session.host = AsyncMock(return_value={'info': {'id': 'msg_return', 'role': 'assistant',
+            'finish': 'stop', 'time': {'completed': 1}}, 'parts': [{'type': 'text', 'text': 'A path is present.'}]})
+        await self.session.turn('I came back. Can I cross?')
+        parts = self.session.host.await_args.args[2]['parts']
+        facts = json.loads(parts[1]['text'].rsplit('\n', 1)[1])
+        self.assertEqual(facts['entities'][0]['created_by'], 'other-player')
+        self.assertEqual(facts['entities'][0]['state']['recipe'], 'walkway')
+        self.assertEqual(facts['entities'][1]['state']['stock'], 0)
+        self.session.host.assert_awaited_once()
+        self.assertEqual(self.session.inference_count, 1)
+
+    async def test_failed_current_read_does_not_spend_model_request(self):
+        self.session.entered = True
+        self.session.catalog = {'map.viewport': {'access': 'read'}}
+        self.session.world = AsyncMock(side_effect=httpx.ReadError('world unavailable'))
+        self.session.host = AsyncMock()
+        with self.assertRaises(httpx.ReadError):
+            await self.session.turn('What has changed?')
+        self.session.host.assert_not_awaited()
+        self.assertEqual(self.session.inference_count, 0)
 
     async def test_companion_cannot_move_or_act_as_person(self):
         self.session.catalog = {"grove.move": {"access": "write", "input_schema": {}},

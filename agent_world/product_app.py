@@ -78,8 +78,13 @@ def create_product_app(
     web_password: str | None = None,
     commons_ui: bool = False,
     identity_ttl_seconds: float | None = None,
+    runtime: WorldRuntime | None = None,
 ) -> FastAPI:
-    runtime = WorldRuntime(db_path)
+    """Reuse the world Runtime for identity and product routes in one host."""
+    if runtime is None:
+        runtime = WorldRuntime(db_path)
+    elif pathlib.Path(db_path).expanduser().resolve() != pathlib.Path(runtime.db_path).resolve():
+        raise ValueError("injected runtime must use the requested database path")
     from importlib.resources import files
 
     web_dir = files("agent_world").joinpath("web")

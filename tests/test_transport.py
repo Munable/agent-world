@@ -280,8 +280,8 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             await asyncio.sleep(0.05)
-            with httpx.Client(trust_env=False) as client:
-                response = client.post(
+            async with httpx.AsyncClient(trust_env=False) as client:
+                response = await client.post(
                     self.server.url + "/v1/functions/counter.increment/invoke",
                     headers=self.auth,
                     json={

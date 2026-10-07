@@ -9,6 +9,7 @@ from agent_world.world_streams import StreamEvent, StreamSpec
 
 from . import model as m
 from . import processes
+from . import building
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 ID = {"type": "string", "minLength": 1, "maxLength": 128}
@@ -23,10 +24,17 @@ MOVE_ARGS = {"type": "object", "properties": {
     "dy": {"type": "integer", "minimum": -1, "maximum": 1},
     "expected_player_version": VERSION}, "required": ["dx", "dy", "expected_player_version"], "additionalProperties": False}
 INSPECT_ARGS = {"type": "object", "properties": {"entity_id": ID}, "required": ["entity_id"], "additionalProperties": False}
+BUILD_ARGS = {"type": "object", "properties": {
+    "recipe": {"enum": list(building.RECIPES)}, "x": COORD, "y": COORD,
+    "expected_player_version": VERSION,
+    "material_ids": {"type": "array", "minItems": 2, "maxItems": 3, "uniqueItems": True, "items": ID}},
+    "required": ["recipe", "x", "y", "expected_player_version"], "additionalProperties": False}
 INTERACT_ARGS = {"type": "object", "properties": {
-    "action": {"enum": ["pickup", "drop", "open", "close", "store", "retrieve", "fill", "pour", "ignite"]},
+    "action": {"enum": ["pickup", "drop", "open", "close", "store", "retrieve", "fill", "pour", "ignite",
+                         "harvest", "tend", "fuel", "dismantle", "switch_mode"]},
     "target_id": ID, "item_id": ID, "expected_player_version": VERSION,
-    "expected_target_version": VERSION, "amount": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "expected_target_version": VERSION, "amount": {"type": "integer", "minimum": 1, "maximum": 100},
+    "mode": {"enum": ["shelter", "collect"]}},
     "required": ["action", "expected_player_version"], "additionalProperties": False}
 VIEW_ARGS = {"type": "object", "properties": {"cx": COORD, "cy": COORD,
     "radius": {"type": "integer", "minimum": 1, "maximum": 8}}, "additionalProperties": False}
@@ -49,7 +57,20 @@ ENTITY_SCHEMA = {"type": "object", "properties": {
         "contents": {"type": "array", "maxItems": 32, "uniqueItems": True, "items": ID},
         "water": {"type": "integer", "minimum": 0, "maximum": 100},
         "water_capacity": {"type": "integer", "minimum": 0, "maximum": 100},
-        "water_remaining": {"type": "integer", "minimum": 0, "maximum": 1000}},
+        "water_remaining": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "water_source_capacity": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "retired": {"type": "boolean"}, "retired_into": NULL_ID,
+        "kind": {"type": "string", "maxLength": 40}, "resource_kind": {"enum": list(m.MATERIALS)},
+        "stock": {"type": "integer", "minimum": 0, "maximum": 4}, "stock_capacity": {"const": 4},
+        "regrowth_tick": {"type": ["integer", "null"], "minimum": 0},
+        "recipe": {"enum": list(building.RECIPES)}, "mode": {"enum": ["shelter", "collect"]},
+        "hearth_fuel": {"type": "integer", "minimum": 0, "maximum": building.HEARTH_FUEL_CAPACITY},
+        "lit": {"type": "boolean"}, "dismantled": {"type": "boolean"},
+        "invested_materials": {"type": "array", "maxItems": 3, "items": {"type": "object", "properties": {
+            "id": ID, "material": {"enum": list(m.MATERIALS)},
+            "fuel": {"type": "integer", "minimum": 0, "maximum": 200},
+            "wetness": {"type": "integer", "minimum": 0, "maximum": 100}},
+            "required": ["id", "material", "fuel", "wetness"], "additionalProperties": False}}},
         "required": ["wetness", "fuel", "burning", "destroyed", "open", "capacity", "contents",
                      "water", "water_capacity", "water_remaining"], "additionalProperties": True}},
     "required": ["id", "name", "x", "y", "material", "capabilities", "owner", "container",
@@ -70,7 +91,7 @@ CHUNK_SCHEMA = {"type": "object", "properties": {
         "owner": ID, "x": COORD, "y": COORD, "radius": {"const": 1}}, "required": ["owner", "x", "y", "radius"], "additionalProperties": False}}},
     "required": ["id", "cx", "cy", "seed", "generator_version", "tiles", "entity_ids", "player_ids", "safe_zones"], "additionalProperties": False}
 PROCESS_SCHEMA = {"type": "object", "properties": {
-    "id": ID, "kind": {"enum": ["rain", "moisture", "burning", "drift"]},
+    "id": ID, "kind": {"enum": ["rain", "moisture", "burning", "drift", "growth"]},
     "status": {"enum": ["active", "complete"]}, "entity_id": NULL_ID,
     "chunk_ids": {"type": "array", "maxItems": 4, "items": ID},
     "remaining_ticks": {"type": "integer", "minimum": 0}, "start_tick": {"type": "integer", "minimum": 0},
@@ -113,6 +134,7 @@ def initialize(ctx):
     ctx.set_state(m.META, "seed", m.SEED)
     ctx.set_state(m.META, "clock", {"epoch": epoch, "sequence": 0, "last_tick_at": ctx.now})
     ctx.set_state(m.META, "active_processes", [])
+    ctx.set_state(m.META, "active_hearths", [])
     ctx.set_state(m.META, "join_count", 0)
     ctx.set_state(m.META, "changes", [])
     m.ensure_chunk(ctx, 0, 0)
@@ -142,17 +164,20 @@ def handbook(ctx, args):
     creation = generation_handbook(ctx,{}).result["creation"]
     return FunctionOutcome({
         "world": "shared-grove", "title": "溪源", "player": _public_self(m.get_player(ctx,required=False)),
-        "clock": ctx.get_state(m.META,"clock"), "process_order": ["weather", "moisture", "burning", "drift"],
+        "clock": ctx.get_state(m.META,"clock"), "process_order": ["weather", "moisture", "hearth", "burning", "drift", "growth"],
         "process_limits": {"wet_or_reserved_entities": processes.MAX_WET_ENTITIES,
                            "burning_entities": processes.MAX_BURNING_ENTITIES,
                            "burning_container_contents": processes.MAX_BURNING_CONTENTS,
-                           "events": processes.MAX_EVENTS, "active_processes": m.MAX_ACTIVE},
-        "terrain": {"grass": "草地", "dirt": "泥地", "water": "可涉浅溪，水上物件可以漂流", "rock": "不能通行的岩壁"},
+                           "events": processes.MAX_EVENTS, "active_processes": m.MAX_ACTIVE,
+                           "hearths": building.MAX_HEARTHS, "growth": 16},
+        "terrain": {"grass": "草地", "dirt": "泥地", "water": "可涉浅溪，走入时随身可湿物件湿度加10；干脚通路免除此代价", "rock": "不能通行的岩壁"},
         "materials": {"wood": "木材可组合搬运、容器、障碍、可燃和受湿能力", "stone": "石材不燃烧", "cloth": "布燃料较少，容易受湿"},
         "capabilities": {"transport": "拿取与放下", "container": "开关、储取与有限装水", "blocking": "未毁坏时阻挡一步移动",
                          "flammable": "消耗有限燃料，湿度35及以上熄火", "wettable": "可以浇湿和干燥",
                          "water_source": "有限取水源", "ignition": "点火工具", "floating": "可在水上漂流",
-                         "personal": "私人物件，不能丢弃、公开存入或点燃"},
+                         "personal": "私人物件，不能丢弃、公开存入或点燃",
+                         "resource_node": "有限库存；木布可花水养护，石材有限",
+                         "walkway": "一格水面干脚通路", "canopy": "遮雨或有限集雨", "hearth": "真实消耗木料的受控烘干炉"},
         "rules": ["人控制四向一步移动和物件行动；自己的外部Agent读取、生成内容与解释。",
                   "行动需最新人物版本，物件归属只在服务器原子提交后改变。",
                   "公共物件需相邻一格才可互动，不能取用别人背包。",
@@ -160,9 +185,18 @@ def handbook(ctx, args):
                   "雨、受湿、燃烧、漂流按每秒顺序处理，服务停机时暂停，不补算缺席时间。",
                   "雨与漂流先按实际物件预留容量：受湿或已预留物件最多128件，燃烧对象最多16件，燃烧容器全部内容合计最多16件，活动过程索引最多128组。雨/漂流事件最多4个，同地块只能1个。超限的新动作会拒绝，新火蔓延暂缓。",
                   "每秒所有已接受物件都处理一次：非雨中湿度减2、燃料减2。降雨按固定逻辑结束tick结束，物件密度不改变这些速率；服务停机不推进逻辑tick。",
+                  "配方成本按裸材料实体件数计；木布湿度须低于35，石材不受湿度限制。容器、点火工具和私人物件不能投料，原木障碍可以拿取后作料。",
+                  "通路只铺一格浅溪；雨棚和烘干炉在草地或泥地建设，每格最多一座，出生安全区禁止火炉。",
+                  "棚的遮雨模式保护半径1的九格公共地面材料，棚自身仍受雨；集雨模式取消遮雨，把雨存为同一容器余额，容量40。已有水保留，可装入自己的容器。",
+                  "炉每份完整木料增加40燃料，上限200；另用打火石点火，每秒耗2燃料，半径1公共地面材料额外干6，多炉不叠加。受湿35及以上立即熄炉，余料保留，受控炉火不蔓延。",
+                  "建筑可由附近任何人拆除，未烧尽的原材料只退还一次到拆除者背包。燃烧、有水或物品时不能拆；木建筑烧毁后投资不返，投炉燃料永不返。",
+                  "采集资源节点立即消耗1份公共库存；木和布最多存4份，花本人容器5份水养护，6个逻辑秒后恢复1份，最多同时养护16处。石材有限，浇水不能造石。",
                   "容器烧毁后全部内容只释放一次；烧毁障碍可以通行。",
                   "生成须领取公共区域机会，目录与资源预算由服务器校验，文字描述不授予能力。"],
         "creation": creation,
+        "construction": {"recipes": building.recipes(), "radius_metric": "chebyshev",
+                         "limits": {"hearths": building.MAX_HEARTHS, "growth": 16},
+                         "build_schema": BUILD_ARGS, "interact_schema": INTERACT_ARGS},
         "entry": "在本地连接器中让自己的OpenCode Agent实际回应并读取世界后，由人进入。"})
 
 
@@ -272,17 +306,28 @@ def move(ctx,args):
         _add_player_index(ctx,player,add=False)
     player.update(x=x,y=y)
     m.save_player(ctx,player)
+    changes = ["走了一格。"]
+    if m.tile_at(ctx, x, y) == "water" and not building.on_walkway(ctx, x, y):
+        for eid in player["inventory"]:
+            entity = m.get_entity(ctx, eid)
+            if ("wettable" in entity["capabilities"] and not entity["state"]["destroyed"]
+                    and not entity["state"].get("retired")):
+                entity["state"]["wetness"] = min(100, entity["state"]["wetness"]+10)
+                m.save_entity(ctx, entity)
+        changes.append("涉过浅溪，随身可湿物件湿度增加10。")
     if previous_chunk!=m.chunk_for(x,y):
         _add_player_index(ctx,player,add=True)
         offer_generation(ctx,x,y,trigger="first_enter")
     for cid in m.chunk_ids_around(x,y,8):
         _,cx,cy=cid.split("_")
         m.ensure_chunk(ctx,int(cx),int(cy))
-    return FunctionOutcome({"player":_public_self(player),"changes":["走了一格。"],"viewport":viewport(ctx,{})},
+    return FunctionOutcome({"player":_public_self(player),"changes":changes,"viewport":viewport(ctx,{})},
         events=(StreamEvent("grove.changes","move",{"summary":f"{player['name']}走了一格。","x":x,"y":y},key="move"),))
 
 
 def _accessible(ctx,player,entity,*,near=True):
+    if entity["state"].get("retired"):
+        raise RuleViolation("物件已经投入其他用途。")
     if entity["owner"] is not None and entity["owner"]!=player["id"]:
         raise PermissionDenied("别人的背包和物件不能取用。")
     current=entity
@@ -303,7 +348,7 @@ def _accessible(ctx,player,entity,*,near=True):
 
 
 def available_actions(ctx,player,entity):
-    if entity["state"]["destroyed"] or entity["owner"] not in {None,player["id"]}:
+    if entity["state"]["destroyed"] or entity["state"].get("retired") or entity["owner"] not in {None,player["id"]}:
         return []
     x,y=m.entity_location(ctx,entity)
     if entity["owner"] is None and (x is None or abs(x-player["x"])+abs(y-player["y"])>1):
@@ -331,19 +376,63 @@ def available_actions(ctx,player,entity):
                 actions.append("store")
             if entity["state"]["contents"]:
                 actions.append("retrieve")
-    if "water_source" in caps and entity["state"]["water_remaining"]>0:
-        actions.append("fill")
+    if (("water_source" in caps and entity["state"]["water_remaining"]>0)
+        or ("container" in caps and entity["state"]["open"] and not burning_path
+            and entity["owner"] is None and entity["state"]["water"]>0)):
+        if entity["state"].get("recipe") != "canopy" or building._owned_available(ctx, player,
+                lambda e: "container" in e["capabilities"] and "personal" not in e["capabilities"]
+                and e["state"]["open"] and e["state"]["water"] < e["state"]["water_capacity"]):
+            actions.append("fill")
     receives_water=("container" in caps and entity["state"]["water_capacity"]>0
                     and entity["state"]["open"] and not entity["state"]["burning"])
     if receives_water and not burning_path and entity["state"]["water"]<entity["state"]["water_capacity"]:
         actions.append("pour")
     elif not receives_water and "wettable" in caps and not personal:
         actions.append("pour")
+    if building.is_structure(entity) and "pour" in actions and not building._water_items(ctx, player):
+        actions.remove("pour")
     if ("flammable" in caps and m.is_ground(entity) and not personal and not entity["state"]["burning"]
         and entity["state"]["wetness"]<35 and entity["state"]["fuel"]>0 and not m.is_safe(ctx,x,y)
         and processes.can_ignite(ctx,entity)):
         actions.append("ignite")
+    actions.extend(building.structure_actions(ctx,player,entity))
     return list(dict.fromkeys(actions))
+
+
+def _action_options(ctx, player, entity):
+    options = building.action_options(ctx, player, entity)
+    if building.is_structure(entity) and entity["state"]["recipe"] == "canopy":
+        actions = available_actions(ctx, player, entity)
+        reason = building._path_reason(ctx, player, entity)
+        if not reason and not entity["state"]["open"]:
+            reason = "请先打开棚的储水口。"
+        if not reason and entity["state"]["water"] <= 0:
+            reason = "棚里没有储水，可切到集雨模式等待实际降雨。"
+        receptacles = building._owned_available(ctx, player, lambda e: "container" in e["capabilities"]
+            and "personal" not in e["capabilities"] and e["state"]["open"]
+            and e["state"]["water"] < e["state"]["water_capacity"])
+        if not reason and not receptacles:
+            reason = "需要自己打开且未满的装水容器。"
+        options.append(building._option("fill", reason, "从棚的同一储水余额装入自己的容器。", "按实际装入份数消耗棚中储水。"))
+        for action in ("open", "close"):
+            if action in actions:
+                options.append(building._option(action, None,
+                    "开合储水口；关上会暂停集雨与取水。"))
+    if building.is_structure(entity):
+        reason = building._path_reason(ctx, player, entity)
+        # Water can suppress a burning wooden structure, so burning the target
+        # itself does not prevent pouring on public ground.
+        if entity["state"]["burning"] and m.is_ground(entity):
+            x, y = m.entity_location(ctx, entity)
+            reason = "要先走到目标相邻的一格。" if abs(x-player["x"])+abs(y-player["y"])>1 else None
+        if not reason and not building._water_items(ctx, player):
+            reason = "需要自己打开的容器里至少1份水。"
+        if not reason and ("container" in entity["capabilities"] and entity["state"]["open"]
+                and not entity["state"]["burning"] and entity["state"]["water"] >= entity["state"]["water_capacity"]):
+            reason = "目标储水已满。"
+        options.append(building._option("pour", reason,
+            "把实际水加入棚的储水，或浇湿建筑灭火；每份水使湿度加8。", "按实际倒出份数消耗自己的水。"))
+    return options
 
 
 def inspect(ctx,args):
@@ -354,9 +443,15 @@ def inspect(ctx,args):
     if "container" in entity["capabilities"] and entity["state"]["open"]:
         contents=[m.get_entity(ctx,eid) for eid in entity["state"]["contents"]]
     visible=_project_entity(ctx,player,entity)
+    explanation=f"{entity['name']}：{entity['material']}，湿度{entity['state']['wetness']}，燃料{entity['state']['fuel']}。"
+    if entity["state"].get("kind") == "resource_node":
+        explanation=f"{entity['name']}：公共库存{entity['state']['stock']}/{entity['state']['stock_capacity']}；"+(
+            "石材有限，不能浇水再生。" if entity["state"]["resource_kind"] == "stone" else "可消耗自己的5份水养护，6个物理秒后恢复1份。")
+    elif building.is_structure(entity):
+        explanation=" ".join(building.effect_projection(entity)["effects"])
     return FunctionOutcome({"entity":visible,"contents":[_project_entity(ctx,player,e) for e in contents],
         "available_actions":available_actions(ctx,player,entity),
-        "explanation":f"{entity['name']}：{entity['material']}，湿度{entity['state']['wetness']}，燃料{entity['state']['fuel']}。"})
+        "action_options":_action_options(ctx,player,entity),"explanation":explanation})
 
 
 def _target(ctx,args):
@@ -374,7 +469,7 @@ def _own_item(ctx,player,args,capability=None):
         raise RuleViolation("请从背包选择使用的物件。")
     item=m.get_entity(ctx,args["item_id"])
     _accessible(ctx,player,item)
-    if item["owner"]!=player["id"] or item["state"]["destroyed"] or "personal" in item["capabilities"]:
+    if item["owner"]!=player["id"] or item["state"]["destroyed"] or item["state"].get("retired") or "personal" in item["capabilities"]:
         raise RuleViolation("须使用自己持有的可用物件。")
     if capability and capability not in item["capabilities"]:
         raise RuleViolation("所选物件没有所需能力。")
@@ -427,7 +522,11 @@ def interact(ctx,args):
     if target["state"]["destroyed"]:
         raise RuleViolation("毁坏的物件不能再互动。")
     item=None
-    if action=="pickup":
+    if action in {"harvest","tend","fuel","dismantle","switch_mode"} or (
+            action == "ignite" and target["state"].get("recipe") == "hearth"):
+        summary=building.interact_structure(ctx,player,args,target)
+        target=m.get_entity(ctx,target["id"])
+    elif action=="pickup":
         if "transport" not in target["capabilities"] or target["owner"] is not None or target.get("container"):
             raise RuleViolation("只能拿起公共地面可搬运物件；容器内物件请取出。")
         if target["state"]["burning"] or "personal" in target["capabilities"]:
@@ -479,13 +578,19 @@ def interact(ctx,args):
     elif action=="fill":
         item=_own_item(ctx,player,args,"container")
         _container(ctx,player,item)
+        source_key="water_remaining"
         if "water_source" not in target["capabilities"]:
-            raise RuleViolation("目标不是取水源。")
+            _container(ctx,player,target)
+            if target["owner"] is not None or target["state"]["water_capacity"]<=0:
+                raise RuleViolation("目标必须是公共水源或打开的公共储水容器。")
+            source_key="water"
+        if target["id"]==item["id"]:
+            raise RuleViolation("不能从同一容器给自己装水。")
         amount=min(args.get("amount",item["state"]["water_capacity"]),
-                   item["state"]["water_capacity"]-item["state"]["water"],target["state"]["water_remaining"])
+                   item["state"]["water_capacity"]-item["state"]["water"],target["state"][source_key])
         if amount<=0:
             raise RuleViolation("容器已满或水源耗尽。")
-        target["state"]["water_remaining"]-=amount
+        target["state"][source_key]-=amount
         item["state"]["water"]+=amount
         m.save_entity(ctx,target)
         m.save_entity(ctx,item)
@@ -509,6 +614,8 @@ def interact(ctx,args):
             target["state"]["wetness"]=min(100,target["state"]["wetness"]+amount*8)
             if target["state"]["wetness"]>=35:
                 target["state"]["burning"]=False
+                if target["state"].get("recipe") == "hearth":
+                    target["state"]["lit"]=False
         else:
             raise RuleViolation("目标既不能装水也不能浇湿。")
         item["state"]["water"]-=amount
@@ -525,7 +632,7 @@ def interact(ctx,args):
         if item["state"].get("uses",20)<=0:
             raise RuleViolation("点火工具已耗尽。")
         if not processes.can_ignite(ctx,target):
-            raise RuleViolation("最多同时燃烧16件物件，燃烧容器的全部内容总数最多16件。")
+            raise RuleViolation("火或内容过程容量不足，或这一片没有容器烧毁后释放内容的地面空间。")
         item["state"]["uses"]=item["state"].get("uses",20)-1
         state["burning"]=True
         m.save_entity(ctx,item)
@@ -551,7 +658,24 @@ def _project_entity(ctx,player,entity):
         value["state"]["contents"]=[]
     value["contents"]=list(value["state"]["contents"])
     value["available_actions"]=available_actions(ctx,player,entity)
+    value["action_options"]=_action_options(ctx,player,entity)
+    value["construction_material"]=building.material_status(ctx,player,entity)
+    if building.is_structure(entity):
+        value["construction"]=building.effect_projection(entity)
     return value
+
+
+def build_function(ctx,args):
+    player=m.get_player(ctx)
+    m.check_player_version(player,args["expected_player_version"])
+    entity,summary=building.build(ctx,player,args)
+    player=m.get_player(ctx)
+    m.save_player(ctx,player)
+    m.record_change(ctx,summary,x=entity["x"],y=entity["y"],entity_id=entity["id"],action="build")
+    return FunctionOutcome({"player":_public_self(player),"entity":_project_entity(ctx,player,entity),
+        "changes":[summary],"viewport":viewport(ctx,{})},events=(StreamEvent("grove.changes","build",
+        {"summary":f"{player['name']}{summary}","x":entity["x"],"y":entity["y"],
+         "entity_id":entity["id"],"action":"build","recipe":args["recipe"]},key="build"),))
 
 
 def viewport(ctx,args):
@@ -581,7 +705,9 @@ def viewport(ctx,args):
           "processes":processes.visible_processes(ctx,x,y,radius),
           "opportunities":generation_opportunities(ctx,{**player,"x":x,"y":y},radius),
           "changes":changes,"bounds":{"min_x":x-radius,"min_y":y-radius,"max_x":x+radius,"max_y":y+radius},
-          "truncated":len(raw_entities)>=160,"clock":ctx.get_state(m.META,"clock")}
+          "truncated":len(raw_entities)>=160,"clock":ctx.get_state(m.META,"clock"),
+          "construction":{"recipes":building.recipes(),"nearby":building.nearby_effects(ctx,x,y,radius),
+                          "radius_metric":"chebyshev","limits":{"hearths":building.MAX_HEARTHS,"growth":16}}}
     # Keep both query and SDK projection comfortably below the96KiB view limit.
     while len(json.dumps(body,ensure_ascii=False,separators=(",",":")).encode())>90000:
         if body["entities"]:
@@ -589,6 +715,9 @@ def viewport(ctx,args):
             body["truncated"]=True
         elif body["changes"]:
             body["changes"].pop(0)
+        elif body["construction"]["nearby"]:
+            body["construction"]["nearby"].pop()
+            body["truncated"]=True
         else:
             raise RuleViolation("附近投影过大，请缩小视野半径。")
     return body
@@ -611,14 +740,15 @@ def make_world():
         FunctionSpec("grove.move",move,MOVE_ARGS,authorize=member,description="由人向四个方向之一走一格。"),
         FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,access="read",authorize=member,description="检查附近物件、状态与实际可用行动。"),
         FunctionSpec("grove.interact",interact,INTERACT_ARGS,authorize=member,description="由人操作真实物件，按材质能力与归属结算。"),
+        FunctionSpec("grove.build",build_function,BUILD_ARGS,authorize=member,description="由人用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,access="read",authorize=member,description="读取附近有限地图与自己的背包。"),
-        *generation_specs()),version=3,state_version=2,
+        *generation_specs()),version=4,state_version=3,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",ENTITY_SCHEMA),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
-        migrations={2:migrate_batched_processes},
+        migrations={2:migrate_batched_processes,3:migrate_batched_processes},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),

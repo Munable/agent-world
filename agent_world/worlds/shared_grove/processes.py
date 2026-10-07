@@ -20,6 +20,7 @@ MOISTURE_BATCH = MAX_WET_ENTITIES
 BURNING_BATCH = MAX_BURNING_ENTITIES
 DRIFT_BATCH = 4
 MAX_EVENTS = 4
+MAX_GROWTH = 16
 
 
 def _admit_event(ctx,chunks=None):
@@ -54,6 +55,9 @@ def _reserve_wet_members(ctx,group,reservation,members):
 
 
 def can_ignite(ctx,entity):
+    candidate = {**entity, "state": {**entity["state"], "burning": True}}
+    if not m.can_place_ground(ctx, candidate):
+        return False
     burning = []
     contents = 0
     for pid in active_process_ids(ctx):
@@ -216,7 +220,8 @@ def reconcile_entity_processes(ctx, entity):
                     _reserve_wet_members(ctx,group,rid,[entity["id"]])
     key = "processes:" + entity["id"]
     links = _meta_get(ctx,key,{})
-    wet = entity["state"]["wetness"] > 0 and not entity["state"]["destroyed"]
+    wet = (entity["state"]["wetness"] > 0 and not entity["state"]["destroyed"]
+           and not entity["state"].get("retired"))
     current = get_process(ctx,links["moisture"]) if links.get("moisture") else None
     changed = False
     if wet:
@@ -239,7 +244,8 @@ def reconcile_entity_processes(ctx, entity):
             changed = True
     elif current is not None and current["status"] == "active":
         _remove_moisture_member(ctx,current,entity["id"])
-    wanted = {"burning": entity["state"]["burning"] and not entity["state"]["destroyed"]}
+    wanted = {"burning": entity["state"]["burning"] and not entity["state"]["destroyed"]
+              and not entity["state"].get("retired")}
     for kind, needed in wanted.items():
         current = get_process(ctx, links[kind]) if kind in links else None
         if needed and (current is None or current["status"] != "active"):
@@ -285,6 +291,32 @@ def start_rain(ctx, chunk_ids, ticks=8, intensity=20, start_delay=2):
     return _new(ctx, "rain", id=rain_id, chunk_ids=list(dict.fromkeys(chunk_ids)), remaining_ticks=ticks,
                 intensity=intensity, water_remaining=ticks*intensity*96*len(chunk_ids),
                 start_delay=start_delay, end_tick=start_tick+ticks, centers=centers)
+
+
+def can_start_growth(ctx):
+    count = sum(1 for pid in active_process_ids(ctx) if (p := get_process(ctx, pid))
+                and p["status"] == "active" and p["kind"] == "growth")
+    return count < MAX_GROWTH and len(active_process_ids(ctx)) < m.MAX_ACTIVE
+
+
+def start_growth(ctx, node_id, ticks=6):
+    node = m.get_entity(ctx, node_id)
+    state = node["state"]
+    if (not m.is_ground(node) or state.get("kind") != "resource_node"
+            or state.get("resource_kind") not in {"wood", "cloth"}
+            or state["stock"] >= state["stock_capacity"] or state.get("regrowth_tick") is not None):
+        raise RuleViolation("只有库存未满且尚未再生的木材或芦苇节点可以照料。")
+    if ticks != 6:
+        raise RuleViolation("人工照料每次固定6个逻辑秒再生一份。")
+    if not can_start_growth(ctx):
+        raise RuleViolation("最多同时照料16个资源节点。")
+    sequence = ctx.get_state(m.META, "clock")["sequence"]
+    process = _new(ctx, "growth", entity_id=node_id,
+                   chunk_ids=[m.chunk_id(*m.chunk_for(node["x"], node["y"]))],
+                   remaining_ticks=6, end_tick=sequence+6)
+    state["regrowth_tick"] = sequence+6
+    m.save_entity(ctx, node)
+    return process
 
 
 def start_drift(ctx, entity_id, ticks=16, route=None, start_delay=2):
@@ -406,6 +438,7 @@ def _rain_members(ctx, process):
 
 
 def tick(ctx, args):
+    from . import building
     clock = ctx.get_state(m.META,"clock")
     if args["epoch"] != clock["epoch"] or args["sequence"] != clock["sequence"]:
         return FunctionOutcome({"advanced":False,"reason":"superseded"})
@@ -415,7 +448,16 @@ def tick(ctx, args):
         clock["epoch"] = m.identifier("clock")
     clock["sequence"] = sequence
     clock["last_tick_at"] = ctx.now
-    changed, wet_by_rain = [], set()
+    changed, wet_by_rain, wet_updates = [], set(), {}
+    affected, affected_keys = [], set()
+    def affect(entity=None, points=None):
+        entries = points or ([{"x": entity.get("x"), "y": entity.get("y"), "entity_id": entity["id"]}]
+                             if entity and entity.get("owner") is None and not entity.get("container") else [])
+        for entry in entries:
+            key = (entry.get("x"), entry.get("y"))
+            if all(type(n) is int for n in key) and key not in affected_keys and len(affected) < 80:
+                affected.append(entry)
+                affected_keys.add(key)
     _begin_batch(ctx)
     indexed = [p for pid in active_process_ids(ctx) if (p:=get_process(ctx,pid)) and p["status"]=="active"]
     if not late:
@@ -429,22 +471,28 @@ def tick(ctx, args):
                 process["end_tick"] = sequence+process["remaining_ticks"]-1
             if sequence<=process["end_tick"]:
                 for eid in _rain_members(ctx,process):
-                    entity = m.get_entity(ctx,eid)
+                    entity = wet_updates.setdefault(eid, m.get_entity(ctx,eid))
                     water = min(process["intensity"],process["water_remaining"])
                     process["water_remaining"] -= water
-                    entity["state"]["wetness"] = min(100,entity["state"]["wetness"]+water)
+                    effect = building.rain_effect(ctx, entity, water)
+                    entity["state"]["wetness"] = effect["wetness"]
+                    entity["state"]["water"] = effect["water"]
                     if entity["state"]["wetness"]>=35:
                         entity["state"]["burning"] = False
-                    if "container" in entity["capabilities"] and entity["state"]["open"]:
-                        entity["state"]["water"] += min(water//4,entity["state"]["water_capacity"]-entity["state"]["water"])
-                    wet_by_rain.add(eid)
-                    m.save_entity(ctx,entity)
+                        if entity["state"].get("recipe") == "hearth":
+                            entity["state"]["lit"] = False
+                    if "water_source" in entity["capabilities"] and not effect.get("protected_by"):
+                        entity["state"]["water_remaining"] += min(water,
+                            entity["state"]["water_source_capacity"]-entity["state"]["water_remaining"])
+                    if not effect.get("protected_by"):
+                        wet_by_rain.add(eid)
             process["remaining_ticks"] = max(0,process["end_tick"]-sequence)
             if sequence>=process["end_tick"] or process["water_remaining"]<=0:
                 process["status"] = "complete"
                 _release_moisture_reservations(ctx,process)
                 _finished_opportunity(ctx,process)
                 changed.append("短雨结束。")
+                affect(points=process.get("centers", []))
             _save(ctx,process)
 
         # 2. Admission bounds the entire wet index, so every member dries by
@@ -456,16 +504,33 @@ def tick(ctx, args):
                 members = process.get("entity_ids",[process["entity_id"]] if process["entity_id"] else [])
                 moisture_tasks.extend((pid,eid) for eid in members)
         for pid,eid in sorted(moisture_tasks):
-            entity = m.get_entity(ctx,eid,required=False)
-            if not entity or entity["state"]["destroyed"]:
+            entity = wet_updates.get(eid) or m.get_entity(ctx,eid,required=False)
+            if not entity or entity["state"]["destroyed"] or entity["state"].get("retired"):
                 _remove_moisture_member(ctx,get_process(ctx,pid),eid)
                 continue
+            wet_updates[eid] = entity
+        for eid,entity in sorted(wet_updates.items()):
             if entity["state"]["wetness"]>=35 and entity["state"]["burning"]:
                 entity["state"]["burning"] = False
                 changed.append(f"{entity['name']}被水熄灭。")
+                affect(entity)
             if eid not in wet_by_rain:
                 entity["state"]["wetness"] = max(0,entity["state"]["wetness"]-2)
+
+        # Installed stone hearths add bounded controlled heat. Their targets are
+        # deduplicated by the building helper; overlapping hearths do not stack.
+        before_heat = len(changed)
+        heated = building.tick_structures(ctx, sequence, changed, wet_updates)
+        for eid in sorted(heated):
+            entity = wet_updates[eid]
+            entity["state"]["wetness"] = max(0, entity["state"]["wetness"]-6)
+        # One entity write for weather, natural drying, and controlled heat.
+        # New rain members reconcile their existing reserved moisture group here.
+        for eid,entity in sorted(wet_updates.items()):
             m.save_entity(ctx,entity)
+        if len(changed) != before_heat:
+            for eid in _meta_get(ctx, "active_hearths", []):
+                affect(m.get_entity(ctx, eid, required=False))
 
         # 3. Every admitted fire burns at the same two-unit-per-second rate.
         # Fire and total burning-container contents are reserved at admission.
@@ -488,6 +553,7 @@ def tick(ctx, args):
             if not next_fuel:
                 destroy_entity(ctx,entity)
                 changed.append(f"{entity['name']}烧毁。")
+                affect(entity)
                 continue
             m.save_entity(ctx,entity)
             if sequence%3==0 and spread_remaining:
@@ -507,6 +573,7 @@ def tick(ctx, args):
                         m.save_entity(ctx,target)
                         spread_remaining -= 1
                         changed.append(f"火蔓延到相邻的{target['name']}。")
+                        affect(target)
 
         # 4. Drift routes were materialized and moisture capacity reserved at
         # admission; the tick performs only bounded one-step movement.
@@ -536,6 +603,7 @@ def tick(ctx, args):
                         if m.tile_at(ctx,entity["x"],entity["y"])!="water":
                             process["status"] = "complete"
                             changed.append(f"{entity['name']}漂到了岸边。")
+                            affect(entity)
                 process["remaining_ticks"] -= 1
                 if process["remaining_ticks"]<=0:
                     process["status"] = "complete"
@@ -543,6 +611,24 @@ def tick(ctx, args):
             if process["status"]=="complete":
                 _release_moisture_reservations(ctx,process)
                 _finished_opportunity(ctx,process)
+        # A paid manual tending advances once, then completes. Stock is never
+        # reset to capacity and no autonomous repeated harvest is scheduled.
+        growth = [p for p in indexed if p["kind"] == "growth"]
+        for process in sorted(growth, key=lambda p: p["id"]):
+            node = m.get_entity(ctx, process["entity_id"], required=False)
+            process["remaining_ticks"] = max(0, process["end_tick"]-sequence)
+            if not node or not m.is_ground(node) or node["state"].get("kind") != "resource_node":
+                process["status"] = "complete"
+            elif sequence >= process["end_tick"]:
+                state = node["state"]
+                state["stock"] = min(state["stock_capacity"], state["stock"]+1)
+                state["regrowth_tick"] = None
+                m.save_entity(ctx, node)
+                process["status"] = "complete"
+                _finished_opportunity(ctx, process)
+                changed.append(f"{node['name']}经照料再生了一份材料。")
+                affect(node)
+            _save(ctx, process)
     _flush_batch(ctx)
     ctx.set_state(m.META,"clock",clock)
     ctx.schedule_timer(f"grove.tick.{clock['epoch']}.{sequence}","grove.tick",
@@ -551,11 +637,12 @@ def tick(ctx, args):
     if changed:
         for summary in changed[:8]:
             m.record_change(ctx,summary,x=None,y=None,action="process")
-        events = (StreamEvent("grove.changes","process",{"summary":" ".join(changed[:8]),"tick":sequence},key=f"tick-{sequence}"),)
+        events = (StreamEvent("grove.changes","process",{"summary":" ".join(changed[:8]),"tick":sequence,
+                              "affected":affected},key=f"tick-{sequence}"),)
     return FunctionOutcome({"advanced":not late,"paused_resume":late,"tick":sequence,
                             "changes":changed[:16],"activity_limits":{"wet_or_reserved":MAX_WET_ENTITIES,
                             "burning":MAX_BURNING_ENTITIES,"burning_contents":MAX_BURNING_CONTENTS,
-                            "events":MAX_EVENTS}},events=events)
+                            "events":MAX_EVENTS,"growth":MAX_GROWTH,"hearths":building.MAX_HEARTHS}},events=events)
 
 
 def visible_processes(ctx, x, y, radius=8):

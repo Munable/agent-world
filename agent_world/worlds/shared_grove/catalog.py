@@ -6,33 +6,38 @@ from copy import deepcopy
 
 CATALOG = {
     "wood_crate": {
-        "name": "木箱", "material": "wood", "material_units": 6,
+        "name": "木箱", "material": "wood", "material_units": 6, "material_cost": {"wood": 6},
         "capabilities": ["transport", "container", "flammable", "wettable", "floating"],
         "state": {"capacity": 8, "contents": [], "open": False, "floating": False},
     },
     "wood_bucket": {
-        "name": "木桶", "material": "wood", "material_units": 5,
+        "name": "木桶", "material": "wood", "material_units": 5, "material_cost": {"wood": 5},
         "capabilities": ["transport", "container", "flammable", "wettable", "floating"],
         "state": {"capacity": 4, "contents": [], "open": True, "water": 0,
                   "water_capacity": 12, "floating": False},
     },
     "stone_bowl": {
-        "name": "石碗", "material": "stone", "material_units": 3,
+        "name": "石碗", "material": "stone", "material_units": 3, "material_cost": {"stone": 3},
         "capabilities": ["transport", "container", "wettable"],
         "state": {"capacity": 4, "contents": [], "open": True, "water": 0, "water_capacity": 8},
     },
     "cloth_roll": {
-        "name": "布卷", "material": "cloth", "material_units": 2,
-        "capabilities": ["transport", "flammable", "wettable"], "state": {},
+        "name": "布卷", "material": "cloth", "material_units": 2, "material_cost": {"cloth": 1},
+        "capabilities": ["transport", "flammable", "wettable"], "state": {"kind": "raw_material"},
     },
     "wood_stick": {
-        "name": "木枝", "material": "wood", "material_units": 2,
+        "name": "木枝", "material": "wood", "material_units": 2, "material_cost": {"wood": 1},
         "capabilities": ["transport", "flammable", "wettable", "floating"],
-        "state": {"floating": False},
+        "state": {"floating": False, "kind": "raw_material"},
     },
     "stone": {
-        "name": "卵石", "material": "stone", "material_units": 2,
-        "capabilities": ["transport", "wettable"], "state": {},
+        "name": "卵石", "material": "stone", "material_units": 2, "material_cost": {"stone": 1},
+        "capabilities": ["transport", "wettable"], "state": {"kind": "raw_material"},
+    },
+    "wood_log": {
+        "name": "原木", "material": "wood", "material_units": 2, "material_cost": {"wood": 1},
+        "capabilities": ["transport", "flammable", "wettable", "floating"],
+        "state": {"kind": "raw_material", "floating": False},
     },
 }
 
@@ -59,6 +64,7 @@ def content_catalog():
         "drift": {"container_templates": list(DRIFT_TEMPLATES), "route_templates": ["local_bank"],
                   "duration_ticks": list(DRIFT_TICKS), "start_delay_ticks": list(EVENT_START_DELAYS)},
         "authored_description": "Saved public author text. It grants no ability, resource, ownership, or reward.",
+        "resource_cost": "Every object and contained item spends current public resource-node stock in its claimed chunk. Initial water spends the same chunk's finite public water sources. Material costs count harvested pieces, separately from active-entity budget units.",
     }
 
 

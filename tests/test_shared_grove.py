@@ -84,7 +84,7 @@ class SharedGroveTests(unittest.TestCase):
             self.assertTrue(any("water_source" in e["capabilities"] for e in view["entities"]))
             self.assertTrue(any("blocking" in e["capabilities"] for e in view["entities"]))
             self.assertTrue(any("container" in e["capabilities"] for e in view["entities"]))
-            self.assertTrue(all(c["seed"] == m.SEED and c["generator_version"] == 1 for c in view["chunks"]))
+            self.assertTrue(all(c["seed"] == m.SEED and c["generator_version"] == m.GENERATOR_VERSION for c in view["chunks"]))
             self.assertTrue(all(e["owner"] == self.roles[actor] for e in view["inventory"]))
         other = self.item("B", "水壶")
         with self.assertRaises(PermissionDenied):
@@ -195,6 +195,11 @@ class SharedGroveTests(unittest.TestCase):
         original = self.call("A", "grove.content_submit", args, "publish-one")
         retry = self.call("A", "grove.content_submit", args, "publish-one")
         self.assertEqual(original, retry)
+        remaining = {material: sum(self.entity(node["id"])["state"]["stock"]
+            for node in context["resource_nodes"] if node["resource_kind"] == material)
+            for material in ("wood", "stone")}
+        self.assertEqual(remaining["wood"], context["resource_stock"]["wood"]-6)
+        self.assertEqual(remaining["stone"], context["resource_stock"]["stone"]-1)
         entity = original["entities"][0]
         self.assertEqual(entity["source"], "agent")
         self.walk("B", x, y)
@@ -209,10 +214,11 @@ class SharedGroveTests(unittest.TestCase):
         self.ticks(4)
         self.assertGreater(self.entity("seed_0_0_4_4")["state"]["wetness"], 0)
         # B explores another public region instead of waiting for a daily gate.
-        self.walk("B", 2, -2)
+        self.walk("B", 2, 18)
+        # The willow grove can pay wood and cloth, but has no stone node.
         drift = self.publish("B", {"kind": "drift", "drift": {"template": "wood_crate",
             "route_template": "local_bank", "duration_ticks": 8, "start_delay_ticks": 2,
-            "contents": [{"template": "stone"}, {"template": "cloth_roll"}]}})
+            "contents": [{"template": "wood_stick"}, {"template": "cloth_roll"}]}})
         crate = drift["entities"][0]
         self.ticks(12)
         after = self.entity(crate["id"])
@@ -253,11 +259,13 @@ class SharedGroveTests(unittest.TestCase):
         # The fixture changes no runtime/material rules and is not shipped.
         ids = []
         def prepare(ctx, args):
-            chunks = []
-            for cx, cy in ((2, 0), (3, 0), (2, 1), (3, 1)):
-                chunk = m.ensure_chunk(ctx, cx, cy)
-                chunks.append(chunk["id"])
-                for n in range(34 if args.get("exceed") else 28):
+            positions = ((2, 0), (3, 0), (2, 1), (3, 1))
+            chunks = [m.ensure_chunk(ctx, cx, cy)["id"] for cx, cy in positions]
+            seeded_wet = sum("wettable" in m.get_entity(ctx, eid)["capabilities"]
+                for cx, cy in positions for eid in m.get_chunk(ctx, cx, cy)["entity_ids"])
+            count = (processes.MAX_WET_ENTITIES-seeded_wet)//len(positions)
+            for cx, cy in positions:
+                for n in range(count+1 if args.get("exceed") else count):
                     entity = m.spawn_entity(ctx, {"name": "雨中卵石", "material": "stone",
                         "capabilities": ["transport", "wettable"], "x": cx*16+n%8,
                         "y": cy*16+n//8, "source": "terrain"})
@@ -330,6 +338,215 @@ class SharedGroveTests(unittest.TestCase):
         self.assertEqual(sparse[0][:3], (10, 38, 18))
         self.assertEqual(sparse[3], (40, 32, 12, False, "complete"))
         self.assertEqual(sparse[9][2:4], (0, True))
+
+    def route_to(self, actor, x, y):
+        from collections import deque
+        current = self.view(actor)
+        start = (current["player"]["x"], current["player"]["y"])
+        tiles = {(c["cx"]*16+dx, c["cy"]*16+dy): c["tiles"][dy*16+dx]
+                 for c in current["chunks"] for dy in range(16) for dx in range(16)}
+        blocked = {(e["x"], e["y"]) for e in current["entities"]
+                   if "blocking" in e["capabilities"] and not e["state"]["destroyed"]}
+        queue, paths = deque([start]), {start: []}
+        while queue:
+            point = queue.popleft()
+            if point == (x, y):
+                for dx, dy in paths[point]:
+                    self.move(actor, dx, dy)
+                return
+            for dx, dy in ((0, 1), (1, 0), (0, -1), (-1, 0)):
+                dest = (point[0]+dx, point[1]+dy)
+                if dest not in paths and dest in tiles and tiles[dest] != "rock" and dest not in blocked:
+                    paths[dest] = paths[point]+[(dx, dy)]
+                    queue.append(dest)
+        self.fail(f"No actual cardinal path to {(x,y)}")
+
+    def resource(self, actor, material):
+        return next(e for e in self.view(actor)["entities"]
+                    if e["state"].get("resource_kind") == material and e["state"].get("stock", 0) > 0)
+
+    def harvest(self, actor, material, count=1):
+        node = self.resource(actor, material)
+        self.route_to(actor, node["x"], node["y"])
+        for _ in range(count):
+            self.act(actor, "harvest", node["id"])
+        return node["id"]
+
+    def build(self, actor, recipe, x, y, operation=None):
+        return self.call(actor, "grove.build", {"recipe": recipe, "x": x, "y": y,
+            "expected_player_version": self.view(actor)["player"]["version"]}, operation)["entity"]
+
+    def test_shared_shelter_collection_and_costly_resource_recovery(self):
+        self.harvest("A", "wood")
+        self.route_to("A", 3, 2)
+        canopy = self.build("A", "canopy", 3, 2)
+        invested = [v["id"] for v in canopy["state"]["invested_materials"]]
+        self.assertEqual(len(invested), 3)
+        self.assertFalse(set(invested).intersection(e["id"] for e in self.view()["inventory"]))
+        self.route_to("B", 4, 2)
+        wood, cloth, bottle = (self.item("B", n)["id"] for n in ("木柴", "干布", "水壶"))
+        self.act("B", "drop", item=wood)
+        self.move("B", 1, 0)
+        self.act("B", "drop", item=cloth)
+        self.publish("A", {"kind": "rain", "rain": {"coverage_template": "local_region",
+            "duration_ticks": 4, "intensity": 20, "start_delay_ticks": 2}})
+        self.ticks(4)
+        self.assertEqual(self.entity(wood)["state"]["wetness"], 0)
+        self.assertGreater(self.entity(cloth)["state"]["wetness"], 0)
+        self.ticks(31)
+        self.route_to("B", 3, 2)
+        args = {"action": "switch_mode", "target_id": canopy["id"], "mode": "collect",
+                "expected_target_version": self.entity(canopy["id"])["version"],
+                "expected_player_version": self.view("B")["player"]["version"]}
+        self.call("B", "grove.interact", args)
+        self.publish("B", {"kind": "rain", "rain": {"coverage_template": "local_region",
+            "duration_ticks": 4, "intensity": 20, "start_delay_ticks": 2}})
+        self.ticks(6)  # Finish the actual rain before measuring later water use.
+        water = self.entity(canopy["id"])["state"]["water"]
+        self.assertGreater(water, 0)
+        self.assertGreater(self.entity(wood)["state"]["wetness"], 0)
+        before = self.entity(bottle)["state"]["water"]
+        self.act("B", "fill", canopy["id"], bottle, 5)
+        self.assertEqual(self.entity(bottle)["state"]["water"], before+5)
+        self.assertEqual(self.entity(canopy["id"])["state"]["water"], water-5)
+        node = self.resource("B", "wood")
+        self.route_to("B", node["x"], node["y"])
+        for _ in range(node["state"]["stock"]):
+            self.act("B", "harvest", node["id"])
+        before = self.entity(bottle)["state"]["water"]
+        self.act("B", "tend", node["id"], bottle)
+        self.assertEqual(self.entity(bottle)["state"]["water"], before-5)
+        with self.assertRaises(RuleViolation):
+            self.act("B", "tend", node["id"], bottle)
+        self.ticks(6)
+        self.assertEqual(self.entity(node["id"])["state"]["stock"], 1)
+        self.act("B", "harvest", node["id"])
+        self.assertEqual(self.entity(node["id"])["state"]["stock"], 0)
+        self.assertTrue(self.call("A", "grove.join", {"name": "ignored"})["resumed"])
+        self.assertEqual(self.entity(canopy["id"])["state"]["water"], water-5)
+
+    def test_water_walkway_changes_cost_and_salvage_is_unique(self):
+        context = self.call("A", "grove.generation_context", {"kind": "layout"})
+        opportunity = context["opportunity"]
+        dry_bank = sorted((p for p in context["allowed_tiles"] if p["x"] <= 5),
+                          key=lambda p: abs(p["x"])+abs(p["y"]))[:2]
+        published = self.call("A", "grove.content_submit", {"opportunity_id": opportunity["id"],
+            "expected_opportunity_version": opportunity["version"], "content": {"kind": "layout", "objects": [
+                {"template": "wood_log", "x": p["x"], "y": p["y"]} for p in dry_bank]}})
+        materials = [e["id"] for e in published["entities"]]
+        for entity in published["entities"]:
+            self.route_to("A", entity["x"], entity["y"])
+            self.act("A", "pickup", entity["id"])
+        self.route_to("A", 5, 0)
+        walkway = self.call("A", "grove.build", {"recipe": "walkway", "x": 6, "y": 0,
+            "expected_player_version": self.view()["player"]["version"],
+            "material_ids": materials}, "build-one-walkway")["entity"]
+        invested = [v["id"] for v in walkway["state"]["invested_materials"]]
+        self.assertTrue(all(self.entity(eid)["state"]["generation_allocation_retired"] for eid in invested))
+        cloth = self.item("A", "干布")["id"]
+        self.move("A", 1, 0)
+        self.assertEqual(self.entity(cloth)["state"]["wetness"], 0)
+        self.move("A", 1, 0)
+        self.assertEqual(self.entity(cloth)["state"]["wetness"], 10)
+        self.move("A", -1, 0)
+        self.assertEqual(self.entity(cloth)["state"]["wetness"], 10)
+        args = {"action": "dismantle", "target_id": walkway["id"],
+                "expected_target_version": self.entity(walkway["id"])["version"],
+                "expected_player_version": self.view()["player"]["version"]}
+        first = self.call("A", "grove.interact", args, "salvage-once")
+        self.assertEqual(first, self.call("A", "grove.interact", args, "salvage-once"))
+        inventory = [e["id"] for e in self.view()["inventory"]]
+        self.assertEqual(sum(eid in inventory for eid in invested), 2)
+        self.assertEqual(sum(self.entity(node["id"])["state"]["stock"] for node in context["resource_nodes"]
+            if node["resource_kind"] == "wood"), context["resource_stock"]["wood"]-2)
+        self.assertFalse(any(e["id"] == walkway["id"] for e in self.view()["entities"]))
+        with self.assertRaises(RuleViolation):
+            self.act("A", "dismantle", walkway["id"])
+
+    def dense_container(self, count, *, nested=False):
+        """Trusted layout fixture; subsequent ignition/drop/ticks use real rules."""
+        def prepare(ctx, args):
+            crate = m.get_entity(ctx, "seed_0_0_5_5")
+            crate["state"]["fuel"] = 2
+            m.save_entity(ctx, crate)
+            contents = []
+            for number in range(2 if nested else 3):
+                item = m.spawn_entity(ctx, {"name": "留存石料", "material": "stone",
+                    "capabilities": ["transport", "container"] if nested and number == 0 else ["transport"],
+                    "container": crate["id"], "state": {"capacity": 1 if nested and number == 0 else 0}})
+                contents.append(item["id"])
+                if nested and number == 0:
+                    child = m.spawn_entity(ctx, {"name": "内层石料", "material": "stone",
+                        "capabilities": ["transport"], "container": item["id"]})
+                    contents.append(child["id"])
+            while len(m.get_chunk(ctx, 0, 0)["entity_ids"]) < count:
+                m.spawn_entity(ctx, {"name": "地面石料", "material": "stone",
+                    "capabilities": ["transport"], "x": 14, "y": 14})
+            return FunctionOutcome({"crate": crate["id"], "contents": contents})
+        self.world = WorldRuntime(self.base / "dense-container.sqlite3")
+        definition = replace(WORLD, functions=(*WORLD.functions,
+            FunctionSpec("grove.fixture", prepare,
+                {"type": "object", "properties": {}, "additionalProperties": False})))
+        self.world.install_world("u", definition)
+        self.roles["A"] = self.world.create_role("A")["role_id"]
+        self.call("A", "grove.join", {"name": "A"})
+        self.route_to("A", 4, 5)
+        return self.call("A", "grove.fixture", {})
+
+    def test_container_ignition_rejects_without_room_to_release_contents(self):
+        layout = self.dense_container(95)
+        flint = self.item("A", "打火石")
+        with self.assertRaises(RuleViolation):
+            self.act("A", "ignite", layout["crate"], flint["id"])
+        self.assertFalse(self.entity(layout["crate"])["state"]["burning"])
+        self.assertEqual(self.entity(flint["id"])["state"]["uses"], flint["state"]["uses"])
+        self.ticks(2)
+
+    def test_burning_container_reserves_release_space_against_later_drop(self):
+        layout = self.dense_container(93, nested=True)
+        self.act("A", "ignite", layout["crate"], self.item("A", "打火石")["id"])
+        cloth = self.item("A", "干布")["id"]
+        with self.assertRaises(RuleViolation):
+            self.act("A", "drop", item=cloth)
+        self.assertEqual(self.entity(cloth)["owner"], self.roles["A"])
+        self.ticks(1)
+        self.assertTrue(self.entity(layout["crate"])["state"]["destroyed"])
+        inner, child, stone = [self.entity(eid) for eid in layout["contents"]]
+        self.assertIsNone(inner["container"])
+        self.assertEqual(child["container"], inner["id"])
+        self.assertIsNone(stone["container"])
+        versions = [self.entity(eid)["version"] for eid in layout["contents"]]
+        self.ticks(1)
+        self.assertEqual(versions, [self.entity(eid)["version"] for eid in layout["contents"]])
+        self.act("A", "drop", item=cloth)
+        roots = self.world.get_state("u", m.CHUNKS, "chunk_0_0")["value"]["entity_ids"]
+        self.assertLessEqual(len(roots), m.MAX_CHUNK_ENTITIES)
+        self.assertEqual(len(roots), len(set(roots)))
+
+    def test_stone_hearth_spends_fuel_without_spreading_and_dries_faster(self):
+        self.harvest("A", "stone", 2)
+        self.route_to("A", 4, 3)
+        hearth = self.build("A", "hearth", 4, 3)
+        fuel = self.item("A", "木柴")["id"]
+        self.act("A", "fuel", hearth["id"], fuel)
+        self.act("A", "ignite", hearth["id"], self.item("A", "打火石")["id"])
+        self.route_to("B", 4, 2)
+        wet, air, bottle = (self.item("B", n)["id"] for n in ("木柴", "干布", "水壶"))
+        self.act("B", "drop", item=wet)
+        self.act("B", "pour", wet, bottle, 5)
+        self.route_to("B", 2, 2)
+        self.act("B", "drop", item=air)
+        self.act("B", "pour", air, bottle, 5)
+        self.ticks(1)
+        self.assertLess(self.entity(wet)["state"]["wetness"], self.entity(air)["state"]["wetness"])
+        self.assertFalse(self.entity(wet)["state"]["burning"])
+        self.assertEqual(self.entity(hearth["id"])["state"]["hearth_fuel"], 38)
+        with self.assertRaises(RuleViolation):
+            self.act("A", "dismantle", hearth["id"])
+        self.act("A", "pour", hearth["id"], self.item("A", "水壶")["id"], 5)
+        self.assertFalse(self.entity(hearth["id"])["state"]["lit"])
+        self.act("A", "dismantle", hearth["id"])
+        self.assertNotIn(fuel, [e["id"] for e in self.view()["inventory"]])
 
 
 if __name__ == "__main__":
