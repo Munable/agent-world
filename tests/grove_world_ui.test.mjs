@@ -18,6 +18,10 @@ assert.ok(ui.entitySummary(first).includes('绑定在物件上'));
 assert.ok(ui.simulationStats(first).some(([label,value])=>label==='承载上限'&&value===48));
 
 // Values are displayed from the server; appearance text never loads an asset.
+const partialReaction=ui.reactionObservationLines({reaction_observations:[{rule_id:'expand',
+  blockers:[],inputs:[],capacity_limited:true,isolated_extent:2}]},{});
+assert.ok(partialReaction.some(line=>line.includes('仍可支持 2 份反应')));
+assert.ok(!partialReaction.some(line=>line.includes('容量不满足')));
 assert.deepEqual(ui.safePresentation({presentation:{shape:'<script>',color:'url(secret)',glyph:'<img src=x>'}}),
   {shape:'part',color:'#aaac8c',glyph:'◆',size:1});
 assert.deepEqual(ui.matterLots({matter:{lots:first.matter}}),[]);

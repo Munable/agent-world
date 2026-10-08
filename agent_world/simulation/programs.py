@@ -258,17 +258,18 @@ def _effects(effects, fields, params, materials, path, object_ids):
     return result
 
 
-def compile_program(definition):
+def compile_program(definition, *, imported_materials=None):
     """Return a validated canonical deep copy; invalid declarations raise ValueError."""
-    _mapping(definition, "program", {"key", "name", "version", "materials", "types"}, {"key", "name", "version", "types"})
+    _mapping(definition, "program", {"key", "name", "version", "materials", "material_imports", "types"}, {"key", "name", "version", "types"})
     result = {"key": _text(definition["key"], "program.key", 80, _KEY),
               "name": _text(definition["name"], "program.name"),
               "version": _integer(definition["version"], "program.version", 1, MAX_INTEGER),
               "materials": {}, "types": {}}
     object_ids = set()
     declared = _mapping(definition.get("materials", {}), "program.materials")
-    if len(declared) > 4:
-        _fail("program.materials", "at most 4 materials are allowed")
+    imports = _mapping(definition.get("material_imports", {}), "program.material_imports")
+    if len(declared) + len(imports) > 4:
+        _fail("program.materials", "at most 4 local and imported materials combined are allowed")
     materials = deepcopy(BASE_MATERIALS)
     for symbol, spec in declared.items():
         at = "program.materials." + symbol
@@ -289,6 +290,32 @@ def compile_program(definition):
             _fail(at + ".load_per_u", "must equal feedstock load_per_u for a mass-conserving one-to-one conversion")
         result["materials"][symbol] = canonical
         materials[symbol] = canonical
+    if imports:
+        result["material_imports"] = {}
+        references = set()
+        for symbol, binding in imports.items():
+            at = "program.material_imports." + symbol
+            _text(symbol, at, 48, _SYMBOL)
+            if symbol in materials:
+                _fail(at, "import aliases cannot replace built-in or local materials")
+            _mapping(binding, at, {"definition_ref", "symbol"}, {"definition_ref", "symbol"})
+            reference = _text(binding["definition_ref"], at + ".definition_ref", 128)
+            source_symbol = _text(binding["symbol"], at + ".symbol", 48, _SYMBOL)
+            identity = reference + "#" + source_symbol
+            if identity in references:
+                _fail(at, "one immutable material identity cannot have multiple aliases in a program")
+            references.add(identity)
+            if imported_materials is None or symbol not in imported_materials:
+                _fail(at, "requires an existing immutable published material reference")
+            source = imported_materials[symbol]
+            _mapping(source, at + ".resolved", {"name", "feedstock", "load_per_u", "combustible", "liquid"},
+                     {"name", "load_per_u", "combustible", "liquid"})
+            physical = {"name": _text(source["name"], at + ".resolved.name", 80),
+                        "load_per_u": _integer(source["load_per_u"], at + ".resolved.load_per_u", 1, 8),
+                        "combustible": _boolean(source["combustible"], at + ".resolved.combustible"),
+                        "liquid": _boolean(source["liquid"], at + ".resolved.liquid")}
+            result["material_imports"][symbol] = {"definition_ref": reference, "symbol": source_symbol}
+            materials[symbol] = physical
     types = _mapping(definition["types"], "program.types")
     if not 1 <= len(types) <= 8:
         _fail("program.types", "must contain from 1 to 8 types")

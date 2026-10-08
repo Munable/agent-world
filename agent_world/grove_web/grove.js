@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices} from './grove-world-ui.js?v=action-material-semantics';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,reactionObservationLines} from './grove-world-ui.js?v=current-rule-observations';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -40,7 +40,7 @@ function messageNode(text){
 }
 function button(text,handler,{disabled=false,secondary=false}={}){const el=node('button',text,secondary?'secondary':'');el.type='button';el.disabled=disabled;el.addEventListener('click',()=>handler());return el;}
 function announce(text,error=false){const el=$(error?'error':'notice');el.textContent=text;el.hidden=!text;if(!error&&text)setTimeout(()=>{if(el.textContent===text)el.hidden=true;},6500);}
-function fail(error){if(error.cancelled)return;announce(error.message||String(error),true);if(error.status===401||error.status===403){client.token=null;held=null;walkPath=[];$('reconnect-world').hidden=false;$('world-status').textContent='网页需要重连';$('movement-feedback').textContent='授权失效：同钥重连后继续。';}renderPending();}
+function fail(error){if(error.cancelled)return;const message=['Failed to fetch','Load failed','NetworkError when attempting to fetch resource.'].includes(error.message)?(client.pending()?'连接中断。重连后先核对原操作结果。':'连接中断，请检查连接后重试。'):error.message||String(error);announce(message,true);if(error.status===401||error.status===403){client.token=null;held=null;walkPath=[];$('reconnect-world').hidden=false;$('world-status').textContent='网页需要重连';$('movement-feedback').textContent='授权失效：同钥重连后继续。';}renderPending();}
 function run(fn){return Promise.resolve().then(fn).catch(fail);}
 const current=()=>identity&&client.token;
 const point=()=>world?.player;
@@ -89,7 +89,7 @@ async function enter(){
       if(epoch!==session)return;
     }
     renderHost();scheduleHost(350);
-  }catch(error){if(epoch===session){entering=false;$('enter').disabled=false;$('entry-cancel').hidden=true;fail(error);}}
+  }catch(error){if(epoch===session){entering=false;$('enter').disabled=false;$('entry-cancel').hidden=true;$('entry-progress').replaceChildren(node('p','连接未完成，请重试。'));fail(error);}}
 }
 async function showGame(epoch=session){
   if(epoch!==session||!current())return;
@@ -481,7 +481,7 @@ function renderMatter(entity){
 }
 function renderRelatedObjects(entity,disabled){
   const children=entity.relations?.children||[];
-  if(children.length){const section=node('section',undefined,'contents-list');section.append(node('h4','当前容纳与绑定 · '+children.length+' 件'));
+  if(children.length){const section=node('section',undefined,'contents-list');section.append(node('h4','当前完整子物件与绑定 · '+children.length+' 件'),node('p','这些物件保留自己的身份和材料；其本体不计入父物件的反应投料。','small'));
     for(const child of children){const row=node('div',undefined,'contents-row');row.append(node('span',child.name||child.id),node('small',child.relation==='attached'?'绑定部件':child.relation==='contained'?'容纳物件':String(child.relation||'')),button('查看',()=>run(()=>select(child.id)),{disabled,secondary:true}));section.append(row);}$('selection-content').append(section);}
   const links=entity.process_refs||[],references=new Set(links.map(reference=>typeof reference==='string'?reference:reference.id)),processes=(world?.processes||[]).filter(process=>references.has(process.id)||process.entity_id===entity.id||(process.participants||[]).includes(entity.id));
   if(processes.length||links.length){const section=node('section',undefined,'process-list');section.append(node('h4','实际过程与保存的引用'));
@@ -506,7 +506,9 @@ function appendFacts(parent,value,depth=0,scope='facts',path=[]){
 function renderCreative(entity,previous=false){
   const creative=creativeState(previous?null:inspection,entity);if(!creative)return;
   const section=node('section',undefined,'creative-state');section.append(node('h4',previous?'规则对象 · 上次已读状态':'规则对象 · 当前事实'),node('p','规则字段、组分、连接与记录来自服务器。逻辑步不是现实经过的秒数，叙述不决定结果。','small'));
-  appendFacts(section,creative,0,entity.id);
+  for(const line of reactionObservationLines(creative,entity))section.append(node('p',line,'small'));
+  const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated'].includes(key)));
+  appendFacts(section,expanded,0,entity.id);
   if(creative.hidden===true)section.append(node('p','这个公共容器已合上。当前只读到规则引用，内部配料、运行与记录未公开。','small'));
   const ref=creative.definition_ref;
   if(ref&&typeof ref==='string'){
@@ -525,9 +527,10 @@ async function readRuleDefinition(ref,id){
 }
 function renderRuleAction(descriptor,entity,disabled){
   const label=descriptorLabel(descriptor);
-  if(descriptor.available===false){$('selection-actions').append(node('p',label+'：'+(descriptor.reason||'当前条件不满足。'),'action-reason'));return;}
+  if(descriptor.available===false){$('selection-actions').append(node('p',label+'：'+(descriptor.reason||'当前条件不满足。'),'action-reason'));for(const line of conditionObservationLines(descriptor.condition_observation,entity))$('selection-actions').append(node('p',line,'small'));return;}
   const form=node('form',undefined,'descriptor-action rule-action');form.dataset.action=descriptor.action;form.dataset.entityId=entity.id;form.append(node('p',label,'descriptor-label'));
   if(descriptor.use)form.append(node('p',descriptor.use,'small'));
+  for(const line of conditionObservationLines(descriptor.condition_observation,entity))form.append(node('p',line,'small'));
   const fields=[],unsupported=[],fixed=descriptor.arguments||{},topSchema=descriptor.input_schema||{type:'object',properties:{},required:[]};
   const candidateKeys={item_id:'items',other_id:'others',material:'materials'};
   const generatedFields=new Set(['action','target_id','expected_target_version','expected_player_version','expected_item_version','expected_other_version','params','delegation']);
@@ -730,7 +733,7 @@ function renderPublicContent(){
   for(const anchor of anchors){const entity=anchor.entity,row=node('div',undefined,'content-anchor');row.append(button(entity?.name||anchor.entity_id,()=>run(()=>select(anchor.entity_id)),{secondary:true}),node('p',entity?stateLine(entity):'当前状态需查看物件','small'),node('small','原对象 '+anchor.entity_id+' · 版本 '+(entity?.version??anchor.version),'fact-reference'));anchorSection.append(row);}
   if(!anchors.length)anchorSection.append(node('p','当前页没有可见对象。','small'));list.append(anchorSection);
   if(content.anchors_truncated)list.append(node('p','这里仅列部分获准读取的公共对象。其他对象仍可从地图或记录中选择查看。','small'));
-  const contributionSection=node('section',undefined,'content-section');contributionSection.append(node('h4',(page?'历史页 · ':'当前页 · ')+'主持留下的贡献'));
+  const contributionSection=node('section',undefined,'content-section');contributionSection.append(node('h4',(page?'历史页 · ':'当前页 · ')+'作者留下的贡献'));
   for(const contribution of contributions){const row=node('article',undefined,'content-contribution');row.append(node('strong',authorLabel(contribution.author)+' · '+contribution.id),node('p','发表时的说明：'+(contribution.description||'未附说明'),'small'));
     const basedOn=contribution.based_on;if(basedOn){const refs=Array.isArray(basedOn)?basedOn.map(ref=>typeof ref==='string'?ref:ref.id||ref.entity_id||JSON.stringify(ref)):typeof basedOn==='object'?Object.entries(basedOn).map(([key,value])=>key+': '+(Array.isArray(value)?value.join('、'):String(value))):[String(basedOn)];row.append(node('p','承接来源：'+refs.join(' · '),'fact-reference'));}
     for(const id of contribution.entity_ids||[])row.append(button('查看对象 '+(entityById(id)?.name||id),()=>run(()=>select(id)),{secondary:true}));contributionSection.append(row);}
@@ -861,7 +864,15 @@ window.addEventListener('keydown',event=>{if(event.key==='Escape'){stopWalking()
 window.addEventListener('keyup',event=>{const released=event.key.length===1?event.key.toLowerCase():event.key;if(held===released){held=null;clearTimeout(walkTimer);}});window.addEventListener('blur',stopWalking);
 for(const el of document.querySelectorAll('[data-direction]'))el.addEventListener('click',()=>{stopWalking();if(point())run(()=>move(...el.dataset.direction.split(',').map(Number)));});
 $('entry-form').addEventListener('submit',event=>{event.preventDefault();run(enter);});$('entry-cancel').addEventListener('click',()=>run(cancelEntry));
-$('import-key').addEventListener('change',event=>run(async()=>{const file=event.target.files?.[0];if(!file)return;if(file.size>16384)throw new Error('恢复文件过大，请选择原身份 JSON 文件。');importedKey=await validateKey(JSON.parse(await file.text()));key=importedKey;$('identity-status').textContent='已选中恢复身份。进入后会保存它并接续原角色。';event.target.value='';}));
+$('import-key').addEventListener('change',event=>run(async()=>{
+  const input=event.target,file=input.files?.[0];if(!file)return;
+  try{
+    if(file.size>16384)throw new Error('恢复文件过大，请选择原身份 JSON 文件。');
+    const restored=await validateKey(JSON.parse(await file.text()));
+    importedKey=restored;key=restored;$('error').hidden=true;
+    $('identity-status').textContent='已选中恢复身份。进入后会保存它并接续原角色。';
+  }finally{input.value='';}
+}));
 $('refresh').addEventListener('click',()=>run(async()=>{stopWalking();const epoch=session;await refreshWorld(true);if(epoch===session&&playing)announce('已读取最新附近现场。');}));
 $('backup').addEventListener('click',()=>{if(!key)return;const blob=new Blob([JSON.stringify(key,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=node('a');a.href=url;a.download='shared-grove-identity.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);announce('恢复文件包含你的身份密钥，请保存在自己的安全位置。');});
 $('follow-player').addEventListener('click',()=>{if(point()){camera={x:point().x,y:point().y};canvas.focus({preventScroll:true});}});$('dismiss-onboarding').addEventListener('click',()=>{$('onboarding').hidden=true;});

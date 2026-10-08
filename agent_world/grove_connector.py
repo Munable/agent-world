@@ -143,7 +143,7 @@ EXECUTION_INSTRUCTIONS = (
     "available resources and use the declared rule actions. Publishing a "
     "definition does not spawn an object or accomplish the goal. Do not infer "
     "capabilities or action params from names; use the live catalog. "
-    "Perform one write at a time with current target/player/item/other versions. "
+    "Perform one write at a time, referencing the returned observation_id; the connector binds its fixed snapshot versions. "
     "Use the exact applicable selected_inspection or inspect preview before "
     "store/attach. A refused, unknown, overloaded or unsafe preview is not "
     "permission to proceed; inspect current facts and choose a safe alternative. "
@@ -333,15 +333,46 @@ def _companion_public_content_index(public):
     return index
 
 
+def _companion_scene_index(scene):
+    """An authorized discovery index; detailed physics remains an explicit read."""
+    if not isinstance(scene, dict):
+        return scene
+    index = {key: deepcopy(scene[key]) for key in (
+        "player", "players", "nearby_players", "clock", "bounds", "inventory_total",
+        "inventory_next", "truncated", "region_entity_count") if key in scene}
+    for field in ("entities", "inventory", "nearby_entities", "resource_nodes", "water_sources"):
+        if isinstance(scene.get(field), list):
+            index[field] = [{key: deepcopy(entity[key]) for key in (
+                "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
+                "entity_ref") if key in entity} if isinstance(entity, dict) else entity
+                for entity in scene[field]]
+    if "public_content" in scene:
+        index["public_content"] = _companion_public_content_index(scene["public_content"])
+    index["projection"] = {
+        "scope": "authorized_scene_index",
+        "meaning": "Actual identity/version/location index, not complete state or an action preview. "
+                   "Omitted matter, conditions and history are not absent. Read grove_inspect(entity_id) "
+                   "for current physics/actions; grove_content_history(content_id) for history; "
+                   "map_viewport for the current scene. Do not infer quantities or success from this index."}
+    return index
+
+
 def companion_projection(function: str, payload: dict) -> dict:
     """Compact an authorized tool response without inventing terrain or authority."""
-    if function not in {"map.viewport", "grove.generation_context", "grove.inspect", "grove.handbook"} | AGENT_WRITE_FUNCTIONS:
+    if function not in {"map.viewport", "grove.generation_context", "grove.inspect", "grove.handbook", "grove.rule_catalog"} | AGENT_WRITE_FUNCTIONS:
         return payload
     result = deepcopy(payload)
     value = result.get("result", result)
     if not isinstance(value, dict):
         return result
-    if function in {"map.viewport", "grove.inspect"} and "public_content" in value:
+    if function == "grove.rule_catalog":
+        value["definitions"] = [{key: deepcopy(row[key]) for key in
+            ("definition_ref", "author", "key", "version") if key in row} |
+            {"type_ids": list(row.get("types", {}))} for row in value.get("definitions", [])]
+        value["definitions_projection"] = "Immutable definition discovery index. Read grove_definition_read(definition_ref) " \
+            "for selected types, costs, materials and rules; omitted details are not absent."
+        return result
+    if function in {"map.viewport", "grove.inspect"} | AGENT_WRITE_FUNCTIONS and "public_content" in value:
         value["public_content"] = _companion_public_content_index(value["public_content"])
     if function == "grove.handbook":
         # Entry needs the real choices and consequences, not repeated full
@@ -462,10 +493,13 @@ def companion_projection(function: str, payload: dict) -> dict:
             if isinstance(scene.get(field), list):
                 scene[field] = [compact_entity(entity) for entity in scene[field]]
         return scene
-    def compact_execution_readback():
+    def compact_execution_readback(*, index=False):
         readback = result.get("execution_readback")
         if isinstance(readback, dict):
-            result["execution_readback"] = compact_scene(readback)
+            readback = compact_scene(readback)
+            if index:
+                readback = _companion_scene_index(readback)
+            result["execution_readback"] = readback
             # The receipt still describes the committed operation. Later fresh
             # readback is the one current scene; equal nested fields need no copy.
             viewport = value.get("viewport")
@@ -478,8 +512,9 @@ def companion_projection(function: str, payload: dict) -> dict:
                 if references:
                     viewport["field_references"] = references
                     viewport["projection_scope"] = (
-                        "Committed operation viewport; identical fields reference the later execution_readback "
-                        "current scene. Differing operation-time facts remain here.")
+                        "Committed operation viewport projection; identical returned fields reference the later "
+                        "execution_readback projection. Differing operation-time facts remain here. "
+                        "Referenced scene indexes omit full state and action previews.")
             public = value.get("public_facts")
             if isinstance(public, dict) and isinstance(public.get("entities"), list):
                 current = readback.get("entities", [])
@@ -489,17 +524,18 @@ def companion_projection(function: str, payload: dict) -> dict:
                     if match is not None and isinstance(entity, dict):
                         public["entities"][index] = {"id": entity.get("id"), "version": entity.get("version"),
                             "entity_ref": "#/execution_readback/entities/" + str(match)}
-                public["readback_projection"] = "Only exactly equal snapshots reference execution_readback; " \
-                    "different state/version remains in this operation's public_facts. References are relative to the full tool response."
+                public["readback_projection"] = "Only exactly equal returned records reference execution_readback; " \
+                    "different state/version remains in this operation's public_facts. References are relative to the full tool response. " \
+                    "Referenced indexes do not contain full entity state."
     if function in AGENT_WRITE_FUNCTIONS and function != "grove.generation_context":
         viewport = value.get("viewport")
         if isinstance(viewport, dict):
-            value["viewport"] = companion_projection("map.viewport", viewport)
+            value["viewport"] = _companion_scene_index(companion_projection("map.viewport", viewport))
         if isinstance(value.get("entity"), dict):
             value["entity"] = compact_entity(value["entity"])
         if isinstance(value.get("entities"), list):
             value["entities"] = [compact_entity(entity) for entity in value["entities"]]
-        compact_execution_readback()
+        compact_execution_readback(index=True)
         return result
     compact_scene(value)
     facts = value.get("public_facts")
@@ -595,12 +631,125 @@ def companion_projection(function: str, payload: dict) -> dict:
     value["chunk_size"] = 16
     if function in AGENT_WRITE_FUNCTIONS:
         compact_execution_readback()
+    if function == "grove.generation_context":
+        if "public_content" in value:
+            public = value["public_content"]
+            value["public_content"] = ({key: deepcopy(public[key]) for key in
+                ("id", "region", "version", "history", "anchors_truncated", "anchor_index_limit") if key in public} |
+                {"projection": "Regional content reference only. Fixed continuation anchors remain complete in "
+                               "opportunity.continuation_basis; read map_viewport for discovery, "
+                               "grove_inspect for selected entities and grove_content_history for history."}) if isinstance(public, dict) else public
+        if "public_facts" in value:
+            value["public_facts"] = {"projection": "The expanded regional/nearby scene is deferred. "
+                "Read map_viewport and grove_inspect for it; omitted entities/state are not absent. "
+                "Admission uses the resource_stock, returned actual allowed_tiles, budgets, preconditions "
+                "and fixed opportunity in this response."}
+        compatible = value.get("compatible_parts")
+        sampled = [item.get("composition") for item in value.get("catalog", {}).get("compositions", [])]
+        if isinstance(compatible, list):
+            value["compatible_parts"] = [{**item, "compositions": [spec for spec in item.get("compositions", []) if spec in sampled]}
+                for item in compatible if any(spec in sampled for spec in item.get("compositions", []))]
+            value["compatible_parts_projection"] = "Actual compatible choices for the explicitly sampled catalog only. " \
+                "Other choices are unexpanded, not incompatible. Published programs use their immutable definition_ref/type_id."
+        opportunity = value.get("opportunity", {})
+        if "continuation" in value and value["continuation"] == opportunity.get("continuation_basis"):
+            value["continuation"] = {"field_reference": "#/result/opportunity/continuation_basis" if value is not result
+                                      else "#/opportunity/continuation_basis"}
+        # Complete admission facts precede optional catalogs and discovery.
+        priority = ("player", "opportunity", "claimed", "availability", "preconditions", "resource_stock",
+                    "budget_remaining", "submission_limits", "allowed_kinds", "allowed_tiles", "allowed_tiles_total",
+                    "lease_seconds", "continuation", "custom_program_instantiation", "compatible_parts")
+        ordered = {key: value[key] for key in priority if key in value}
+        ordered.update({key: val for key, val in value.items() if key not in ordered})
+        if value is result:
+            result = ordered
+        else:
+            result["result"] = ordered
+        if "execution_readback" in result:
+            readback = result["execution_readback"]
+            result["execution_readback"] = _companion_scene_index({key: readback[key]
+                for key in ("player", "clock") if key in readback})
+            result["execution_readback"]["projection"]["scope"] = "post_claim_actor_and_clock"
     return result
 
 
+def _agent_tool_text(payload):
+    """Lossless JSON without deep indentation or oversized single lines."""
+    def render(value, depth=0):
+        compact = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        if not isinstance(value, (dict, list)) or not value or depth >= 2 and len(compact.encode()) <= 4096:
+            return compact
+        if isinstance(value, dict):
+            return "{\n" + ",\n".join(json.dumps(key, ensure_ascii=False) + ":" + render(item, depth+1)
+                                      for key, item in value.items()) + "\n}"
+        return "[\n" + ",\n".join(render(item, depth+1) for item in value) + "\n]"
+    return render(payload)
+
+
+def _agent_version_field(name):
+    match = re.fullmatch(r"expected_(.+)_version", name)
+    return match.group(1) if match else "anchor" if name == "observed_anchor_version" else None
+
+
+def agent_tool_schema(schema):
+    """Hide only optimistic snapshot guards from this connector's MCP input."""
+    result = deepcopy(schema)
+
+    def visit(value, path=()):
+        if not isinstance(value, dict):
+            return
+        guarded = path in {(), ("continuation",)}
+        properties = value.get("properties", {})
+        for key in list(properties):
+            if guarded and _agent_version_field(key):
+                properties.pop(key)
+            else:
+                visit(properties[key], (*path, key))
+        if guarded and isinstance(value.get("required"), list):
+            value["required"] = [key for key in value["required"] if not _agent_version_field(key)]
+        for branch in ("oneOf", "anyOf", "allOf"):
+            for child in value.get(branch, []):
+                visit(child, path)
+        visit(value.get("items"), (*path, "[]"))
+
+    # Published definitions and author action params are semantic inputs, even
+    # when an author gives a parameter a name resembling a snapshot guard.
+    visit(result)
+    return result
+
+
+def public_world_error_details(value):
+    """Allow only the world's observable action facts, never upstream diagnostics."""
+    if not isinstance(value, dict):
+        return None
+    source = value.get("action_precondition")
+    if not isinstance(source, dict):
+        return None
+    safe = {}
+    for key in ("subject", "entity_id", "condition", "metric", "reason"):
+        if isinstance(source.get(key), str) and len(source[key]) <= 180:
+            safe[key] = source[key]
+    for key in ("known", "satisfied"):
+        if type(source.get(key)) is bool:
+            safe[key] = source[key]
+    for key in ("required_max", "actual_distance"):
+        if type(source.get(key)) is int and 0 <= source[key] <= 1_000_000:
+            safe[key] = source[key]
+    if safe.get("known") is True:
+        for key in ("location", "player_location"):
+            location = source.get(key)
+            if (isinstance(location, dict) and set(location) == {"x", "y"} and
+                    all(type(location[axis]) is int and abs(location[axis]) <= 1_000_000 for axis in ("x", "y"))):
+                safe[key] = dict(location)
+    else:
+        safe.pop("actual_distance", None)
+    return {"action_precondition": safe} if safe else None
+
+
 class ConnectorError(Exception):
-    def __init__(self, code: str, message: str, status: int = 400):
+    def __init__(self, code: str, message: str, status: int = 400, *, world_details=None):
         self.code, self.message, self.status = code, message, status
+        self.world_details = public_world_error_details(world_details)
         super().__init__(message)
 
 
@@ -715,6 +864,11 @@ class GroveSession:
         self.progress: list[dict] = []
         self.initialization: list[dict] = []
         self.catalog: dict[str, dict] = {}
+        # Immutable, opaque model observations are deliberately not persisted.
+        # Independent MCP requests have no reliable inference-batch boundary.
+        self._agent_observations = {}
+        self._agent_preflight_observation_id = None
+        self._agent_observation_sequence = 0
         self.available_models: list[str] = []
         self.model_metadata: dict = {}
         self.unknown: list[dict] = []
@@ -727,6 +881,10 @@ class GroveSession:
             try:
                 saved = json.loads(self.memory_file.read_text())
                 if saved.get("role_id") == self.role_id:
+                    sequence = saved.get("agent_observation_sequence", 0)
+                    if type(sequence) is not int or sequence < 0:
+                        raise ValueError("invalid observation sequence")
+                    self._agent_observation_sequence = sequence
                     self.model = checked_model(saved.get("model") or self.model)
                     self.session_id = saved.get("session_id", "")
                     self.blueprint_session_id = saved.get("blueprint_session_id", "")
@@ -789,6 +947,7 @@ class GroveSession:
 
     def remember(self):
         save_json(self.memory_file, {"role_id": self.role_id, "session_id": self.session_id,
+            "agent_observation_sequence": self._agent_observation_sequence,
             "blueprint_session_id": self.blueprint_session_id,
             "blueprint_opportunity_id": self.blueprint_opportunity_id,
             "entered": self.entered, "world_read": self.world_read,
@@ -871,7 +1030,8 @@ class GroveSession:
             raise ConnectorError("WorldUnavailable", "World service returned an invalid response.", 502)
         if response.status_code >= 400:
             raise ConnectorError(str(payload.get("error", "WorldError")),
-                str(payload.get("message", "World request failed."))[:400], response.status_code)
+                str(payload.get("message", "World request failed."))[:400], response.status_code,
+                world_details=payload.get("details"))
         if not response.is_success:
             raise ConnectorError("WorldRedirectRefused", "World redirects are not accepted.", 502)
         return payload
@@ -1812,6 +1972,7 @@ class GroveSession:
                 facts["execution_task"]["confirmed_receipts"] = [deepcopy(item) for item in
                     self.execution["receipts"] if item.get("status") == "confirmed"][-8:]
                 self.execution.update(readback=deepcopy(facts), readback_actual=True)
+            facts = self.present_agent_result("map.viewport", facts, preflight=True)
             parts.append({"type": "text", "text": CURRENT_FACTS_INSTRUCTIONS + "\n" +
                           json.dumps(facts, ensure_ascii=False, separators=(",", ":"))})
         parts.append({"type": "text", "text": PRIVATE_CONTEXT_INSTRUCTIONS + "\n" +
@@ -2791,9 +2952,168 @@ class GroveSession:
                     self.process.kill()
                 await self.process.wait()
 
+    def agent_observation(self, observation_id):
+        if not isinstance(observation_id, str) or observation_id not in self._agent_observations:
+            raise ConnectorError("ObservationRequired", "请先读取世界并引用返回的observation_id；当前观察标识未知或已因服务重启失效。", 409)
+        return deepcopy(self._agent_observations[observation_id])
+
+    def present_agent_result(self, function, payload, *, base_id=None, preflight=False):
+        """Create a new fixed bundle solely from this presented response.
+
+        No invoke/UI/recovery path calls this. Another parallel tool's unseen
+        response cannot alter the bundle selected by an already submitted write.
+        """
+        result = deepcopy(companion_projection(function, payload))
+        bundle = (self.agent_observation(base_id) if base_id is not None else
+                  {"versions": {kind: {} for kind in ("player", "entity", "opportunity", "content")},
+                   "continuation_bases": {}})
+
+        def remember(kind, value, id_key="id", version_key="version"):
+            if isinstance(value, dict) and isinstance(value.get(id_key), str) and type(value.get(version_key)) is int and value[version_key] > 0:
+                bundle["versions"][kind][value[id_key]] = value[version_key]
+
+        def rows(value):
+            return value if isinstance(value, list) else []
+
+        def options(values):
+            for option in values if isinstance(values, list) else []:
+                if not isinstance(option, dict):
+                    continue
+                # These are current server-generated choices, not authored
+                # descriptions, program fields, schemas or historical receipts.
+                inputs = option.get("input", {})
+                candidates = rows(inputs.get("candidates")) if isinstance(inputs, dict) else []
+                choices = option.get("choices", {})
+                if isinstance(choices, dict):
+                    candidates = [*candidates, *rows(choices.get("items")), *rows(choices.get("others"))]
+                for candidate in candidates:
+                    if isinstance(candidate, dict):
+                        remember("player" if candidate.get("kind") == "role" else "entity", candidate)
+                if isinstance(option.get("input_schema"), dict):
+                    option["input_schema"] = agent_tool_schema(option["input_schema"])
+                if isinstance(option.get("arguments"), dict):
+                    option["arguments"] = {key: value for key, value in option["arguments"].items()
+                                           if not _agent_version_field(key)}
+
+        def entity(value):
+            if isinstance(value, dict):
+                remember("entity", value)
+                options(value.get("action_options"))
+
+        def content(value):
+            if isinstance(value, list):
+                for item in value:
+                    content(item)
+            elif isinstance(value, dict):
+                remember("content", value)
+                for anchor in rows(value.get("anchors")):
+                    remember("entity", anchor, "entity_id")
+                    if isinstance(anchor, dict):
+                        entity(anchor.get("entity"))
+
+        def scene(value):
+            if not isinstance(value, dict):
+                return
+            # Regional indexes precede direct snapshots; operation snapshots
+            # precede viewport, selected inspection and final execution readback.
+            # This ordering uses their actual sources, never the largest number.
+            content(value.get("public_content"))
+            content(value.get("public_contents"))
+            scene(value.get("public_facts"))
+            remember("player", value.get("player"))
+            for key in ("players", "nearby_players"):
+                for item in rows(value.get(key)):
+                    remember("player", item)
+            for key in ("entities", "inventory", "contents", "nearby_entities", "resource_nodes", "water_sources"):
+                for item in rows(value.get(key)):
+                    entity(item)
+            entity(value.get("entity"))
+            options(value.get("action_options"))
+            opportunities = list(rows(value.get("opportunities")))
+            if isinstance(value.get("opportunity"), dict):
+                opportunities.append(value["opportunity"])
+            for opportunity in opportunities:
+                remember("opportunity", opportunity)
+                if isinstance(opportunity, dict) and isinstance(opportunity.get("id"), str) and "continuation_basis" in opportunity:
+                    # The claimed opportunity's basis is immutable admission
+                    # evidence. Later live anchor reads cannot replace it.
+                    bundle["continuation_bases"][opportunity["id"]] = deepcopy(opportunity["continuation_basis"])
+            scene(value.get("viewport"))
+            scene(value.get("selected_inspection"))
+
+        scene(result.get("result", result))
+        scene(result.get("execution_readback"))
+        # Reserve before publication. The random tail keeps a parallel reader's
+        # next handle unpredictable; the durable sequence prevents restart reuse.
+        self._agent_observation_sequence += 1
+        self.remember()
+        observation_id = f"obs{self._agent_observation_sequence}-{secrets.token_hex(4)}"
+        self._agent_observations[observation_id] = bundle
+        result = {"observation_id": observation_id,
+                  **{key: result[key] for key in ("operation_id", "function_id", "ok", "commit_seq") if key in result},
+                  **result}
+        if preflight:
+            self._agent_preflight_observation_id = observation_id
+        return result
+
+    def bind_agent_versions(self, function, arguments, observation_id):
+        """Use an explicitly selected immutable observation; never query state."""
+        bundle = self.agent_observation(observation_id)
+        root = deepcopy(arguments)
+        versions = bundle["versions"]
+
+        def missing(subject, identity):
+            raise ConnectorError("ObservedVersionRequired", f"此观察中没有{subject} {identity or ''}的版本；请先读取该对象，并引用新返回的observation_id。", 409)
+
+        def fixed_basis(node, subject):
+            basis = bundle["continuation_bases"].get(root.get("opportunity_id"))
+            if not isinstance(basis, dict) or basis.get("content_id") != node.get("content_id"):
+                missing("创作机会固定的内容接续依据", root.get("opportunity_id"))
+            if subject == "content":
+                return basis.get("expected_content_version")
+            anchor = next((item for item in basis.get("anchors", [])
+                           if item.get("entity_id") == node.get("anchor_entity_id")), None)
+            if anchor is None:
+                missing("创作机会固定的锚点", node.get("anchor_entity_id"))
+            return anchor.get("observed_anchor_version")
+
+        def bind(schema, node, path=()):
+            if not isinstance(schema, dict) or not isinstance(node, dict):
+                return node
+            props = schema.get("properties", {})
+            for key, field in props.items():
+                subject = _agent_version_field(key) if path in {(), ("continuation",)} else None
+                if subject is None:
+                    if key in node and isinstance(node[key], dict):
+                        node[key] = bind(field, node[key], (*path, key))
+                    continue
+                node.pop(key, None)  # A copied model number is never authority.
+                if path == ("continuation",) and subject in {"content", "anchor"}:
+                    version = fixed_basis(node, subject)
+                else:
+                    identity = self.role_id if subject == "player" else node.get(subject + "_id")
+                    kind = subject if subject in {"player", "opportunity", "content"} else "entity"
+                    if function == "grove.interact":
+                        if subject == "target" or (subject == "item" and root.get("action") == "drop"):
+                            identity = root.get("target_id") or root.get("item_id")
+                    if function == "grove.rule_action" and subject == "other" and root.get("action") == "offer":
+                        kind = "player"
+                    if identity is None and key not in schema.get("required", []):
+                        continue
+                    version = versions[kind].get(identity) if isinstance(identity, str) else None
+                if type(version) is not int or version < 1:
+                    missing(subject, identity if path != ("continuation",) else node.get("anchor_entity_id", node.get("content_id")))
+                node[key] = version
+            return node
+
+        return bind(self.catalog[function]["input_schema"], root)
+
     def tools(self):
         result = [{"name": "world_bootstrap", "description": "Read authenticated entry facts of this world.",
-                   "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}]
+                   "inputSchema": {"type": "object", "properties": {"base_observation_id": {
+                       "type": "string", "minLength": 1, "maxLength": 100,
+                       "description": "Optional fixed observation to extend; omitted uses this request's preflight."}},
+                       "additionalProperties": False}}]
         result.append({"name": "execution_checkpoint",
             "description": "Finish this bounded execution segment. Report observed progress and next intention, "
                 "or report the granted goal complete only after real readback, referencing its confirmed operation IDs. "
@@ -2813,7 +3133,8 @@ class GroveSession:
             spec = self.catalog[function]
             if function in AGENT_READ_FUNCTIONS and spec.get("access") != "read":
                 continue
-            schema = deepcopy(spec["input_schema"])
+            schema = agent_tool_schema(spec["input_schema"])
+            description = spec.get("description", function)
             if function in AGENT_WRITE_FUNCTIONS:
                 schema.get("properties", {}).pop("delegation", None)
                 if "required" in schema:
@@ -2822,7 +3143,18 @@ class GroveSession:
                     "type": "string", "minLength": 1, "maxLength": 100,
                     "description": "Copy the current execution_task.segment_id exactly; stale requests cannot write."}
                 schema.setdefault("required", []).append("execution_segment_id")
-            result.append({"name": function.replace(".", "_"), "description": spec.get("description", function),
+                schema["properties"]["observation_id"] = {
+                    "type": "string", "minLength": 1, "maxLength": 100,
+                    "description": "Use the opaque ID returned with the exact observations you are acting on. "
+                                   "The connector supplies their fixed player/target/item/other and opportunity versions."}
+                schema["required"].append("observation_id")
+                description += " Snapshot guards are bound from observation_id; terms_version and combination fingerprints remain explicit."
+            else:
+                schema.setdefault("properties", {})["base_observation_id"] = {
+                    "type": "string", "minLength": 1, "maxLength": 100,
+                    "description": "Optional previous observation_id to extend with this read only. "
+                                   "Omitted uses the fixed request preflight, never another parallel read."}
+            result.append({"name": function.replace(".", "_"), "description": description,
                            "inputSchema": schema})
         return result
 
@@ -2837,13 +3169,17 @@ class GroveSession:
         if name == "execution_checkpoint":
             return await self.execution_checkpoint(arguments)
         if name == "world_bootstrap":
-            if arguments:
-                raise ConnectorError("InvalidArguments", "world_bootstrap takes no arguments.")
+            clean = deepcopy(arguments)
+            base_id = clean.pop("base_observation_id", self._agent_preflight_observation_id)
+            if base_id is not None:
+                self.agent_observation(base_id)
+            if clean:
+                raise ConnectorError("InvalidArguments", "world_bootstrap only accepts base_observation_id.")
             result = await self.world("GET", "/v1/bootstrap")
             self.world_read = True
             self.note("world_read", "伙伴已实际读取本人获准的世界事实")
             self.remember()
-            return result
+            return self.present_agent_result("world_bootstrap", result, base_id=base_id)
         mapping = {function.replace(".", "_"): function for function in
                    (AGENT_READ_FUNCTIONS | AGENT_WRITE_FUNCTIONS) & self.catalog.keys()}
         function = mapping.get(name)
@@ -2867,13 +3203,17 @@ class GroveSession:
                 return await self.execution_tool_write(function, clean, segment_id=segment_id)
         elif self.catalog[function].get("access") != "read":
             raise ConnectorError("ToolDenied", "The declared read tool is not read-only.", 403)
-        result = await self.invoke(function, arguments)
+        clean = deepcopy(arguments)
+        base_id = clean.pop("base_observation_id", self._agent_preflight_observation_id)
+        if base_id is not None:
+            self.agent_observation(base_id)
+        result = await self.invoke(function, clean)
         if self.catalog[function].get("access") == "read":
             self.world_read = True
         if function == "grove.control_status":
             self.update_execution_control(result.get("result", result))
         self.remember()
-        return companion_projection(function, result)
+        return self.present_agent_result(function, result, base_id=base_id)
 
     async def execution_tool_write(self, function: str, arguments: dict, *, segment_id: str | None = None):
         if (self.cancelled or not self.active_execution or not self.delegation or
@@ -2881,7 +3221,9 @@ class GroveSession:
             raise ConnectorError("DelegationRequired", "The person reclaimed control; stop writing.", 403)
         if not segment_id or segment_id != self.execution.get("segment_id"):
             raise ConnectorError("StaleExecutionSegment", "原请求已结束；迟到工具调用没有执行。", 409)
-        arguments = deepcopy(arguments) | {"delegation": self.delegation}
+        arguments = deepcopy(arguments)
+        observation_id = arguments.pop("observation_id", None)
+        arguments = self.bind_agent_versions(function, arguments, observation_id) | {"delegation": self.delegation}
         started = time.monotonic()
         try:
             result = await self.invoke(function, arguments, model_write=True)
@@ -2902,7 +3244,7 @@ class GroveSession:
         projection["execution_readback"] = facts
         projection["execution_control"] = {key: self.execution.get(key) for key in
             ("actions_count", "max_actions", "remaining_actions", "delegation_active", "grant_version")}
-        return companion_projection(function, projection)
+        return self.present_agent_result(function, projection, base_id=observation_id)
 
     async def execution_checkpoint(self, arguments: dict):
         schema = next(item["inputSchema"] for item in self.tools() if item["name"] == "execution_checkpoint")
@@ -3332,11 +3674,13 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
                 if not isinstance(params, dict) or not isinstance(params.get("arguments", {}), dict):
                     raise ConnectorError("InvalidArguments", "World tool arguments must be an object.")
                 value = await session.tool_call(str(params.get("name", "")), params.get("arguments", {}))
-                result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False, separators=(",", ":"))}],
+                result = {"content": [{"type": "text", "text": _agent_tool_text(value)}],
                           "structuredContent": value, "isError": False}
             except (ConnectorError, httpx.HTTPError) as exc:
                 error = {"error": exc.code, "message": exc.message} if isinstance(exc, ConnectorError) else {
                     "error": "UnknownWorldResult", "message": "World request disconnected. Stop; recover the original receipt before another write."}
+                if isinstance(exc, ConnectorError) and exc.world_details is not None:
+                    error["details"] = exc.world_details
                 result = {"content": [{"type": "text", "text": json.dumps(error)}], "structuredContent": error, "isError": True}
         else:
             return JSONResponse({"jsonrpc": "2.0", "id": request_id,

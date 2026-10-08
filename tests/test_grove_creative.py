@@ -1,15 +1,17 @@
 """Formal player publication/use paths, separate from real model/UI evidence."""
 from collections import deque
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from agent_world import WorldRuntime
+from agent_world import FunctionOutcome, FunctionSpec, WorldRuntime
 from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.worlds.shared_grove import make_world, model as m
 from agent_world.worlds.shared_grove import creative
+from agent_world.simulation.matter import encoded_size
 from agent_world.simulation.programs import solve_mechanical
 
 
@@ -179,6 +181,12 @@ class CreativeWorldTests(unittest.TestCase):
         quantities = creative._quantities(mixed)
         self.assertEqual(quantities, {"amber": 1, "blue": 3, "resin": 2})
         self.assertEqual(mixed["state"]["program"]["fields"]["temperature"], 4)
+        # Prove the actual reaction was recorded while it is in the retained
+        # window. Later unrelated actions may evict this older fact under the
+        # shared byte budget, without erasing the cumulative recorded count.
+        reaction_record = self.world.get_state("w", creative.RECORDS, objects["echo"])["value"]
+        self.assertTrue(any(event["action"] == "reaction" for event in reaction_record["history"]))
+        reaction_count = self.entity(objects["echo"])["state"]["program"]["recorder"]["recorded_count"]
         # Another identity takes actual product into its ordinary vessel, then
         # supplies a second published process using the same immutable material.
         self.approach("B", objects["mixer"])
@@ -224,7 +232,8 @@ class CreativeWorldTests(unittest.TestCase):
         with self.assertRaises(PermissionDenied):
             self.action("B", objects["pact"], "release", item_id=self.item("B", "水壶")["id"])
         record = self.action("A", objects["echo"], "read_records")["records"]
-        self.assertTrue(any(event["action"] == "reaction" for event in record["history"]))
+        self.assertGreaterEqual(self.entity(objects["echo"])["state"]["program"]["recorder"]["recorded_count"], reaction_count)
+        self.assertLessEqual(encoded_size(record), creative.MAX_RECORD_BYTES)
         self.assertEqual(record["reads"][-1]["actor"], self.roles["A"])
         self.assertTrue(all("recorded_tick" in event and "occurred_at" in event for event in record["history"]))
         self.approach("B", objects["echo"])
@@ -501,6 +510,337 @@ class CreativeWorldTests(unittest.TestCase):
         self.call('A', 'grove.move', {'dx': direction[0], 'dy': direction[1],
                                     'expected_player_version': self.view()['player']['version']})
         self.assertEqual(self.world.get_state('w', m.META, 'creative_events')['value']['sequence'], journal['value']['sequence']+1)
+
+
+    def test_capacity_limits_positive_reaction_without_reporting_a_blocker(self):
+        definition = {"key": "capacity-limited", "name": "有限容纳反应", "version": 1,
+            "materials": {"granules": {"name": "粒料", "feedstock": "water", "load_per_u": 2,
+                "liquid": False, "combustible": False}},
+            "types": {"reactor": {"name": "扩容反应器", "body_material": "stone",
+                "cost": {"stone": 1}, "container_capacity": 6,
+                "rules": [{"id": "expand", "phase": "reaction", "when": True,
+                    "effects": [{"op": "react", "inputs": {"granules": 1},
+                        "outputs": {"wood": 2}, "rate": 4}]}]}}}
+        _, objects = self.publish("A", definition, ["reactor"])
+        target = objects["reactor"]
+        self.action("A", target, "charge", material="granules", amount=4,
+                    item_id=self.item("A", "水壶")["id"])
+        observed = self.read("A", "grove.inspect", {"entity_id": target})["entity"]["creative"]
+        reaction = observed["reaction_observations"][0]
+        self.assertEqual(reaction["isolated_extent"], 2)
+        self.assertTrue(reaction["capacity_limited"])
+        self.assertEqual(reaction["blockers"], [])
+        self.ticks(1)
+        self.assertEqual(creative._quantities(self.entity(target)), {"granules": 2, "wood": 4})
+        blocked = self.read("A", "grove.inspect", {"entity_id": target})["entity"]["creative"]["reaction_observations"][0]
+        self.assertEqual(blocked["isolated_extent"], 0)
+        self.assertIn("capacity", blocked["blockers"])
+
+    def test_current_inputs_exclude_whole_children_and_mark_history(self):
+        _, objects = self.publish("A", package(), ["mixer"])
+        target = objects["mixer"]
+        wood = self.item("A", "木柴")["id"]
+        for symbol in ("amber", "blue"):
+            self.action("A", target, "charge", material=symbol, amount=1, item_id=wood)
+        self.interact("A", target, "store", item_id=wood)
+        observed = self.read("A", "grove.inspect", {"entity_id": target})
+        inputs = observed["entity"]["creative"]["reaction_inputs"]
+        self.assertEqual(inputs["quantities"], {"amber": 1, "blue": 1})
+        self.assertFalse(inputs["whole_children_are_inputs"])
+        self.assertEqual(observed["contents"][0]["id"], wood)
+        self.assertNotIn("materials", observed["entity"]["creative"])
+        self.ticks(1)
+        self.ticks(1)
+        current = self.read("A", "grove.inspect", {"entity_id": target})["entity"]["creative"]
+        self.assertEqual(current["reaction_inputs"]["quantities"], {"resin": 2})
+        self.assertEqual(current["process"]["status"], "waiting")
+        self.assertTrue(current["process"]["last_reaction"]["historical"])
+        self.assertFalse(current["process"]["last_reaction"]["current_production"])
+        reaction = current["reaction_observations"][0]
+        self.assertEqual(reaction["isolated_extent"], 0)
+        self.assertIn("insufficient_inputs", reaction["blockers"])
+        self.assertEqual([item["missing_for_one_extent"] for item in reaction["inputs"]], [1, 1])
+        public = next(item for item in self.view()["entities"] if item["id"] == target)
+        self.assertNotIn("reaction_observations", public["creative"])
+        self.interact("A", target, "close")
+        closed = self.read("B", "grove.inspect", {"entity_id": target})["entity"]
+        self.assertTrue(closed["creative"]["hidden"])
+        self.assertNotIn("reaction_inputs", closed["creative"])
+
+    def test_cross_author_material_identity_reaction_and_relocated_instance(self):
+        original = package()
+        ref, objects = self.publish("A", original, ["mixer"])
+        self.time.return_value += 31  # operational regional publication cooldown
+        self.world.run_due_timers("w")
+        importer = {"key": "finisher", "name": "另一人的加工", "version": 1,
+            "materials": {"coat": {"name": "绿树脂", "feedstock": "wood", "load_per_u": 1,
+                                    "liquid": True, "combustible": False}},
+            "material_imports": {"input": {"definition_ref": ref, "symbol": "resin"}},
+            "types": {"consumer": {"name": "独立加工器", "body_material": "stone", "cost": {"stone": 1},
+                "container_capacity": 20, "rules": [{"id": "finish", "phase": "reaction", "when": True,
+                    "effects": [{"op": "react", "inputs": {"input": 1}, "outputs": {"coat": 1}, "rate": 1}]}]}}}
+        other_ref, others = self.publish("B", importer, ["consumer"])
+        consumer = others["consumer"]
+        self.assertNotEqual(ref, other_ref)
+        self.assertEqual(self.entity(consumer)["state"]["program"]["material_aliases"], {"input": ref+"#resin"})
+        # Identical display names do not provide the imported substance.
+        self.action("B", consumer, "charge", material="coat", amount=2, item_id=self.item("B", "木柴")["id"])
+        self.ticks(1)
+        self.assertEqual(creative._quantities(self.entity(consumer)), {"coat": 2})
+        wood = self.item("A", "木柴")["id"]
+        self.action("A", objects["mixer"], "charge", material="amber", amount=1, item_id=wood)
+        self.action("A", objects["mixer"], "charge", material="blue", amount=2, item_id=wood)
+        self.ticks(1)
+        vessel = self.item("B", "水壶")["id"]
+        def transfer(symbol):
+            source = self.entity(objects["mixer"])
+            lot = next(lot for lot in source["matter"] if lot["material"] == ref+"#"+symbol)
+            self.approach("B", source["id"])
+            self.interact("B", vessel, "transfer", item_id=source["id"], lot_id=lot["id"], amount=1)
+            self.approach("B", consumer)
+            carried = next(lot for lot in self.entity(vessel)["matter"] if lot["material"] == ref+"#"+symbol)
+            self.interact("B", consumer, "transfer", item_id=vessel, lot_id=carried["id"], amount=1)
+        # A legitimate unreferenced material remains real ballast, not a rule error.
+        transfer("blue")
+        self.ticks(1)
+        self.assertNotEqual(self.entity(consumer)["state"]["program"]["process"]["status"], "error")
+        self.assertEqual(creative._quantities(self.entity(consumer)), {"coat": 2, ref+"#blue": 1})
+        transfer("resin")
+        inspected = self.read("B", "grove.inspect", {"entity_id": consumer})["entity"]["creative"]
+        self.assertEqual(inspected["reaction_observations"][0]["inputs"][0]["material_id"], ref+"#resin")
+        self.ticks(1)
+        self.assertEqual(creative._quantities(self.entity(consumer)), {"coat": 3, ref+"#blue": 1})
+        before = deepcopy(self.entity(consumer)["state"]["program"])
+        updated = deepcopy(original)
+        updated["version"] = 2
+        updated["materials"]["resin"]["name"] = "另一版树脂"
+        updated_ref = self.call("A", "grove.definition_publish", {"definition": updated})["definition_ref"]
+        self.assertNotEqual(ref, updated_ref)
+        self.assertEqual(self.entity(consumer)["state"]["program"], before)
+        self.interact("B", consumer, "pickup")
+        scene = self.view("B")
+        player = scene["player"]
+        tiles = {(chunk["cx"]*16+index%16, chunk["cy"]*16+index//16): tile
+                 for chunk in scene["chunks"] for index, tile in enumerate(chunk["tiles"])}
+        blocked = {(item["x"], item["y"]) for item in scene["entities"]
+                   if item.get("barrier_active") or "blocking" in item["capabilities"]}
+        destination = next((dx, dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                           if tiles.get((player["x"]+dx, player["y"]+dy), "rock") != "rock"
+                           and (player["x"]+dx, player["y"]+dy) not in blocked)
+        self.call("B", "grove.move", {"dx": destination[0], "dy": destination[1], "expected_player_version": player["version"]})
+        self.interact("B", consumer, "drop")
+        self.assertEqual(self.entity(consumer)["state"]["program"]["material_aliases"], {"input": ref+"#resin"})
+        self.time.return_value += 31  # publication lease only; no experience claim
+        self.world.run_due_timers("w")
+        _, rebuilt = self.publish("B", importer, ["consumer"])
+        self.assertEqual(self.entity(rebuilt["consumer"])["state"]["program"]["material_aliases"], {"input": ref+"#resin"})
+        self.world = WorldRuntime(self.db)
+        self.world.install_world("w", make_world())
+        self.assertEqual(creative._quantities(self.entity(consumer)), {"coat": 3, ref+"#blue": 1})
+
+    def test_transitive_import_pins_origin_and_duplicate_identity_is_rejected(self):
+        ref = self.call("A", "grove.definition_publish", {"definition": package()})["definition_ref"]
+        middle = {"key": "relay", "name": "中间定义", "version": 1,
+            "material_imports": {"shared": {"definition_ref": ref, "symbol": "resin"}},
+            "types": {"holder": {"name": "容器", "body_material": "stone", "cost": {"stone": 1}, "container_capacity": 8}}}
+        relay = self.call("B", "grove.definition_publish", {"definition": middle})["definition_ref"]
+        final = deepcopy(middle)
+        final["key"] = "final"
+        final["material_imports"] = {"x": {"definition_ref": relay, "symbol": "shared"}}
+        final_ref = self.call("A", "grove.definition_publish", {"definition": final})["definition_ref"]
+        pinned = self.read("B", "grove.definition_read", {"definition_ref": final_ref})["definition"]
+        self.assertEqual(pinned["material_imports"], {"x": {"definition_ref": ref, "symbol": "resin"}})
+        final["version"] = 2
+        final["material_imports"]["y"] = {"definition_ref": ref, "symbol": "resin"}
+        with self.assertRaisesRegex(RuleViolation, "multiple aliases"):
+            self.call("A", "grove.definition_publish", {"definition": final})
+        invalid = deepcopy(middle)
+        invalid["key"] = "bad_mass"
+        invalid["types"]["holder"]["rules"] = [{"id": "bad", "phase": "reaction", "when": True,
+            "effects": [{"op": "react", "inputs": {"shared": 1}, "outputs": {"stone": 1}, "rate": 1}]}]
+        with self.assertRaisesRegex(RuleViolation, "mass|load"):
+            self.call("B", "grove.definition_publish", {"definition": invalid})
+
+    def test_one_step_coalesces_event_and_recorder_writes_with_ordered_facts(self):
+        definition = package()
+        for kind in ("mixer", "polisher"):
+            definition["types"][kind]["recorder"] = {"radius": 8, "window_ticks": 100}
+        _, objects = self.publish("A", definition, ["mixer", "polisher", "echo"])
+        wood = self.item("A", "木柴")["id"]
+        for symbol in ("amber", "blue"):
+            self.action("A", objects["mixer"], "charge", material=symbol, amount=1, item_id=wood)
+        self.action("A", objects["polisher"], "charge", material="resin", amount=1, item_id=wood)
+        for eid in objects.values():
+            self.action("A", eid, "start_recording")
+        versions = {eid: self.world.get_state("w", creative.RECORDS, eid)["version"] for eid in objects.values()}
+        journal = self.world.get_state("w", m.META, "creative_events")
+        self.ticks(1)
+        current = self.world.get_state("w", m.META, "creative_events")
+        self.assertEqual(current["version"], journal["version"]+1)
+        # The public queue retains only unconsumed facts; recorders keep both
+        # actual ordered reactions even when no rule consumes that queue.
+        self.assertEqual(current["value"]["sequence"], journal["value"]["sequence"]+2)
+        for eid, previous in versions.items():
+            record = self.world.get_state("w", creative.RECORDS, eid)
+            self.assertEqual(record["version"], previous+1)
+            observed = [event for event in record["value"]["history"] if event["sequence"] > journal["value"]["sequence"]]
+            self.assertEqual({event["entity_id"] for event in observed}, {objects["mixer"], objects["polisher"]})
+            self.assertEqual([event["sequence"] for event in observed],
+                             [journal["value"]["sequence"]+1, journal["value"]["sequence"]+2])
+
+    def test_full_definition_and_recorder_capacity_keeps_committing(self):
+        # Controlled placement removes travel from this capacity regression.
+        # Publication still pays real regional stock through content_submit.
+        def visit(ctx, args):
+            m.ensure_chunk(ctx, args["cx"], args["cy"])
+            player = m.get_player(ctx)
+            player.update(x=args["cx"]*16+1, y=args["cy"]*16+1)
+            m.save_player(ctx, player)
+            return FunctionOutcome({})
+        world = make_world()
+        fixture = FunctionSpec("grove.fixture_visit", visit, {"type": "object", "additionalProperties": False,
+            "required": ["cx", "cy"], "properties": {"cx": {"type": "integer"}, "cy": {"type": "integer"}}}, access="write")
+        self.db = self.db.with_name("capacity.sqlite3")
+        self.world = WorldRuntime(self.db)
+        self.world.install_world("w", replace(world, functions=(*world.functions, fixture)))
+        self.roles = {name: self.world.create_role(name)["role_id"] for name in "AB"}
+        for name in self.roles:
+            self.call(name, "grove.join", {"name": name})
+        definitions = []
+        for index in range(32):
+            definition = {"key": "observer_"+str(index), "name": "独立记录定义", "version": 1,
+                "types": {"echo": {"name": "真实事件记录器", "body_material": "wood", "cost": {"wood": 1},
+                    "recorder": {"radius": 8, "window_ticks": 3600}}}}
+            definitions.append(self.call("A", "grove.definition_publish", {"definition": definition})["definition_ref"])
+        self.assertEqual(len(self.read("A", "grove.rule_catalog")["definitions"]), 32)
+        regions = [(0, 0)] + [(x, y) for y in range(-3, 4) for x in range(-3, 4)
+            if (x, y) != (0, 0) and m.chunk_landscape(x, y) == "willow_grove"][:3]
+        self.assertEqual(len(regions), 4)
+        ids = []
+        for cx, cy in regions:
+            self.call("A", "grove.fixture_visit", {"cx": cx, "cy": cy})
+            for _ in range(2):
+                self.time.return_value += 31  # Only the publication cooldown, not elapsed play evidence.
+                context = self.call("A", "grove.generation_context", {"kind": "layout", "reason": "user_request"})
+                opportunity = context["opportunity"]
+                specs = [{"definition_ref": definitions[len(ids)+i], "type_id": "echo", **tile}
+                         for i, tile in enumerate(context["allowed_tiles"][:4])]
+                result = self.call("A", "grove.content_submit", {"opportunity_id": opportunity["id"],
+                    "expected_opportunity_version": opportunity["version"], "content": {"kind": "layout", "objects": specs}})
+                ids.extend(entity["id"] for entity in result["entities"])
+        self.assertEqual(len(ids), 32)
+        # Histories originate from actual public actions. Reading repeatedly
+        # must remain bounded, and a subsequent world step must still commit.
+        for eid in ids:
+            region = m.chunk_for(self.entity(eid)["x"], self.entity(eid)["y"])
+            if m.chunk_for(self.view()["player"]["x"], self.view()["player"]["y"]) != region:
+                self.call("A", "grove.fixture_visit", {"cx": region[0], "cy": region[1]})
+            self.action("A", eid, "start_recording")
+        for _ in range(20):
+            self.action("A", ids[-1], "read_records")
+        for eid in ids:
+            record = self.world.get_state("w", creative.RECORDS, eid)
+            if record["exists"]:
+                self.assertLessEqual(encoded_size(record["value"]), creative.MAX_RECORD_BYTES)
+        self.ticks(2)
+        import sqlite3
+        with sqlite3.connect(self.db) as connection:
+            count, size = connection.execute("SELECT COUNT(*), SUM(length(CAST(COALESCE(before_json,'') AS BLOB))"
+                "+length(CAST(value_json AS BLOB))) FROM state_changes WHERE commit_seq=(SELECT MAX(seq) FROM world_commits)").fetchone()
+        self.assertLessEqual(count, 512)
+        self.assertLessEqual(size, 2*1024*1024)
+
+        # Independent material identities consume separate accounting rows.
+        # The ninth full-capability instance exceeds the combination budget,
+        # while the 32-instance count and regional stock still allow it.
+        self.db = self.db.with_name("combination-capacity.sqlite3")
+        self.world = WorldRuntime(self.db)
+        self.world.install_world("w", replace(world, functions=(*world.functions, fixture)))
+        self.roles = {name: self.world.create_role(name)["role_id"] for name in "AB"}
+        for name in self.roles:
+            self.call(name, "grove.join", {"name": name})
+        refs = []
+        for index in range(9):
+            definition = {"key": "combined_"+str(index), "name": "独立复合机制", "version": 1,
+                "materials": {symbol: {"name": symbol, "feedstock": "wood", "load_per_u": 1,
+                    "liquid": True, "combustible": False} for symbol in ("a", "b", "c", "d")},
+                "types": {"combined": {"name": "复合物件", "body_material": "wood", "cost": {"wood": 1},
+                    "container_capacity": 20, "mechanical": {"role": "source", "teeth": 16, "torque": 4, "speed": 1},
+                    "recorder": {"radius": 8, "window_ticks": 3600},
+                    "contract": {"material": "wood", "quantity": 1, "duration_ticks": 3600},
+                    "rules": [{"id": left+right, "phase": "reaction", "when": True, "effects": [
+                        {"op": "react", "inputs": {left: 1}, "outputs": {right: 1}, "rate": 1,
+                         "mode": "independent", "channel": left+right}]}
+                        for left, right in (("a", "b"), ("b", "a"), ("c", "d"), ("d", "c"))]}}}
+            refs.append(self.call("A", "grove.definition_publish", {"definition": definition})["definition_ref"])
+        combined_ids = []
+        for index in range(0, 8, 2):
+            self.time.return_value += 31
+            context = self.call("A", "grove.generation_context", {"kind": "layout", "reason": "user_request"})
+            self.assertIsNotNone(context["opportunity"], (index, context["availability"], context["budget_remaining"]))
+            result = self.call("A", "grove.content_submit", {"opportunity_id": context["opportunity"]["id"],
+                "expected_opportunity_version": context["opportunity"]["version"], "content": {"kind": "layout", "objects": [
+                    {"definition_ref": ref, "type_id": "combined", **tile}
+                    for ref, tile in zip(refs[index:index+2], context["allowed_tiles"])]}})
+            combined_ids.extend(entity["id"] for entity in result["entities"])
+        self.call("A", "grove.fixture_visit", {"cx": regions[1][0], "cy": regions[1][1]})
+        self.time.return_value += 31
+        context = self.call("A", "grove.generation_context", {"kind": "layout", "reason": "user_request"})
+        with sqlite3.connect(self.db) as connection:
+            before = connection.execute("SELECT scope,state_key,value_json,version FROM world_state ORDER BY scope,state_key").fetchall()
+        with self.assertRaisesRegex(RuleViolation, "提交容量"):
+            self.call("A", "grove.content_submit", {"opportunity_id": context["opportunity"]["id"],
+                "expected_opportunity_version": context["opportunity"]["version"], "content": {"kind": "layout", "objects": [
+                    {"definition_ref": refs[-1], "type_id": "combined", **context["allowed_tiles"][0]}]}})
+        with sqlite3.connect(self.db) as connection:
+            self.assertEqual(connection.execute("SELECT scope,state_key,value_json,version FROM world_state ORDER BY scope,state_key").fetchall(), before)
+        self.assertEqual(len(self.world.get_state("w", m.META, "creative_instances")["value"]), 8)
+        self.call("A", "grove.fixture_visit", {"cx": 0, "cy": 0})
+        wood = self.item("A", "木柴")["id"]
+        for eid in combined_ids:
+            for symbol in ("a", "b", "c", "d"):
+                self.action("A", eid, "charge", material=symbol, amount=1, item_id=wood)
+            self.action("A", eid, "fuel", amount=1, item_id=wood)
+            self.action("A", eid, "start")
+            self.action("A", eid, "start_recording")
+        self.ticks(2)
+        for eid in combined_ids:
+            self.assertEqual(creative._quantities(self.entity(eid)), {"a": 1, "b": 1, "c": 1, "d": 1})
+            self.assertEqual(self.entity(eid)["state"]["program"]["process"]["status"], "running")
+            record = self.world.get_state("w", creative.RECORDS, eid)["value"]
+            self.assertTrue(any(event["kind"] == "process" for event in record["history"]))
+            self.assertLessEqual(encoded_size(record), creative.MAX_RECORD_BYTES)
+
+    def test_world_upgrade_hands_off_clock_without_advancing_saved_state(self):
+        db = self.db.with_name("upgrade.sqlite3")
+        world = WorldRuntime(db)
+        world.install_world("w", replace(make_world(), version=10, state_version=5, migrations={}))
+        role = world.create_role("returning")["role_id"]
+        world.call_function("w", "grove.join", role, {"name": "returning"}, operation_id="upgrade-join")
+        self.time.return_value += 1
+        self.assertEqual(world.run_due_timers("w")["count"], 1)
+        player = world.get_state("w", m.PLAYERS, role)
+        clock = world.get_state("w", m.META, "clock")["value"]
+        old_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
+        world = WorldRuntime(db)
+        world.install_world("w", make_world())
+        resumed = world.get_state("w", m.META, "clock")["value"]
+        self.assertEqual(resumed["sequence"], clock["sequence"])
+        self.assertEqual(resumed["last_tick_at"], clock["last_tick_at"])
+        self.assertNotEqual(resumed["epoch"], clock["epoch"])
+        self.assertEqual(world.get_state("w", m.PLAYERS, role), player)
+        self.assertEqual(world.get_timer("w", old_id)["status"], "cancelled")
+        next_id = f"grove.tick.{resumed['epoch']}.{resumed['sequence']}"
+        self.assertEqual(world.get_timer("w", next_id)["status"], "pending")
+        world.install_world("w", make_world())
+        self.assertEqual(world.get_state("w", m.META, "clock")["value"], resumed)
+        self.time.return_value += 100  # simulated service outage, not elapsed play
+        result = world.run_due_timers("w")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"])
+        self.time.return_value += 1
+        self.assertEqual(world.run_due_timers("w")["count"], 1)
+        self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"]+1)
 
 
 if __name__ == "__main__":

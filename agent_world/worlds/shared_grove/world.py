@@ -8,6 +8,7 @@ from copy import deepcopy
 from agent_world import FunctionOutcome, FunctionSpec, StateRule, TimerSpec, ViewSpec, WorldDefinition
 from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.world_streams import StreamEvent, StreamSpec
+from agent_world.world_timers import TimerNotFound
 
 from . import model as m
 from . import processes
@@ -174,6 +175,26 @@ def initialize(ctx):
     ctx.schedule_timer(f"grove.tick.{epoch}.0", "grove.tick", {"epoch": epoch, "sequence": 0}, due_at=ctx.now+1)
 
 
+def resume_clock(ctx):
+    """Explicitly hand the saved clock to this reviewed world revision.
+
+    Runtime keeps old-version timers blocked. Only the current clock task is
+    replaced; state, logical sequence and contract deadlines do not advance.
+    """
+    clock = ctx.get_state(m.META, "clock")
+    old_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
+    try:
+        ctx.get_timer(old_id)
+    except TimerNotFound:
+        pass
+    else:
+        ctx.cancel_timer(old_id)
+    clock["epoch"] = m.identifier("clock")
+    ctx.set_state(m.META, "clock", clock)
+    ctx.schedule_timer(f"grove.tick.{clock['epoch']}.{clock['sequence']}", "grove.tick",
+        {"epoch": clock["epoch"], "sequence": clock["sequence"]}, due_at=ctx.now+1)
+
+
 def handbook(ctx, args):
     from .generation import handbook as generation_handbook
     from .definitions import composition_catalog, PHASES, RULES_VERSION
@@ -218,7 +239,7 @@ def handbook(ctx, args):
                   "外表浇水不穿透关闭容器；蒸发和燃烧进入明确环境终点，已耗物质不能在拆除时复活。",
                   "结构、材料损伤、失效、泄出及运输按同一确定过程顺序裁决，来源和物件名字不改变机制。",
                   "配方按真实材料u投入，部分用料的余量保留；拆除只取回仍存在的投资批次。",
-                  "木布节点可消费本人5u水养护，6个物理秒后产出一份原料；石材有限，浇水不造石。",
+                  "木布节点可消费本人5u水养护，6个物理逻辑步后产出一份原料；石材有限，浇水不造石。",
                   "下水后的浮力按组合及内容总负担计算，超载、吸水或失去浮材可改变漂流结果。",
                   "公共内容保存各作者贡献及真实后果；接续须读取当前锚点与版本，不复制私聊作为公共事实。",
                   "过程有公开有限容量，超过则拒绝或停止，事务、Receipt和原Operation恢复继续适用。",
@@ -370,7 +391,7 @@ def move(ctx,args):
         events=(StreamEvent("grove.changes","move",{"summary":f"{player['name']}走了一格。","x":x,"y":y},key="move"),))
 
 
-def _accessible(ctx, player, entity, *, near=True):
+def _accessible(ctx, player, entity, *, near=True, subject="target"):
     if entity["state"].get("retired") or entity.get("lifecycle") == "consumed":
         raise RuleViolation("物件已耗尽或投入其他用途。")
     current, seen = entity, set()
@@ -390,9 +411,33 @@ def _accessible(ctx, player, entity, *, near=True):
         raise RuleViolation("物理关系层数超过限制。")
     x, y = m.entity_location(ctx, entity)
     if x is None or (near and current["owner"] is None and abs(x-player["x"])+abs(y-player["y"]) > 1):
-        raise RuleViolation("要先走到物件相邻的一格。")
+        visible = x is not None and max(abs(x-player["x"]), abs(y-player["y"])) <= 8
+        condition = {"subject": subject, "entity_id": entity["id"], "condition": "adjacent",
+                     "known": visible, "satisfied": False, "required_max": 1, "metric": "manhattan"}
+        if visible:
+            condition.update(location={"x": x, "y": y}, player_location={"x": player["x"], "y": player["y"]},
+                             actual_distance=abs(x-player["x"])+abs(y-player["y"]))
+        else:
+            condition["reason"] = "location_not_observable"
+        label = {"target": "目标物件", "item": "来源物件", "other": "另一物件"}.get(subject, "物件")
+        raise RuleViolation("要先走到" + label + "相邻的一格。", details={"action_precondition": condition})
     if not near and max(abs(x-player["x"]), abs(y-player["y"])) > 8:
         raise RuleViolation("物件不在附近视野内。")
+
+
+def _access_observation(ctx, player, entity, *, subject="target"):
+    """Public action distance after ownership, ancestry and visibility checks."""
+    try:
+        _accessible(ctx, player, entity, near=False, subject=subject)
+    except (PermissionDenied, RuleViolation):
+        return {"subject": subject, "entity_id": entity["id"], "condition": "accessible",
+                "known": False, "satisfied": False}
+    x, y = m.entity_location(ctx, entity)
+    distance = abs(x-player["x"])+abs(y-player["y"])
+    return {"subject": subject, "entity_id": entity["id"], "condition": "adjacent",
+            "known": True, "location": {"x": x, "y": y}, "player_location": {"x": player["x"], "y": player["y"]},
+            "actual_distance": distance, "required_max": 1, "metric": "manhattan",
+            "satisfied": entity["owner"] == player["id"] or distance <= 1}
 
 
 def _reason(ctx, player, entity, *, burning=False):
@@ -413,8 +458,13 @@ def _reason(ctx, player, entity, *, burning=False):
 
 
 def _candidate(entity, lots=None):
+    body = [(lot["material"], lot["quantity"]) for lot in entity.get("matter", []) if lot["slot"] == "body"]
+    hidden = entity["owner"] is None and not entity["state"]["open"] and "container" in entity.get("components", {})
+    water = "未公开" if hidden else str(entity["state"]["water"])+"u"
     value = {"id": entity["id"], "name": entity["name"], "version": entity["version"],
-             "summary": f"{entity['material']}，实际水{entity['state']['water']}u"}
+             "selection_kind": "material_lot" if lots is not None else "whole_entity",
+             "summary": "本体" + "、".join(f"{material}{quantity}u" for material, quantity in body) +
+                        "，自身实际水"+water}
     if lots is not None:
         value["lots"] = [{"id": lot["id"], "material": lot["material"], "quantity": lot["quantity"],
                           "slot": lot["slot"], "item_id": entity["id"]} for lot in lots]
@@ -606,6 +656,7 @@ def _action_options(ctx, player, entity):
     for option in options:
         action = option["action"]
         option.update(label=labels[action], arguments={"target_id": entity["id"], "expected_target_version": entity["version"]})
+        option["preconditions"] = [_access_observation(ctx, player, entity)]
         if "target_slot" in option:
             option["arguments"]["target_slot"] = option["target_slot"]
         if action == "tend":
@@ -615,6 +666,9 @@ def _action_options(ctx, player, entity):
             option["input"] = _input([_candidate(e, [lot for lot in building._body_lots(e) if lot["material"] == "wood"]) for e in fuels], quantity=option["maximum"], lots=True)
         elif action == "switch_mode":
             option["input"] = _input(choices=[{"value": value, "label": "遮雨" if value == "shelter" else "集雨"} for value in option["modes"]])
+        for candidate in (option.get("input") or {}).get("candidates", []):
+            item = m.get_entity(ctx, candidate["id"])
+            candidate["preconditions"] = [_access_observation(ctx, player, item, subject="item")]
     return options
 
 
@@ -627,12 +681,13 @@ def inspect(ctx, args):
     player = m.get_player(ctx)
     entity = m.get_entity(ctx, args["entity_id"])
     _accessible(ctx, player, entity, near=False)
-    visible = _project_entity(ctx, player, entity)
+    visible = _project_entity(ctx, player, entity, detailed=True)
     contents = [m.get_entity(ctx, eid) for eid in entity["state"]["contents"]] if entity["state"]["open"] else []
     explanation = f"{entity['name']}：完整性{visible['simulation']['integrity']}，实际载荷{visible['simulation']['total']}，支撑{visible['simulation']['limit']}。"
     if entity["state"].get("kind") == "resource_node":
         explanation = f"{entity['name']}：公共库存{entity['state']['stock']}/{entity['state']['stock_capacity']}；"+("石材有限。" if entity['state']['resource_kind'] == 'stone' else '养护消耗本人5u水。')
-    return FunctionOutcome({"entity": visible, "contents": [_project_entity(ctx, player, e, include_options=False) for e in contents],
+    return FunctionOutcome({"player": _public_self(player), "entity": visible,
+        "contents": [_project_entity(ctx, player, e, include_options=False) for e in contents],
         "available_actions": visible["available_actions"], "action_options": visible["action_options"], "explanation": explanation,
         "public_content": public_content(ctx, player, entity["state"].get("generation_region"))})
 
@@ -653,7 +708,7 @@ def _own_item(ctx, player, args, capability=None):
     item = m.get_entity(ctx, args["item_id"])
     if args.get("expected_item_version") is not None and args["expected_item_version"] != item["version"]:
         raise StateConflict("所选物件已经变化，请刷新后再行动。")
-    _accessible(ctx, player, item)
+    _accessible(ctx, player, item, subject="item")
     if item["owner"] != player["id"] or item.get("lifecycle") == "consumed" or item["state"].get("retired") or "personal" in item["capabilities"]:
         raise RuleViolation("须使用自己持有的可用物件。")
     if capability and capability not in item["capabilities"]:
@@ -770,7 +825,7 @@ def interact(ctx, args):
         if not args.get("item_id"):
             raise RuleViolation("请选择实际来源物件。")
         item = m.get_entity(ctx,args["item_id"])
-        _accessible(ctx,player,item)
+        _accessible(ctx,player,item,subject="item")
         if args.get("expected_item_version") is not None and item["version"] != args["expected_item_version"]:
             raise StateConflict("来源物件已经变化，请刷新后再行动。")
         if item["owner"] not in {None,player["id"]} or "personal" in item["capabilities"]:
@@ -823,7 +878,7 @@ def _process_refs(ctx, entity):
             or row["kind"] == "rain" and region in row["chunk_ids"]]
 
 
-def _project_entity(ctx, player, entity, *, include_options=True):
+def _project_entity(ctx, player, entity, *, include_options=True, detailed=False):
     value = deepcopy(entity)
     hidden = entity["owner"] is None and not entity["state"]["open"] and "container" in entity["components"]
     children = [child for child in m.descendants(ctx, entity) if (child.get("physical_parent") or {}).get("id") == entity["id"]]
@@ -855,7 +910,44 @@ def _project_entity(ctx, player, entity, *, include_options=True):
         value["state"]["program"]["hidden"] = True
         value["creative"] = deepcopy(value["state"]["program"])
     else:
-        value["creative"] = projection(ctx, entity)
+        value["creative"] = projection(ctx, entity, detailed=detailed)
+        if value["creative"] and value["state"].get("program"):
+            program = value["state"]["program"]
+            program["material_definitions"] = program.pop("materials", {})
+            program["process"] = deepcopy(value["creative"]["process"])
+    if detailed and include_options and not hidden and value["creative"]:
+        from .observations import action_condition_observations
+        conditions = action_condition_observations(ctx, player, entity)
+        for option in value["action_options"]:
+            if option.get("function_id") == "grove.rule_action":
+                option["preconditions"] = [_access_observation(ctx, player, entity)]
+                if option["action"] in conditions:
+                    option["condition_observation"] = conditions[option["action"]]
+                for name, subject in (("items", "item"), ("others", "other")):
+                    for candidate in option.get("choices", {}).get(name, []):
+                        if candidate.get("kind") == "entity":
+                            item = m.get_entity(ctx, candidate["id"])
+                            observation = _access_observation(ctx, player, item, subject=subject)
+                            if subject == "other" and observation["known"]:
+                                first = m.entity_location(ctx, entity)
+                                second = m.entity_location(ctx, item)
+                                distance = max(abs(first[0]-second[0]), abs(first[1]-second[1]))
+                                observation.update(condition="interface_distance", metric="chebyshev",
+                                    actual_distance=distance, required_max=2, satisfied=distance <= 2,
+                                    reference_id=entity["id"], reference_location={"x": first[0], "y": first[1]})
+                                observation.pop("player_location", None)
+                            candidate["preconditions"] = [observation]
+                            if subject == "item" and observation["known"] and option["action"] in {"charge", "fuel", "deliver"}:
+                                slots = ["body", "contained", "surface", "absorbed"] if option["action"] == "deliver" else ["body", "contained", "surface"]
+                                quantities = {}
+                                for lot in item["matter"]:
+                                    if not lot["burning"] and lot["slot"] in slots:
+                                        quantities[lot["material"]] = quantities.get(lot["material"], 0)+lot["quantity"]
+                                candidate["source_materials"] = {"slots": slots,
+                                    "quantities": quantities, "unit": "logical_matter", "whole_children_included": False}
+                if option["action"] == "charge":
+                    option["preconditions"].append({"subject": "target", "entity_id": entity["id"],
+                        "condition": "container_open", "known": True, "satisfied": entity["state"]["open"]})
     value["construction_material"] = building.material_status(ctx, player, entity)
     value["relations"] = {"parent": value["physical_parent"], "children": [
         {"id": child["id"], "relation": child["physical_parent"]["relation"], "name": child["name"]} for child in children]}
@@ -1020,17 +1112,19 @@ def make_world():
     return WorldDefinition("shared-grove","溪源",(
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
-        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=2,access="read",authorize=member,description="检查附近物件、实际行动与装入/绑定候选的只读载荷预览。"),
-        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=3,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。读取inspect的当前候选与版本。"),
+        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=4,access="read",authorize=member,description="在同一次读取中返回本人状态、物件的自身材料槽、完整子物件、当前反应条件与缺口、历史过程，及实际行动和装入/绑定候选的只读载荷预览。"),
+        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=4,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。"),
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
-        FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,access="read",authorize=member,description="读取附近有限地图与自己的背包。"),
-        *generation_specs(), *creative.specs()),version=9,state_version=5,
+        FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=2,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
+        *generation_specs(), *creative.specs()),version=12,state_version=7,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
-        migrations={},
+        # All supported older revisions hand off once at the final migration.
+        # Timer commands are staged until the migration transaction commits.
+        migrations={6: lambda ctx: None, 7: resume_clock},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),

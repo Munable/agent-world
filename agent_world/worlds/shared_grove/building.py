@@ -26,7 +26,7 @@ RECIPES = {
                               "absorbent": {"capacity": 24, "rate": 2}, "collector": {"capacity": 40, "mode": "shelter", "radius": 1},
                               "combustion": {"rate": 2, "spread": True}}},
     "hearth": {"id": "hearth", "name": "烘干炉", "cost": {"stone": 2}, "terrain": ["grass", "dirt"], "radius": 1,
-               "use": "装入真实木料后点火；每秒烧2u木料，附近物件加快蒸发，不额外造燃料。",
+               "use": "装入真实木料后点火；每个正常物理逻辑步，每个燃烧批次最多消耗2u木料，附近物件加快蒸发，不额外造燃料。",
                "material": "stone", "capabilities": ["hearth", "container", "wettable"],
                "components": {"container": {"slots": 0, "liquid_capacity": 0, "open": True},
                               "structure": {"max_integrity": 100, "integrity": 100, "support_limit": 480, "overload_rate": 1},
@@ -323,7 +323,7 @@ def action_options(ctx, player, target):
                           (processes.get_process(ctx, pid) for pid in processes.active_process_ids(ctx)))
             if growing >= processes.MAX_GROWTH:
                 reason = f"最多同时养护{processes.MAX_GROWTH}个资源节点。"
-        options.append(_option("tend", reason, "消耗5u真实水养护，6个物理秒后库存加1。", {"water": 5}, duration_ticks=6))
+        options.append(_option("tend", reason, "消耗5u真实水养护，6个物理逻辑步后库存加1。", {"water": 5}, duration_ticks=6))
         return options
     options = []
     if is_structure(target):
@@ -404,7 +404,7 @@ def interact_structure(ctx, player, args, target):
         from . import processes
         processes.start_growth(ctx, target["id"], ticks=6)
         m.consume_water(ctx, item, 5, reason="growth")
-        return f"消耗5u水养护了{target['name']}，6个物理秒后增加一份资源。"
+        return f"消耗5u水养护了{target['name']}，6个物理逻辑步后增加一份资源。"
     if action == "fuel":
         item = _require_own(ctx, player, args)
         status = material_status(ctx, player, item)

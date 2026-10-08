@@ -4,7 +4,7 @@ const materialLabels={wood:'木',stone:'石',cloth:'布',metal:'金属',water:'�
 const slotLabels={body:'本体',contained:'容纳',surface:'表面',absorbed:'吸附'};
 const parentLabels={ground:'在地面',held:'随身携带',contained:'在容器中',attached:'绑定在物件上'};
 const finite=value=>Number.isFinite(value)?value:null;
-export const materialLabel=(value,entity)=>entity?.creative?.materials?.[value]?.name||entity?.state?.program?.materials?.[value]?.name||materialLabels[value]||String(value||'未标明');
+export const materialLabel=(value,entity)=>{const program=entity?.creative||entity?.state?.program||{},id=program.material_aliases?.[value]||value;return program.material_definitions?.[id]?.name||program.materials?.[id]?.name||materialLabels[value]||String(value||'未标明');};
 export const slotLabel=value=>slotLabels[value]||String(value||'未标明');
 
 export function matterLots(entity){
@@ -63,7 +63,7 @@ export function safePresentation(entity){
     color:typeof presentation.color==='string'&&/^#[0-9a-f]{6}$/i.test(presentation.color)?presentation.color:'#aaac8c',
     glyph:entityGlyph(entity),size:(entity?.composition?.size??presentation.size)===2?2:1};
 }
-const factLabels={definition_ref:'规则定义',type_id:'对象类型',fields:'当前属性',materials:'实际组分',mechanical:'机械状态',recorder:'记录状态',contract:'双方契约',connections:'当前连接',process:'实际过程',history:'已发生的记录',position:'位置',angle:'角度',speed:'速度',status:'状态',energy:'能量',available_torque:'可用扭矩',active:'正在运行',started_tick:'开始逻辑步',until_tick:'截止逻辑步',sequence:'事件序号',tick:'逻辑步',occurred_at:'发生时间',recorded_tick:'记录逻辑步',action:'行动',entity_id:'对象',actor:'行动者',read_tick:'读取逻辑步',reads:'实际读取',parties:'双方身份',terms_version:'条款版本',accepted:'已接受的身份',deadline_tick:'截止逻辑步',delivered:'已交付',quantity:'数量',material:'材料',beneficiary:'受益方',id:'标识',name:'名称',version:'版本',unit:'单位',temperature:'温度',pressure:'压力',progress:'进展',running:'运行中',remaining:'剩余量',capacity:'容量',amount:'数量',item_id:'投入物件',other_id:'另一个对象',connected_to:'连接至',direction:'方向',mode:'方式',output:'产物',inputs:'投入',outputs:'产出',rules:'规则',types:'类型',actions:'行动',conditions:'条件',effects:'效果',description:'说明',label:'名称',duration:'持续逻辑步',fuel:'燃料',work:'做功',torque:'扭矩',reaction:'反应',state:'当前状态',owner:'身份',scope:'范围'};
+const factLabels={definition_ref:'规则定义',type_id:'对象类型',fields:'当前属性',materials:'材料定义',material_definitions:'材料定义',mechanical:'机械状态',recorder:'记录状态',contract:'双方契约',connections:'当前连接',process:'过程状态与历史',last_reaction:'保存的上次反应',source_last_tick:'保存的过程逻辑步',observed_tick:'本次观察逻辑步',last_tick:'过程保存的逻辑步',steps:'累计反应步数',steps_meaning:'步数含义',historical:'历史记录',current_production:'是否本次生产',meaning:'含义',history:'已发生的记录',position:'位置',angle:'角度',speed:'速度',status:'状态',energy:'能量',available_torque:'可用扭矩',active:'正在运行',started_tick:'开始逻辑步',until_tick:'截止逻辑步',sequence:'事件序号',tick:'逻辑步',occurred_at:'发生时间',recorded_tick:'记录逻辑步',action:'行动',entity_id:'对象',actor:'行动者',read_tick:'读取逻辑步',reads:'实际读取',parties:'双方身份',terms_version:'条款版本',accepted:'已接受的身份',deadline_tick:'截止逻辑步',delivered:'已交付',quantity:'数量',material:'材料',beneficiary:'受益方',id:'标识',name:'名称',version:'版本',unit:'单位',temperature:'温度',pressure:'压力',progress:'进展',running:'运行中',remaining:'剩余量',capacity:'容量',amount:'数量',item_id:'投入物件',other_id:'另一个对象',connected_to:'连接至',direction:'方向',mode:'方式',output:'产物',inputs:'投入',outputs:'产出',rules:'规则',types:'类型',actions:'行动',conditions:'条件',effects:'效果',description:'说明',label:'名称',duration:'持续逻辑步',fuel:'燃料',work:'做功',torque:'扭矩',reaction:'反应',state:'当前状态',owner:'身份',scope:'范围'};
 export const factLabel=key=>factLabels[key]||String(key);
 export function factValue(value){
   if(value===null||value===undefined)return '未公开或未设定';
@@ -74,6 +74,28 @@ export function factValue(value){
 export function creativeState(inspection,entity){
   const value=inspection?.creative||entity?.creative||entity?.state?.program;
   return value&&typeof value==='object'&&!Array.isArray(value)?value:null;
+}
+export function conditionObservationLines(observation,entity){
+  if(!observation||typeof observation!=='object')return [];
+  if(observation.known!==true)return [observation.reason==='event_required'?'条件未知：须有实际事件输入，当前快照不能判断。':'条件未知：当前未取得所需的可观察事实。'];
+  const lines=[observation.satisfied?'声明条件当前成立。':'声明条件当前未成立。'];
+  const symbols={eq:'=',ne:'≠',lt:'<',lte:'≤',gt:'>',gte:'≥'};
+  if(['all','any','not'].includes(observation.expression?.op))lines.push('以下是子比较的快照；整体条件按原规则组合判断。');
+  for(const check of observation.checks||[]){const reference=check.left||{},kind=Object.keys(reference)[0],key=reference[kind],label=kind==='quantity'?'容纳 '+materialLabel(key,entity):kind==='concentration'?materialLabel(key,entity)+'容纳份额':kind==='object'?String(key?.id||'对象')+' · '+factLabel(key?.field):kind==='field'||kind==='mechanical'||kind==='contract'?factLabel(key):'子条件';lines.push(label+'：'+(check.known===true?factValue(check.actual_left)+' '+(symbols[check.operator]||check.operator)+' '+factValue(check.actual_right)+'（'+(check.satisfied?'成立':'未成立')+'）':'当前无法核对'));}
+  for(const fact of observation.facts||[]){const reference=fact.reference||{},kind=Object.keys(reference)[0],key=reference[kind],label=kind==='quantity'?'容纳材料 '+materialLabel(key,entity):kind==='concentration'?'容纳份额 '+materialLabel(key,entity):kind==='object'?String(key?.id||'对象')+' · '+factLabel(key?.field):factLabel(kind)+' · '+factLabel(key);lines.push(label+'：'+(fact.known===true?factValue(fact.actual):'当前未公开或不可观察'));}
+  if(observation.input_scope==='parameter_defaults')lines.push('以上条件使用当前默认参数；实际填写的参数仍在提交时核验。');
+  return lines;
+}
+export function reactionObservationLines(creative,entity){
+  const lines=[],inputs=creative?.reaction_inputs;
+  if(inputs){const actual=Object.entries(inputs.quantities||{}).map(([material,quantity])=>materialLabel(material,entity)+' '+quantity+' 单位').join('，');lines.push('本物件的容纳材料槽：'+(actual||'当前没有材料')+'。本体和完整子物件不计入反应投料。');if(Number.isFinite(inputs.contained_quantity)&&Number.isFinite(inputs.capacity))lines.push('实际容纳量 '+inputs.contained_quantity+' / '+inputs.capacity+' 单位。');}
+  const blockerLabels={condition_unknown:'条件未知',condition_unmet:'声明条件未成立',insufficient_inputs:'反应原料不足',capacity:'容量不满足',program_error:'规则已暂停',not_intact:'物件不完整'};
+  for(const reaction of creative?.reaction_observations||[]){lines.push('反应 '+reaction.rule_id+'：'+((reaction.blockers||[]).length?reaction.blockers.map(value=>blockerLabels[value]||value).join('、'):'当前单条材料与条件满足')+'。');for(const input of reaction.inputs||[])lines.push(materialLabel(input.material_id||input.symbol,entity)+'：当前可用 '+input.available+'，每份反应需 '+input.per_extent+(input.missing_for_one_extent?'，缺 '+input.missing_for_one_extent:'')+' 单位。');lines.push(...conditionObservationLines(reaction.condition,entity));}
+  for(const reaction of creative?.reaction_observations||[])if(reaction.capacity_limited&&reaction.isolated_extent>0)lines.push('反应 '+reaction.rule_id+' 受容量限制，当前单条材料快照仍可支持 '+reaction.isolated_extent+' 份反应。');
+  if((creative?.reaction_observations||[]).length)lines.push('这些是当前快照的条件和材料；通道竞争与实际产出由世界逻辑步结算。');
+  if(creative?.reaction_observations_truncated)lines.push('当前只展示前 8 条反应；其余请读取本物件的完整规则定义。');
+  if(creative?.process?.last_reaction)lines.push('保存的上次反应属于历史记录（过程逻辑步 '+creative.process.last_reaction.source_last_tick+'），不证明本次生产或当前产物数量。');
+  return lines;
 }
 export function ruleChoices(descriptor,key){
   return (Array.isArray(descriptor?.choices?.[key])?descriptor.choices[key]:[]).filter(value=>value&&typeof value==='object'&&typeof value.id==='string');

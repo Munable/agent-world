@@ -42,7 +42,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
             ("grove.control_grant", "grove.control_revoke", "grove.control_status", "grove.rule_catalog", "grove.move")}
         session.world = self.world
         session.current_turn_facts = AsyncMock(side_effect=lambda **kwargs:
-            {"player": {"x": self.position, "y": 0, "version": self.position + 1}, "entities": []})
+            {"player": {"id": session.role_id, "x": self.position, "y": 0, "version": self.position + 1}, "entities": []})
         session.host = self.host
 
     async def world(self, method, path, body=None):
@@ -110,7 +110,9 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
             "evidence_operation_ids": evidence})
 
     async def move(self):
+        observed = self.session.present_agent_result("map.viewport", await self.session.current_turn_facts())
         await self.session.tool_call("grove_move", {"dx": 1, "dy": 0,
+            "observation_id": observed["observation_id"],
             "execution_segment_id": self.session.execution["segment_id"]})
 
     async def test_one_goal_spans_two_requests_and_completion_has_real_evidence(self):
