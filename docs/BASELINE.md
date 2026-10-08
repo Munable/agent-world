@@ -4,7 +4,7 @@
 
 ## 当前仓库快照
 
-- **本轮源码：** `/Users/mubin/Developer/agent-world/grove-composable-rules`，`codex/grove-composable-rules`，本轮起点 `3886bc8`，候选0.26.0。引擎17文件SHA256为`6f11fd873f193ab0b082e106798f08b368b6cc52ee8dca3ad1a76146de17824c`，已冻结；最终包安装probe通过，先前全量检查不写成最新整树通过。普通玩家组合执行与Agent自主完整体验分开记录，状态见唯一研发记录。
+- **本轮源码：** `/Users/mubin/Developer/agent-world/grove-composable-rules`，`codex/grove-composable-rules`，本轮起点 `3886bc8`，候选0.26.0。规则解释器冻结记录的17文件SHA256为`6f11fd873f193ab0b082e106798f08b368b6cc52ee8dca3ad1a76146de17824c`，属于后续操作投影说明修复之前的源码，不能作为当前整树摘要；后续world9／interact3／rule_action2正规描述升级保留state_version5与已发表不可变定义。当前源码592项全量检查及两份Node检查通过；先前0.26.0包安装probe只属于原包范围，当前候选从源码运行。普通玩家组合执行与Agent自主完整体验分开记录，状态见唯一研发记录。
 - **当前与保护入口：** 当前世界8900、A8901、B8902，独立数据库与private profiles位于DevDisk的`shared-grove/creative-rules`对应目录，启动／恢复参数见[SHARED_GROVE](SHARED_GROVE.md)。旧0.25的8896／8897／8898、0.24的8894／8891、8890和Frontier8811，以及原身份／会话／数据库和repo未提交修改均保护，当前源码不接旧库。
 - **人和自己的工具：** 每人必须带自己的 OpenCode。普通提问、内容创作与显式目标委托分开；工具只在有效目标下继续推理行动，没有目标时世界变化不自动唤醒。同一角色按同一行动规则操作，收回控制取消未来未执行动作，已成立后果不回滚，不要求逐项审提案。私人上下文本机保存。
 - **模拟层：** 可选可信材料／结构／规则包及有界声明程序解释器；定义与版本引用不可变，旧对象固定引用。反应按真实数量、原子 extent 和容量结算；机械网络冻结快照后统一求解提交。规则不能写受保护身份、位置和安全字段，机械位置只由 solver 写入；不执行任意 Python／JS。

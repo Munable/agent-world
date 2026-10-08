@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices} from './grove-world-ui.js?v=rulechain-readable';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices} from './grove-world-ui.js?v=action-material-semantics';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -155,7 +155,7 @@ function renderExecution(){
   const execution=host?.execution||{},status=execution.status||'idle',active=execution.delegation_active===true,busy=['starting','running'].includes(status),unknown=status==='unknown'||(execution.receipts||[]).some(receipt=>receipt.status==='unknown');
   const goalCompleted=status==='completed'&&!!execution.task_id&&execution.goal_result?.status==='completed';
   const labels={idle:'尚未委托',starting:'正在授权',running:'正在执行目标',completed:'目标已完成',result_unconfirmed:'目标结果未确认',paused:'目标已暂停',blocked:'目标受阻',error:'执行受阻',unknown:'结果待核对',budget_exhausted:'目标额度已用完'};
-  const displayedStatus=unknown?'unknown':status==='completed'&&!goalCompleted?'result_unconfirmed':status,requestLabels={idle:'尚未开始',preparing:'正在读取现场',running:'推理与行动中',returned:'这一段请求已返回',timed_out:'这一段请求超时',settling:'正在核对原结果',idle_confirmed:'原请求已停止并核对',unsettled:'原请求状态待核对'};
+  const displayedStatus=unknown?'unknown':status==='completed'&&!goalCompleted?'result_unconfirmed':status,requestLabels={idle:'尚未开始',preparing:'正在读取现场',summarizing:'正在整理会话历史',summary_failed:'会话历史整理失败',running:'推理与行动中',returned:'这一段请求已返回',timed_out:'这一段请求超时',settling:'正在核对原结果',idle_confirmed:'原请求已停止并核对',unsettled:'原请求状态待核对'};
   $('execution-status').textContent=labels[displayedStatus]||displayedStatus;$('execution-status').dataset.status=displayedStatus;
   if(!goalDirty&&typeof execution.goal==='string'&&document.activeElement!==$('execution-goal'))$('execution-goal').value=execution.goal;
   $('execution-current-goal').textContent=execution.goal?'委托目标：'+execution.goal:'明确给出目标后才允许 Agent 行动。保存想法或普通提问不会授权。';
@@ -163,6 +163,9 @@ function renderExecution(){
   const requests=Number.isInteger(execution.requests_used)?String(execution.requests_used):'待读取',requestLimit=Number.isInteger(execution.max_requests)?String(execution.max_requests):'待读取';
   $('execution-budget').textContent=execution.goal?'世界动作 '+count+' / '+limit+(execution.task_id?' · 这个目标模型请求 '+requests+' / '+requestLimit:' · 原请求记录，尚无目标接续额度'):'';
   $('execution-request').textContent=execution.goal&&execution.task_id?'当前请求：'+(requestLabels[execution.request_status]||execution.request_status||'待读取')+(execution.budget?' · 每段建议 '+execution.budget.max_steps+' 个推理步骤、最多 '+execution.budget.max_tool_calls+' 次世界读取或行动':''):'';
+  const recovery=execution.history_recovery||{},recoveryLabels={not_started:recovery.requested?'尚未开始整理会话历史':'未请求整理会话历史',running:'正在整理会话历史',completed:'会话历史整理完成；目标仍以行动与核对结果判断',failed:'会话历史整理失败；本目标不会自动重试整理',uncertain:'会话历史整理结果待核对；本目标不会自动重试整理'};
+  $('execution-history-recovery').hidden=!execution.task_id||!recovery.status;
+  $('execution-history-recovery').textContent=[recoveryLabels[recovery.status]||recovery.status,recovery.attempts>0?'摘要请求已计入这个目标的模型请求总额度，原记录保留。':'',recovery.error?.message].filter(value=>typeof value==='string'&&value).join('\n');
   const detail=unknown?'原行动结果未确认。先核对原回执，才可接续或开始新目标；核对不会自动继续行动。':goalCompleted?'目标已完成。已经保存的行动和结果保留，可在现场继续查看。':status==='completed'?'原请求已结束，目标结果未确认。已经保存的行动保留；没有明确的目标完成记录，不能将请求结束视为成功。':active?'行动授权仍有效。Agent 可在总额度内继续；收回或亲手行动会停止后续行动，已保存的结果保留。':execution.resume_allowed===true?'当前没有行动授权。点击“接续这个目标”才再次授权；它会读取最新现场，继续原目标与剩余额度。':execution.goal?'当前没有行动授权。已保存的行动保留；请求结束或额度用完不代表目标完成。':'人可以直接玩，也可以在这里明确授权 Agent 帮你实现目标。';
   $('execution-detail').textContent=[execution.stop_reason,execution.error?.message,detail].filter((value,index,values)=>typeof value==='string'&&value&&values.indexOf(value)===index).join('\n');
   const progress=execution.progress||{},progressNodes=[];
@@ -176,8 +179,12 @@ function renderExecution(){
   if(receipts.length>8)$('execution-actions').append(node('p','显示最近 8 个回执，共 '+receipts.length+' 个；它们记录行动，不替代当前现场。','small'));
   if(execution.readback_actual===true)$('execution-actions').append(node('p','这个目标已有实际世界读回。物件的最新状态仍以地图与详情为准。','small'));
   $('execution-start').disabled=hostCommandBusy||busy||active||unknown||!['ready','paused'].includes(host?.status)||actionBusy||!!client.pending();
-  $('execution-resume').hidden=execution.resume_allowed!==true||!execution.task_id||unknown;
-  $('execution-resume').disabled=hostCommandBusy||executionReclaimBusy||busy||active||unknown||['connecting','thinking','disconnected'].includes(host?.status)||actionBusy||!!client.pending();
+  const additionalControl=$('execution-additional-requests'),additionalLimit=Math.max(0,8-(execution.max_requests||0));
+  additionalControl.max=String(additionalLimit);additionalControl.disabled=execution.extension_allowed!==true;
+  if(Number(additionalControl.value)>additionalLimit)additionalControl.value=String(additionalLimit);
+  const additional=Number(additionalControl.value),canResume=execution.resume_allowed===true||(execution.extension_allowed===true&&Number.isInteger(additional)&&additional>0&&additional<=additionalLimit);
+  $('execution-resume').hidden=(execution.resume_allowed!==true&&execution.extension_allowed!==true)||!execution.task_id||unknown;
+  $('execution-resume').disabled=!canResume||hostCommandBusy||executionReclaimBusy||busy||active||unknown||['connecting','thinking','disconnected'].includes(host?.status)||actionBusy||!!client.pending();
   $('execution-reclaim').disabled=executionReclaimBusy||!(active||busy||unknown);
   $('execution-reclaim').textContent=executionReclaimBusy?'正在收回…':'收回行动权';
   $('execution-recover').hidden=!unknown;$('execution-recover').disabled=hostCommandBusy||executionReclaimBusy;
@@ -462,7 +469,7 @@ function renderEffects(entity){
   if(entity.construction_material?.eligible)lines.push('可投入搭建'+(entity.material==='wood'?'，也可作为石炉燃料。':'。'));
   else if(entity.construction_material?.reason&&!s.recipe&&s.kind!=='resource_node')lines.push('目前不能投入搭建：'+entity.construction_material.reason);
   const actionOptions=inspection?.entity?.id===entity.id?inspection.action_options||[]:[];
-  for(const option of actionOptions.filter(o=>o.available&&o.use))lines.push((actionNames[option.action]||option.action)+'：'+option.use+(option.cost?' · '+formatCost(option.cost):''));
+  for(const option of actionOptions.filter(o=>o.available&&o.use))lines.push(descriptorLabel(option)+'：'+option.use+(option.cost?' · '+formatCost(option.cost):''));
   $('selection-effects').replaceChildren(...[...new Set(lines)].map(line=>node('p',line,'small')));
 }
 function formatCost(cost){if(typeof cost==='string')return cost;return Object.entries(cost).map(([key,value])=>(materialNames[key]||({water:'水',stored_water:'棚内存水',uses:'点火次数',ignition_uses:'点火次数',stock:'公共原料'}[key])||key)+' '+value).join(' · ');}
@@ -875,15 +882,18 @@ $('execution-form').addEventListener('submit',event=>{event.preventDefault();run
   if(!Number.isInteger(maxActions)||maxActions<1||maxActions>64)throw new Error('目标动作上限须为 1 至 64 的整数。');
   if(!Number.isInteger(maxRequests)||maxRequests<1||maxRequests>8)throw new Error('目标模型请求上限须为 1 至 8 的整数。');
   stopWalking();const entity=selectedEntity();
-  if(await hostCommand('execute',{goal,max_actions:maxActions,max_requests:maxRequests,...(entity?{context_entity_id:entity.id}:{})})){goalDirty=false;client.saveDraft('grove-goal',goal);announce('目标已交给你的 Agent。它可在总额度内接续执行，你可以随时收回后续行动权。');}
+  if(await hostCommand('execute',{goal,max_actions:maxActions,max_requests:maxRequests,compact_history:$('execution-compact-history').checked,...(entity?{context_entity_id:entity.id}:{})})){goalDirty=false;$('execution-compact-history').checked=false;client.saveDraft('grove-goal',goal);announce('目标已交给你的 Agent。它可在总额度内接续执行，你可以随时收回后续行动权。');}
 });});
 $('execution-goal').addEventListener('input',()=>{goalDirty=true;if(current())try{client.storage.setItem(client.draftKey('grove-goal'),$('execution-goal').value);}catch{}});
 $('execution-resume').addEventListener('click',()=>run(async()=>{
   const execution=host?.execution||{};
-  if(hostCommandBusy||executionReclaimBusy||actionBusy||client.pending()||execution.delegation_active||['starting','running','unknown'].includes(execution.status)||['connecting','thinking','disconnected'].includes(host?.status)||(execution.receipts||[]).some(receipt=>receipt.status==='unknown')||execution.resume_allowed!==true||!execution.task_id)return;
+  const additional=Number($('execution-additional-requests').value),canResume=execution.resume_allowed===true||(execution.extension_allowed===true&&additional>0);
+  if(hostCommandBusy||executionReclaimBusy||actionBusy||client.pending()||execution.delegation_active||['starting','running','unknown'].includes(execution.status)||['connecting','thinking','disconnected'].includes(host?.status)||(execution.receipts||[]).some(receipt=>receipt.status==='unknown')||!canResume||!execution.task_id)return;
+  if(!Number.isInteger(additional)||additional<0||(execution.max_requests||0)+additional>8)throw new Error('追加后的原目标模型请求总额度不能超过 8 次。');
   stopWalking();
-  if(await hostCommand('execute-resume',{task_id:execution.task_id}))announce('已再次授权接续原目标；保留原行动记录与剩余额度，先读取最新现场。');
+  if(await hostCommand('execute-resume',{task_id:execution.task_id,compact_history:$('execution-compact-history').checked,additional_requests:additional})){$('execution-compact-history').checked=false;$('execution-additional-requests').value='0';announce('已再次授权接续原目标；保留原行动记录与已用额度，先读取最新现场。');}
 }));
+$('execution-additional-requests').addEventListener('input',renderExecution);
 $('execution-reclaim').addEventListener('click',()=>run(reclaimExecution));$('execution-reclaim-quick').addEventListener('click',()=>run(reclaimExecution));
 $('execution-recover').addEventListener('click',()=>run(()=>hostCommand('recover',{token:client.token,public_key:key.public_key,name:point()?.name||prefs().name},{refresh:true})));
 $('rule-catalog-read').addEventListener('click',()=>run(async()=>{

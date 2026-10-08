@@ -710,7 +710,9 @@ def rule_action(ctx, args):
         if "container" not in entity["components"] or not entity["state"]["open"]:
             raise RuleViolation("配料需要打开的实际容器。")
         if args.get("material") not in pack["materials"]:
-            raise RuleViolation("请选择本规则包已声明材料的symbol。")
+            choices = ", ".join(f"{symbol} (feedstock={value['feedstock']})" for symbol, value in pack["materials"].items())
+            raise RuleViolation("charge只制备本规则包已声明材料：" + choices +
+                "；消耗对应feedstock并转换材料。转移已有批次请读grove.inspect的transfer选项，使用grove.interact transfer。")
         amount = args.get("amount", 0)
         if not amount:
             raise RuleViolation("请输入投入的真实u数量。")
@@ -726,7 +728,7 @@ def rule_action(ctx, args):
         m._record_account(ctx, "sinks", definition["feedstock"], amount, "creative_charge")
         m._record_account(ctx, "sources", material, amount, "creative_charge")
         _finish_item(ctx, item, entity)
-        summary = f"实际投入{amount}u配料，来源余量保留。"
+        summary = f"消耗{amount}u {definition['feedstock']}，制备{amount}u {args['material']}；来源余量保留。这不是反应产物证据。"
     elif action in {"fuel", "start", "stop"}:
         if spec.get("mechanical", {}).get("role") != "source":
             raise RuleViolation("此物件不是动力源。")
@@ -957,7 +959,7 @@ def action_options(ctx, player, entity):
                for item in m.public_players_near(ctx, player["x"], player["y"], radius=8) if item["id"] != player["id"]]
     options = []
 
-    def add(action, label, choices=None, params=None, arguments=None, reason=None, amount=False):
+    def add(action, label, choices=None, params=None, arguments=None, reason=None, amount=False, use=None):
         if entity["lifecycle"] != "intact" and action != "release":
             reason = "规则物件已破损，只有实际托管物可按结果回收。"
         fields = {"action": {"const": action}, "target_id": ID, "expected_target_version": VERSION, "expected_player_version": VERSION}
@@ -993,9 +995,13 @@ def action_options(ctx, player, entity):
             fields["params"] = param_schema
         options.append({"action": action, "label": label, "function_id": "grove.rule_action", "available": not (base or reason),
                         "reason": base or reason, "arguments": args, "input_schema": schema, "params_schema": param_schema, "choices": choices})
+        if use:
+            options[-1]["use"] = use
 
     if pack["materials"] and "container" in entity["components"]:
-        add("charge", "投入真实配料", {"items": own_items, "materials": [{"id": key, "name": value["name"]} for key, value in pack["materials"].items()]}, amount=True)
+        add("charge", "制备已声明材料", {"items": own_items, "materials": [
+            {"id": key, "name": value["name"], "feedstock": value["feedstock"]} for key, value in pack["materials"].items()]}, amount=True,
+            use="选材料symbol，消耗来源中的对应feedstock，等量制备该声明材料。转移已有批次用transfer，搬入整件用store；制备不是规则反应。")
     if "mechanical" in spec:
         add("connect", "连接传动", {"others": mechanicals})
         links = {item["other_id"] for item in entity["state"]["program"]["connections"]}
@@ -1052,7 +1058,7 @@ def rule_catalog(ctx, args):
         "action": "{id,label,parameters?:{name:{type,default,min?,max?}},when?:boolean_expression,effects:[...]}; server reserved charge/fuel/connect/.../accept cannot be overridden",
         "effects": ["{op:set,field:declared_field,value:expr}", "{op:react,inputs:{symbol:1..100},outputs:{symbol:1..100},rate:1..10,heat:-20..20,channel:family,mode:exclusive|independent}", "{op:emit,name:public_signal}"],
         "reaction": "sum(quantity*load_per_u) must match. Atomic maximal extent/rate/capacity; exclusive same channel substitutes, independent channels compete finite inputs; temperature field receives bounded heat; emitted signal does not prove consent/delivery",
-        "steps": ["publish immutable definition with definition_publish", "claim generation_context layout; actual allowed_tiles/resources/budgets apply", "content_submit object {definition_ref,type_id,x,y,name?,description?} consumes real body materials", "inspect actual actions and versions", "rule_action charge/fuel takes own finite materials; connect two actual public objects; second identity can use same definitions/objects"],
+        "steps": ["publish immutable definition with definition_publish", "claim generation_context layout; actual allowed_tiles/resources/budgets apply", "content_submit object {definition_ref,type_id,x,y,name?,description?} consumes real body materials", "inspect actual actions, source item/lot candidates and versions", "interact store moves a whole child, retaining its own matter; it does not feed the parent's contained reaction inputs", "interact transfer moves an existing lot by item_id/lot_id/amount into target_slot, preserving material identity and source remainder", "rule_action charge consumes a declared symbol's feedstock to prepare that custom material; it is not transfer or reaction evidence. fuel consumes finite wood; connect links actual objects; another identity can use the same definitions/objects"],
         "time": "all simulation windows/deadlines use clock.sequence; server downtime pauses, no wall-clock catch-up",
         "security": "no arbitrary code, owner/position/security writes or author acceptance for other actors; normal human actions do not call a model"})
 
@@ -1062,7 +1068,7 @@ def specs():
         FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, access="read", description="Discover the exact bounded program language, published immutable definitions, physical semantics and actual publication path."),
         FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, access="read", description="Read one immutable definition and its author/hash; existing instances pin this reference."),
         FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, authorize=_member, description="Compile and automatically publish bounded conditions, actions, reactions, processes and relations; no matter/consent created; detailed repairable errors; version immutable."),
-        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, authorize=_member, description="Use actual published actions and finite resources; versions and permissions verified; same actor human or explicitly delegated Agent; read current inspect options before acting."),
+        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=2, authorize=_member, description="Use published actions and finite resources with current inspect options and versions. charge consumes the chosen declared symbol's feedstock to prepare that custom material; it does not transfer an existing lot or prove a reaction. Use grove.interact transfer for existing lots, store for whole children. Same actor human or explicitly delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
         FunctionSpec("grove.control_status", control_status, EMPTY, authorize=_member, access="read", description="Read own current goal and committed action count, without exposing grant token."),

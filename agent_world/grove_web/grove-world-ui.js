@@ -100,7 +100,7 @@ export function candidatePreviewSummary(candidate){
   return previewLoad(physics)+(otherOverloads?' · 另有 '+otherOverloads+' 个受影响结构会过载':'');
 }
 export function candidateLabel(candidate){
-  return [candidate?.name||candidate?.id||'物件',candidate?.summary,candidatePreviewSummary(candidate)].filter(Boolean).join(' · ');
+  return [candidate?.name||candidate?.id||'物件',candidate?.feedstock?'每1u消耗1u'+materialLabel(candidate.feedstock):null,candidate?.summary,candidatePreviewSummary(candidate)].filter(Boolean).join(' · ');
 }
 export function candidatePreviewLines(candidate){
   const preview=candidate?.preview;if(!preview||typeof preview!=='object')return [];

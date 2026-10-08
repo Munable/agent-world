@@ -156,9 +156,24 @@ class CreativeWorldTests(unittest.TestCase):
         _, more = self.publish("B", definition, ["echo", "pact", "polisher"], refs={"polisher": ref})
         objects.update(more)
         self.action("B", objects["echo"], "start_recording")
+        self.approach("A", objects["mixer"])
+        # Consume the public action projection, including the declared input
+        # material, instead of assuming charge means transferring a raw lot.
         source = self.item("A", "木柴")
-        self.action("A", objects["mixer"], "charge", material="amber", amount=2, item_id=source["id"])
-        self.action("A", objects["mixer"], "charge", material="blue", amount=4, item_id=source["id"])
+        before = sum(lot["quantity"] for lot in source["matter"] if lot["material"] == "wood")
+        for symbol, amount in (("amber", 2), ("blue", 4)):
+            inspected = self.world.query_function("w", "grove.inspect", self.roles["A"],
+                                                  {"entity_id": objects["mixer"]})["result"]
+            charge = next(option for option in inspected["action_options"] if option["action"] == "charge")
+            choice = next(choice for choice in charge["choices"]["materials"] if choice["id"] == symbol)
+            item_choice = next(choice for choice in charge["choices"]["items"] if choice["id"] == source["id"])
+            self.assertEqual(choice["feedstock"], "wood")
+            self.call("A", charge["function_id"], {**charge["arguments"], "material": choice["id"],
+                "amount": amount, "item_id": item_choice["id"], "expected_item_version": item_choice["version"],
+                "expected_player_version": self.view("A")["player"]["version"]})
+        self.assertEqual(sum(lot["quantity"] for lot in self.entity(source["id"])["matter"]
+                             if lot["material"] == "wood"), before-6)
+        self.assertEqual(creative._quantities(self.entity(objects["mixer"])), {"amber": 2, "blue": 4})
         self.ticks(1)
         mixed = self.entity(objects["mixer"])
         quantities = creative._quantities(mixed)

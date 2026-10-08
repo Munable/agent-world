@@ -8,11 +8,12 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 
-from agent_world.grove_connector import ConnectorError, ConnectorManager, GroveSession, CURRENT_FACTS_INSTRUCTIONS
+from agent_world.grove_connector import (ConnectorError, ConnectorManager, GroveSession, CURRENT_FACTS_INSTRUCTIONS,
+    HISTORY_RECOVERY_INSTRUCTIONS, EXECUTION_INSTRUCTIONS, EXECUTOR_AGENT, MCP_NAME, create_connector_app)
 
 
 class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
@@ -353,6 +354,142 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.model_segment = segment
         await self.session.execute_goal(self.session.execution["goal"])
         self.assertEqual((self.requests, len(self.attempts), self.position), (2, 2, 2))
+
+    def history_host(self, *, finish="stop", interrupted=False):
+        original_host = self.session.host
+        self.summary_calls = 0
+        messages = []
+        async def host(method, path, body=None, timeout=15):
+            if path == "/config":
+                return {"compaction": {"auto": False, "tail_turns": 0}, "agent": {
+                    "compaction": {"disable": False, "model": self.session.model,
+                        "prompt": HISTORY_RECOVERY_INSTRUCTIONS, "permission": {"*": "deny"}},
+                    EXECUTOR_AGENT: {"prompt": EXECUTION_INSTRUCTIONS,
+                        "permission": {"*": "deny", MCP_NAME + "_*": "allow"}}}}
+            if path.endswith("/message?limit=100"):
+                return deepcopy(messages)
+            if path.endswith("/summarize"):
+                self.summary_calls += 1
+                self.assertEqual(body, {"providerID": "provider", "modelID": "model", "auto": False})
+                self.assertFalse(self.grants)
+                self.assertFalse(self.session.active_execution)
+                self.assertEqual(self.session.execution["requests_used"], 1)
+                messages.extend([{"info": {"id": "compact-user", "role": "user", "sessionID": "test-session"},
+                    "parts": [{"type": "compaction", "auto": False}]},
+                    {"info": {"id": "summary-result", "parentID": "compact-user", "role": "assistant",
+                        "summary": True, "sessionID": "test-session", "providerID": "provider", "modelID": "model",
+                        "finish": finish, "time": {"completed": 1}},
+                     "parts": [{"type": "text", "text": "Past plan is not an executed action. Check current facts."}]}])
+                if interrupted:
+                    raise httpx.ReadTimeout("Original summary response interrupted")
+                return True
+            return await original_host(method, path, body, timeout)
+        self.session.host = host
+
+    async def test_summary_consumes_budget_and_is_verified_before_fresh_facts_and_grant(self):
+        self.history_host()
+        self.session.execution["history_recovery"]["requested"] = True
+        self.session.execution["max_requests"] = 2
+        # The same human goal can be reused. A summary is a model request,
+        # never evidence that this new task owns the previous world's grant.
+        self.control.update(status="revoked", goal=self.session.execution["goal"],
+                            actions_count=4, max_actions=4, version=100)
+        async def segment(number):
+            self.assertEqual(self.session.execution["history_recovery"]["status"], "completed")
+            self.assertTrue(self.session.execution["readback_actual"])
+            self.assertEqual(self.session.execution["actions_count"], 0)
+            await self.move()
+            await self.checkpoint("completed")
+        self.model_segment = segment
+        await self.session.execute_goal(self.session.execution["goal"])
+        self.assertEqual((self.summary_calls, self.requests, len(self.grants), self.position), (1, 1, 1, 1))
+        self.assertEqual(self.session.execution["requests_used"], 2)
+        self.assertEqual([item["purpose"] for item in self.session.inference_history], ["execution_summary", "execution"])
+
+    async def test_truncated_summary_cannot_grant_or_be_replaced_by_new_goal(self):
+        self.history_host(finish="length")
+        self.session.execution["history_recovery"]["requested"] = True
+        with self.assertRaises(ConnectorError):
+            await self.session.execute_goal(self.session.execution["goal"])
+        self.assertEqual((self.summary_calls, self.requests, len(self.grants)), (1, 0, 0))
+        self.assertEqual(self.session.execution["history_recovery"]["status"], "failed")
+        self.assertFalse(self.session.execution_can_resume())
+        app = create_connector_app(storage=self.manager.storage, wrapper=None)
+        app.state.connector.authorized = Mock(return_value=self.session)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=self.manager.local_url,
+                headers={"Authorization": "Bearer fixture-bearer"}) as client:
+            response = await client.post("/connector/execute", json={"goal": "Different goal"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.session.execution["task_id"], "test-task")
+        self.assertEqual(self.session.execution["requests_used"], 1)
+
+    async def test_interrupted_summary_reconciles_original_without_spending_again(self):
+        self.history_host(interrupted=True)
+        with self.assertRaises(ConnectorError):
+            await self.session.recover_execution_history()
+        self.assertEqual(self.session.execution["history_recovery"]["status"], "uncertain")
+        self.session.execution.update(status="paused", request_status="idle_confirmed")
+        self.assertFalse(self.session.execution_can_resume())
+        await self.session.verify_history_recovery()
+        self.assertTrue(self.session.execution_can_resume())
+        self.assertEqual((self.summary_calls, self.session.execution["requests_used"], self.requests, len(self.grants)), (1, 1, 0, 0))
+        self.assertIsNone(self.session.execution["goal_result"])
+
+    async def test_history_option_preserves_task_budget_and_archives_replaced_goal(self):
+        self.session.execution.update(status="paused", request_status="idle_confirmed", resume_allowed=True,
+            requests_used=7, max_requests=8, actions_count=3)
+        self.session.schedule = Mock()
+        app = create_connector_app(storage=self.manager.storage, wrapper=None)
+        app.state.connector.authorized = Mock(return_value=self.session)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=self.manager.local_url,
+                headers={"Authorization": "Bearer fixture-bearer"}) as client:
+            response = await client.post("/connector/execute-resume", json={"task_id": "test-task", "compact_history": True})
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(self.session.execution["requests_used"], 7)
+            self.session.schedule.assert_not_called()
+            response = await client.post("/connector/execute", json={"goal": "A separately authorized goal",
+                "max_actions": 2, "max_requests": 2, "compact_history": True})
+            self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.session.execution_archive[-1]["task_id"], "test-task")
+        self.assertEqual(self.session.execution_archive[-1]["requests_used"], 7)
+        self.assertEqual(self.session.execution_archive[-1]["actions_count"], 3)
+        self.assertEqual(self.session.execution["max_requests"], 2)
+        self.assertTrue(self.session.execution["history_recovery"]["requested"])
+
+    async def test_explicit_extension_preserves_exhausted_task_and_all_spent_progress(self):
+        self.session.execution.update(status="paused", request_status="idle_confirmed", resume_allowed=False,
+            requests_used=2, max_requests=2, actions_count=3)
+        self.session.schedule = Mock()
+        app = create_connector_app(storage=self.manager.storage, wrapper=None)
+        app.state.connector.authorized = Mock(return_value=self.session)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=self.manager.local_url,
+                headers={"Authorization": "Bearer fixture-bearer"}) as client:
+            rejected = await client.post("/connector/execute-resume", json={"task_id": "test-task"})
+            self.assertEqual(rejected.status_code, 409)
+            accepted = await client.post("/connector/execute-resume", json={"task_id": "test-task", "additional_requests": 2})
+            self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(self.session.execution["task_id"], "test-task")
+        self.assertEqual((self.session.execution["max_requests"], self.session.execution["requests_used"],
+            self.session.execution["actions_count"], self.session.execution["max_actions"]), (4, 2, 3, 4))
+        self.assertEqual(self.session.execution["budget_extensions"], [{"additional_requests": 2,
+            "previous_max_requests": 2, "max_requests": 4, "requests_used": 2, "actions_count": 3}])
+        self.session.schedule.assert_called_once_with(self.session.execution["goal"], mode="execute-resume", context_entity_id=None)
+
+    async def test_extension_cannot_exceed_cap_or_bypass_unsettled_summary(self):
+        self.session.execution.update(status="paused", request_status="idle_confirmed", resume_allowed=False,
+            requests_used=2, max_requests=2)
+        self.session.schedule = Mock()
+        app = create_connector_app(storage=self.manager.storage, wrapper=None)
+        app.state.connector.authorized = Mock(return_value=self.session)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=self.manager.local_url,
+                headers={"Authorization": "Bearer fixture-bearer"}) as client:
+            response = await client.post("/connector/execute-resume", json={"task_id": "test-task", "additional_requests": 7})
+            self.assertEqual(response.status_code, 400)
+            self.session.execution["history_recovery"]["status"] = "uncertain"
+            response = await client.post("/connector/execute-resume", json={"task_id": "test-task", "additional_requests": 2})
+            self.assertEqual(response.status_code, 409)
+        self.assertEqual((self.session.execution["max_requests"], self.session.execution["requests_used"]), (2, 2))
+        self.session.schedule.assert_not_called()
 
     async def test_completed_checkpoint_survives_later_native_timeout(self):
         async def segment(number):

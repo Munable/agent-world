@@ -45,6 +45,18 @@ MAX_SECONDS, MAX_WORLD_CALLS = 150, 16
 MAX_EXECUTION_REQUESTS = 8
 HOST_START_SECONDS = 45
 HOST_METADATA_SECONDS = 10
+HISTORY_RECOVERY_INSTRUCTIONS = (
+    "Produce a concise factual memory of this conversation for a later explicitly granted goal. "
+    "This is historical memory, not current world state or action authorization. "
+    "Preserve the user's goals and boundaries, immutable definition references, confirmed "
+    "operation IDs and observed results, rejected or unresolved operations, and open questions. "
+    "Distinguish actual tool results from assistant plans, reasoning and claims. Planned actions "
+    "are not executed actions. Old step counters, tools-disabled summaries and old entry-only "
+    "restrictions do not describe a later execution segment. Do not invent a solution, action "
+    "sequence, permission, receipt or completion. Do not repeat long failed reasoning or old "
+    "plans. Current authorization, deadlines and object facts must be read from the server "
+    "after this memory is produced. Use no tools. Return only the concise memory."
+)
 HOST_INSTRUCTIONS = (
     "You are this user's private host in Shared Grove (溪源). Keep this person's "
     "intent, preferences and private dialogue distinct from shared facts. Use "
@@ -681,6 +693,7 @@ class GroveSession:
         self.blueprint_active = False
         self.active_execution = False
         self.delegation = ""
+        self.execution_archive = []
         self.execution = {"status": "idle", "goal": "", "max_actions": 0, "actions_count": 0,
             "remaining_actions": 0, "control_status": "idle", "delegation_active": False,
             "grant_version": None, "receipts": [], "readback": None,
@@ -691,6 +704,8 @@ class GroveSession:
             "readback_actions_count": None, "no_progress_segments": 0,
             "segment_id": "", "checkpoint": None, "goal_result": None, "segments": [], "phase_timings": [],
             "settlement": None,
+            "history_recovery": {"requested": False, "status": "not_started", "attempts": 0},
+            "budget_extensions": [],
             "progress": {"summary": "", "next_intent": "", "evidence": []},
             "budget": {"max_steps": 8, "max_tool_calls": MAX_WORLD_CALLS, "max_seconds": MAX_SECONDS}}
         self.restore_permissions = False
@@ -729,6 +744,8 @@ class GroveSession:
                     self.generation = saved.get("generation", self.generation)
                     if isinstance(saved.get("execution"), dict):
                         self.execution.update(saved["execution"])
+                    archive = saved.get("execution_archive", [])
+                    self.execution_archive = archive[-8:] if isinstance(archive, list) else []
                     self.delegation = saved.get("execution_delegation", "")
                     if not isinstance(self.delegation, str):
                         raise ValueError("invalid execution delegation")
@@ -736,6 +753,8 @@ class GroveSession:
                         self.execution["status"] = "paused"
                         self.execution.update(request_status="unsettled", resume_allowed=False,
                             stop_reason="连接器已重启；先恢复原回执和现场，再明确接续。")
+                    if (self.execution.get("history_recovery") or {}).get("status") == "running":
+                        self.execution["history_recovery"]["status"] = "uncertain"
                     self.messages = saved.get("messages", [])[-30:]
                     self.unknown = saved.get("unknown_operations", [])
                     self.opportunity = saved.get("opportunity")
@@ -781,6 +800,7 @@ class GroveSession:
             "inference_counter_initialized": self.inference_counter_initialized,
             "restore_permissions": self.restore_permissions, "generation": self.generation,
             "execution": self.execution, "execution_delegation": self.delegation,
+            "execution_archive": self.execution_archive,
             "messages": self.messages[-30:], "unknown_operations": self.unknown,
             "opportunity": self.opportunity, "automatic_started": self.automatic_started,
             "automatic": self.automatic, "visited_regions": self.visited_regions[-256:],
@@ -830,7 +850,8 @@ class GroveSession:
             "cost": self.response_diagnostics.get("cost", self.last_completion.get("cost")),
             "response_diagnostics": self.response_diagnostics,
             "generation": self.generation, "inference_count": self.inference_count,
-            "execution": deepcopy(self.execution),
+            "execution": deepcopy(self.execution) | {"extension_allowed": self.execution_can_resume(additional_requests=1)},
+            "execution_archive": deepcopy(self.execution_archive),
             "private_context": deepcopy(self.private_context),
             "context": {key: deepcopy(self.private_context[key]) for key in ("intent", "preferences")},
             "inference_history": self.inference_history[-30:],
@@ -976,9 +997,9 @@ class GroveSession:
 
     def normalize_execution_progress(self):
         # Counts belong to this goal's actual execution, not a previous public
-        # control record. An untouched task has no spent actions to preserve.
+        # control record. Summary requests are not world-action evidence.
         if (not self.execution.get("task_id") or self.execution.get("grant_operation_id") or
-                self.execution.get("requests_used") or self.execution.get("receipts") or self.unknown):
+                self.execution.get("receipts") or self.unknown):
             return False
         changed = self.execution.get("actions_count", 0) != 0 or self.execution.get("grant_action_offset", 0) != 0
         self.execution.update(actions_count=0, grant_action_offset=0, grant_version=None,
@@ -987,11 +1008,13 @@ class GroveSession:
             self.execution["readback_actions_count"] = 0
         return changed
 
-    def execution_can_resume(self):
+    def execution_can_resume(self, *, additional_requests: int = 0):
         return bool(self.execution.get("task_id") and self.execution.get("status") in {"paused", "error"} and
+            (self.execution.get("history_recovery") or {}).get("status") not in {"running", "uncertain", "failed"} and
             not self.unknown and not self.execution.get("delegation_active") and
             self.execution.get("actions_count", 0) < self.execution.get("max_actions", 0) and
-            self.execution.get("requests_used", 0) < self.execution.get("max_requests", 0) and
+            self.execution.get("max_requests", 0) + additional_requests <= MAX_EXECUTION_REQUESTS and
+            self.execution.get("requests_used", 0) < self.execution.get("max_requests", 0) + additional_requests and
             self.execution.get("request_status") == "idle_confirmed")
 
     def pause_execution(self, reason: str, *, error: dict | None = None):
@@ -1070,7 +1093,7 @@ class GroveSession:
         # private recovery journal and never copied into UI or model context.
         self.normalize_execution_progress()
         task_control = (value.get("goal") == self.execution["goal"] and
-            bool(self.execution.get("grant_operation_id") or self.execution.get("requests_used") or self.execution.get("receipts")))
+            bool(self.execution.get("grant_operation_id") or self.execution.get("receipts")))
         if self.execution.get("task_id"):
             # A user-approved resume grants only the original remainder. World
             # grant counters restart; the local task's counters never do.
@@ -1145,6 +1168,14 @@ class GroveSession:
                 if self.execution.get("delegation_active"):
                     await self.revoke_execution()
                 self.execution["pending_grant_action_offset"] = self.execution["actions_count"]
+            recovery = self.execution.get("history_recovery") or {}
+            if recovery.get("requested") and recovery.get("status") != "completed":
+                await self.recover_execution_history()
+                # A summary is memory, never a checkpoint or grant. Re-read the
+                # actual server before establishing this segment's authority.
+                await self.execution_readback(context_entity_id=context_entity_id)
+            if self.cancelled:
+                raise asyncio.CancelledError()
             remaining = self.execution["max_actions"] - self.execution["actions_count"]
             if remaining <= 0 or self.execution["requests_used"] >= self.execution["max_requests"]:
                 self.pause_execution("原任务的行动或模型请求额度已用完。")
@@ -1159,6 +1190,7 @@ class GroveSession:
             self.execution["status"] = "running"
             self.execution.update(stop_reason="", error=None, resume_allowed=False)
             self.remember()
+
             while not self.cancelled:
                 if self.execution["requests_used"] >= self.execution["max_requests"]:
                     self.pause_execution("模型请求额度已用完；目标未宣称完成。")
@@ -1245,6 +1277,88 @@ class GroveSession:
             if self.execution["status"] in {"completed", "paused"}:
                 self.status = "ready" if self.execution["status"] == "completed" else "paused"
             self.remember()
+
+    async def verify_history_recovery(self):
+        """Read only the original summary attempt; never issue a replacement."""
+        recovery = self.execution["history_recovery"]
+        messages = await self.host("GET", "/session/" + quote(self.session_id, safe="") + "/message?limit=100")
+        prior = set(recovery.get("before_message_ids", []))
+        markers = [message for message in messages if message.get("info", {}).get("id") not in prior
+            and message.get("info", {}).get("role") == "user" and any(
+                part.get("type") == "compaction" and part.get("auto") is False and not part.get("tail_start_id")
+                for part in message.get("parts", []))]
+        if len(markers) != 1:
+            raise ConnectorError("HistoryRecoveryUnconfirmed", "原历史整理标记尚未唯一核对；没有继续执行。", 409)
+        marker_id = markers[0]["info"]["id"]
+        responses = [message for message in messages if message.get("info", {}).get("parentID") == marker_id
+            and message.get("info", {}).get("summary") is True]
+        if len(responses) != 1:
+            raise ConnectorError("HistoryRecoveryUnconfirmed", "原摘要结果尚未唯一核对；没有继续执行。", 409)
+        response = responses[0]
+        info, parts = response["info"], response.get("parts", [])
+        provider, model = self.model.split("/", 1)
+        text = "\n".join(part.get("text", "") for part in parts if part.get("type") == "text"
+            and not part.get("ignored") and not part.get("synthetic"))
+        if (info.get("sessionID") != self.session_id or info.get("providerID") != provider or
+                info.get("modelID") != model or info.get("role") != "assistant" or info.get("error") or
+                info.get("finish") != "stop" or not info.get("time", {}).get("completed") or not text.strip() or
+                any(part.get("type") == "tool" for part in parts)):
+            raise ConnectorError("HistoryRecoveryInvalid", "原摘要未正常完整结束；没有继续执行。", 409)
+        recovery.update(status="completed", compaction_user_id=marker_id, message_id=info["id"],
+            summary_sha256=hashlib.sha256(text.encode()).hexdigest(), summary_characters=len(text), error=None)
+        inference = next((item for item in self.inference_history if item.get("number") == recovery.get("inference_number")), None)
+        if inference is not None:
+            self.inference_finished(inference, response)
+        self.remember()
+
+    async def recover_execution_history(self):
+        recovery = self.execution["history_recovery"]
+        if recovery.get("attempts", 0):
+            raise ConnectorError("HistoryRecoveryUnavailable", "本目标已使用一次历史整理；不会自动重复调用。", 409)
+        if self.unknown or self.delegation or self.execution.get("delegation_active") or self.active_execution:
+            raise ConnectorError("HistoryRecoveryUnsafe", "先停止原授权并核对原操作，再整理历史。", 409)
+        if self.execution["max_requests"] - self.execution["requests_used"] < 2:
+            raise ConnectorError("HistoryRecoveryBudget", "历史整理和接续执行共需至少两次剩余模型请求。", 409)
+        config = await self.host("GET", "/config")
+        compact = config.get("compaction", {})
+        agent = config.get("agent", {}).get("compaction", {})
+        executor = config.get("agent", {}).get(EXECUTOR_AGENT, {})
+        if (compact.get("auto") is not False or compact.get("tail_turns") != 0 or agent.get("disable") is not False or
+                agent.get("model") != self.model or agent.get("prompt") != HISTORY_RECOVERY_INSTRUCTIONS or
+                agent.get("permission") != {"*": "deny"} or executor.get("prompt") != EXECUTION_INSTRUCTIONS or
+                executor.get("permission") != {"*": "deny", MCP_NAME + "_*": "allow"}):
+            raise ConnectorError("HistoryRecoveryConfig", "原生历史整理配置未能核对；没有调用模型。", 409)
+        messages = await self.host("GET", "/session/" + quote(self.session_id, safe="") + "/message?limit=100")
+        if self.cancelled:
+            raise asyncio.CancelledError()
+        recovery.update(status="running", attempts=1, session_id=self.session_id,
+            before_message_ids=[message["info"]["id"] for message in messages])
+        # The attempt and request counter are persisted together before POST.
+        inference = self.inference_started("execution_summary")
+        recovery["inference_number"] = inference["number"]
+        self.status = "thinking"
+        self.remember()
+        provider, model = self.model.split("/", 1)
+        try:
+            await asyncio.wait_for(self.host("POST", "/session/" + quote(self.session_id, safe="") + "/summarize",
+                {"providerID": provider, "modelID": model, "auto": False}, timeout=MAX_SECONDS), timeout=MAX_SECONDS)
+            if self.cancelled:
+                raise asyncio.CancelledError()
+            if not await self.settle_execution_request():
+                raise ConnectorError("HistoryRecoveryUnconfirmed", "原摘要调用尚未确认停止。", 409)
+            await self.verify_history_recovery()
+        except (asyncio.TimeoutError, httpx.HTTPError, ConnectorError, asyncio.CancelledError) as exc:
+            recovery.update(status="uncertain", error={"code": getattr(exc, "code", "HistoryRecoveryInterrupted"),
+                "message": "历史整理未确认完整成功；原记录保留，没有开始执行。"})
+            inference.update(status="interrupted", finished_at=time.time(), error=recovery["error"])
+            self.remember()
+            idle = await self.settle_execution_request(abort=True)
+            if idle and isinstance(exc, ConnectorError) and exc.code == "HistoryRecoveryInvalid":
+                recovery["status"] = "failed"
+            self.remember()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise ConnectorError("HistoryRecoveryFailed", "历史整理未通过完整核验；没有开始执行。", 409) from None
 
     def observe_outcome(self, function: str, payload: dict, *, operation_record: dict | None = None):
         value = payload.get("result", payload)
@@ -1363,7 +1477,15 @@ class GroveSession:
                     if self.entered:
                         await self.execution_readback()
                 if self.execution.get("task_id") and not self.unknown:
-                    await self.settle_execution_request(abort=True)
+                    idle = await self.settle_execution_request(abort=True)
+                    recovery = self.execution.get("history_recovery") or {}
+                    if idle and recovery.get("status") in {"running", "uncertain"}:
+                        try:
+                            await self.verify_history_recovery()
+                        except ConnectorError as exc:
+                            recovery.update(status="failed" if exc.code == "HistoryRecoveryInvalid" else "uncertain",
+                                error={"code": exc.code, "message": exc.message})
+                            self.remember()
                     self.execution["resume_allowed"] = self.execution_can_resume()
         if self.session_id:
             session_started = time.monotonic()
@@ -1493,6 +1615,7 @@ class GroveSession:
         config = {"$schema": "https://opencode.ai/config.json", "model": self.model,
             "small_model": self.model, "enabled_providers": [self.model.split("/", 1)[0]],
             "autoupdate": False, "share": "disabled", "snapshot": False,
+            "compaction": {"auto": False, "prune": False, "tail_turns": 0},
             "tools": tools, "permission": permission, "default_agent": AGENT,
             "agent": {AGENT: {"description": "溪源的有界本地伙伴", "mode": "primary", "steps": 8,
                 "prompt": HOST_INSTRUCTIONS, "tools": tools, "permission": permission},
@@ -1500,7 +1623,10 @@ class GroveSession:
                     "prompt": EXECUTION_INSTRUCTIONS, "tools": tools, "permission": permission},
                 BLUEPRINT_AGENT: {"description": "根据实际世界上下文创作有限公共内容", "mode": "primary", "steps": 2,
                     "prompt": BLUEPRINT_INSTRUCTIONS, "tools": {"*": False}, "permission": {"*": "deny"}},
-                "title": {"disable": True}, "summary": {"disable": True}, "compaction": {"disable": True}},
+                "title": {"disable": True}, "summary": {"disable": True},
+                "compaction": {"disable": False, "model": self.model,
+                    "prompt": HISTORY_RECOVERY_INSTRUCTIONS,
+                    "tools": {"*": False}, "permission": {"*": "deny"}}},
             "mcp": {MCP_NAME: {"type": "remote", "url": self.manager.local_url + "/connector/mcp",
                 "oauth": False, "headers": {"Authorization": "Bearer {env:GROVE_MCP_CAPABILITY}"}}}}
         if self.model == "opencode-go/longcat-2.5-preview-free":
@@ -1872,11 +1998,11 @@ class GroveSession:
         return facts
 
     def inference_started(self, purpose: str, *, session_id: str | None = None) -> dict:
-        if purpose == "execution":
+        if purpose in {"execution", "execution_summary"}:
             if self.execution["requests_used"] >= self.execution["max_requests"]:
                 raise ConnectorError("ExecutionRequestBudget", "原目标的模型请求额度已用完。", 409)
             self.execution["requests_used"] += 1
-            self.execution["request_status"] = "running"
+            self.execution["request_status"] = "summarizing" if purpose == "execution_summary" else "running"
         if self.active_automatic:
             if self.automatic["count"] >= self.automatic["max_count"]:
                 raise ConnectorError("AutomaticBudget", "自动模型请求预算已用完；生成机会会释放。", 409)
@@ -1889,7 +2015,7 @@ class GroveSession:
         self.inference_count += 1
         entry = {"number": self.inference_count, "purpose": purpose, "status": "started", "started_at": time.time(),
                  "session_id": session_id or self.session_id}
-        if purpose == "execution":
+        if purpose in {"execution", "execution_summary"}:
             entry.update(task_id=self.execution.get("task_id"), segment_id=self.execution.get("segment_id"),
                 request_number=self.execution["requests_used"])
         self.inference_history.append(entry)
@@ -3000,7 +3126,7 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
     async def execute(request: Request):
         session = manager.authorized(bearer_from(request))
         body = await request.json()
-        if not isinstance(body, dict) or set(body) - {"goal", "max_actions", "max_requests", "context_entity_id"}:
+        if not isinstance(body, dict) or set(body) - {"goal", "max_actions", "max_requests", "context_entity_id", "compact_history"}:
             raise ConnectorError("InvalidArguments", "Expected an explicit goal and bounded action grant.")
         goal, maximum = body.get("goal"), body.get("max_actions", 32)
         if not isinstance(goal, str) or not 1 <= len(goal.strip()) <= 4000:
@@ -3011,6 +3137,11 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
         if (not isinstance(max_requests, int) or isinstance(max_requests, bool) or
                 not 1 <= max_requests <= MAX_EXECUTION_REQUESTS):
             raise ConnectorError("InvalidRequestBudget", "每个目标最多授权 1–8 次模型请求。")
+        compact_history = body.get("compact_history", False)
+        if not isinstance(compact_history, bool):
+            raise ConnectorError("InvalidArguments", "compact_history 需要布尔值。")
+        if compact_history and max_requests < 2:
+            raise ConnectorError("HistoryRecoveryBudget", "历史整理和接续执行共需至少两次模型请求。")
         selected = body.get("context_entity_id")
         if selected is not None and (not isinstance(selected, str) or not 1 <= len(selected) <= 256 or not selected.strip()):
             raise ConnectorError("InvalidArguments", "context_entity_id 需要真实已选物件的标识。")
@@ -3022,6 +3153,8 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
             raise ConnectorError("TurnBusy", "伙伴正在回应；请先收回或等待当前回应。", 409)
         if session.delegation or session.execution.get("delegation_active"):
             raise ConnectorError("ReclaimRequired", "请先收回原目标的控制，再授予新目标。", 409)
+        if (session.execution.get("history_recovery") or {}).get("status") in {"running", "uncertain", "failed"}:
+            raise ConnectorError("HistoryRecoveryUnconfirmed", "先恢复并核对原摘要结果，不能替换原目标。", 409)
         if not {"grove.control_grant", "grove.control_revoke", "grove.control_status"} <= session.catalog.keys():
             raise ConnectorError("ExecutionUnavailable", "这个世界尚未提供目标执行。", 409)
         grant_schema = session.catalog["grove.control_grant"]["input_schema"]
@@ -3032,6 +3165,8 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
         if session.automatic_worker:
             session.automatic_worker.cancel()
         session.cancelled = False
+        if session.execution.get("task_id"):
+            session.execution_archive = (session.execution_archive + [deepcopy(session.execution)])[-8:]
         session.execution.update(status="starting", goal=goal.strip(), max_actions=maximum, actions_count=0,
             remaining_actions=maximum, delegation_active=False, grant_version=None, control_status=None,
             receipts=[], readback=None, readback_actual=False, error=None,
@@ -3040,6 +3175,8 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
             grant_action_offset=0, pending_grant_action_offset=None, grant_operation_id=None,
             readback_actions_count=None, no_progress_segments=0,
             segment_id="", checkpoint=None, goal_result=None, segments=[], phase_timings=[], settlement=None,
+            history_recovery={"requested": compact_history, "status": "not_started", "attempts": 0},
+            budget_extensions=[],
             progress={"summary": "", "next_intent": "", "evidence": []})
         session.remember()
         session.remember_user_request(goal.strip())
@@ -3051,18 +3188,40 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
     async def execute_resume(request: Request):
         session = manager.authorized(bearer_from(request))
         body = await request.json()
-        if (not isinstance(body, dict) or set(body) != {"task_id"} or
+        if (not isinstance(body, dict) or "task_id" not in body or set(body) - {"task_id", "compact_history", "additional_requests"} or
                 not isinstance(body["task_id"], str) or body["task_id"] != session.execution.get("task_id")):
-            raise ConnectorError("InvalidTask", "接续只接受当前原任务标识，不接受新目标或新额度。")
+            raise ConnectorError("InvalidTask", "接续需要当前原任务标识；可明确追加模型请求，不接受替换目标或动作额度。")
+        compact_history = body.get("compact_history", False)
+        if not isinstance(compact_history, bool):
+            raise ConnectorError("InvalidArguments", "compact_history 需要布尔值。")
+        additional = body.get("additional_requests", 0)
+        if (not isinstance(additional, int) or isinstance(additional, bool) or additional < 0 or
+                session.execution.get("max_requests", 0) + additional > MAX_EXECUTION_REQUESTS):
+            raise ConnectorError("InvalidRequestBudget", "追加后的原目标模型请求总额度不能超过 8 次。")
         if not session.entered or not session.session_id or not session.host_url:
             raise ConnectorError("EntryRequired", "请先恢复原连接和现场。", 409)
         if session.unknown:
             raise ConnectorError("UnknownWrite", "先核对原操作结果，再接续原目标。", 409)
         if session.worker and not session.worker.done():
             raise ConnectorError("TurnBusy", "原请求仍在处理；不会并行启动另一个执行。", 409)
-        if (session.execution.get("status") == "completed" or not session.execution.get("resume_allowed") or
-                not session.execution_can_resume()):
+        if (session.execution.get("status") == "completed" or
+                (not additional and not session.execution.get("resume_allowed")) or
+                not session.execution_can_resume(additional_requests=additional)):
             raise ConnectorError("ResumeUnavailable", "这个任务已经完成、额度用完或原请求尚未安全停止。", 409)
+        recovery = session.execution["history_recovery"]
+        if compact_history and recovery.get("status") != "completed":
+            if recovery.get("attempts", 0):
+                raise ConnectorError("HistoryRecoveryUnavailable", "原目标已尝试历史整理，不会重复调用。", 409)
+            if session.execution["max_requests"] + additional - session.execution["requests_used"] < 2:
+                raise ConnectorError("HistoryRecoveryBudget", "历史整理和接续执行共需至少两次剩余模型请求。", 409)
+            recovery["requested"] = True
+        if additional:
+            previous = session.execution["max_requests"]
+            session.execution["max_requests"] += additional
+            session.execution["budget_extensions"] = (session.execution.get("budget_extensions", []) + [{
+                "additional_requests": additional, "previous_max_requests": previous,
+                "max_requests": session.execution["max_requests"], "requests_used": session.execution["requests_used"],
+                "actions_count": session.execution["actions_count"]}])[-MAX_EXECUTION_REQUESTS:]
         session.cancelled = False
         session.execution.update(status="starting", error=None, stop_reason="", resume_allowed=False)
         session.remember()

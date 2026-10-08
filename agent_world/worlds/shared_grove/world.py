@@ -193,6 +193,10 @@ def handbook(ctx, args):
         "materials": composition_catalog()["materials"], "compositions": composition_catalog(),
         "material_slots": {"body": "本体真实材料", "contained": "容器内可装卸的物质", "surface": "外表面接触物质", "absorbed": "实际已吸收水"},
         "material_roles": {"structural": "支撑本体，烧耗会影响结构", "lining": "衬层，耗尽不把石壳变成燃料", "substance": "装入或接触的物质"},
+        "material_operations": {
+            "store": "搬入完整子物件，保留其身份与自身材料；子物件的本体不变成目标的contained配料。",
+            "transfer": "按来源item_id、lot_id和amount转移已有材料批次到目标target_slot；材料身份不变，来源余量保留。",
+            "charge": "grove.rule_action只消耗定义的feedstock并等量制备包内声明材料symbol，不是转移已有批次，也不证明反应发生。"},
         "combination_preview": {"actions": ["store", "attach"], "location": "action_options[].input.candidates[].preview",
             "availability": "available/reason 表示当前行动资格，与 physics.known/overloaded 分开。",
             "physics": "before/after 为目标载荷汇总；affected 为可见或本人的受影响承载者，含其当前版本。",
@@ -542,7 +546,7 @@ def _action_options(ctx, player, entity):
                       and entity["id"] not in {child["id"] for child in m.descendants(ctx, e)}]
         if candidates and not any(candidate["preview"]["available"] for candidate in candidates):
             reason = reason or candidates[0]["preview"]["reason"]
-        add("store", reason or ("没有可装入的本人物件。" if not candidates else None), "将完整物件移动到目标；载荷超限可能导致后续结构失效。", _input(candidates))
+        add("store", reason or ("没有可装入的本人物件。" if not candidates else None), "搬入完整子物件，保留其身份与自身材料；本体不会变成目标的contained配料。载荷超限可能导致后续结构失效。", _input(candidates))
         children = [m.get_entity(ctx, eid) for eid in state["contents"]] if state["open"] else []
         candidates = [_candidate(e) for e in children if _movable(ctx, player, e)]
         add("retrieve", base or ("请先打开容器。" if not state["open"] else None) or ("没有可取出的物件。" if not candidates else None),
@@ -597,7 +601,7 @@ def _action_options(ctx, player, entity):
                         if not _reason(ctx,player,e) and "container" in e.get("components", {})})
         candidates = [_candidate(e, lots) for e in sources.values() if e["id"] != entity["id"] and (lots := _transfer_lots(ctx, player, e))]
         reason = base or ("请先打开目的容器。" if not state["open"] else None) or ("没有可转移的本人材料批次。" if not candidates else None)
-        add("transfer", reason, "从本人物件或附近打开的公共容器转移指定批次；源余量保留，装入材料增加载荷。",
+        add("transfer", reason, "选择来源物件及lot_id，按amount将已有批次转入目标contained材料槽；材料身份不变，源余量保留，增加目标载荷。与搬入完整物件、制备新材料不同。",
             _input(candidates, quantity=max([lot["quantity"] for c in candidates for lot in c["lots"]] or [1]), lots=True), target_slot="contained")
     for option in options:
         action = option["action"]
@@ -1017,11 +1021,11 @@ def make_world():
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
         FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=2,access="read",authorize=member,description="检查附近物件、实际行动与装入/绑定候选的只读载荷预览。"),
-        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=2,authorize=member,description="本人或明确目标委托操作真实物件，按实际能力与归属结算。"),
+        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=3,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。读取inspect的当前候选与版本。"),
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,access="read",authorize=member,description="读取附近有限地图与自己的背包。"),
-        *generation_specs(), *creative.specs()),version=8,state_version=5,
+        *generation_specs(), *creative.specs()),version=9,state_version=5,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
