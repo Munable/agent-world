@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from .effects import Break, Damage, Move, SetBurning, Sink, Source, SpillSink, SpillTransfer, Transfer
 from .matter import (MAX_FRAME_OBJECTS, MAX_LOTS, MAX_QUANTITY, children, lot_identifier,
-                     normalize_lots, project, quantity)
+                     normalize_lots, project)
 
 
 def _freeze(value):
@@ -56,10 +57,71 @@ class Frame:
     def _lot(self, entity_id, lot_id):
         return next((lot for lot in self.objects[entity_id]["matter"] if lot["id"] == lot_id), None)
 
+    def _liquid_quantity(self, entity):
+        return sum(lot["quantity"] for lot in entity["matter"]
+                   if lot["slot"] == "contained" and self.registry.materials[lot["material"]].liquid)
+
+    def _mixture_room(self, entity):
+        program = entity.get("state", {}).get("program", {})
+        if not isinstance(program, Mapping):
+            raise ValueError("物件的程序绑定无效。")
+        if "mixture_capacity" not in program:
+            return None
+        capacity = program["mixture_capacity"]
+        if type(capacity) is not int or not 1 <= capacity <= 200:
+            raise ValueError("混合物容量须为1至200的整数逻辑u。")
+        return max(0, capacity-sum(lot["quantity"] for lot in entity["matter"]
+                                  if lot["slot"] == "contained"))
+
+    def _inherit_material(self, entity, material):
+        if material in {"wood", "stone", "cloth", "water"}:
+            return
+        definition = self.registry.materials.get(material)
+        if definition is None:
+            raise ValueError("转移物质未注册。")
+        if (not isinstance(definition.name, str) or not 1 <= len(definition.name) <= 80
+                or not definition.name.strip() or not definition.name.isprintable()
+                or type(definition.piece_quantity) is not int or not 1 <= definition.piece_quantity <= 10000
+                or type(definition.load_per_u) is not int or not 1 <= definition.load_per_u <= 8
+                or type(definition.combustible) is not bool or type(definition.liquid) is not bool):
+            raise ValueError("注册材料名称或份量无效。")
+        snapshot = {"name": definition.name, "load_per_u": definition.load_per_u,
+                    "piece_quantity": definition.piece_quantity,
+                    "combustible": definition.combustible, "liquid": definition.liquid}
+        program = entity.setdefault("state", {}).get("program", {})
+        if not isinstance(program, dict):
+            raise ValueError("接收物件的程序材料快照无效。")
+        materials = program.get("materials", {})
+        if not isinstance(materials, dict) or len(materials) > 4:
+            raise ValueError("接收物件最多携带4种注册材料。")
+        previous = materials.get(material)
+        if previous is not None:
+            if not isinstance(previous, Mapping):
+                raise ValueError("接收物件的材料定义无效。")
+            comparable = dict(previous)
+            comparable.setdefault("piece_quantity", 4)
+            if comparable != snapshot:
+                raise ValueError("相同注册材料标识的物理定义不一致，不能覆盖。")
+            return
+        if len(materials) >= 4:
+            raise ValueError("接收物件的4种注册材料已满。")
+        entity["state"].setdefault("program", program)
+        program.setdefault("materials", materials)
+        materials[material] = snapshot
+
     def _add(self, entity_id, material, amount, slot, *, source_lot=None, bound_to=None):
         if amount == 0:
             return
         entity = self.objects[entity_id]
+        if material not in self.registry.materials:
+            raise ValueError("转移物质未注册。")
+        if slot == "absorbed" and material != "water":
+            raise ValueError("吸附槽只支持实际水，其他物质不能冒用吸水机制。")
+        if slot == "contained":
+            mixture_room = self._mixture_room(entity)
+            if mixture_room is not None and amount > mixture_room:
+                raise ValueError("真实混合物总量超过物件共用容量。")
+        self._inherit_material(entity, material)
         origin_object = (source_lot or {}).get("origin_object")
         origin_lot = (source_lot or {}).get("origin_lot")
         # Body provenance is kept for one-time dismantling. Unrefundable stored
@@ -93,23 +155,47 @@ class Frame:
             if not isinstance(effect, (Source, SpillTransfer)) and source is None:
                 raise ValueError("转移来源物质批次不存在。")
             material = effect.material if isinstance(effect, Source) else "water" if isinstance(effect, SpillTransfer) else source["material"]
-            key = (effect.target, material, effect.slot, effect.bound_to)
+            if material not in self.registry.materials:
+                raise ValueError("转移物质未注册。")
+            if effect.slot == "absorbed" and material != "water":
+                raise ValueError("吸附槽只支持实际水，其他物质不能冒用吸水机制。")
+            liquid = self.registry.materials[material].liquid and effect.slot == "contained"
+            # All contained liquids reserve the same room. Material-specific
+            # keys would let simultaneous liquids each allocate the full vessel.
+            key = (effect.target, "@liquid" if liquid else material, effect.slot,
+                   None if liquid else effect.bound_to)
+            target = self.objects[key[0]]
             if key not in rooms:
-                target = self.objects[key[0]]
-                material, slot, bound = key[1:]
+                slot, bound = key[2:]
                 if material == "water" and slot == "absorbed":
                     portion = target["components"].get("absorbent", {}).get("supports", {}).get(bound)
                     support = self._lot(key[0], bound)
                     capacity = portion["capacity"]*support["quantity"]//portion["quantity"] if portion and support else 0
                     held = sum(lot["quantity"] for lot in target["matter"] if lot["material"] == material and lot["slot"] == slot and lot.get("bound_to") == bound)
                     rooms[key] = max(0, capacity-held)
-                elif material == "water" and slot == "contained":
+                elif liquid:
                     components = target["components"]
                     capacity = components.get("water_source", {}).get("capacity", components.get("container", {}).get("liquid_capacity", components.get("collector", {}).get("capacity", 0)))
-                    rooms[key] = max(0, capacity-quantity(target, "water", "contained"))
+                    rooms[key] = max(0, capacity-self._liquid_quantity(target))
                 else:
                     rooms[key] = MAX_QUANTITY-sum(lot["quantity"] for lot in target["matter"] if (lot["material"], lot["slot"], lot.get("bound_to")) == (material, slot, bound))
-            return key
+            keys = [key]
+            if effect.slot == "contained":
+                mixture_room = self._mixture_room(target)
+                if mixture_room is not None:
+                    mixture_key = (effect.target, "@mixture", "contained", None)
+                    rooms.setdefault(mixture_key, mixture_room)
+                    keys.append(mixture_key)
+            return tuple(keys)
+
+        def reserve(destination, amount, strict=False):
+            free = min(rooms[key] for key in destination)
+            if strict and amount > free:
+                raise ValueError("目的物质槽的实际容量不足。")
+            amount = min(amount, free)
+            for key in destination:
+                rooms[key] -= amount
+            return amount
         if allocate:
             # Automatic consumers receive a stable allocation in registered rule
             # and entity order. Commands use strict transfers and reject shortages.
@@ -123,15 +209,13 @@ class Frame:
                     amount = min(available[key], effect.quantity)
                     if isinstance(effect, Transfer) and amount:
                         destination = room(effect)
-                        amount = min(amount, rooms[destination])
-                        rooms[destination] -= amount
+                        amount = reserve(destination, amount)
                     available[key] -= amount
                     if amount:
                         planned.append(replace(effect, quantity=amount))
                 elif isinstance(effect, Source):
                     destination = room(effect)
-                    amount = min(effect.quantity, rooms[destination])
-                    rooms[destination] -= amount
+                    amount = reserve(destination, effect.quantity)
                     rejected = effect.quantity-amount
                     if rejected:
                         if effect.reason not in allowed_sources or "drain" not in allowed_sinks:
@@ -146,8 +230,7 @@ class Frame:
                     amount = min(available[key], effect.quantity)
                     if isinstance(effect, SpillTransfer) and amount:
                         destination = room(effect)
-                        amount = min(amount, rooms[destination])
-                        rooms[destination] -= amount
+                        amount = reserve(destination, amount)
                     available[key] -= amount
                     if amount:
                         planned.append(replace(effect, quantity=amount))
@@ -158,9 +241,7 @@ class Frame:
             for effect in effects:
                 if isinstance(effect, (Transfer, Source, SpillTransfer)):
                     destination = room(effect)
-                    if effect.quantity > rooms[destination]:
-                        raise ValueError("目的物质槽的实际容量不足。")
-                    rooms[destination] -= effect.quantity
+                    reserve(destination, effect.quantity, strict=True)
         withdrawals = defaultdict(int)
         setters, damage = {}, defaultdict(int)
         for effect in effects:
@@ -304,10 +385,13 @@ class Frame:
             entity["components"].pop(key, None)
         for lot in entity["matter"]:
             if lot["slot"] == "contained":
-                if recipient and lot["material"] == "water":
-                    free = recipient["components"]["container"]["liquid_capacity"]-quantity(recipient, "water", "contained")
+                if recipient and self.registry.materials[lot["material"]].liquid:
+                    free = recipient["components"]["container"]["liquid_capacity"]-self._liquid_quantity(recipient)
+                    mixture_room = self._mixture_room(recipient)
+                    if mixture_room is not None:
+                        free = min(free, mixture_room)
                     amount = min(max(0, free), lot["quantity"])
-                    self._add(recipient["id"], "water", amount, "contained")
+                    self._add(recipient["id"], lot["material"], amount, "contained")
                     lot["quantity"] -= amount
                     lot["slot"] = "surface"
                 elif owner:

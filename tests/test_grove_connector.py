@@ -103,38 +103,22 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.last_completion, original)
         self.session.host.assert_awaited_once()
 
-    async def test_enabling_automatic_returns_after_baseline_and_keeps_first_new_action(self):
+    async def test_unscoped_automatic_requires_explicit_goal_without_inference(self):
         self.session.entered = True
         self.session.status = "ready"
-        self.session.catalog = {"map.viewport": {"access": "read"},
-            "grove.interact": {"input_schema": {"properties": {"action": {"enum": ["harvest"]}}}}}
-        scene = {"result": {"player": {"x": 3, "y": 2}}}
-        event = {"seq": 2, "event_id": "first-new-action", "kind": "interact", "actor_role_id": "test-user",
-                 "payload": {"action": "harvest", "x": 4, "y": 2, "entity_id": "reed"}}
-        self.session.world = AsyncMock(side_effect=[
-            {"cursor": "before-enable", "events": [{"seq": 1}]}, scene,
-            {"cursor": "after-action", "events": [event]}, scene])
+        self.session.world = AsyncMock()
         self.session.schedule = Mock()
         app = create_connector_app(storage=self.manager.storage, wrapper=None)
         app.state.connector.authorized = Mock(return_value=self.session)
-        try:
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                         base_url="http://127.0.0.1:8891") as client:
-                response = await client.post("/connector/automatic", json={"enabled": True, "max_count": 2},
-                                             headers={"Authorization": "Bearer test-private-bearer"})
-            self.assertEqual(response.status_code, 200)
-            self.assertFalse(self.session.needs_observation_baseline)
-            self.assertEqual(self.session.automatic["last_observed_seq"], 1)
-            self.session.schedule.assert_not_called()
-            await self.session.observe_automatic()
-            self.assertEqual(self.session.pending_changes[0]["event_id"], "first-new-action")
-            self.session.schedule.assert_called_once()
-            self.assertEqual(self.session.inference_count, 0)
-        finally:
-            self.session.automatic["enabled"] = False
-            if self.session.automatic_worker:
-                self.session.automatic_worker.cancel()
-                await asyncio.gather(self.session.automatic_worker, return_exceptions=True)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://127.0.0.1:8891") as client:
+            response = await client.post("/connector/automatic", json={"enabled": True, "max_count": 2},
+                                         headers={"Authorization": "Bearer test-private-bearer"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"], "GoalRequired")
+        self.session.world.assert_not_awaited()
+        self.session.schedule.assert_not_called()
+        self.assertEqual(self.session.inference_count, 0)
 
     async def test_private_intent_survives_reconnect_without_a_model_or_world_write(self):
         self.session.host = AsyncMock()
@@ -389,14 +373,42 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.host.assert_not_awaited()
         self.assertEqual(self.session.inference_count, 1)
 
-    async def test_companion_cannot_move_or_act_as_person(self):
+    async def test_stable_write_catalog_requires_explicit_person_delegation(self):
         self.session.catalog = {"grove.move": {"access": "write", "input_schema": {}},
                                 "grove.handbook": {"access": "read", "input_schema": {}}}
-        self.assertNotIn("grove_move", [t["name"] for t in self.session.tools()])
+        self.assertIn("grove_move", [t["name"] for t in self.session.tools()])
         self.session.status = "thinking"
+        self.session.invoke = AsyncMock()
         with self.assertRaises(ConnectorError) as denied:
             await self.session.tool_call("grove_move", {"dx": 1, "dy": 0})
-        self.assertEqual(denied.exception.code, "ToolDenied")
+        self.assertEqual(denied.exception.code, "DelegationRequired")
+        self.session.invoke.assert_not_awaited()
+
+    async def test_execution_gets_current_catalog_and_closes_writes_before_abort(self):
+        self.session.catalog = {"grove.rule_catalog": {"access": "read"}}
+        self.session.current_turn_facts = AsyncMock(return_value={"scene": {"player": "actual"}})
+        self.session.invoke = AsyncMock(return_value={"result": {"limits": {"bound_object_ids": 8}}})
+        self.session.release_opportunity = AsyncMock()
+        self.session.active_execution = True
+        requests = []
+
+        async def host(method, path, body=None, timeout=15):
+            requests.append(path)
+            if path.endswith('/message'):
+                supplied = json.loads(body['parts'][1]['text'].split('\n', 1)[1])
+                self.assertEqual(supplied['rule_catalog']['limits']['bound_object_ids'], 8)
+                raise httpx.ReadTimeout('test timeout')
+            self.assertTrue(path.endswith('/abort'))
+            self.assertFalse(self.session.active_execution)
+            return {}
+
+        self.session.host = host
+        with self.assertRaises(ConnectorError) as failed:
+            await self.session.turn('Publish one rule definition', executing=True)
+        self.assertEqual(failed.exception.code, 'HostUnavailable')
+        self.assertEqual(self.session.inference_count, 1)
+        self.assertEqual(requests, ['/session/test-session/message', '/session/test-session/abort'])
+        self.session.invoke.assert_awaited_once_with('grove.rule_catalog', {})
 
     async def test_unknown_publication_stops_new_generation_without_model_call(self):
         self.session.unknown = [{"envelope": {"operation_id": "original-publication"}}]

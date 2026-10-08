@@ -28,7 +28,7 @@ MAX_CONTENT_ANCHORS = 48
 CONTENT_ANCHOR_VIEW = 12
 CONTRIBUTION_PAGE = 6
 OUTCOME_PAGE = 12
-MAX_OUTCOMES_PER_STEP = 68
+MAX_OUTCOMES_PER_STEP = 164  #64 physical participants plus up to3 facts for each32 program instances
 MAX_CONTENT_BYTES = 8192
 MAX_OUTCOME_BYTES = 2048
 LEASE_SECONDS = 120
@@ -674,6 +674,8 @@ def _context(ctx, opportunity, player):
 
 
 def generation_context(ctx, args):
+    from .creative import check_delegation
+    check_delegation(ctx, args)
     player = _player(ctx)
     author_record = _record(ctx, AUTHORS, ctx.actor_role_id)
     author = deepcopy(author_record["value"]) if author_record["exists"] else {"active_id": None, "next_claim_at": 0}
@@ -733,17 +735,17 @@ def _owned_opportunity(ctx, args):
     return record, opportunity, region_record, region
 
 
-def _cost(objects):
+def _cost(objects, ctx=None):
     cost = {key: 0 for key in SUBMISSION_LIMITS}
     for obj in objects:
-        entry = object_definition(obj)
+        entry = object_definition(obj, ctx)
         contents = obj.get("contents", [])
         if contents and "container" not in entry["capabilities"]:
             raise RuleViolation("only a catalog container may have contents")
         if len(contents) > entry["components"].get("container", {}).get("slots", 0):
             raise RuleViolation("container contents exceed actual capacity")
         for item in [obj, *contents]:
-            definition = object_definition(item)
+            definition = object_definition(item, ctx)
             water = item.get("water", 0)
             if water > definition["water_capacity"]:
                 raise RuleViolation("initial water exceeds the registered construction's capacity")
@@ -754,11 +756,11 @@ def _cost(objects):
     return cost
 
 
-def _resource_cost(objects):
+def _resource_cost(objects, ctx=None):
     cost = {"water": 0}
     for obj in objects:
         for item in [obj, *obj.get("contents", [])]:
-            for kind, amount in object_definition(item)["material_cost"].items():
+            for kind, amount in object_definition(item, ctx)["material_cost"].items():
                 cost[kind] = cost.get(kind, 0) + amount
             cost["water"] += item.get("water", 0)
     return cost
@@ -794,7 +796,7 @@ def _initial_water(ctx, entity, amount, region):
 
 
 def _spawn(ctx, obj, x, y, opportunity, resources_consumed):
-    entry = object_definition(obj)
+    entry = object_definition(obj, ctx)
     state = deepcopy(entry["state"])
     state.update(generation_region=opportunity["region"],
                  generation_cost={"material_units": entry["material_units"], "water_units": obj.get("water", 0)})
@@ -809,7 +811,7 @@ def _spawn(ctx, obj, x, y, opportunity, resources_consumed):
     resources_consumed.extend(_initial_water(ctx, entity, obj.get("water", 0), opportunity["region"]))
     entities = [entity]
     for child in obj.get("contents", []):
-        child_entry = object_definition(child)
+        child_entry = object_definition(child, ctx)
         child_entry["state"].update(generation_region=opportunity["region"],
                                     generation_cost={"material_units": child_entry["material_units"], "water_units": child.get("water", 0)})
         child_entity = model.spawn_entity(ctx, {
@@ -823,12 +825,17 @@ def _spawn(ctx, obj, x, y, opportunity, resources_consumed):
         })
         resources_consumed.extend(_initial_water(ctx, child_entity, child.get("water", 0), opportunity["region"]))
         entities.append(child_entity)
+    from .creative import register_instance
+    for instance in entities:
+        register_instance(ctx, instance)
     entities[0] = model.get_entity(ctx, entity["id"])
     return entities
 
 
 def content_submit(ctx, args):
     from . import processes
+    from .creative import check_delegation
+    check_delegation(ctx, args)
     player = _player(ctx)
     record, opportunity, region_record, region = _owned_opportunity(ctx, args)
     continuation = args.get("continuation")
@@ -860,9 +867,9 @@ def content_submit(ctx, args):
             raise StateConflict("placement changed, is protected, occupied, or outside the claimed region")
         if len(ground) + len(objects) > MAX_REGION_GROUND:
             raise StateConflict("current region ground-object limit is full")
-        cost = _cost(objects)
+        cost = _cost(objects, ctx)
         _check_budget(region, cost)
-        material_cost = _resource_cost(objects)
+        material_cost = _resource_cost(objects, ctx)
         material_cost["water"] = 0
         resources_consumed = model.consume_resources(ctx, cx, cy, material_cost)
         for obj in objects:
@@ -886,7 +893,7 @@ def content_submit(ctx, args):
         authored_description = rain.get("description", "")
     elif content["kind"] == "drift":
         drift = content["drift"]
-        definition = object_definition(drift)
+        definition = object_definition(drift, ctx)
         if not {"floating", "container"} <= set(definition["capabilities"]):
             raise RuleViolation("drift requires a registered buoyant container construction")
         route = _route(ctx, cx, cy, occupied)
@@ -894,11 +901,11 @@ def content_submit(ctx, args):
             raise StateConflict("current region has no unoccupied safe water-to-shore route")
         if len(ground) >= MAX_REGION_GROUND:
             raise StateConflict("current region ground-object limit is full")
-        cost = _cost([drift])
+        cost = _cost([drift], ctx)
         _check_budget(region, cost)
         if anchor and max(abs(route[-1]["x"] - anchor["x"]), abs(route[-1]["y"] - anchor["y"])) > 2:
             raise RuleViolation("a drift continuation must actually deliver near its referenced public anchor")
-        material_cost = _resource_cost([drift])
+        material_cost = _resource_cost([drift], ctx)
         material_cost["water"] = 0
         resources_consumed = model.consume_resources(ctx, cx, cy, material_cost)
         entities = _spawn(ctx, drift, route[0]["x"], route[0]["y"], opportunity, resources_consumed)
@@ -920,6 +927,11 @@ def content_submit(ctx, args):
                        created_entity_ids=[entity["id"] for entity in entities],
                        process_id=process["id"] if process is not None else None,
                        authored_description=authored_description)
+    from .creative import public_event
+    for entity in entities:
+        public_event(ctx, action="content_published", entity_id=entity["id"], kind="publication")
+    if process is not None:
+        public_event(ctx, action="content_published", x=player["x"], y=player["y"], kind="publication")
     version = _save(ctx, OPPORTUNITIES, opportunity["id"], opportunity, record)
     author_record = _record(ctx, AUTHORS, ctx.actor_role_id)
     author = deepcopy(author_record["value"])
@@ -945,6 +957,8 @@ def content_submit(ctx, args):
 
 
 def content_release(ctx, args):
+    from .creative import check_delegation
+    check_delegation(ctx, args)
     record, opportunity, region_record, region = _owned_opportunity(ctx, args)
     opportunity.update(status="released", finished_at=ctx.now, request=args.get("reason", ""))
     version = _save(ctx, OPPORTUNITIES, opportunity["id"], opportunity, record)
@@ -1027,14 +1041,19 @@ def handbook(ctx, args):
 
 
 def generation_specs():
+    from .creative import DELEGATION
+    context_args, release_args = deepcopy(CONTEXT_ARGS), deepcopy(RELEASE_ARGS)
+    context_args["properties"]["delegation"] = DELEGATION
+    release_args["properties"]["delegation"] = DELEGATION
     submit_args = deepcopy(SUBMIT_ARGS)
     submit_args["properties"]["content"] = content_schema()
+    submit_args["properties"]["delegation"] = DELEGATION
     return (
-        FunctionSpec("grove.generation_context", generation_context, CONTEXT_ARGS, authorize=_member,
+        FunctionSpec("grove.generation_context", generation_context, context_args, authorize=_member,
                      description="Claim one public regional content opportunity with a 120-second lease; current owner/version, bounded public facts, catalog, budgets and placement/event preconditions are returned. An existing own lease is returned unchanged. This writes a claim but creates no content."),
         FunctionSpec("grove.content_submit", content_submit, submit_args, authorize=_member,
                      description="Atomically publish registered material/construction combinations, finite rain, or a buoyant container with real contents. Body, lining, all contents and initial source water pay actual costs and obey ordinary physical admission. Optional continuation quotes a public content and actual observed anchor; create compatible parts without attaching or changing old facts. One publication per owned lease; no invented abilities, rewards or private goals."),
-        FunctionSpec("grove.content_release", content_release, RELEASE_ARGS, authorize=_member,
+        FunctionSpec("grove.content_release", content_release, release_args, authorize=_member,
                      description="Release your current owned unexpired opportunity after generation failure without creating objects. The public region and identity keep a 30-second cooldown."),
         FunctionSpec("grove.content_history", content_history, HISTORY_ARGS, authorize=_member, access="read",
                      description="Read one bounded page of this region's actual public contributions and outcomes. Copy its returned cursor for older records; pages are historical records, not current object state or a complete snapshot."),

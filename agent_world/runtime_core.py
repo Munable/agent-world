@@ -576,11 +576,14 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             raise InvalidArguments("identity access_mode must be control or observe")
         normalized_key, _ = self._normalize_identity_public_key(public_key)
         ttl_seconds = duration(ttl_seconds, "identity challenge ttl_seconds", 300)
-        now = time.time()
         challenge_id = "awkc_" + secrets.token_hex(16)
         nonce = self._b64url_encode(secrets.token_bytes(32))
         message = self._identity_key_challenge_message(universe, challenge_id, nonce, access_mode)
-        with self._conn() as c:
+        # Timer and world writes use this same lock. Queue identity writes
+        # before opening SQLite, rather than racing a long world transaction
+        # against SQLite's busy deadline. TTL starts once the writer is ready.
+        with self._lock, self._conn() as c:
+            now = time.time()
             c.execute(
                 """INSERT INTO identity_key_challenges(
                      challenge_id,universe,public_key,nonce,created_at,expires_at,
@@ -696,7 +699,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 "identity ttl_seconds",
                 315360000,
             )
-        with self._conn() as c:
+        with self._lock, self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             try:
                 challenge = c.execute(

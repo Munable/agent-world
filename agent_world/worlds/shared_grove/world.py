@@ -12,7 +12,7 @@ from agent_world.world_streams import StreamEvent, StreamSpec
 from . import model as m
 from . import processes
 from . import building
-from .definitions import COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION
+from .definitions import COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 ID = {"type": "string", "minLength": 1, "maxLength": 128}
@@ -178,6 +178,8 @@ def handbook(ctx, args):
     from .generation import handbook as generation_handbook
     from .definitions import composition_catalog, PHASES, RULES_VERSION
     creation = generation_handbook(ctx, {}).result["creation"]
+    from .creative import rule_catalog
+    creation["programs"] = rule_catalog(ctx, {}).result
     return FunctionOutcome({
         "world": "shared-grove", "title": "溪源", "player": _public_self(m.get_player(ctx, required=False)),
         "clock": ctx.get_state(m.META, "clock"), "rules_version": RULES_VERSION, "process_order": list(PHASES),
@@ -201,7 +203,7 @@ def handbook(ctx, args):
         "capabilities": {"transport": "搬运完整物件", "container": "开关与有限容纳", "blocking": "有效时阻挡通行",
                          "water_source": "有限真实取水源", "ignition": "点燃实际可燃批次", "personal": "背包保护边界，不能公开丢弃",
                          "resource_node": "有限原材料库存", "attachment": "兼容部件的唯一附着关系", "buoyant": "按实际总载荷决定浮力"},
-        "rules": ["人亲自移动和行动；私人Agent读事实、解释和按获准机会贡献，不能替人连续玩。",
+        "rules": ["人可亲自移动与行动，或明确一个目标委托自己的外部Agent用同一角色实际读取、计划、行动、读回与调整；亲手行动或收回会停止后续委托，已完成事实保留。",
                   "行动需当前人物版本；目标和使用物件可带当前版本，过期拒绝且无半次结果。",
                   "公共地面可由附近任何人取用和修改，作者不是永久产权；别人的背包及其保护内容不能取用。放下即公开。",
                   "同一物件只有一个物理父关系，容纳和附着不能循环，关闭容器内不能装卸。",
@@ -216,7 +218,7 @@ def handbook(ctx, args):
                   "下水后的浮力按组合及内容总负担计算，超载、吸水或失去浮材可改变漂流结果。",
                   "公共内容保存各作者贡献及真实后果；接续须读取当前锚点与版本，不复制私聊作为公共事实。",
                   "过程有公开有限容量，超过则拒绝或停止，事务、Receipt和原Operation恢复继续适用。",
-                  "新规则数据只由受信任世界作者部署；模型描述不能安装代码或赋予未声明能力。"],
+                  "Agent可自动发布有界声明规则；服务器校验不可变定义与实际资源，纯文字不赋予能力。"],
         "creation": creation,
         "construction": {"recipes": building.recipes(), "radius_metric": "chebyshev",
                          "limits": {"hearths": building.MAX_HEARTHS, "growth": processes.MAX_GROWTH},
@@ -322,6 +324,8 @@ def join(ctx,args):
 
 
 def move(ctx,args):
+    from .creative import check_delegation, public_event
+    check_delegation(ctx, args)
     from .generation import offer_generation
     player=m.get_player(ctx)
     m.check_player_version(player,args["expected_player_version"])
@@ -357,6 +361,7 @@ def move(ctx,args):
     for cid in m.chunk_ids_around(x,y,8):
         _,cx,cy=cid.split("_")
         m.ensure_chunk(ctx,int(cx),int(cy))
+    public_event(ctx, action="move", x=x, y=y, kind="movement")
     return FunctionOutcome({"player":_public_self(player),"changes":changes,"viewport":viewport(ctx,{})},
         events=(StreamEvent("grove.changes","move",{"summary":f"{player['name']}走了一格。","x":x,"y":y},key="move"),))
 
@@ -556,7 +561,7 @@ def _action_options(ctx, player, entity):
         candidates = [_candidate(e) for e in wet if e["id"] != entity["id"]]
         reason = _reason(ctx, player, entity, burning=True) or ("没有可用的本人水。" if not candidates else None)
         add("pour", reason, "转入打开容器；关闭或燃烧时只浇外表面，水不穿透容器。", _input(candidates, quantity=max([e["state"]["water"] for e in wet] or [1])))
-    fuel_lots = [lot for lot in entity.get("matter", []) if REGISTRY.materials[lot["material"]].combustible and lot["quantity"] > 0
+    fuel_lots = [lot for lot in entity.get("matter", []) if registry_for(entity).materials[lot["material"]].combustible and lot["quantity"] > 0
                  and (state["open"] or lot["slot"] != "contained" and lot["role"] != "lining")]
     if fuel_lots:
         tools = [_candidate(e) for e in own if "ignition" in e["capabilities"] and e["state"].get("uses", 0) > 0]
@@ -673,10 +678,13 @@ def _store(ctx, player, item, target):
 
 def interact(ctx, args):
     from .generation import record_content_outcome
+    from .creative import check_delegation, guard_ordinary_action
+    check_delegation(ctx, args)
     player = m.get_player(ctx)
     m.check_player_version(player, args["expected_player_version"])
     action = args["action"]
     target = _target(ctx, args)
+    guard_ordinary_action(ctx, action, target, m.get_entity(ctx, args["item_id"]) if args.get("item_id") else None)
     if action in {"store", "attach"} and "expected_combination_fingerprint" in args:
         if not args.get("item_id"):
             raise RuleViolation("请选择这次组合使用的本人物件。")
@@ -821,7 +829,7 @@ def _project_entity(ctx, player, entity, *, include_options=True):
         value["state"]["water"] = None
         if "hearth_fuel" in value["state"]:
             value["state"]["hearth_fuel"] = None
-        value["state"]["fuel"] = sum(lot["quantity"] for lot in value["matter"] if REGISTRY.materials[lot["material"]].combustible)
+        value["state"]["fuel"] = sum(lot["quantity"] for lot in value["matter"] if registry_for(entity).materials[lot["material"]].combustible)
         value.get("composition", {}).pop("lining", None)
         visible_ids = {lot["id"] for lot in value["matter"]}
         for lot in value["matter"]:
@@ -833,8 +841,17 @@ def _project_entity(ctx, player, entity, *, include_options=True):
         children = [child for child in children if child["physical_parent"]["relation"] != "contained"]
     value["contents"] = list(value["state"]["contents"])
     if include_options:
-        value["action_options"] = _action_options(ctx, player, entity)
+        from .creative import action_options
+        value["action_options"] = [*_action_options(ctx, player, entity), *action_options(ctx, player, entity)]
         value["available_actions"] = [option["action"] for option in value["action_options"] if option["available"]]
+    from .creative import projection
+    if hidden and value["state"].get("program"):
+        program = value["state"]["program"]
+        value["state"]["program"] = {key: program[key] for key in ("definition_ref", "type_id") if key in program}
+        value["state"]["program"]["hidden"] = True
+        value["creative"] = deepcopy(value["state"]["program"])
+    else:
+        value["creative"] = projection(ctx, entity)
     value["construction_material"] = building.material_status(ctx, player, entity)
     value["relations"] = {"parent": value["physical_parent"], "children": [
         {"id": child["id"], "relation": child["physical_parent"]["relation"], "name": child["name"]} for child in children]}
@@ -866,6 +883,8 @@ def _project_entity(ctx, player, entity, *, include_options=True):
         value.pop("authored_description", None)
         value.pop("created_at", None)
         value.pop("created_by", None)
+        value["presentation"] = {"size": value.get("composition", {}).get("size", 1)}
+        value["barrier_active"] = bool(value.get("components", {}).get("barrier", {}).get("active", False))
         value.pop("composition", None)
         value.pop("components", None)
         value["state"] = {key: item for key, item in value["state"].items() if key in {
@@ -884,6 +903,8 @@ def _project_entity(ctx, player, entity, *, include_options=True):
 
 
 def build_function(ctx,args):
+    from .creative import check_delegation
+    check_delegation(ctx, args)
     from .generation import record_content_outcome
     player=m.get_player(ctx)
     m.check_player_version(player,args["expected_player_version"])
@@ -972,7 +993,9 @@ def map_project(ctx,args):
 def _registered_entity_schema():
     schema = deepcopy(ENTITY_SCHEMA)
     props = schema["properties"]
-    props["matter"]["items"]["properties"]["material"]["enum"] = list(REGISTRY.materials)
+    # Immutable material snapshots are validated by the trusted world handler;
+    # the static state schema must not snapshot one world's dynamic registry.
+    props["matter"]["items"]["properties"]["material"] = {"type": "string", "minLength": 1, "maxLength": 180}
     props["composition"]["properties"]["construction"]["enum"] = list(CONSTRUCTIONS)
     props["components"]["properties"] = {name: {"type": "object", "properties": {
         field: ({"type": "boolean"} if kind is bool else {"type": "string", "maxLength": 80} if kind is str
@@ -985,21 +1008,26 @@ def _registered_entity_schema():
 
 def make_world():
     from .generation import generation_specs, generation_state_specs
+    from . import creative
+    def with_delegation(schema):
+        schema = deepcopy(schema)
+        schema["properties"]["delegation"] = creative.DELEGATION
+        return schema
     return WorldDefinition("shared-grove","溪源",(
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
-        FunctionSpec("grove.move",move,MOVE_ARGS,authorize=member,description="由人向四个方向之一走一格。"),
+        FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
         FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=2,access="read",authorize=member,description="检查附近物件、实际行动与装入/绑定候选的只读载荷预览。"),
-        FunctionSpec("grove.interact",interact,INTERACT_ARGS,version=2,authorize=member,description="由人操作真实物件，按材质能力与归属结算。"),
-        FunctionSpec("grove.build",build_function,BUILD_ARGS,authorize=member,description="由人用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
+        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=2,authorize=member,description="本人或明确目标委托操作真实物件，按实际能力与归属结算。"),
+        FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,access="read",authorize=member,description="读取附近有限地图与自己的背包。"),
-        *generation_specs()),version=7,state_version=4,
+        *generation_specs(), *creative.specs()),version=8,state_version=5,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
-            StateRule(m.META,"",{},history="metadata"),*generation_state_specs()),
+            StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
         migrations={},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),
-        entry_instructions="先用grove.handbook读取规则。人连接自己的外部Agent后入场，四向移动与物件行动由人控制；Agent读取事实、按公共机会创作与解释。")
+        entry_instructions="先读grove.handbook与grove.rule_catalog。人可亲自移动操作，或明确目标委托给自己的外部Agent实际读、计划、行动、读回和调整；随时收回。规则发布与实例生成分开，后者消耗真实区域资源。")

@@ -13,7 +13,7 @@ from copy import deepcopy
 from agent_world.simulation import matter as sm
 from agent_world.simulation.effects import Sink, Source, Transfer
 from agent_world.simulation.frame import Frame
-from .definitions import REGISTRY, RULES_VERSION, PIECE_QUANTITIES
+from .definitions import REGISTRY, RULES_VERSION, PIECE_QUANTITIES, registry_for
 
 from agent_world.errors import RuleViolation, StateConflict
 
@@ -26,6 +26,8 @@ ENTITIES = "grove.entity"
 CHUNKS = "grove.chunk"
 PROCESSES = "grove.process"
 META = "grove.meta"
+CREATIVE_ACCOUNTING = "grove.creative.accounting"
+CREATIVE_ACCOUNT_REASONS = {"seed", "combustion", "creative_reaction", "creative_charge", "mechanical_fuel"}
 MATERIALS = {key: {"fuel": definition.piece_quantity if definition.combustible else 0}
              for key, definition in REGISTRY.materials.items() if key != "water"}
 CAPABILITIES = {"transport", "container", "blocking", "flammable", "wettable",
@@ -37,6 +39,18 @@ MAX_INVENTORY = 64
 MAX_ACTIVE = sm.MAX_FRAME_OBJECTS
 MAX_CHUNK_BYTES = 16384
 MAX_META_BYTES = 8192
+
+
+def liquid_quantity(entity, slot="contained", registry=None):
+    registry = registry_for(entity) if registry is None else registry
+    return sum(lot["quantity"] for lot in entity.get("matter", [])
+               if registry.materials[lot["material"]].liquid and (slot is None or lot["slot"] == slot))
+
+
+def liquid_capacity(entity):
+    components = entity.get("components", {})
+    return components.get("water_source", {}).get("capacity", components.get("container", {}).get(
+        "liquid_capacity", components.get("collector", {}).get("capacity", 0)))
 
 
 def identifier(prefix):
@@ -301,7 +315,9 @@ def public_players_near(ctx, x, y, radius=8):
 
 
 def blocking_at(ctx, x, y, *, ignore=None):
-    return any(e["id"] != ignore and "blocking" in e["capabilities"] and not e["state"]["destroyed"]
+    return any(e["id"] != ignore and e.get("lifecycle", "intact") == "intact"
+               and e.get("components", {}).get("barrier", {}).get("active", False) is True
+               and not e["state"]["destroyed"]
                for e in public_entities_near(ctx, x, y, radius=0, limit=96))
 
 
@@ -333,11 +349,15 @@ def public_break_reservations(ctx, entity, *, objects=None):
         members[member["id"]] = member
         pending.extend(sm.children(member, objects))
     at_risk = set()
+    try:
+        registry = registry_for(members)
+    except ValueError as exc:
+        raise RuleViolation(str(exc)) from exc
     for eid, member in members.items():
         if member.get("lifecycle", "intact") != "intact" or member["state"].get("retired"):
             continue
         try:
-            overloaded = bool(member["components"].get("structure") and sm.load_summary(REGISTRY, member, members)["overload"])
+            overloaded = bool(member["components"].get("structure") and sm.load_summary(registry, member, members)["overload"])
         except ValueError as exc:
             raise RuleViolation(str(exc)) from exc
         if overloaded or any(lot.get("burning") for lot in member["matter"]):
@@ -438,6 +458,10 @@ def normalize_entity(entity):
         if type(state[key]) is not bool:
             raise RuleViolation("物件状态必须为明确真假值。")
     value["state"] = state
+    try:
+        registry = registry_for(value)
+    except ValueError as exc:
+        raise RuleViolation(str(exc)) from exc
     # These defaults are a trusted new-object constructor, not a migration of
     # old percentage/fuel facts. Once matter exists, those projections are ignored.
     if "matter" not in value:
@@ -447,15 +471,21 @@ def normalize_entity(entity):
         if "resource_node" in caps:
             resource = state.get("resource_kind", material)
             value["matter"].append({"id": "stock", "material": resource, "quantity": state.get("stock", 4)*PIECE_QUANTITIES[resource], "slot": "contained", "role": "substance", "burning": False})
+    try:
+        value["matter"] = sm.normalize_lots(registry, value["id"], value["matter"])
+        if any(lot["slot"] == "absorbed" and lot["material"] != "water" for lot in value["matter"]):
+            raise ValueError("吸附槽只支持已注册的水吸附机制。")
+    except ValueError as exc:
+        raise RuleViolation(str(exc)) from exc
     if "components" not in value:
         components = {}
         if "container" in caps:
             components["container"] = {"slots": min(16, state.get("capacity", 4)), "liquid_capacity": state.get("water_capacity", 0), "open": state["open"]}
             components["structure"] = {"integrity": 100, "max_integrity": 100, "support_limit": 48, "overload_rate": 1}
-        absorption = REGISTRY.materials[material].absorption_per_piece
+        absorption = registry.materials[material].absorption_per_piece
         if "wettable" in caps and absorption:
             components["absorbent"] = {"capacity": absorption, "rate": 2}
-        if any(REGISTRY.materials[lot["material"]].combustible for lot in value["matter"]):
+        if any(registry.materials[lot["material"]].combustible for lot in value["matter"]):
             components["combustion"] = {"rate": 2, "spread": True}
         if "floating" in caps:
             components["buoyant"] = {"capacity": 96}
@@ -472,9 +502,8 @@ def normalize_entity(entity):
             components["resource"] = {"material": state.get("resource_kind", material), "capacity": 4}
         value["components"] = components
     try:
-        value["matter"] = sm.normalize_lots(REGISTRY, value["id"], value["matter"])
-        value["components"] = sm.validate_components(REGISTRY, value["components"])
-        if any(REGISTRY.materials[lot["material"]].combustible for lot in value["matter"]):
+        value["components"] = sm.validate_components(registry, value["components"])
+        if any(registry.materials[lot["material"]].combustible for lot in value["matter"]):
             value["components"].setdefault("combustion", {"rate": 2, "spread": "heater" not in value["components"]})
         else:
             value["components"].pop("combustion", None)
@@ -501,7 +530,7 @@ def normalize_entity(entity):
                     if original in converted and original not in live_ids:
                         converted[lot["id"]] = converted.pop(original)
                     elif component == "absorbent":
-                        definition = REGISTRY.materials[lot["material"]]
+                        definition = registry.materials[lot["material"]]
                         capacity = definition.absorption_per_piece*lot["quantity"]//definition.piece_quantity
                         available = max(0, current["capacity"]-sum(portion["capacity"] for portion in converted.values()))
                         if capacity and available:
@@ -517,18 +546,29 @@ def normalize_entity(entity):
     if set(state["contents"]).intersection(state["attachments"]):
         raise RuleViolation("同一物件不能同时容纳和绑定。")
     state.setdefault("initial_structural_quantity", sum(lot["quantity"] for lot in value["matter"] if lot["role"] == "structural"))
-    sm.project(REGISTRY, value)
+    sm.project(registry, value)
+    state["liquid_quantity"] = liquid_quantity(value, registry=registry)
+    state["liquid_capacity"] = liquid_capacity(value)
     components = value["components"]
     if state["contents"] and "container" not in components and value["lifecycle"] != "broken":
         raise RuleViolation("只有容器或受保护破损根可以容纳物件。")
     if "container" in components and len(state["contents"]) > components["container"]["slots"]:
         raise RuleViolation("容器物件槽不足。")
-    if "container" in components and sm.quantity(value, "water", "contained") > components["container"]["liquid_capacity"]:
-        raise RuleViolation("真实储水量超过器皿容量。")
+    program = state.get("program", {})
+    if "mixture_capacity" in program:
+        capacity = program["mixture_capacity"]
+        if type(capacity) is not int or not 1 <= capacity <= 200:
+            raise RuleViolation("混合物容量须为1至200的整数逻辑u。")
+        if sm.quantity(value, slot="contained") > capacity:
+            raise RuleViolation("真实混合物总量超过物件共用容量。")
+    if state["liquid_quantity"] > state["liquid_capacity"]:
+        raise RuleViolation("真实液体总量超过物件共用容量。")
     dynamic = {"container", "flammable", "wettable", "floating", "blocking", "attachment", "covering", "buoyant", "broken"}
     caps = [cap for cap in caps if cap not in dynamic]
     for component, tag in (("container", "container"), ("combustion", "flammable"), ("absorbent", "wettable"),
                            ("buoyant", "floating"), ("barrier", "blocking"), ("attachment", "attachment"), ("covering", "covering")):
+        if component == "barrier" and components.get("barrier", {}).get("active", False) is not True:
+            continue
         if component in components and (value["lifecycle"] == "intact" or (value["lifecycle"] == "broken" and component in {"combustion", "absorbent", "buoyant"})):
             caps.append(tag)
     if value["lifecycle"] == "broken":
@@ -540,7 +580,7 @@ def normalize_entity(entity):
     for lot_id, portion in components.get("absorbent", {}).get("supports", {}).items():
         if portion["capacity"] and any(lot["id"] == lot_id for lot in value["matter"]):
             future.add(("absorbed", lot_id))
-    if "absorbent" in components or any(REGISTRY.materials[lot["material"]].combustible for lot in value["matter"]):
+    if "absorbent" in components or any(registry.materials[lot["material"]].combustible for lot in value["matter"]):
         future.add(("surface", None))
     held = {(lot["slot"], lot.get("bound_to")) for lot in value["matter"] if lot["material"] == "water"}
     missing = future-held
@@ -603,17 +643,18 @@ def spawn_entity(ctx, entity):
         raise RuleViolation("物件标识已经存在。")
     entity.setdefault("created_at", ctx.now)
     value = normalize_entity(entity)
+    registry = registry_for(value)
     pool = getattr(ctx, "_grove_material_allocation", None)
     if value.get("source") == "agent":
         if pool is None:
             raise RuleViolation("Agent物件必须从真实区域材料转移而来。")
-        needed = {material: sm.quantity(value, material) for material in REGISTRY.materials}
+        needed = {material: sm.quantity(value, material) for material in registry.materials}
         if any(needed[k] > pool.get(k, 0) for k in needed):
             raise RuleViolation("生成物件的实际物质超过已投入库存。")
         for material, amount in needed.items():
             pool[material] = pool.get(material, 0)-amount
     else:
-        for material in REGISTRY.materials:
+        for material in registry.materials:
             amount = sm.quantity(value, material)
             if amount:
                 _record_account(ctx, "sources", material, amount, "seed")
@@ -780,6 +821,25 @@ def finish_resource_allocation(ctx):
 def _record_account(ctx, category, material, amount, reason):
     if not amount:
         return
+    if category not in {"sources", "sinks"} or type(amount) is not int or not 0 < amount <= 10**18:
+        raise RuleViolation("物质账分类或数量无效。")
+    if "#" in material:
+        if reason not in CREATIVE_ACCOUNT_REASONS:
+            raise RuleViolation("注册材料的物质账必须使用已声明的固定原因。")
+        key = hashlib.sha256("\0".join((category, material, reason)).encode()).hexdigest()
+        record = ctx.get_state_record(CREATIVE_ACCOUNTING, key)
+        expected = {"category": category, "material": material, "reason": reason}
+        if record["exists"]:
+            previous = record["value"]
+            if (not isinstance(previous, dict) or set(previous) != set(expected) | {"quantity"}
+                    or any(previous[field] != value for field, value in expected.items())
+                    or type(previous["quantity"]) is not int or not 0 <= previous["quantity"] <= 10**18):
+                raise RuleViolation("注册材料的实际物质账无效。")
+            amount += previous["quantity"]
+        if amount > 10**18:
+            raise RuleViolation("物质账的有界计数已满。")
+        ctx.set_state(CREATIVE_ACCOUNTING, key, {**expected, "quantity": amount}, expected_version=record["version"])
+        return
     from .processes import _meta_get, _meta_set
     account = _meta_get(ctx, "matter_accounting", {"unit": "u", "rules_version": RULES_VERSION, "sources": {}, "sinks": {}})
     key = material+":"+reason
@@ -809,7 +869,8 @@ def _tree_objects(ctx, entity):
 
 def load_summary(ctx, entity):
     try:
-        return sm.load_summary(REGISTRY, entity, _tree_objects(ctx, entity))
+        objects = _tree_objects(ctx, entity)
+        return sm.load_summary(registry_for(objects), entity, objects)
     except ValueError as exc:
         raise RuleViolation(str(exc)) from exc
 
@@ -831,7 +892,7 @@ def preview_relation(ctx, target, item, relation):
     fingerprint = hashlib.sha256((RULES_VERSION+":"+relation+":"+target["id"]+":"+item["id"]+":"+versions).encode()).hexdigest()
     fields = ("unit", "local", "total", "supported", "limit", "overload", "integrity", "max_integrity", "buoyancy", "can_float")
     def summary(objects, eid):
-        actual = sm.load_summary(REGISTRY, objects[eid], objects)
+        actual = sm.load_summary(registry_for(objects), objects[eid], objects)
         return {key: actual[key] for key in fields}
     def ancestry(objects, eid):
         result = set()
@@ -911,8 +972,8 @@ def eligible_drift(ctx, entity):
 
 
 def _apply_matter(ctx, objects, effects, *, sources=(), sinks=()):
-    frame = Frame(REGISTRY, {obj["id"]: obj for obj in objects})
     try:
+        frame = Frame(registry_for(objects), {obj["id"]: obj for obj in objects})
         frame.apply(effects, allowed_sources=sources, allowed_sinks=sinks)
         frame.verify_balance()
     except ValueError as exc:
@@ -938,6 +999,8 @@ def transfer_material(ctx, source, target, lot_id, amount, *, target_slot="conta
         raise RuleViolation("来源物质批次余额不足。")
     if source["id"] == target["id"] and lot["slot"] == target_slot:
         raise RuleViolation("物质已位于这个槽。")
+    if target_slot == "absorbed" and lot["material"] != "water":
+        raise RuleViolation("吸附槽只支持已注册的水吸附机制。")
     _apply_matter(ctx, [source] if source["id"] == target["id"] else [source, target],
                   [Transfer(source["id"], lot_id, target["id"], amount, target_slot, bound_to)])
     matches = [current for current in target["matter"] if current["material"] == lot["material"] and current["slot"] == target_slot
@@ -954,11 +1017,10 @@ def transfer_water(ctx, source, target, amount, *, target_slot="contained", reas
     lots = [lot for lot in source["matter"] if lot["material"] == "water" and lot["slot"] == "contained"]
     if sum(lot["quantity"] for lot in lots) < amount:
         raise RuleViolation("真实储水余额不足。")
-    capacity = (target["components"].get("container", {}).get("liquid_capacity", target["components"].get("collector", {}).get("capacity", 0))
-                if target_slot == "contained" else sm.component_capacity(target, "absorbent"))
+    capacity = liquid_capacity(target) if target_slot == "contained" else sm.component_capacity(target, "absorbent")
     if target_slot == "surface":
         capacity = max(8, capacity)
-    held = sm.quantity(target, "water", target_slot)
+    held = (liquid_quantity(target) if target_slot == "contained" else sm.quantity(target, "water", target_slot))
     if held+amount > capacity:
         raise RuleViolation("目标真实储水或吸水容量不足。")
     effects, remaining = [], amount
@@ -1022,9 +1084,13 @@ def start_burning(ctx, entity, lot_id=None):
     from .processes import can_ignite
     entity = get_entity(ctx, entity) if isinstance(entity, str) else entity
     objects = _tree_objects(ctx, entity)
+    try:
+        registry = registry_for(objects)
+    except ValueError as exc:
+        raise RuleViolation(str(exc)) from exc
     if sm.quantity(entity, "water", "surface") or not can_ignite(ctx, entity):
         raise RuleViolation("当前湿度、保护或物理预算不允许点燃。")
-    selected = [lot for lot in entity["matter"] if (lot_id is None or lot["id"] == lot_id) and REGISTRY.materials[lot["material"]].combustible and sm.lot_moisture(entity, lot) < 35 and sm.exposed(entity, lot, objects)]
+    selected = [lot for lot in entity["matter"] if (lot_id is None or lot["id"] == lot_id) and registry.materials[lot["material"]].combustible and sm.lot_moisture(entity, lot) < 35 and sm.exposed(entity, lot, objects)]
     if not selected:
         raise RuleViolation("没有可暴露的可燃物质批次。")
     for lot in selected:
@@ -1155,3 +1221,5 @@ def record_change(ctx, summary, *, x, y, entity_id=None, action=None):
                     "action": action, "at": ctx.now})
     from .processes import _meta_set
     _meta_set(ctx, "changes", changes[-8:])
+    from .creative import public_event
+    public_event(ctx, action=action, entity_id=entity_id, x=x, y=y)

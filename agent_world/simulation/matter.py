@@ -174,6 +174,9 @@ def project(registry, entity):
     state, components = entity.setdefault("state", {}), entity.get("components", {})
     state["water"] = quantity(entity, "water", "contained") if "water_source" not in components else 0
     state["water_remaining"] = quantity(entity, "water", "contained") if "water_source" in components else 0
+    state["liquid_quantity"] = sum(lot["quantity"] for lot in entity.get("matter", [])
+                                   if lot["slot"] == "contained" and registry.materials[lot["material"]].liquid)
+    state["liquid_capacity"] = components.get("water_source", {}).get("capacity", components.get("container", {}).get("liquid_capacity", components.get("collector", {}).get("capacity", 0)))
     state["water_capacity"] = components.get("container", {}).get("liquid_capacity", components.get("collector", {}).get("capacity", 0))
     state["water_source_capacity"] = components.get("water_source", {}).get("capacity", 200)
     state["wetness"] = moisture(entity)

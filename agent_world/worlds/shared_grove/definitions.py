@@ -1,7 +1,9 @@
 """Bounded trusted compositions. Quantities and load are game units, not SI."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
+import re
 
 from agent_world.simulation.registry import ComponentDef, MaterialDef, Registry
 from agent_world.simulation.compiler import compile_composition
@@ -15,6 +17,68 @@ for material in (MaterialDef("wood", "木", 1, 40, True, 20),
                  MaterialDef("water", "水", 2, 1, False, 0, True)):
     REGISTRY.register_material(material)
 PIECE_QUANTITIES = {key: value.piece_quantity for key, value in REGISTRY.materials.items()}
+MAX_CUSTOM_MATERIALS = 4
+_MATERIAL_SYMBOL = re.compile(r"[a-z][a-z0-9_]{0,47}\Z")
+
+
+def registry_for(entity_or_list):
+    """Build a local registry from the participating entities' trusted snapshots.
+
+    Material metadata travels with lots, including ordinary receiving vessels.
+    It never changes the shared built-in registry or enables executable rules.
+    """
+    registry = Registry(REGISTRY.version, REGISTRY.phases)
+    registry.materials = dict(REGISTRY.materials)
+    registry.components = dict(REGISTRY.components)
+    registry.rules = dict(REGISTRY.rules)
+    if entity_or_list is None:
+        entities = ()
+    elif isinstance(entity_or_list, Mapping):
+        entities = ((entity_or_list,) if any(key in entity_or_list for key in ("id", "material", "state", "matter"))
+                    else entity_or_list.values())
+    else:
+        entities = entity_or_list
+    for entity in entities:
+        if not isinstance(entity, Mapping):
+            raise ValueError("材料注册须来自参与物件。")
+        state = entity.get("state", {})
+        if not isinstance(state, Mapping):
+            raise ValueError("物件状态无效。")
+        program = state.get("program", {})
+        if not isinstance(program, Mapping):
+            raise ValueError("物件程序材料快照无效。")
+        materials = program.get("materials", {})
+        if not isinstance(materials, Mapping) or len(materials) > MAX_CUSTOM_MATERIALS:
+            raise ValueError("每个物件最多携带4种注册材料。")
+        for material_id, snapshot in materials.items():
+            if (not isinstance(material_id, str) or not 3 <= len(material_id) <= 180
+                    or material_id.count("#") != 1):
+                raise ValueError("注册材料标识须为定义引用#材料符号。")
+            prefix, symbol = material_id.split("#")
+            if (not prefix or any(not char.isprintable() or char.isspace() for char in prefix)
+                    or not _MATERIAL_SYMBOL.fullmatch(symbol)):
+                raise ValueError("注册材料标识须为定义引用#材料符号。")
+            if material_id in REGISTRY.materials:
+                raise ValueError("不能覆盖内置材料定义。")
+            if (not isinstance(snapshot, Mapping)
+                    or set(snapshot) - {"name", "load_per_u", "piece_quantity", "combustible", "liquid"}
+                    or not {"name", "load_per_u", "combustible", "liquid"}.issubset(snapshot)):
+                raise ValueError("注册材料只能携带可信的有限物理参数。")
+            name = snapshot["name"]
+            load, piece = snapshot["load_per_u"], snapshot.get("piece_quantity", 4)
+            if (not isinstance(name, str) or not 1 <= len(name) <= 80 or not name.strip()
+                    or not all(char.isprintable() for char in name)):
+                raise ValueError("注册材料名称须为1至80字且不含控制字符。")
+            if (type(load) is not int or not 1 <= load <= 8
+                    or type(piece) is not int or not 1 <= piece <= 10000
+                    or type(snapshot["combustible"]) is not bool or type(snapshot["liquid"]) is not bool):
+                raise ValueError("注册材料的载荷、份量和物理标志无效。")
+            definition = MaterialDef(material_id, name, load, piece, snapshot["combustible"], 0, snapshot["liquid"])
+            previous = registry.materials.get(material_id)
+            if previous is not None and previous != definition:
+                raise ValueError("相同注册材料标识的物理定义不一致。")
+            registry.materials[material_id] = definition
+    return registry
 
 
 def _integer(maximum=10000):

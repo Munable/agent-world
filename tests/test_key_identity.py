@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+import threading
 import tempfile
 import time
 import unittest
@@ -72,6 +75,38 @@ class KeyIdentityTests(unittest.TestCase):
 
         mapping = runtime.get_identity_key_profile("u", self.public_key)
         self.assertEqual(mapping["role_profile"]["role_id"], role_id)
+
+    def test_key_recovery_waits_for_world_writer_before_opening_sqlite(self):
+        runtime = self.runtime("writer-recovery")
+        first = self.authenticate(runtime, "u", self.private, self.public_key)
+        challenge = runtime.issue_identity_key_challenge("u", self.public_key)
+        signature = sign(self.private, challenge)
+        original_conn = runtime._conn
+        entered = threading.Event()
+
+        @contextmanager
+        def observed_connection(*args, **kwargs):
+            entered.set()
+            with original_conn(*args, **kwargs) as connection:
+                yield connection
+
+        runtime._conn = observed_connection
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            for action in (
+                lambda: runtime.issue_identity_key_challenge("u", self.public_key),
+                lambda: runtime.exchange_identity_key_challenge(challenge["challenge_id"], signature),
+            ):
+                entered.clear()
+                with runtime._lock, original_conn() as writer:
+                    writer.execute("BEGIN IMMEDIATE")
+                    pending = executor.submit(action)
+                    # Previously the identity path opened SQLite here and
+                    # raced the writer against its five-second busy timeout.
+                    self.assertFalse(entered.wait(0.1))
+                    self.assertFalse(pending.done())
+                recovered = pending.result(timeout=5)
+                self.assertTrue(entered.is_set())
+        self.assertEqual(recovered["role_profile"]["role_id"], first["role_profile"]["role_id"])
 
     def test_same_challenge_replays_same_local_credential(self):
         runtime = self.runtime("replay")

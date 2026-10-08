@@ -11,7 +11,7 @@ from agent_world.simulation.effects import Break, Sink, Source, Transfer
 from agent_world.simulation.frame import Frame
 
 from . import model as m
-from .definitions import REGISTRY, RULES_VERSION
+from .definitions import REGISTRY, RULES_VERSION, registry_for
 
 MAX_WET_ENTITIES = sm.MAX_FRAME_OBJECTS
 MAX_BURNING_ENTITIES = 8
@@ -110,7 +110,7 @@ def _needs_physics(ctx, entity, objects=None):
     contact = False
     objects = m._tree_objects(ctx, entity) if objects is None else objects
     try:
-        overload = sm.load_summary(REGISTRY, entity, objects)["overload"]
+        overload = sm.load_summary(registry_for(objects), entity, objects)["overload"]
     except ValueError as exc:
         raise RuleViolation(str(exc)) from exc
     if m.is_ground(entity) and "absorbent" in entity["components"] and m.tile_at(ctx, entity["x"], entity["y"]) == "water" and sm.absorption_targets(entity, objects):
@@ -123,7 +123,8 @@ def _needs_physics(ctx, entity, objects=None):
 
 
 def _physical_closure(ctx, extra=(), reserve_chunks=()):
-    seeds = {eid: m.get_entity(ctx, eid, required=False) for eid in _meta_get(ctx, "physical_active", [])}
+    active_ids = set(_meta_get(ctx, "physical_active", [])) | set(_meta_get(ctx, "creative_instances", []))
+    seeds = {eid: m.get_entity(ctx, eid, required=False) for eid in active_ids}
     for entity in extra:
         seeds[entity["id"]] = entity
     reserved = set(reserve_chunks)
@@ -212,7 +213,7 @@ def reconcile_entity_processes(ctx, entity):
         raise RuleViolation("活动物理对象已满。")
     _meta_set(ctx, "physical_active", sorted(ids))
     root = next((obj for obj in tree.values() if not obj.get("physical_parent")), entity)
-    if needed or any(p and p["status"] == "active" and p["kind"] in {"rain", "drift"} and m.is_ground(root)
+    if needed or _meta_get(ctx, "creative_instances", []) or any(p and p["status"] == "active" and p["kind"] in {"rain", "drift"} and m.is_ground(root)
                      and m.chunk_id(*m.chunk_for(root["x"], root["y"])) in p.get("moisture_chunks", p["chunk_ids"])
                      for p in (get_process(ctx, pid) for pid in active_process_ids(ctx))):
         _physical_closure(ctx, list(tree.values()))
@@ -228,7 +229,7 @@ def can_ignite(ctx, entity):
     found = False
     objects = m._tree_objects(ctx, entity)
     for lot in candidate["matter"]:
-        if REGISTRY.materials[lot["material"]].combustible and sm.lot_moisture(candidate, lot) < 35 and sm.exposed(candidate, lot, objects):
+        if registry_for(candidate).materials[lot["material"]].combustible and sm.lot_moisture(candidate, lot) < 35 and sm.exposed(candidate, lot, objects):
             lot["burning"] = True
             found = True
     if not found:
@@ -336,10 +337,14 @@ def destroy_entity(ctx, entity):
         spills = chunk.get("water_reservoirs", {})
         extra.extend(m.public_entities_near(ctx, x, y, radius=0, limit=m.MAX_CHUNK_ENTITIES))
     objects, _ = _physical_closure(ctx, extra)
-    frame = Frame(REGISTRY, objects, spills=spills)
+    frame = Frame(registry_for(objects), objects, spills=spills)
     frame.apply([Break(entity["id"])], allowed_sinks={"drain"})
     frame.apply(spill_rule(frame.snapshot()), allowed_sinks={"drain"}, allocate=True)
     frame.verify_balance()
+    from .creative import physical_contract_failure
+    for current in frame.objects.values():
+        if physical_contract_failure(ctx, current):
+            frame.dirty.add(current["id"])
     own_batch = not hasattr(ctx, "_grove_entities")
     if own_batch:
         _begin_batch(ctx)
@@ -431,7 +436,7 @@ def tick(ctx, args):
         for cid in chunks:
             _, cx, cy = cid.split("_")
             spills.update(m.get_chunk(ctx, int(cx), int(cy)).get("water_reservoirs", {}))
-        frame = Frame(REGISTRY, objects, sequence, protected=protected, spills=spills)
+        frame = Frame(registry_for(objects), objects, sequence, protected=protected, spills=spills)
         # Finite water contact spends one source lot with a deterministic budget.
         contact_effects, source_available, wet_by_rain = [], {}, set()
         for eid, entity in sorted(frame.objects.items()):
@@ -565,16 +570,16 @@ def tick(ctx, args):
                     burning_count = sum(any(lot.get("burning") for lot in obj["matter"]) for obj in frame.objects.values())
                     if burning_count >= MAX_BURNING_ENTITIES:
                         break
-                    lot = next((lot for lot in current["matter"] if REGISTRY.materials[lot["material"]].combustible and sm.lot_moisture(current, lot) < 35 and sm.exposed(current, lot, frame.objects)), None)
+                    lot = next((lot for lot in current["matter"] if registry_for(frame.objects).materials[lot["material"]].combustible and sm.lot_moisture(current, lot) < 35 and sm.exposed(current, lot, frame.objects)), None)
                     if lot:
                         lot["burning"] = True
-                        sm.project(REGISTRY, current)
+                        sm.project(registry_for(frame.objects), current)
                         ctx._grove_entities[current["id"]] = deepcopy(current)
                         try:
                             _physical_closure(ctx, list(frame.objects.values()))
                         except RuleViolation:
                             lot["burning"] = False
-                            sm.project(REGISTRY, current)
+                            sm.project(registry_for(frame.objects), current)
                             ctx._grove_entities[current["id"]] = deepcopy(current)
                             continue
                         frame.dirty.add(current["id"])
@@ -583,6 +588,10 @@ def tick(ctx, args):
                         if not spread:
                             break
         frame.verify_balance()
+        from .creative import physical_contract_failure
+        for current in frame.objects.values():
+            if physical_contract_failure(ctx, current, tick=sequence):
+                frame.dirty.add(current["id"])
         ctx._grove_entities.update(deepcopy(frame.objects))
         ctx._grove_dirty_entities.update(frame.dirty)
         for eid in sorted(frame.dirty):
@@ -634,13 +643,18 @@ def tick(ctx, args):
                 _finished_opportunity(ctx, process)
         # Each wet/burning/overloaded object's state has already advanced fully.
         # No density-dependent scan delays, query materialization or catch-up.
+    ctx.set_state(m.META, "clock", clock)
+    if not late:
+        from .creative import tick as creative_tick
+        creative_outcomes = creative_tick(ctx)
+        outcomes.extend((eid, action, summary, None) for eid, action, summary in creative_outcomes)
+        changes.extend(summary for _, _, summary in creative_outcomes)
     for summary in changes[:8]:
         m.record_change(ctx, summary, x=None, y=None, action="process")
     _flush_batch(ctx)
     from .generation import record_content_outcomes
     record_content_outcomes(ctx, [{"entity_id": entity_id, "action": action, "summary": summary, "process_id": process_id}
                                  for entity_id, action, summary, process_id in (outcomes if not late else [])])
-    ctx.set_state(m.META, "clock", clock)
     ctx.schedule_timer(f"grove.tick.{clock['epoch']}.{sequence}", "grove.tick",
                        {"epoch": clock["epoch"], "sequence": sequence}, due_at=ctx.now+1)
     events = (StreamEvent("grove.changes", "process", {"summary": " ".join(changes[:8]), "tick": sequence,

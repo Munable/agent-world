@@ -14,12 +14,12 @@ const renamed={...first,name:'另一位主持的称呼',composition:{constructio
 assert.equal(ui.entitySummary(first),ui.entitySummary(renamed));
 assert.deepEqual(ui.simulationStats(first),ui.simulationStats(renamed));
 assert.ok(ui.entitySummary(first).includes('容纳 水 4 单位'));
-assert.ok(ui.entitySummary(first).includes('绑定于 parent'));
+assert.ok(ui.entitySummary(first).includes('绑定在物件上'));
 assert.ok(ui.simulationStats(first).some(([label,value])=>label==='承载上限'&&value===48));
 
 // Values are displayed from the server; appearance text never loads an asset.
 assert.deepEqual(ui.safePresentation({presentation:{shape:'<script>',color:'url(secret)',glyph:'<img src=x>'}}),
-  {shape:'part',color:'#aaac8c',glyph:'◆'});
+  {shape:'part',color:'#aaac8c',glyph:'◆',size:1});
 assert.deepEqual(ui.matterLots({matter:{lots:first.matter}}),[]);
 
 // A source's actual lots bound quantity; switching sources cannot retain a lot.
@@ -81,7 +81,7 @@ for(const status of [403,404,401])for(const kind of ['combination-target','ordin
     actionIds:ui.actionIds,descriptorCandidates:ui.descriptorCandidates,descriptorLabel:ui.descriptorLabel};
   vm.createContext(context);
   vm.runInContext(extract('function fail(','const current=')+
-    extract('async function perform(','async function triggerCompanion(')+
+    extract('async function perform(','async function move(')+
     extract('async function interact(','function authorLabel('),context);
   await context.run(()=>context.interact(kind==='combination-target'?'store':'pour',target,'item',undefined,{},
     kind==='combination-target'?{form,fingerprint:'a'.repeat(64)}:undefined));

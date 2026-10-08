@@ -2,9 +2,9 @@
 // loads a model asset, or turns a descriptor into an executable callback.
 const materialLabels={wood:'木',stone:'石',cloth:'布',metal:'金属',water:'水',leather:'皮革'};
 const slotLabels={body:'本体',contained:'容纳',surface:'表面',absorbed:'吸附'};
-const parentLabels={ground:'地面',held:'持有',contained:'容纳于',attached:'绑定于'};
+const parentLabels={ground:'在地面',held:'随身携带',contained:'在容器中',attached:'绑定在物件上'};
 const finite=value=>Number.isFinite(value)?value:null;
-export const materialLabel=value=>materialLabels[value]||String(value||'未标明');
+export const materialLabel=(value,entity)=>entity?.creative?.materials?.[value]?.name||entity?.state?.program?.materials?.[value]?.name||materialLabels[value]||String(value||'未标明');
 export const slotLabel=value=>slotLabels[value]||String(value||'未标明');
 
 export function matterLots(entity){
@@ -16,31 +16,31 @@ export function bodyQuantities(entity){
   if(Array.isArray(entity?.simulation?.body))return entity.simulation.body.filter(row=>row&&Number.isInteger(row.quantity)&&row.quantity>=0);
   return matterLots(entity).filter(lot=>lot.slot==='body').map(lot=>({material:lot.material,quantity:lot.quantity}));
 }
-export function relationLabel(entity){
+export function relationLabel(entity,backpackId){
   const parent=entity?.relations?.parent;
   if(!parent||typeof parent!=='object')return '';
   const kind=parent.relation;
-  const target=parent.id;
-  return (parentLabels[kind]||kind||'物理关系')+(target?' '+target:'');
+  if(kind==='contained'&&backpackId&&parent.id===backpackId)return '在自己的背包中';
+  return parentLabels[kind]||'存在物理关联';
 }
-export function entitySummary(entity){
+export function entitySummary(entity,backpackId){
   const state=entity?.state||{},lots=matterLots(entity);
-  const quantities=lots.length?lots.map(lot=>slotLabel(lot.slot)+' '+materialLabel(lot.material)+' '+lot.quantity+' 单位').join('，'):materialLabel(entity?.material);
+  const quantities=lots.length?lots.map(lot=>slotLabel(lot.slot)+' '+materialLabel(lot.material,entity)+' '+lot.quantity+' 单位').join('，'):materialLabel(entity?.material,entity);
   const wetness=entity?.simulation?.wetness??state.wetness,burning=(entity?.simulation?.burning_lots||[]).length>0||lots.some(lot=>lot.burning);
-  return [quantities,lifecycleLabel(entity),burning?'有残余材料正在燃烧':null,Number.isFinite(wetness)&&wetness>0?'湿度 '+wetness:null,relationLabel(entity)].filter(Boolean).join(' · ');
+  return [quantities,lifecycleLabel(entity),burning?'有残余材料正在燃烧':null,Number.isFinite(wetness)&&wetness>0?'湿度 '+wetness:null,relationLabel(entity,backpackId)].filter(Boolean).join(' · ');
 }
 export function lifecycleLabel(entity){
   if(entity?.lifecycle==='consumed'||entity?.state?.destroyed)return '材料已耗尽';
   if(entity?.lifecycle==='broken'||entity?.state?.broken)return '结构已破损，残材仍在';
   return '';
 }
-export function simulationStats(entity){
+export function simulationStats(entity,backpackId){
   const sim=entity?.simulation||{},rows=[];
-  for(const [key,label] of [['local','本件载荷'],['total','总载荷'],['supported','承载量'],['limit','承载上限'],['buoyancy','浮力']])if(finite(sim[key])!==null)rows.push([label,sim[key]]);
+  for(const [key,label] of [['local','本件载荷'],['total','总载荷'],['supported','承受载荷'],['limit','承载上限'],['buoyancy','浮力']])if(finite(sim[key])!==null)rows.push([label,sim[key]]);
   if(finite(sim.integrity)!==null)rows.push(['完整度',sim.integrity+(finite(sim.max_integrity)!==null?' / '+sim.max_integrity:'')]);
   if(finite(sim.overload)!==null)rows.push(['过载量',sim.overload]);
   if(typeof sim.can_float==='boolean')rows.push(['下水资格',sim.can_float?'满足浮力条件':'未满足浮力条件']);
-  if(entity?.relations)rows.push(['物理关系',entity.relations.parent?relationLabel(entity):Number.isFinite(entity.x)&&Number.isFinite(entity.y)?'地面 '+entity.x+'，'+entity.y:'无父物件']);
+  if(entity?.relations)rows.push(['物理关系',entity.relations.parent?relationLabel(entity,backpackId):Number.isFinite(entity.x)&&Number.isFinite(entity.y)?'地面 '+entity.x+'，'+entity.y:'无父物件']);
   if(entity?.custody)rows.push(['保管边界',entity.custody.scope==='private'?'私人':entity.custody.scope==='public'?'公共':String(entity.custody.scope||entity.custody)]);
   if(Number.isFinite(sim.wetness))rows.push(['派生湿度',sim.wetness]);
   return rows;
@@ -61,7 +61,22 @@ export function safePresentation(entity){
   const fallback=(entity?.capabilities||[]).includes('container')?'box':'part';
   return {shape:shapes.has(presentation.shape)?presentation.shape:fallback,
     color:typeof presentation.color==='string'&&/^#[0-9a-f]{6}$/i.test(presentation.color)?presentation.color:'#aaac8c',
-    glyph:entityGlyph(entity)};
+    glyph:entityGlyph(entity),size:(entity?.composition?.size??presentation.size)===2?2:1};
+}
+const factLabels={definition_ref:'规则定义',type_id:'对象类型',fields:'当前属性',materials:'实际组分',mechanical:'机械状态',recorder:'记录状态',contract:'双方契约',connections:'当前连接',process:'实际过程',history:'已发生的记录',position:'位置',angle:'角度',speed:'速度',status:'状态',energy:'能量',available_torque:'可用扭矩',active:'正在运行',started_tick:'开始逻辑步',until_tick:'截止逻辑步',sequence:'事件序号',tick:'逻辑步',occurred_at:'发生时间',recorded_tick:'记录逻辑步',action:'行动',entity_id:'对象',actor:'行动者',read_tick:'读取逻辑步',reads:'实际读取',parties:'双方身份',terms_version:'条款版本',accepted:'已接受的身份',deadline_tick:'截止逻辑步',delivered:'已交付',quantity:'数量',material:'材料',beneficiary:'受益方',id:'标识',name:'名称',version:'版本',unit:'单位',temperature:'温度',pressure:'压力',progress:'进展',running:'运行中',remaining:'剩余量',capacity:'容量',amount:'数量',item_id:'投入物件',other_id:'另一个对象',connected_to:'连接至',direction:'方向',mode:'方式',output:'产物',inputs:'投入',outputs:'产出',rules:'规则',types:'类型',actions:'行动',conditions:'条件',effects:'效果',description:'说明',label:'名称',duration:'持续逻辑步',fuel:'燃料',work:'做功',torque:'扭矩',reaction:'反应',state:'当前状态',owner:'身份',scope:'范围'};
+export const factLabel=key=>factLabels[key]||String(key);
+export function factValue(value){
+  if(value===null||value===undefined)return '未公开或未设定';
+  if(typeof value==='boolean')return value?'是':'否';
+  if(typeof value==='string'||typeof value==='number')return String(value);
+  return Array.isArray(value)?value.length+' 项':'结构化状态';
+}
+export function creativeState(inspection,entity){
+  const value=inspection?.creative||entity?.creative||entity?.state?.program;
+  return value&&typeof value==='object'&&!Array.isArray(value)?value:null;
+}
+export function ruleChoices(descriptor,key){
+  return (Array.isArray(descriptor?.choices?.[key])?descriptor.choices[key]:[]).filter(value=>value&&typeof value==='object'&&typeof value.id==='string');
 }
 export function actionIds(actions){return (actions||[]).map(action=>typeof action==='string'?action:action?.action).filter(value=>typeof value==='string');}
 export function actionDescriptors(inspection){
@@ -74,7 +89,7 @@ export function descriptorCandidates(descriptor){
 function previewNumber(value){return Number.isFinite(value)?String(value):'未读取';}
 function previewLoad(summary){
   const applicable=summary?.support_limit_applicable!==false;
-  return '预计承载 '+previewNumber(summary?.after?.supported)+(applicable?' / '+previewNumber(summary?.after?.limit):'')+' 载荷单位'+
+  return '操作后承受载荷 '+previewNumber(summary?.after?.supported)+(applicable?' / '+previewNumber(summary?.after?.limit):'')+' 载荷单位'+
     (!applicable?' · 未设结构承载上限':summary?.overloaded===true?' · 会过载 '+previewNumber(summary.after?.overload):Number.isFinite(summary?.support_margin)?' · 余量 '+summary.support_margin:'');
 }
 export function candidatePreviewSummary(candidate){
@@ -94,7 +109,7 @@ export function candidatePreviewLines(candidate){
   if(physics.known!==true)lines.push('组合载荷预估未知：'+(physics.reason||'没有取得足够的可见物理状态。'));
   else{
     lines.push('目标 '+(physics.subject?.name||physics.subject?.id||preview.target_id||'物件')+'：本件载荷 '+previewNumber(before.local)+' → '+previewNumber(after.local)+'，总载荷 '+previewNumber(before.total)+' → '+previewNumber(after.total)+' 载荷单位。');
-    lines.push('承载量 '+previewNumber(before.supported)+' → '+previewNumber(after.supported)+' 载荷单位；'+(physics.support_limit_applicable===false?'未设结构承载上限。':'承载上限 '+previewNumber(before.limit)+' → '+previewNumber(after.limit)+'；操作后余量 '+previewNumber(physics.support_margin)+' 载荷单位。'));
+    lines.push('承受载荷 '+previewNumber(before.supported)+' → '+previewNumber(after.supported)+' 载荷单位；'+(physics.support_limit_applicable===false?'未设结构承载上限。':'承载上限 '+previewNumber(before.limit)+' → '+previewNumber(after.limit)+'；操作后余量 '+previewNumber(physics.support_margin)+' 载荷单位。'));
     if(physics.support_limit_applicable!==false)lines.push('过载量 '+previewNumber(before.overload)+' → '+previewNumber(after.overload)+'；'+(physics.overloaded===true?'操作后会过载，结构可能继续受损。':physics.overloaded===false?'操作后当前目标不过载。':'是否过载未读取。'));
     lines.push('浮力 '+previewNumber(before.buoyancy)+' → '+previewNumber(after.buoyancy)+'；'+(physics.can_float===true?'操作后满足当前浮力条件。':physics.can_float===false?'操作后不满足当前浮力条件。':'当前浮力条件未读取。'));
     for(const row of Array.isArray(physics.affected)?physics.affected:[]){

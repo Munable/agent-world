@@ -45,10 +45,15 @@ def template(name):
     return _shortcut(name)
 
 
-def object_definition(spec):
+def object_definition(spec, ctx=None):
     """Resolve only registered constructions; prose cannot add mechanics."""
-    if ("template" in spec) == ("composition" in spec):
-        raise RuleViolation("choose exactly one template shortcut or material composition")
+    if sum(key in spec for key in ("template", "composition", "definition_ref")) != 1:
+        raise RuleViolation("choose exactly one template, composition, or published definition_ref/type_id")
+    if "definition_ref" in spec:
+        if ctx is None:
+            raise RuleViolation("published definitions must be resolved in their own world")
+        from .creative import object_definition as authored_definition
+        return authored_definition(ctx, spec)
     if "composition" in spec:
         try:
             return composition_definition(spec["composition"])
@@ -100,15 +105,19 @@ COMPOSITION_SCHEMA = {
                    "size": {"enum": sorted({size for item in composition_catalog()["constructions"] for size in item["sizes"]})},
                    "lining": {"enum": sorted({material for item in composition_catalog()["constructions"] for material in item.get("lining", [])})}},
 }
-DEFINITION_CHOICE = [{"required": ["template"], "properties": {"composition": False}},
-                     {"required": ["composition"], "properties": {"template": False}}]
+DEFINITION_CHOICE = [{"required": ["template"], "properties": {"composition": False, "definition_ref": False, "type_id": False}},
+                     {"required": ["composition"], "properties": {"template": False, "definition_ref": False, "type_id": False}},
+                     {"required": ["definition_ref", "type_id"], "properties": {"template": False, "composition": False}}]
+PROGRAM_PROPERTIES = {"definition_ref": {"type": "string", "minLength": 1, "maxLength": 128},
+                      "type_id": {"type": "string", "minLength": 1, "maxLength": 48}}
 CONTENT_ITEM_SCHEMA = {
     "type": "object", "additionalProperties": False, "oneOf": DEFINITION_CHOICE,
-    "properties": {"template": {"enum": list(CATALOG)}, "composition": COMPOSITION_SCHEMA,
+    "properties": {**PROGRAM_PROPERTIES, "template": {"enum": list(CATALOG)}, "composition": COMPOSITION_SCHEMA,
                    "name": NAME, "description": TEXT,
                    "water": {"type": "integer", "minimum": 0, "maximum": 12}},
 }
 OBJECT_PROPERTIES = {
+    **PROGRAM_PROPERTIES,
     "template": {"enum": list(CATALOG)}, "composition": COMPOSITION_SCHEMA,
     "name": NAME, "description": TEXT,
     "water": {"type": "integer", "minimum": 0, "maximum": 12},
