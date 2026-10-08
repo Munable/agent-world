@@ -96,4 +96,27 @@ for(const status of [403,404,401])for(const kind of ['combination-target','ordin
   }
 }
 
-console.log('Grove data presentation: common quantities, relationships and bounded source selection passed');
+// A native response ending is not evidence that the delegated goal succeeded.
+// Exercise the page's actual renderer with persisted request/task outcomes.
+for(const [execution,label,detail,resume] of [
+  [{status:'completed',goal:'运来补给'},'目标结果未确认','原请求已结束',false],
+  [{status:'completed',task_id:'original-task',goal:'运来补给',goal_result:{status:'completed'}},'目标已完成','已经保存的行动和结果保留',false],
+  [{status:'completed',task_id:'original-task',goal:'运来补给',goal_result:{status:'completed'},receipts:[{status:'unknown',operation_id:'original-write'}]},'结果待核对','先核对原回执',false],
+  [{status:'paused',task_id:'original-task',goal:'运来补给',resume_allowed:true},'目标已暂停','继续原目标与剩余额度',true]
+]){
+  const elements=new Map(),element=id=>{
+    if(!elements.has(id))elements.set(id,{textContent:'',dataset:{},hidden:false,disabled:false,replaceChildren(){},append(){}});
+    return elements.get(id);
+  };
+  const context={host:{status:'ready',execution},goalDirty:true,hostCommandBusy:false,executionReclaimBusy:false,
+    actionBusy:false,document:{activeElement:null},client:{pending:()=>null},$:element,
+    node:()=>({append(){}})};
+  vm.createContext(context);
+  vm.runInContext(extract('function renderExecution(){','async function reclaimExecution(){'),context);
+  context.renderExecution();
+  assert.equal(element('execution-status').textContent,label);
+  assert.ok(element('execution-detail').textContent.includes(detail));
+  assert.equal(element('execution-resume').hidden,!resume);
+}
+
+console.log('Grove presentation: quantities, relationship/action boundaries and truthful goal/resume outcomes passed');

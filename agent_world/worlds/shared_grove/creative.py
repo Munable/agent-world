@@ -583,7 +583,13 @@ def tick(ctx):
                 outcomes.append((eid, "reaction", "实际组分按已发布配比反应，余量仍在。"))
             elif state["process"]["status"] == "running":
                 state["process"]["status"] = "waiting"
-            state["event_cursor"] = journal_sequence
+            # A cursor tracks consumed event inputs, not every public change.
+            # Recorder history is updated separately by public_event; neither
+            # recording alone nor reading live object facts consumes this log.
+            # Advancing unused cursors would invalidate otherwise unchanged
+            # action targets whenever another object is moving or speaking.
+            if _has_event(specs[eid]):
+                state["event_cursor"] = journal_sequence
             m.normalize_entity(entity)
         except (ValueError, RuleViolation) as exc:
             fail_instance(eid, exc)

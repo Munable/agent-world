@@ -135,7 +135,7 @@ function renderHost(){
   const lastReply=[...messages].reverse().find(m=>!['user','event'].includes(m.role)&&m.text);
   const failed=host.status==='error';
   $('companion-update').hidden=!failed&&!busy&&!lastReply;
-  $('companion-update').textContent=failed?'本轮 Agent 未完成：'+previewMessage(host.error?.message||'回应暂不可用，请打开“目标与交谈”查看。'):busy?'你的 Agent 正在看现场。你可以继续走动与操作。':lastReply?'Agent 回应：'+previewMessage(lastReply.text):'';
+  $('companion-update').textContent=failed?'当前 Agent 请求未完成：'+previewMessage(host.error?.message||'回应暂不可用，请打开“目标与交谈”查看。'):busy?'你的 Agent 正在看现场。你可以继续走动与操作。':lastReply?'Agent 回应：'+previewMessage(lastReply.text):'';
   const signature=JSON.stringify(messages);
   if(signature!==lastChatSignature){lastChatSignature=signature;$('agent-messages').replaceChildren(...messages.slice(-12).map(m=>{const el=node('div',undefined,'chat-message '+(m.role==='user'?'user':m.role==='event'?'event':'agent'));el.append(node('small',m.role==='user'?'你':m.role==='event'?'现场变化':'你的 Agent'),messageNode(m.text));return el;}));$('agent-messages').scrollTop=$('agent-messages').scrollHeight;}
   if(!messages.length&&host.text)$('agent-messages').replaceChildren(messageNode(host.text));
@@ -153,22 +153,35 @@ async function hostCommand(path,body,{refresh=false,interrupt=false}={}){
 }
 function renderExecution(){
   const execution=host?.execution||{},status=execution.status||'idle',active=execution.delegation_active===true,busy=['starting','running'].includes(status),unknown=status==='unknown'||(execution.receipts||[]).some(receipt=>receipt.status==='unknown');
-  const labels={idle:'尚未委托',starting:'正在授权',running:'执行中',completed:'本轮已结束',paused:'已暂停',error:'执行受阻',unknown:'结果待核对'};
-  $('execution-status').textContent=labels[status]||status;$('execution-status').dataset.status=status;
+  const goalCompleted=status==='completed'&&!!execution.task_id&&execution.goal_result?.status==='completed';
+  const labels={idle:'尚未委托',starting:'正在授权',running:'正在执行目标',completed:'目标已完成',result_unconfirmed:'目标结果未确认',paused:'目标已暂停',blocked:'目标受阻',error:'执行受阻',unknown:'结果待核对',budget_exhausted:'目标额度已用完'};
+  const displayedStatus=unknown?'unknown':status==='completed'&&!goalCompleted?'result_unconfirmed':status,requestLabels={idle:'尚未开始',preparing:'正在读取现场',running:'推理与行动中',returned:'这一段请求已返回',timed_out:'这一段请求超时',settling:'正在核对原结果',idle_confirmed:'原请求已停止并核对',unsettled:'原请求状态待核对'};
+  $('execution-status').textContent=labels[displayedStatus]||displayedStatus;$('execution-status').dataset.status=displayedStatus;
   if(!goalDirty&&typeof execution.goal==='string'&&document.activeElement!==$('execution-goal'))$('execution-goal').value=execution.goal;
-  $('execution-current-goal').textContent=execution.goal?'本轮目标：'+execution.goal:'明确给出目标后才允许 Agent 行动。保存想法或普通提问不会授权。';
+  $('execution-current-goal').textContent=execution.goal?'委托目标：'+execution.goal:'明确给出目标后才允许 Agent 行动。保存想法或普通提问不会授权。';
   const count=Number.isInteger(execution.actions_count)?String(execution.actions_count):'待读取',limit=Number.isInteger(execution.max_actions)?String(execution.max_actions):'待读取';
-  $('execution-budget').textContent=execution.goal?'本轮世界动作 '+count+' / '+limit+(execution.budget?' · 最多 '+execution.budget.max_steps+' 个推理步骤、'+execution.budget.max_tool_calls+' 次世界读取或行动':''):'';
-  $('execution-detail').textContent=execution.error?.message||(unknown?'原行动结果未确认。先核对原回执，再开始新目标；不会自动发起替代执行。':active?'行动授权仍有效。收回或亲手行动会接回控制，停止后续 Agent 行动；已保存的结果保留。':execution.goal?'当前没有有效行动授权。已经完成的行动保留；本轮结束不代表目标一定完成。':'人可以直接玩，也可以在这里明确授权 Agent 帮你实现目标。');
+  const requests=Number.isInteger(execution.requests_used)?String(execution.requests_used):'待读取',requestLimit=Number.isInteger(execution.max_requests)?String(execution.max_requests):'待读取';
+  $('execution-budget').textContent=execution.goal?'世界动作 '+count+' / '+limit+(execution.task_id?' · 这个目标模型请求 '+requests+' / '+requestLimit:' · 原请求记录，尚无目标接续额度'):'';
+  $('execution-request').textContent=execution.goal&&execution.task_id?'当前请求：'+(requestLabels[execution.request_status]||execution.request_status||'待读取')+(execution.budget?' · 每段建议 '+execution.budget.max_steps+' 个推理步骤、最多 '+execution.budget.max_tool_calls+' 次世界读取或行动':''):'';
+  const detail=unknown?'原行动结果未确认。先核对原回执，才可接续或开始新目标；核对不会自动继续行动。':goalCompleted?'目标已完成。已经保存的行动和结果保留，可在现场继续查看。':status==='completed'?'原请求已结束，目标结果未确认。已经保存的行动保留；没有明确的目标完成记录，不能将请求结束视为成功。':active?'行动授权仍有效。Agent 可在总额度内继续；收回或亲手行动会停止后续行动，已保存的结果保留。':execution.resume_allowed===true?'当前没有行动授权。点击“接续这个目标”才再次授权；它会读取最新现场，继续原目标与剩余额度。':execution.goal?'当前没有行动授权。已保存的行动保留；请求结束或额度用完不代表目标完成。':'人可以直接玩，也可以在这里明确授权 Agent 帮你实现目标。';
+  $('execution-detail').textContent=[execution.stop_reason,execution.error?.message,detail].filter((value,index,values)=>typeof value==='string'&&value&&values.indexOf(value)===index).join('\n');
+  const progress=execution.progress||{},progressNodes=[];
+  if(typeof progress.summary==='string'&&progress.summary)progressNodes.push(node('p','最近发现与行动：'+progress.summary,'small'));
+  if(typeof progress.next_intent==='string'&&progress.next_intent&&!goalCompleted)progressNodes.push(node('p','下一步打算：'+progress.next_intent,'small'));
+  const evidence=Array.isArray(progress.evidence)?progress.evidence:[],lastConfirmed=evidence[evidence.length-1]||[...(execution.receipts||[])].reverse().find(receipt=>['committed','confirmed'].includes(receipt.status));
+  if(lastConfirmed)progressNodes.push(node('p','最后已确认行动：'+(lastConfirmed.function||'世界行动')+'\n原操作 '+(lastConfirmed.operation_id||'未返回')+(Number.isInteger(lastConfirmed.commit_seq)?' · 记录 '+lastConfirmed.commit_seq:''),'small fact-reference'));
+  $('execution-progress').replaceChildren(...progressNodes);$('execution-progress').hidden=progressNodes.length===0;
   const receipts=Array.isArray(execution.receipts)?execution.receipts:[],receiptLabels={committed:'已保存',confirmed:'已核对',rejected:'已拒绝',unknown:'待核对'};
   $('execution-actions').replaceChildren(...receipts.slice(-8).map(receipt=>{const row=node('div',undefined,'execution-receipt');row.append(node('strong',(receipt.function||'世界行动')+' · '+(receiptLabels[receipt.status]||receipt.status||'状态未读')),node('small','操作 '+(receipt.operation_id||'未返回')+(Number.isInteger(receipt.commit_seq)?' · 记录 '+receipt.commit_seq:''),'fact-reference'));return row;}));
   if(receipts.length>8)$('execution-actions').append(node('p','显示最近 8 个回执，共 '+receipts.length+' 个；它们记录行动，不替代当前现场。','small'));
-  if(execution.readback_actual===true)$('execution-actions').append(node('p','本轮已实际读回世界。物件的最新状态仍以地图与详情为准。','small'));
+  if(execution.readback_actual===true)$('execution-actions').append(node('p','这个目标已有实际世界读回。物件的最新状态仍以地图与详情为准。','small'));
   $('execution-start').disabled=hostCommandBusy||busy||active||unknown||!['ready','paused'].includes(host?.status)||actionBusy||!!client.pending();
+  $('execution-resume').hidden=execution.resume_allowed!==true||!execution.task_id||unknown;
+  $('execution-resume').disabled=hostCommandBusy||executionReclaimBusy||busy||active||unknown||['connecting','thinking','disconnected'].includes(host?.status)||actionBusy||!!client.pending();
   $('execution-reclaim').disabled=executionReclaimBusy||!(active||busy||unknown);
   $('execution-reclaim').textContent=executionReclaimBusy?'正在收回…':'收回行动权';
   $('execution-recover').hidden=!unknown;$('execution-recover').disabled=hostCommandBusy||executionReclaimBusy;
-  const summary=execution.goal?(labels[status]||status)+' · '+count+' / '+limit+' 个动作':'未委托行动 · 你可以直接操作或给 Agent 一个目标';
+  const summary=execution.goal?(labels[displayedStatus]||displayedStatus)+' · '+count+' / '+limit+' 个动作'+(execution.task_id?' · '+requests+' / '+requestLimit+' 次模型请求':''):'未委托行动 · 你可以直接操作或给 Agent 一个目标';
   $('execution-summary').textContent=summary;$('execution-reclaim-quick').hidden=!(active||busy||unknown);$('execution-reclaim-quick').disabled=executionReclaimBusy;
 }
 async function reclaimExecution(){
@@ -856,14 +869,21 @@ $('release-operation').addEventListener('click',()=>run(()=>recoverWorldOperatio
 $('reconnect-world').addEventListener('click',()=>run(async()=>{const epoch=session;await authenticate(key);if(epoch!==session)return;if(await hostCommand('recover',{token:client.token,public_key:key.public_key,name:point()?.name||prefs().name},{refresh:true})){scheduleWorld();scheduleHost();}}));
 $('chat-form').addEventListener('submit',event=>{event.preventDefault();run(async()=>{const text=$('chat-text').value.trim();if(!text)return;const entity=selectedEntity();if(await hostCommand('prompt',{text,intent:$('host-intent').value.trim(),...(entity?{context_entity_id:entity.id}:{})})){$('chat-text').value='';client.saveDraft('grove-chat','');intentDirty=false;}});});
 $('execution-form').addEventListener('submit',event=>{event.preventDefault();run(async()=>{
-  const goal=$('execution-goal').value.trim(),maxActions=Number($('execution-max-actions').value),execution=host?.execution||{};
-  if(!goal||hostCommandBusy||actionBusy||client.pending()||execution.delegation_active||['starting','running','unknown'].includes(execution.status))return;
-  if(goal.length>2000)throw new Error('本轮目标最多 2000 字。');
-  if(!Number.isInteger(maxActions)||maxActions<1||maxActions>64)throw new Error('本轮动作上限须为 1 至 64 的整数。');
+  const goal=$('execution-goal').value.trim(),maxActions=Number($('execution-max-actions').value),maxRequests=Number($('execution-max-requests').value),execution=host?.execution||{};
+  if(!goal||hostCommandBusy||actionBusy||client.pending()||execution.delegation_active||['starting','running','unknown'].includes(execution.status)||(execution.receipts||[]).some(receipt=>receipt.status==='unknown'))return;
+  if(goal.length>2000)throw new Error('委托目标最多 2000 字。');
+  if(!Number.isInteger(maxActions)||maxActions<1||maxActions>64)throw new Error('目标动作上限须为 1 至 64 的整数。');
+  if(!Number.isInteger(maxRequests)||maxRequests<1||maxRequests>8)throw new Error('目标模型请求上限须为 1 至 8 的整数。');
   stopWalking();const entity=selectedEntity();
-  if(await hostCommand('execute',{goal,max_actions:maxActions,...(entity?{context_entity_id:entity.id}:{})})){goalDirty=false;client.saveDraft('grove-goal',goal);announce('目标已交给你的 Agent。请看本轮真实行动与回执；你可以随时收回后续行动权。');}
+  if(await hostCommand('execute',{goal,max_actions:maxActions,max_requests:maxRequests,...(entity?{context_entity_id:entity.id}:{})})){goalDirty=false;client.saveDraft('grove-goal',goal);announce('目标已交给你的 Agent。它可在总额度内接续执行，你可以随时收回后续行动权。');}
 });});
 $('execution-goal').addEventListener('input',()=>{goalDirty=true;if(current())try{client.storage.setItem(client.draftKey('grove-goal'),$('execution-goal').value);}catch{}});
+$('execution-resume').addEventListener('click',()=>run(async()=>{
+  const execution=host?.execution||{};
+  if(hostCommandBusy||executionReclaimBusy||actionBusy||client.pending()||execution.delegation_active||['starting','running','unknown'].includes(execution.status)||['connecting','thinking','disconnected'].includes(host?.status)||(execution.receipts||[]).some(receipt=>receipt.status==='unknown')||execution.resume_allowed!==true||!execution.task_id)return;
+  stopWalking();
+  if(await hostCommand('execute-resume',{task_id:execution.task_id}))announce('已再次授权接续原目标；保留原行动记录与剩余额度，先读取最新现场。');
+}));
 $('execution-reclaim').addEventListener('click',()=>run(reclaimExecution));$('execution-reclaim-quick').addEventListener('click',()=>run(reclaimExecution));
 $('execution-recover').addEventListener('click',()=>run(()=>hostCommand('recover',{token:client.token,public_key:key.public_key,name:point()?.name||prefs().name},{refresh:true})));
 $('rule-catalog-read').addEventListener('click',()=>run(async()=>{
@@ -890,7 +910,7 @@ $('leave').addEventListener('click',()=>{
   ledger.clear();streamCursor=null;lastSelectionSignature='';lastInventorySignature='';lastChatSignature='';lastGenerationSignature='';lastContentSignature='';contentHistoryId=null;contentHistoryPages=[];contentHistoryBusy=false;operationRecoveryBusy=false;inventoryPageBusy=false;inventoryPageCursors=[null];intentDirty=false;goalDirty=false;
   definitionReadBusy=false;definitionReadValue=null;definitionReadError=null;definitionReadRef=null;definitionReadOpen=false;$('rule-catalog-result').replaceChildren();$('rule-catalog-read').disabled=false;
   document.body.classList.remove('playing','context-open','agent-open');$('agent-toggle').setAttribute('aria-expanded','false');$('game').hidden=true;$('entry').hidden=false;$('world-status').textContent='已离开 · 可接续';$('entry-progress').replaceChildren();$('enter').disabled=false;
-  announce('已离开网页。身份与变化保留；已委托的本轮仍受保存的动作上限约束。离开网页不等于收回行动权。');
+  announce('已离开网页。身份、目标进度与变化保留；已委托行动仍受这个目标的总额度约束。离开网页不等于收回行动权。');
 });
 window.addEventListener('resize',resize);window.addEventListener('pagehide',()=>{stopWalking();client.cancel();});document.addEventListener('visibilitychange',()=>{if(document.hidden)stopWalking();else if(playing){run(()=>refreshWorld());scheduleHost(250);}});
 window.addEventListener('pageshow',event=>{if(event.persisted&&playing){run(()=>refreshWorld(true));scheduleWorld();scheduleHost(250);}});

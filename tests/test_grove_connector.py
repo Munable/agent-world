@@ -340,13 +340,38 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["entity"]["field_references"]["action_options"], "#/action_options")
         self.assertEqual(result["action_options"], options)
         self.assertEqual(result["entity"]["simulation"], {"total": 160})
-        self.assertEqual(result["public_content"], {"version": 8})
+        self.assertEqual(result["public_content"]["version"], 8)
+        self.assertEqual(result["public_content"]["projection"]["scope"], "public_content_index")
         self.assertIn("action_options", original["result"]["entity"])
         original["result"]["entity"]["available_actions"] = ["close"]
         original["result"]["entity"]["action_options"] = [{"action": "close"}]
         differing = companion_projection("grove.inspect", original)["result"]["entity"]
         self.assertEqual(differing["available_actions"], ["close"])
         self.assertEqual(differing["action_options"], [{"action": "close"}])
+
+    def test_region_index_preserves_discovery_without_repeating_snapshots_or_action_previews(self):
+        entity = {"id":"box", "version":7, "name":"Box", "x":3, "y":2,
+            "state":{"open":False,"program":{"definition_ref":"immutable","contract":{"status":"active"}}},
+            "matter":[{"id":"original-lot","quantity":2}], "simulation":{"total":160}}
+        options = [{"action":"store","available":False,"reason":"Overloaded",
+            "input":{"candidates":[{"id":"item","preview":{"available":False,"physics":{"overloaded":True}}}]}}]
+        public = {"id":"content:0:0", "region":"0:0", "version":8,
+            "history":{"cursor":"older-page", "outcome_count":22},
+            "anchors":[{"entity_id":"box","version":7,"entity":entity}],
+            "contributions":[{"id":"source","text":"historical text"}], "outcome_refs":[{"id":"receipt"}]}
+        original = {"result":{"entity":entity,"action_options":options,"available_actions":[],"public_content":public}}
+        actual = companion_projection("grove.inspect", original)["result"]
+        self.assertEqual(actual["entity"],entity)
+        self.assertEqual(actual["action_options"],options)
+        index = actual["public_content"]
+        self.assertEqual(index["history"],public["history"])
+        self.assertEqual(index["anchors"][0]["entity_id"],"box")
+        self.assertNotIn("entity",index["anchors"][0])
+        self.assertNotIn("contributions",index)
+        self.assertIn("no cursor",index["projection"]["meaning"])
+        self.assertEqual(original["result"]["public_content"],public)
+        folded = self.session.blueprint_model_input({"public_content":index,"public_entities":[entity]})
+        self.assertEqual(folded["public_entities"],[entity])
 
     async def test_selected_inspection_is_authorized_before_model_request(self):
         self.session.entered = True
@@ -384,7 +409,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.exception.code, "DelegationRequired")
         self.session.invoke.assert_not_awaited()
 
-    async def test_execution_gets_current_catalog_and_closes_writes_before_abort(self):
+    async def test_execution_gets_current_catalog_and_closes_writes_before_goal_settlement(self):
         self.session.catalog = {"grove.rule_catalog": {"access": "read"}}
         self.session.current_turn_facts = AsyncMock(return_value={"scene": {"player": "actual"}})
         self.session.invoke = AsyncMock(return_value={"result": {"limits": {"bound_object_ids": 8}}})
@@ -398,16 +423,15 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
                 supplied = json.loads(body['parts'][1]['text'].split('\n', 1)[1])
                 self.assertEqual(supplied['rule_catalog']['limits']['bound_object_ids'], 8)
                 raise httpx.ReadTimeout('test timeout')
-            self.assertTrue(path.endswith('/abort'))
-            self.assertFalse(self.session.active_execution)
-            return {}
+            self.fail('The goal loop, not an isolated model turn, settles the native request.')
 
         self.session.host = host
         with self.assertRaises(ConnectorError) as failed:
             await self.session.turn('Publish one rule definition', executing=True)
         self.assertEqual(failed.exception.code, 'HostUnavailable')
         self.assertEqual(self.session.inference_count, 1)
-        self.assertEqual(requests, ['/session/test-session/message', '/session/test-session/abort'])
+        self.assertEqual(requests, ['/session/test-session/message'])
+        self.assertFalse(self.session.active_execution)
         self.session.invoke.assert_awaited_once_with('grove.rule_catalog', {})
 
     async def test_unknown_publication_stops_new_generation_without_model_call(self):

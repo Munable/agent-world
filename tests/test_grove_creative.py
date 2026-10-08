@@ -371,11 +371,24 @@ class CreativeWorldTests(unittest.TestCase):
         self.assertTrue(self.entity(devices["gate"])["components"]["barrier"]["active"])
         self.action("A", devices["source"], "disconnect", other_id=devices["gate"])
         self.action("A", devices["gear"], "connect", other_id=devices["gate"])
+        self.approach("B", target)
+        # Keep the actual delivery intent read before a moving network step.
+        # An unrelated event-log cursor must not make the contract stale;
+        # the transaction must reach its latest-state delivery predicate.
+        before = self.entity(target)
+        delivery = {"action": "deliver", "target_id": target,
+            "expected_target_version": before["version"],
+            "expected_player_version": self.view("B")["player"]["version"],
+            "item_id": payer, "expected_item_version": self.entity(payer)["version"], "amount": 2}
+        journal_before = self.world.get_state("w", m.META, "creative_events")["value"]["sequence"]
         self.ticks(2)
+        self.assertGreater(self.world.get_state("w", m.META, "creative_events")["value"]["sequence"], journal_before)
+        self.assertEqual(self.entity(target)["version"], before["version"])
+        self.assertEqual(self.entity(target)["state"]["program"]["event_cursor"], before["state"]["program"]["event_cursor"])
         self.assertGreater(self.entity(devices["gate"])["state"]["program"]["barrier_opened_sequence"], started)
         self.assertNotEqual(self.entity(devices["source"])["state"]["program"]["mechanical"]["speed"], 0)
         with self.assertRaisesRegex(RuleViolation, "交付条件当前未满足"):
-            self.action("B", target, "deliver", item_id=payer, amount=2)
+            self.call("B", "grove.rule_action", delivery)
         self.assertEqual(self.entity(payer)["matter"], remaining)
         self.action("A", devices["source"], "stop")
         self.ticks(1)
