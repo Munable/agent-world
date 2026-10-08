@@ -31,7 +31,8 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.uncertain_write, self.host_busy = False, False
         self.attach(self.session)
         self.session.execution.update(task_id="test-task", goal="Go to the observed destination",
-            segment_id="test-segment", status="starting", max_actions=4, remaining_actions=4, max_requests=4)
+            segment_id="test-segment", status="starting", max_actions=4, remaining_actions=4, max_requests=4,
+            context_reference_attempted=False)
 
     def attach(self, session):
         session.entered = True
@@ -505,6 +506,130 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.execution["goal_result"]["evidence_operation_ids"], self.attempts)
         self.assertFalse(self.session.execution["resume_allowed"])
 
+
+    def contract_facts(self, *, terms=1, status="active", entity="bound-contract"):
+        return {"selected_inspection": {"entity": {"id": entity, "version": 7, "name": "交付约定",
+            "creative": {"definition_ref": "original-definition", "type_id": "contract", "world_tick": 30,
+                "contract": {"terms_version": terms, "material": "original-definition#product",
+                    "quantity": 2, "delivered": 2 if status == "complete" else 0,
+                    "status": status, "finished_tick": 29 if status == "complete" else None, "released": 0}}}}}
+
+    def test_contract_world_verdict_does_not_prove_extra_goal_or_release(self):
+        self.session.execution.update(context_entity_id="bound-contract", goal="完成交付并取回收益", status="paused")
+        self.session.execution_world_results(self.contract_facts(), establish_reference=True)
+        result = self.session.execution_world_results(self.contract_facts(status="complete"))[0]
+        self.assertEqual(result["verification"]["status"], "verified_complete")
+        self.assertEqual(result["released"], 0)
+        self.assertEqual(self.session.execution["status"], "paused")
+        self.assertIsNone(self.session.execution["goal_result"])
+        self.assertEqual(self.session.execution["goal"], "完成交付并取回收益")
+
+    def test_changed_contract_terms_and_other_object_cannot_replace_original_reference(self):
+        self.session.execution["context_entity_id"] = "bound-contract"
+        self.session.execution_world_results(self.contract_facts(), establish_reference=True)
+        original = deepcopy(self.session.execution["context_result_reference"])
+        changed = self.session.execution_world_results(self.contract_facts(terms=2, status="complete"), establish_reference=True)[0]
+        self.assertEqual(changed["verification"]["status"], "reference_mismatch")
+        self.assertEqual(self.session.execution["context_result_reference"], original)
+        self.assertEqual(self.session.execution_world_results(self.contract_facts(entity="easier-contract", status="complete")), [])
+
+    def test_old_task_without_start_reference_cannot_bind_on_resume(self):
+        self.session.execution.update(context_entity_id="bound-contract", status="paused")
+        self.session.execution.pop("context_reference_attempted", None)
+        self.session.remember()
+        restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
+        result = restored.execution_world_results(self.contract_facts(status="complete"), establish_reference=True)[0]
+        self.assertEqual(result["verification"]["status"], "unbound")
+        self.assertIsNone(restored.execution["context_result_reference"])
+
+    def test_missing_initial_terms_cannot_bind_later_terms_after_restart(self):
+        self.session.execution["context_entity_id"] = "bound-contract"
+        initial = self.contract_facts()
+        initial["selected_inspection"]["entity"]["creative"].pop("contract")
+        self.assertEqual(self.session.execution_world_results(initial, establish_reference=True), [])
+        restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
+        result = restored.execution_world_results(self.contract_facts(terms=2, status="complete"), establish_reference=True)[0]
+        self.assertEqual(result["verification"]["status"], "unbound")
+        self.assertIsNone(restored.execution["context_result_reference"])
+
+    def test_new_task_reference_is_fixed_once_and_persisted_across_restart(self):
+        self.session.execution["context_entity_id"] = "bound-contract"
+        initial = self.session.execution_world_results(self.contract_facts(), establish_reference=True)[0]
+        restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
+        result = restored.execution_world_results(self.contract_facts(status="complete"), establish_reference=True)[0]
+        self.assertEqual(result["verification"]["status"], "verified_complete")
+        self.assertEqual(result["reference"], initial["reference"])
+        changed = restored.execution_world_results(self.contract_facts(terms=2), establish_reference=True)[0]
+        self.assertEqual(changed["verification"]["status"], "reference_mismatch")
+        self.assertEqual(changed["reference"], initial["reference"])
+
+    async def test_definite_first_selection_refusal_cannot_adopt_later_terms(self):
+        self.session.execution["context_entity_id"] = "bound-contract"
+        self.session.current_turn_facts = AsyncMock(side_effect=ConnectorError("RuleViolation", "物件不在附近视野内。", 409))
+        with self.assertRaises(ConnectorError):
+            await self.session.turn("原交付目标", executing=True, context_entity_id="bound-contract")
+        self.assertEqual(self.requests, 0)
+        self.assertTrue(self.session.execution["context_reference_attempted"])
+        restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
+        result = restored.execution_world_results(self.contract_facts(terms=2), establish_reference=True)[0]
+        self.assertEqual(result["verification"]["status"], "unbound")
+
+    async def test_initial_network_outage_keeps_first_valid_pre_execution_binding(self):
+        self.session.execution["context_entity_id"] = "bound-contract"
+        self.session.current_turn_facts = AsyncMock(side_effect=ConnectorError("WorldUnavailable", "Network read failed", 503))
+        with self.assertRaises(ConnectorError):
+            await self.session.turn("原交付目标", executing=True, context_entity_id="bound-contract")
+        self.assertEqual(self.requests, 0)
+        self.assertFalse(self.session.execution["context_reference_attempted"])
+        result = self.session.execution_world_results(self.contract_facts(), establish_reference=True)[0]
+        self.assertEqual(result["reference"]["terms_version"], 1)
+
+    async def test_recovery_refusal_closes_initial_binding_before_readable_new_terms(self):
+        self.session.execution["context_entity_id"] = "bound-contract"
+        self.session.current_turn_facts = AsyncMock(side_effect=ConnectorError("WorldUnavailable", "Network read failed", 503))
+        with self.assertRaises(ConnectorError):
+            await self.session.execution_readback()
+        self.assertFalse(self.session.execution["context_reference_attempted"])
+        self.session.current_turn_facts = AsyncMock(return_value={"player": {"id": "test-user", "x": 0, "y": 0},
+            "selected_inspection_unavailable": {"entity_id": "bound-contract", "code": "PermissionDenied"}})
+        await self.session.execution_readback()
+        self.assertTrue(self.session.execution["context_reference_attempted"])
+        restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
+        result = restored.execution_world_results(self.contract_facts(terms=2, status="complete"), establish_reference=True)[0]
+        self.assertEqual(result["verification"]["status"], "unbound")
+        self.assertIsNone(result["reference"])
+
+    async def test_completed_checkpoint_is_agent_claim_even_with_confirmed_action(self):
+        async def segment(number):
+            await self.move()
+            await self.checkpoint("completed")
+        self.model_segment = segment
+        await self.session.execute_goal(self.session.execution["goal"])
+        result = self.session.execution["goal_result"]
+        self.assertEqual(result["completion_source"], "agent_claim")
+        self.assertEqual(result["verification"], {"status": "unverified", "scope": "natural_language_goal"})
+        self.assertEqual(result["evidence_operation_ids"], self.attempts)
+
+    def test_native_timing_rejects_old_messages_and_deduplicates_reasoning_spans(self):
+        import time
+        entry = {"session_id": self.session.session_id, "timings": {"first_model_response_seconds": None,
+            "first_tool_seconds": None, "reasoning_completed_spans_seconds": None}}
+        self.session._active_request_measurement = {"entry": entry, "started": time.monotonic(),
+            "started_at_ms": 1000, "assistant_ids": set(), "reasoning_spans": {}}
+        self.session.observe_native_timing("message.updated", {"info": {"id": "old", "role": "assistant",
+            "sessionID": self.session.session_id, "time": {"created": 999}}})
+        self.session.observe_native_timing("message.part.updated", {"part": {"messageID": "old", "type": "text", "text": "old answer"}})
+        self.assertIsNone(entry["timings"]["first_model_response_seconds"])
+        self.session.observe_native_timing("message.updated", {"info": {"id": "new", "role": "assistant",
+            "sessionID": self.session.session_id, "time": {"created": 1001}}})
+        event = {"part": {"id": "reason", "messageID": "new", "type": "reasoning", "text": "private",
+            "time": {"start": 1001, "end": 2501}}}
+        self.session.observe_native_timing("message.part.updated", event)
+        self.session.observe_native_timing("message.part.updated", event)
+        self.assertEqual(entry["timings"]["reasoning_completed_spans_seconds"], 1.5)
+        self.assertIsNotNone(entry["timings"]["first_model_response_seconds"])
+        self.assertIsNone(entry["timings"]["first_tool_seconds"])
+        self.assertNotIn("private", str(entry))
 
 if __name__ == "__main__":
     unittest.main()

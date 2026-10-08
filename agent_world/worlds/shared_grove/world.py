@@ -28,7 +28,11 @@ MOVE_ARGS = {"type": "object", "properties": {
     "dx": {"type": "integer", "minimum": -1, "maximum": 1},
     "dy": {"type": "integer", "minimum": -1, "maximum": 1},
     "expected_player_version": VERSION}, "required": ["dx", "dy", "expected_player_version"], "additionalProperties": False}
-INSPECT_ARGS = {"type": "object", "properties": {"entity_id": ID}, "required": ["entity_id"], "additionalProperties": False}
+INSPECT_ARGS = {"type": "object", "properties": {"entity_id": ID,
+    "action": {"type": "string", "minLength": 1, "maxLength": 80,
+               "description": "Optional actual declared action name. Expand only this action's complete conditions, candidates and previews; omit to expand all actions."},
+    "candidate_id": {**ID, "description": "Optional actual input.candidates or choices.items/others ID, only with action. Expand only this complete candidate; other candidates' details and versions are not provided."}},
+    "required": ["entity_id"], "additionalProperties": False}
 BUILD_ARGS = {"type": "object", "properties": {
     "recipe": {"enum": list(building.RECIPES)}, "x": COORD, "y": COORD,
     "expected_player_version": VERSION,
@@ -216,7 +220,7 @@ def handbook(ctx, args):
         "material_roles": {"structural": "支撑本体，烧耗会影响结构", "lining": "衬层，耗尽不把石壳变成燃料", "substance": "装入或接触的物质"},
         "material_operations": {
             "store": "搬入完整子物件，保留其身份与自身材料；子物件的本体不变成目标的contained配料。",
-            "transfer": "按来源item_id、lot_id和amount转移已有材料批次到目标target_slot；材料身份不变，来源余量保留。",
+            "transfer": "按来源item_id、lot_id和amount转移已有材料批次到目标target_slot；材料身份不变，来源余量保留。本人个人背包中已有的自身contained散料可转出；不取背包本体、衬层或完整子物件，不能取他人的保护内容。个人背包不接收散料。",
             "charge": "grove.rule_action只消耗定义的feedstock并等量制备包内声明材料symbol，不是转移已有批次，也不证明反应发生。"},
         "combination_preview": {"actions": ["store", "attach"], "location": "action_options[].input.candidates[].preview",
             "availability": "available/reason 表示当前行动资格，与 physics.known/overloaded 分开。",
@@ -523,11 +527,18 @@ def _movable(ctx, player, entity):
 
 
 def _transfer_lots(ctx, player, entity):
-    raw = building.material_status(ctx, player, entity)["eligible"]
-    if "personal" in entity["capabilities"] or _reason(ctx, player, entity):
+    from .creative import guard_ordinary_action
+    personal = "personal" in entity["capabilities"]
+    if _reason(ctx, player, entity) or personal and entity["owner"] != player["id"]:
         return []
+    try:
+        guard_ordinary_action(ctx, "transfer", entity)
+    except PermissionDenied:
+        return []
+    raw = not personal and building.material_status(ctx, player, entity)["eligible"]
     return [lot for lot in entity.get("matter", []) if lot["quantity"] > 0 and not lot.get("bound_to")
-            and not lot.get("burning") and (lot["slot"] == "contained" and entity["state"]["open"] and "container" in entity.get("components", {})
+            and not lot.get("burning") and (not personal or lot.get("role") != "lining")
+            and (lot["slot"] == "contained" and entity["state"]["open"] and "container" in entity.get("components", {})
             or lot["slot"] == "body" and raw)]
 
 
@@ -646,12 +657,18 @@ def _action_options(ctx, player, entity):
         reason = reason or ("附近没有未被占用的漂流路径。" if not _launch_route(ctx, entity) else None)
         add("launch", reason, "以真实浮力和载荷漂流；进水、火和结构失效会影响途中后果。")
     if "container" in components and entity.get("lifecycle") == "intact" and not personal:
-        sources = {e["id"]: e for e in own}
+        sources = {e["id"]: e for e in building._owned_available(ctx, player, lambda e: e["owner"] == player["id"])}
         sources.update({e["id"]: e for e in m.public_entities_near(ctx,player["x"],player["y"],radius=1,limit=96)
                         if not _reason(ctx,player,e) and "container" in e.get("components", {})})
         candidates = [_candidate(e, lots) for e in sources.values() if e["id"] != entity["id"] and (lots := _transfer_lots(ctx, player, e))]
-        reason = base or ("请先打开目的容器。" if not state["open"] else None) or ("没有可转移的本人材料批次。" if not candidates else None)
-        add("transfer", reason, "选择来源物件及lot_id，按amount将已有批次转入目标contained材料槽；材料身份不变，源余量保留，增加目标载荷。与搬入完整物件、制备新材料不同。",
+        from .creative import guard_ordinary_action
+        reason = base
+        try:
+            guard_ordinary_action(ctx, "transfer", entity)
+        except PermissionDenied as exc:
+            reason = reason or str(exc)
+        reason = reason or ("请先打开目的容器。" if not state["open"] else None) or ("没有可转移的本人材料批次。" if not candidates else None)
+        add("transfer", reason, "选择来源物件及lot_id，按amount将已有批次转入目标contained材料槽；材料身份不变，源余量保留，增加目标载荷。本人个人背包仅可转出自身contained散料，不取本体、衬层或完整子物件；个人背包不接收散料。与搬入完整物件、制备新材料不同。",
             _input(candidates, quantity=max([lot["quantity"] for c in candidates for lot in c["lots"]] or [1]), lots=True), target_slot="contained")
     for option in options:
         action = option["action"]
@@ -678,18 +695,65 @@ def available_actions(ctx, player, entity):
 
 def inspect(ctx, args):
     from .generation import public_content
+    if "candidate_id" in args and "action" not in args:
+        raise RuleViolation("candidate_id须与action同时提供。")
     player = m.get_player(ctx)
     entity = m.get_entity(ctx, args["entity_id"])
     _accessible(ctx, player, entity, near=False)
     visible = _project_entity(ctx, player, entity, detailed=True)
+    if "action" in args:
+        action = args["action"]
+        options = visible["action_options"]
+        selected = [option for option in options if option["action"] == action]
+        if not selected:
+            raise RuleViolation("此物件没有声明所选行动；请使用实际action名称。")
+        visible["action_options"] = selected
+        visible["available_actions"] = [option["action"] for option in selected if option["available"]]
+        visible["action_options_projection"] = {
+            "scope": "selected_declared_action", "action": action,
+            "expanded_actions": [action],
+            "unexpanded_actions": [{key: option[key] for key in
+                ("action", "label", "function_id", "available", "reason") if key in option}
+                for option in options if option["action"] != action],
+            "meaning": "Only the selected action's complete arguments, conditions, candidates and previews are expanded. "
+                       "Other declared actions are outlines only; read grove.inspect with their action name before using missing inputs or previews."}
+        if "candidate_id" in args:
+            candidate_id = args["candidate_id"]
+            groups = []
+            for option in selected:
+                inputs = option.get("input") or {}
+                if "candidates" in inputs:
+                    groups.append((inputs, "candidates"))
+                choices = option.get("choices", {})
+                groups.extend((choices, name) for name in ("items", "others") if name in choices)
+            candidates = [candidate for group, name in groups for candidate in group[name]]
+            if not any(candidate["id"] == candidate_id for candidate in candidates):
+                raise RuleViolation("所选行动没有这个实际候选；请使用该行动返回的候选id。")
+            for group, name in groups:
+                group[name] = [candidate for candidate in group[name] if candidate["id"] == candidate_id]
+            visible["action_options_projection"]["candidate_selection"] = {
+                "candidate_id": candidate_id, "expanded_candidate_ids": [candidate_id],
+                "unexpanded_candidate_ids": list(dict.fromkeys(candidate["id"] for candidate in candidates
+                                                                if candidate["id"] != candidate_id)),
+                "unexpanded_details_provided": False,
+                "read": {"function_id": "grove.inspect", "entity_id": entity["id"], "action": action,
+                         "candidate_id_argument": "Select one actual ID from unexpanded_candidate_ids."},
+                "meaning": "Only the selected candidate's complete facts, version, conditions and preview are provided. "
+                           "Other candidate IDs are discovery references, without versions or previews; read the same entity/action with that candidate_id before acting on them."}
+            visible["action_options_projection"]["meaning"] = (
+                "Only the selected declared action and candidate are expanded; the object's actual state and creative facts remain. "
+                "Other actions and candidates are explicitly unexpanded and supply no missing action inputs or previews.")
     contents = [m.get_entity(ctx, eid) for eid in entity["state"]["contents"]] if entity["state"]["open"] else []
     explanation = f"{entity['name']}：完整性{visible['simulation']['integrity']}，实际载荷{visible['simulation']['total']}，支撑{visible['simulation']['limit']}。"
     if entity["state"].get("kind") == "resource_node":
         explanation = f"{entity['name']}：公共库存{entity['state']['stock']}/{entity['state']['stock_capacity']}；"+("石材有限。" if entity['state']['resource_kind'] == 'stone' else '养护消耗本人5u水。')
-    return FunctionOutcome({"player": _public_self(player), "entity": visible,
+    result = {"player": _public_self(player), "entity": visible,
         "contents": [_project_entity(ctx, player, e, include_options=False) for e in contents],
         "available_actions": visible["available_actions"], "action_options": visible["action_options"], "explanation": explanation,
-        "public_content": public_content(ctx, player, entity["state"].get("generation_region"))})
+        "public_content": public_content(ctx, player, entity["state"].get("generation_region"))}
+    if "action_options_projection" in visible:
+        result["action_options_projection"] = visible["action_options_projection"]
+    return FunctionOutcome(result)
 
 
 def _target(ctx, args):
@@ -828,8 +892,6 @@ def interact(ctx, args):
         _accessible(ctx,player,item,subject="item")
         if args.get("expected_item_version") is not None and item["version"] != args["expected_item_version"]:
             raise StateConflict("来源物件已经变化，请刷新后再行动。")
-        if item["owner"] not in {None,player["id"]} or "personal" in item["capabilities"]:
-            raise RuleViolation("不能从他人的保护物件或个人背包抽出材料。")
         _container(ctx, player, target)
         lot = next((lot for lot in _transfer_lots(ctx, player, item) if lot["id"] == args.get("lot_id")), None)
         if not lot or not args.get("amount"):
@@ -1112,19 +1174,19 @@ def make_world():
     return WorldDefinition("shared-grove","溪源",(
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
-        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=4,access="read",authorize=member,description="在同一次读取中返回本人状态、物件的自身材料槽、完整子物件、当前反应条件与缺口、历史过程，及实际行动和装入/绑定候选的只读载荷预览。"),
-        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=4,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。"),
+        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=6,access="read",authorize=member,description="在同一次读取中返回本人状态、物件的自身材料槽、完整子物件、当前反应条件与缺口、历史过程、编译定义的材料身份与反应系数，及实际行动和装入/绑定候选的只读载荷预览。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
+        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=5,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。"),
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=2,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=12,state_version=7,
+        *generation_specs(), *creative.specs()),version=17,state_version=8,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
-        migrations={6: lambda ctx: None, 7: resume_clock},
+        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: resume_clock},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),

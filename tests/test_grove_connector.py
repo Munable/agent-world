@@ -1,5 +1,6 @@
 """Local companion gates/recovery, without invoking a real model in unit tests."""
 from pathlib import Path
+from copy import deepcopy
 import asyncio
 import json
 import os
@@ -314,8 +315,8 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         parts = self.session.host.await_args.args[2]['parts']
         facts = json.loads(parts[1]['text'].rsplit('\n', 1)[1])
         self.assertEqual(facts['entities'][0]['created_by'], 'other-player')
-        self.assertEqual(facts['entities'][0]['state']['recipe'], 'walkway')
-        self.assertEqual(facts['entities'][1]['state']['stock'], 0)
+        self.assertEqual(facts['entities'][0]['discovery_state']['recipe'], 'walkway')
+        self.assertEqual(facts['entities'][1]['discovery_state']['stock'], 0)
         self.session.host.assert_awaited_once()
         self.assertEqual(self.session.inference_count, 1)
 
@@ -388,6 +389,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         await self.session.turn("能装吗？", context_entity_id="box")
         facts = json.loads(self.session.host.await_args.args[2]["parts"][1]["text"].rsplit("\n", 1)[1])
         self.assertEqual(facts["selected_inspection"]["action_options"][0]["input"]["candidates"][0]["preview"], preview)
+
         self.session.invoke.assert_any_await("grove.inspect", {"entity_id": "box"})
         self.assertEqual(self.session.inference_count, 1)
         self.session.host.reset_mock()
@@ -397,6 +399,22 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.exception.code, "PermissionDenied")
         self.session.host.assert_not_awaited()
         self.assertEqual(self.session.inference_count, 1)
+
+    async def test_unreadable_previous_selection_keeps_current_scene_but_no_stale_verdict(self):
+        self.session.entered = True
+        self.session.catalog = {name: {"access": "read"} for name in ("map.viewport", "grove.inspect")}
+        self.session.world = AsyncMock(return_value={"events": []})
+        scene = {"player": {"id": "test-user", "x": 12, "y": 0, "version": 9}, "entities": [], "inventory": []}
+        self.session.invoke = AsyncMock(side_effect=[scene, ConnectorError("RuleViolation", "物件不在附近视野内。", 409)])
+        facts = await self.session.current_turn_facts(context_entity_id="old-target", optional_selected=True)
+        self.assertEqual(facts["player"], scene["player"])
+        self.assertNotIn("selected_inspection", facts)
+        self.assertEqual(facts["selected_inspection_unavailable"]["entity_id"], "old-target")
+        self.assertEqual(self.session.execution_world_results(facts), [])
+        self.session.invoke = AsyncMock(side_effect=[scene, ConnectorError("WorldUnavailable", "Network read failed", 503)])
+        with self.assertRaises(ConnectorError) as unavailable:
+            await self.session.current_turn_facts(context_entity_id="old-target", optional_selected=True)
+        self.assertEqual(unavailable.exception.code, "WorldUnavailable")
 
     async def test_stable_write_catalog_requires_explicit_person_delegation(self):
         self.session.catalog = {"grove.move": {"access": "write", "input_schema": {}},
@@ -409,7 +427,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.exception.code, "DelegationRequired")
         self.session.invoke.assert_not_awaited()
 
-    async def test_execution_gets_current_catalog_and_closes_writes_before_goal_settlement(self):
+    async def test_execution_keeps_catalog_on_demand_and_closes_writes_before_goal_settlement(self):
         self.session.catalog = {"grove.rule_catalog": {"access": "read"}}
         self.session.current_turn_facts = AsyncMock(return_value={"scene": {"player": "actual"}})
         self.session.invoke = AsyncMock(return_value={"result": {"limits": {"bound_object_ids": 8}}})
@@ -421,7 +439,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             requests.append(path)
             if path.endswith('/message'):
                 supplied = json.loads(body['parts'][1]['text'].split('\n', 1)[1])
-                self.assertEqual(supplied['rule_catalog']['limits']['bound_object_ids'], 8)
+                self.assertNotIn('rule_catalog', supplied)
+                self.assertIn('grove_rule_catalog', supplied['detail_reads']['tools'])
+                self.assertIn('base_observation_id', supplied['detail_reads']['meaning'])
                 raise httpx.ReadTimeout('test timeout')
             self.fail('The goal loop, not an isolated model turn, settles the native request.')
 
@@ -432,7 +452,46 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.inference_count, 1)
         self.assertEqual(requests, ['/session/test-session/message'])
         self.assertFalse(self.session.active_execution)
-        self.session.invoke.assert_awaited_once_with('grove.rule_catalog', {})
+        self.session.invoke.assert_not_awaited()
+
+    async def test_discovery_index_keeps_real_material_and_location_without_copying_details(self):
+        self.session.entered = True
+        self.session.catalog = {name: {"access": "read"} for name in ("map.viewport", "grove.inspect")}
+        self.session.world = AsyncMock(return_value={"events": []})
+        source = {"id": "foreign-source", "version": 6, "x": None, "y": None,
+            "location": {"x": 3, "y": 2}, "owner": None, "capabilities": ["container"],
+            "state": {"open": False}, "source": "agent", "creative": {"definition_ref": "foreign-definition",
+                "type_id": "mixer", "reaction_observations": ["long detailed condition"]},
+            "matter": [{"material": "foreign-definition#product", "slot": "contained", "quantity": 2}],
+            "material_quantity": {"unit": "logical_matter"}, "simulation": {"total": 8}}
+        preview = {"physics": {"known": True, "overloaded": False}, "version_fingerprint": "f" * 64}
+        selected = {"player": {"id": "test-user", "version": 5}, "entity": deepcopy(source),
+            "action_options": [{"action": "store", "input": {"candidates": [{"id": "tool", "preview": preview}]}}]}
+        self.session.invoke = AsyncMock(side_effect=[{"player": {"id": "test-user", "x": 3, "y": 2},
+            "entities": [source], "inventory": [source], "inventory_total": 7, "inventory_next": "next-page"}, selected])
+        facts = await self.session.current_turn_facts(context_entity_id="foreign-source")
+        indexed = facts["entities"][0]
+        self.assertEqual(indexed["matter"][0], source["matter"][0])
+        self.assertEqual(indexed["location"], source["location"])
+        self.assertEqual(indexed["version"], 6)
+        self.assertEqual(indexed["contents_visibility"], "hidden")
+        self.assertNotIn("simulation", indexed)
+        self.assertNotIn("reaction_observations", indexed["creative"])
+        self.assertEqual(facts["inventory_next"], "next-page")
+        self.assertEqual(facts["selected_inspection"]["action_options"][0]["input"]["candidates"][0]["preview"], preview)
+
+        # Write receipts re-project this already compact readback. Current
+        # stock/open state and the selected fresh versions must survive it.
+        indexed["discovery_state"]["open"] = True
+        indexed.pop("contents_visibility", None)
+        projected = companion_projection("grove.interact", {"result": {}, "execution_readback": facts})
+        readback = projected["execution_readback"]
+        self.assertTrue(readback["entities"][0]["discovery_state"]["open"])
+        self.assertNotEqual(readback["entities"][0].get("contents_visibility"), "hidden")
+        self.assertEqual(readback["selected_inspection"]["entity"], facts["selected_inspection"]["entity"])
+        self.assertNotIn("action_options", readback["selected_inspection"])
+        self.assertEqual(readback["selected_inspection"]["read_request"]["arguments"], {"entity_id": "foreign-source"})
+        self.assertEqual(readback["entities"][0]["matter"], facts["entities"][0]["matter"])
 
     async def test_unknown_publication_stops_new_generation_without_model_call(self):
         self.session.unknown = [{"envelope": {"operation_id": "original-publication"}}]

@@ -150,6 +150,86 @@ class CreativeWorldTests(unittest.TestCase):
             self.assertEqual(result.get("failed", 0), 0, result)
             self.assertEqual(result["count"], 1, result)
 
+    def test_own_backpack_contained_matter_is_recoverable_without_exposing_body_or_other_user(self):
+        # Represent already-persisted loose matter using a test-only transfer,
+        # conserving real inventory rather than creating a new material lot.
+        def contained_fixture(ctx, args):
+            player = m.get_player(ctx)
+            bag = m.get_entity(ctx, player["backpack_id"])
+            wood = next(e for eid in player["inventory"]
+                        if (e := m.get_entity(ctx, eid))["name"] == "木柴")
+            lot = next(lot for lot in wood["matter"] if lot["slot"] == "body")
+            m.transfer_material(ctx, wood, bag, lot["id"], 2, reason="persisted_contained_fixture")
+            return FunctionOutcome({})
+        world = make_world()
+        fixture = FunctionSpec("grove.contained_fixture", contained_fixture,
+                               {"type": "object", "additionalProperties": False})
+        self.world.install_world("w", replace(world, version=world.version+1, functions=(*world.functions, fixture)))
+        self.call("A", "grove.contained_fixture", {})
+        self.call("B", "grove.contained_fixture", {})
+        bag = self.entity(self.item("A", "随身背包")["id"])
+        peer_bag = self.entity(self.item("B", "随身背包")["id"])
+        target = self.item("A", "水壶")["id"]
+        wood = self.entity(self.item("A", "木柴")["id"])
+        before_bag, before_peer = deepcopy(bag["matter"]), deepcopy(peer_bag["matter"])
+        option = next(option for option in self.read("A", "grove.inspect", {"entity_id": target})["action_options"]
+                      if option["action"] == "transfer")
+        candidates = {candidate["id"]: candidate for candidate in option["input"]["candidates"]}
+        self.assertIn(bag["id"], candidates)
+        self.assertNotIn(peer_bag["id"], candidates)
+        self.assertEqual([lot["slot"] for lot in candidates[bag["id"]]["lots"]], ["contained"])
+        body = next(lot for lot in bag["matter"] if lot["slot"] == "body")
+        with self.assertRaises(RuleViolation):
+            self.interact("A", target, "transfer", item_id=bag["id"], lot_id=body["id"], amount=1)
+        peer_lot = next(lot for lot in peer_bag["matter"] if lot["slot"] == "contained")
+        with self.assertRaises(PermissionDenied):
+            self.interact("A", target, "transfer", item_id=peer_bag["id"], lot_id=peer_lot["id"], amount=1)
+        self.assertEqual(self.entity(bag["id"])["matter"], before_bag)
+        self.assertEqual(self.entity(peer_bag["id"])["matter"], before_peer)
+        held = next(lot for lot in bag["matter"] if lot["slot"] == "contained")
+        self.interact("A", target, "transfer", item_id=bag["id"], lot_id=held["id"], amount=1)
+        after = self.entity(bag["id"])
+        self.assertEqual(next(lot for lot in after["matter"] if lot["slot"] == "body"), body)
+        self.assertEqual(sum(lot["quantity"] for lot in after["matter"] if lot["slot"] == "contained"), 1)
+        self.assertEqual(sum(lot["quantity"] for lot in self.entity(target)["matter"]
+                             if lot["slot"] == "contained" and lot["material"] == "wood"), 1)
+        self.assertEqual(self.entity(wood["id"])["matter"], wood["matter"])
+
+    def test_upgrade_hands_off_blocked_saved_clock_without_advancing_saved_state(self):
+        db = self.db.with_name("blocked-clock-upgrade.sqlite3")
+        world = WorldRuntime(db)
+        definition = make_world()
+        world.install_world("w", replace(definition, version=13, state_version=7, migrations={}))
+        role = world.create_role("returning")["role_id"]
+        world.call_function("w", "grove.join", role, {"name": "returning"}, operation_id="clock-join")
+        self.time.return_value += 1
+        self.assertEqual(world.run_due_timers("w")["count"], 1)
+        clock = world.get_state("w", m.META, "clock")["value"]
+        old_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
+        player = world.get_state("w", m.PLAYERS, role)
+        # A world-only revision leaves its durable old-version task blocked.
+        world.install_world("w", replace(definition, version=16, state_version=7, migrations={}))
+        self.time.return_value += 1
+        world.run_due_timers("w")
+        self.assertEqual(world.get_timer("w", old_id)["status"], "blocked")
+        world.install_world("w", definition)
+        resumed = world.get_state("w", m.META, "clock")["value"]
+        self.assertEqual(resumed["sequence"], clock["sequence"])
+        self.assertEqual(resumed["last_tick_at"], clock["last_tick_at"])
+        self.assertNotEqual(resumed["epoch"], clock["epoch"])
+        self.assertEqual(world.get_state("w", m.PLAYERS, role), player)
+        self.assertEqual(world.get_timer("w", old_id)["status"], "cancelled")
+        next_id = f"grove.tick.{resumed['epoch']}.{resumed['sequence']}"
+        self.assertEqual(world.get_timer("w", next_id)["status"], "pending")
+        world.install_world("w", definition)
+        self.assertEqual(world.get_state("w", m.META, "clock")["value"], resumed)
+        self.time.return_value += 1
+        self.assertEqual(world.run_due_timers("w")["count"], 1)
+        self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"]+1)
+        self.time.return_value += 1
+        self.assertEqual(world.run_due_timers("w")["count"], 1)
+        self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"]+2)
+
     def test_formal_four_capabilities_and_other_identity_continue(self):
         definition = package()
         ref, objects = self.publish("A", definition, ["source", "gear", "gate", "mixer"])
@@ -228,6 +308,28 @@ class CreativeWorldTests(unittest.TestCase):
         other_source = self.item("B", "木柴")
         self.action("B", objects["pact"], "deliver", item_id=other_source["id"], amount=2)
         self.assertEqual(self.entity(objects["pact"])["state"]["program"]["contract"]["status"], "complete")
+        vessel = self.item("A", "水壶")["id"]
+        choices = self.read("A", "grove.inspect", {"entity_id": vessel, "action": "transfer"})["action_options"][0]["input"]["candidates"]
+        self.assertNotIn(objects["pact"], [candidate["id"] for candidate in choices])
+        destination = self.read("A", "grove.inspect", {"entity_id": objects["pact"], "action": "transfer"})["action_options"][0]
+        self.assertFalse(destination["available"])
+        self.assertTrue(destination["reason"])
+        water = next(lot for lot in self.entity(vessel)["matter"] if lot["slot"] == "contained" and lot["material"] == "water")
+        before_destination = self.entity(objects["pact"])
+        with self.assertRaises(PermissionDenied):
+            self.interact("A", objects["pact"], "transfer", item_id=vessel, lot_id=water["id"], amount=1)
+        self.assertEqual(self.entity(objects["pact"]), before_destination)
+        protected = self.entity(objects["pact"])
+        lot = next(lot for lot in protected["matter"] if lot["slot"] == "contained" and lot["material"] == "wood")
+        with self.assertRaises(PermissionDenied):
+            self.interact("A", vessel, "transfer", item_id=objects["pact"], lot_id=lot["id"], amount=1)
+        release = self.read("A", "grove.inspect", {"entity_id": objects["pact"], "action": "release"})["action_options"][0]
+        backpack = self.item("A", "随身背包")["id"]
+        self.assertNotIn(backpack, [candidate["id"] for candidate in release["choices"]["items"]])
+        before_rejected_release = self.entity(objects["pact"])
+        with self.assertRaises(RuleViolation):
+            self.action("A", objects["pact"], "release", item_id=backpack)
+        self.assertEqual(self.entity(objects["pact"]), before_rejected_release)
         self.action("A", objects["pact"], "release", item_id=self.item("A", "水壶")["id"])
         with self.assertRaises(PermissionDenied):
             self.action("B", objects["pact"], "release", item_id=self.item("B", "水壶")["id"])
@@ -580,6 +682,16 @@ class CreativeWorldTests(unittest.TestCase):
                 "container_capacity": 20, "rules": [{"id": "finish", "phase": "reaction", "when": True,
                     "effects": [{"op": "react", "inputs": {"input": 1}, "outputs": {"coat": 1}, "rate": 1}]}]}}}
         other_ref, others = self.publish("B", importer, ["consumer"])
+        published = self.read("A", "grove.definition_read", {"definition_ref": other_ref})
+        semantics = published["material_semantics"]
+        self.assertEqual(semantics["materials"]["input"]["material_id"], ref+"#resin")
+        self.assertEqual(semantics["materials"]["input"]["kind"], "imported")
+        self.assertEqual(semantics["materials"]["coat"]["material_id"], other_ref+"#coat")
+        self.assertEqual(semantics["types"]["consumer"]["reactions"][0]["inputs_per_extent"], {"input": 1})
+        self.assertNotIn("input", semantics["local_preparation"])
+        repeated = self.call("B", "grove.definition_publish", {"definition": importer})
+        self.assertEqual(repeated["definition_ref"], other_ref)
+        self.assertEqual(repeated["material_semantics"], semantics)
         consumer = others["consumer"]
         self.assertNotEqual(ref, other_ref)
         self.assertEqual(self.entity(consumer)["state"]["program"]["material_aliases"], {"input": ref+"#resin"})
@@ -607,9 +719,11 @@ class CreativeWorldTests(unittest.TestCase):
         self.assertEqual(creative._quantities(self.entity(consumer)), {"coat": 2, ref+"#blue": 1})
         transfer("resin")
         inspected = self.read("B", "grove.inspect", {"entity_id": consumer})["entity"]["creative"]
+        self.assertEqual(inspected["material_semantics"]["materials"]["input"]["material_id"], ref+"#resin")
         self.assertEqual(inspected["reaction_observations"][0]["inputs"][0]["material_id"], ref+"#resin")
         self.ticks(1)
         self.assertEqual(creative._quantities(self.entity(consumer)), {"coat": 3, ref+"#blue": 1})
+        self.assertNotIn("material_semantics", next(e for e in self.view("B")["entities"] if e["id"] == consumer)["creative"])
         before = deepcopy(self.entity(consumer)["state"]["program"])
         updated = deepcopy(original)
         updated["version"] = 2

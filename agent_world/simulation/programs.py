@@ -398,6 +398,64 @@ def compile_program(definition, *, imported_materials=None):
     return result
 
 
+def program_material_semantics(definition, definition_ref, *, type_id=None):
+    """Project compiled material bindings and coefficients without executing them.
+
+    The world has already resolved imports to their original immutable reference.
+    This projection stays outside the stored definition and its content hash.
+    Names and author descriptions play no part in material identity resolution.
+    """
+    types = definition["types"] if type_id is None else {type_id: definition["types"][type_id]}
+    symbols = set(definition["materials"]) | set(definition.get("material_imports", {}))
+    projected_types = {}
+    for symbol, kind in types.items():
+        reactions = []
+        for group in ("rules", "actions"):
+            for declaration in kind[group]:
+                for index, effect in enumerate(declaration["effects"]):
+                    if effect["op"] != "react":
+                        continue
+                    symbols.update(effect["inputs"])
+                    symbols.update(effect["outputs"])
+                    origin = ({"rule_id": declaration["id"], "phase": declaration["phase"]}
+                              if group == "rules" else {"action_id": declaration["id"]})
+                    reactions.append({**origin, "effect_index": index,
+                        "inputs_per_extent": deepcopy(effect["inputs"]),
+                        "outputs_per_extent": deepcopy(effect["outputs"]),
+                        "max_extent": effect["rate"], "channel": effect["channel"], "mode": effect["mode"]})
+        current = {"reactions": reactions}
+        if "contract" in kind:
+            contract = kind["contract"]
+            symbols.add(contract["material"])
+            current["delivery"] = {"material": contract["material"], "quantity_u": contract["quantity"]}
+        projected_types[symbol] = current
+
+    preparations = {}
+    for symbol, material in definition["materials"].items():
+        symbols.add(material["feedstock"])
+        preparations[symbol] = {"inputs_per_unit": {material["feedstock"]: 1},
+                                "outputs_per_unit": {symbol: 1}}
+    bindings = {}
+    for symbol in sorted(symbols):
+        if symbol in BASE_MATERIALS:
+            bindings[symbol] = {"kind": "builtin", "material_id": symbol}
+        else:
+            source = definition.get("material_imports", {}).get(symbol)
+            reference = source["definition_ref"] if source else definition_ref
+            original_symbol = source["symbol"] if source else symbol
+            bindings[symbol] = {"kind": "imported" if source else "local",
+                "material_id": reference + "#" + original_symbol,
+                "definition_ref": reference, "symbol": original_symbol}
+    return {"scope": "compiled_material_semantics", "definition_ref": definition_ref,
+        "unit": "logical_matter", "materials": bindings, "types": projected_types,
+        "local_preparation": preparations,
+        "meaning": "Symbols in consumption and production map to materials[symbol].material_id, never to display names. "
+            "Reaction coefficients are per extent, not executed quantities; actual conditions, input lots, capacity "
+            "and competing effects determine execution. local_preparation is charge's one-to-one feedstock conversion, "
+            "not use of an existing foreign lot or proof of a reaction. Imports supply neither matter nor permission. "
+            "Delivery quantities describe terms, not acceptance or completed delivery."}
+
+
 def evaluate(expr, context):
     """Evaluate bounded data against explicit state and public fact context.
 

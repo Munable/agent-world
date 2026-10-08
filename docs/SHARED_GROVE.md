@@ -1,8 +1,46 @@
 # Shared Grove（溪源）：当前官方世界
 
-复核：2026-10-09。本文是官方 World Package 的合同、入口和唯一研发记录，不改变 Runtime 的领域中立、跨世界 Ed25519 身份或提交语义。**0.26.0 候选已出现一条真实 Agent 生产到交付链；跨作者接续加工仍失败，最终固定版本的自主执行未验证通过。** 代码检查、代理玩家操作与真实 Agent 结果分别记录；历史最佳仍为0.24.0，产品未完成。
+复核：2026-10-09。本文是官方 World Package 的合同、入口和唯一研发记录，不改变 Runtime 的领域中立、跨世界 Ed25519 身份或提交语义。**0.26.0候选已出现真实Agent生产到交付链，另一人经自然反馈与接口修复后已消费旧合同外来材料发生反应并取出混合库存；随后本轮B新交付的2u也由同一A会话合法领取、投入原炉、反应并取出1u，跨作者新货接续成立。** 同类材料合批后不作取出份额来源断言。代码检查、代理玩家操作与真实 Agent 结果分别记录；历史最佳仍为0.24.0，产品未完成。
 
 ## 当前研发记录
+
+**当前判断与方法：**以玩家意图、发现、选择、行动、共享后果和下一次选择判断实际推进。轮次用于关联这些过程，不设固定数量目标；请求数只作费用边界，物理tick、停机和连接超时各自承担运行责任，天数或日活不算体验深度。当前最佳仍为0.24；新代码必须形成更好的完整玩家路径才能替换，不因检查数量或局部成功升级。
+
+**当前实现：**工作轮起点`73d0e9a`；world17／state8／inspect6／interact5／rule_action4，固定201文件摘要`db1700ba666efaffd19ae2e2a84ec3f2ad7fa1809e0fc747e89178c4d8939816`。非选中现场保留真实身份、位置、数量的发现索引；详细定义与完整动作／候选按需读取，概要明确未展开项，不绑定未交付的版本／预览。自动写输出保留原回执和control，字节裁剪先于观察绑定；store／attach仍须当前完整组合预览和世界指纹。超大默认inspect返回可继续读取的真实状态及动作索引，单个完整候选仍超大则明确拒绝。
+
+**目标与原失败：**B独立完成12个确认动作，消耗真实木料合法制备2u canonical混合产物、开桥、停机并交付原合同；合同完成不证明所有自然语言附加目标。A原目标是用大家已有产物接着加工；它发表并放置真实进口器皿，也自行适应另一人关闭器皿的变化，但8次请求／13个确认动作后没有消费外来材料，原目标失败。它以木料直接制出的2u新料不替代玩家要求；定义误报、非法托管转移及原失败回执均保留。
+
+**自然反馈与实际修复：**同一身份／主会话以新尝试接收一句玩家反馈：“我要的是把已交付混合产物接着加工，木料重新制备不算”，不提供工具步骤。先修合同release误许散料进入personal背包却无法取出的问题：未来release目的须为合法散料容器，既有本人contained可经通用transfer转出，body／lining／完整子物件及他人内容保持保护；托管来源和目的候选都复用同一写入guard。Agent自行将背包中早先合同领回的2u canonical混合产物投入自己的加工炉，未替换成B本轮新交付那2u；批次来源明确区分。
+
+接着发现物理任务因world-only升级仍保存world13而被`TimerVersionMismatch`拦住，反应条件已满足却不能结算。正式state8迁移复用现有resume_clock，只接续当前兼容旧任务；全222条状态除时钟epoch外逐值保留，sequence仍16682、原last_tick_at及期限不变，旧任务取消、仅1个新版任务有效，不补停机墙钟。正常服务随后连续完成两步反应：消费外来2u、炉内新料由旧1u增至3u，process.steps由0变2。已暂停并核定原请求空闲后才切换源码；原反馈任务／目标／额度与两笔投料回执保持，原反馈任务已结束：真实转出1u，最终炉内2u、水壶2u。旧charge基线炉／壶各1u，反应另增2u；同material合并后不能证明取出的具体1u无旧charge成分。Agent误称炉内剩1u并保证那份来源，权威读回与它的自述分列。旧源合同`object_14799d33226149069081827882c356f0`的交付是前序代理玩家操作`manual-resumable-delivery-4147ba0c715747b8bc9ff690f173d9dc`／commit7347，A正式领出是`grove-local-74436af19286dce6bd9e1e396284b6e6`／commit19276，再经两笔transfer投入炉；不能称作本轮B→A完整新货接力。
+
+因此最后使用同一A身份／主会话，单独授予“把阿岚刚交过来的那两份继续加工”这一自然目标，选中本轮原合同，不提供工具步骤，不由人工移货；最多3次剩余native请求，不追加额度。任务`grove-task-baa68efb099386bfa5f72eefe08439a2`实际用2次请求完成3个确认动作：原合同释放2u至A水壶（`grove-local-e326a35040d1e6e1b1c5316dd064c85c`／commit19613），投入既有加工炉2u（`grove-local-5fcb5910f55d00d66c5b7e3b20c3c496`／19622），正常物理过程在19623／19624消费2u并新增2u新料，最后取出1u（`grove-local-ea70657cfd7dc94fefe58e4a231c4a84`／19668）。最终炉／壶各3u、process.steps由2增至4；合同released2、escrow_remaining0，原混合器保留。途中旧观察／执行段拒绝未绕过，原拒绝与重新读取记录保留。这证明本轮新货的数量接续，不证明同类库存合并后取出的具体1u只来自该批。Agent还把载荷163／上限120解释成“支撑余量充足未超载”，没有相应独立验证，不能背书。原A失败、开发修复和自然反馈均保留，不能称为一次无介入冷启动成功或真人趣味性通过。
+
+未来world版本变更如保有持久计时任务，必须在已知兼容状态迁移中明确交接并验证唯一任务、连续结算、停机暂停和原tick／期限保留；未知不兼容版本仍拒绝，不能悄悄解除Runtime版本保护。
+
+**验证范围与预算：**最终world17固定实现的632项完整Python通过（192.415秒）、两份Node及安装probe通过；之前65项定向与连续计时回归也通过，旧630项结果仍只属于前world15冻结。确定性fixture、代理玩家动作、真实模型和浏览器各自标明，不把它们当真人趣味性。本轮累计23次外部native请求，已完成evaluation报告费用0.713181088美元；另有2次中止，实际账单未知，留0.70美元估算储备。最多24次／约3美元是规划边界，不是提供商硬上限；失败／中止／修正均计入，剩余1次不使用，停止新模型调用。独立前轮29次费用保留，控制任务与协作子任务的Codex用量不含在上述统计内。当前调用、主会话、所有冻结／回执／截图与恢复证据仍集中在[唯一implementation.json](/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/implementation.json)的`on_demand_execution_round`，不另建报告。
+
+**当前入口：**[阿岚8961](http://127.0.0.1:8961/)和[林舟8962](http://127.0.0.1:8962/)共享世界8960。个人profiles与既有安全注入保持分离，无目标不自主调用模型。当前服务已在运行；只有停止后才重新启动，分别在三个终端执行下列正式模块命令，每个终端先进入源码目录并设置`TASK_PY`，既有库不得加`--init`：
+
+```sh
+cd /Users/mubin/Developer/agent-world/grove-composable-rules
+TASK_PY=/Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python
+
+# 终端一：先启动共享世界。
+"$TASK_PY" -m agent_world.grove_app --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/interoperable-rules/on-demand/new/world.sqlite3 --port 8960
+
+# 终端二：阿岚的本地连接器。
+"$TASK_PY" -m agent_world.grove_connector --world-url http://127.0.0.1:8960 --port 8961 --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/interoperable-rules/on-demand/connector-new-b --runtime-storage /Users/mubin/Developer/agent-world/work/on-demand-runtime/new-b --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode --credential-wrapper /Users/mubin/.local/bin/opencode-env
+
+# 终端三：林舟的本地连接器。
+"$TASK_PY" -m agent_world.grove_connector --world-url http://127.0.0.1:8960 --port 8962 --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/interoperable-rules/on-demand/connector-new-a --runtime-storage /Users/mubin/Developer/agent-world/work/on-demand-runtime/new-a --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode --credential-wrapper /Users/mubin/.local/bin/opencode-env
+```
+
+**实际恢复与页面：**同一最终源码重启世界与两个连接器后，旧4笔原回执逐值相同；新货接续后又取得一致SQLite备份，独立恢复经API读回原两人身份、全部232条世界状态以及旧／新7笔原回执，逐值相同。恢复对比关闭物理timer以保持同一快照，不能代替正常服务的连续结算验证。唯一最新备份为`private/shared-grove/interoperable-rules/on-demand/world-on-demand-release-backup.sqlite3`，99684352字节，SHA256 `e0bab5212e07a53a6cebb2b83ef171a72b843f047bf79aae0f524197a81e352f`；完整绝对路径在唯一索引。浏览器以原B身份返回并读取另一人的加工炉3u；真实视口390×844时`innerWidth=scrollWidth=390`，无横向溢出。窄屏截图文件实际只有390×219，不能冒充844高的页面证据；桌面截图保留实际现场。页面仍有原恢复失败历史提示／旧请求状态，需要用户正确区分历史与当前；本轮未证明真人趣味性、四玩家、多CLI或完整首次游玩。默认不推送、不部署，不触碰原世界／备份／repo脏修改。
+
+**本轮收尾：**新备份验证后清理自己的旧阶段备份、两份临时恢复库及空测试临时目录；活动世界、个人profiles、原生会话、失败现场、关键截图和唯一最新恢复备份保留。精确文件清单、文件／分配占用与实际可用空间变化沿用唯一索引，不把APFS同时变化全部归因于清理。原repo差异摘要、两份受保护原备份和原8900／8901／8902进程复核不变。仅提交本任务完成并验证的12个文件，不推送、部署或创建后台清理任务。
+
+### 前序冻结结果（非当前验收）
 
 **当前互用与低价Agent工作轮：**以`54a0fe4`的已核验源码为起点，原8900世界、两人身份／主会话和失败档案保持原位。两条主线接齐再统一检查：A公开准确的自身投料、整件子物件、当前规则条件及有主体的拒绝依据，分离历史反应；B以显式不可变定义／symbol导入材料，独立作者可在新实例和新位置接着使用，材料同名不合并、引用不授予物资或控制权。同时核查组合提交的实际写入及历史字节预算，防止每事件×每记录器放大为全世界停步。不预设新剧情或给Agent逐工具攻略。
 
@@ -18,7 +56,7 @@
 
 **最终固定版实际结果：**从共同保存初态另建隔离库，保留原A／B SDK身份，使用两个新专用原生会话及既有GLM5.3 Flash Go路线。2次入场正常，2次同时执行各在150秒原生请求边界前中止，工具和确认动作均为0，MessageAbortedError，随后确认空闲。应归为“未得到有效模型执行回应／中止请求”，不能据此判断模型不理解导入，也没有完成目标。实际执行事实正文A104677／B95464字节，含目标等完整用户文字A105719／B96524字节；主要为对象／背包及所选对象行动信息，未发现额外巨大重复，不能证明输入大小是超时根因。
 
-**下一次有界实验建议，尚未实现：**复用既有`_companion_scene_index`压缩非选中对象与背包，不再每段必带完整规则目录，提示同步改成按需读取；所选行动事实和当前预览保留。完整对象、定义与目录通过既有inspect／definition_read／rule_catalog读取。代价是更多按需读取、首次信息更少，必须以同一目标的真实行动结果评估，不能因正文变小就宣布可用。本轮不扩架构或再起实验。
+**上一工作轮提出的实验建议（实现状态见上）：**复用既有`_companion_scene_index`压缩非选中对象与背包，不再每段必带完整规则目录，提示同步改成按需读取；所选行动事实和当前预览保留。完整对象、定义与目录通过既有inspect／definition_read／rule_catalog读取。代价是更多按需读取、首次信息更少，必须以同一目标的真实行动结果评估，不能因正文变小就宣布可用。上一轮在此停止调用；当前授权工作轮的验证见上。
 
 **最终接口与容量范围：**观察ID绑定已经呈现的固定事实，按对象ID补版本；旧观察、未知操作及不可变定义不重绑或放宽CAS。世界version12／state_version7／inspect4。MCP采用无损分行JSON；真实生成上下文26198字节且native未截断，真实所选对象读回44669字节／113行、解析精确一致；32行动候选极限fixture仍超过原生51200字节界限，不能宣称所有最大场景都可一次完整交付。容量实测32个木质记录器、20次真实读取和2个逻辑步；8个不同四材料机制含记录器与合同能力可扣材创建并推进2步，第9个容量拒绝且原子回滚。合同未全部激活，也未实测所有64物件极限状态。记录与read_by按1536字节历史窗口淘汰最旧项，累计计数保留；不承诺每个记录器总能保留32条完整记录。事件保留与未来状态预算共同限制，不丢未消费事实来让世界继续。
 
@@ -26,7 +64,7 @@
 
 **浏览器证据与局限：**最终页面实际读取合同complete／2u交付与A炉内未消耗外来材料；桌面和390×844窄屏已检查，窄屏scrollWidth=innerWidth=390，详情可收起继续观看。坏恢复文件拒绝、有效文件清除旧错误、延迟下取消、模拟断网提示、刷新草稿保留及清空、重复刷新、离开及同钥返回均实际检查；延迟／断网是浏览器模拟，其他页面读取是真实本地世界。浏览器恢复的是额外测试身份，**不是原B SDK身份**，身份配对错误单独保留。前进／后退遇到已停服务错误页后被浏览器控制工具阻断，未记通过；新标签一次恢复正常，没有新推理。首屏状态卡占据较多空间、地图从约y480才出现，首次游玩与趣味性仍未达标或验证，不在本轮再做视觉重构。截图／原生证据／费用／清理统一存入现有[implementation.json](/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/implementation.json)的`interoperable_world_round`。
 
-**当前待体验入口：**保留自己的8930世界与[8931网页](http://127.0.0.1:8931/)，读现场、键鼠操作不用模型，提问或委托才调用已有模型。固定版无回应实验8940／8941／8942与旧对照服务已停止，原8900／8901／8902及8811等旧入口、原repo脏修改和原备份受保护。重启时分别在两个终端运行以下世界与连接器命令，沿用既有运行环境和凭据注入；现有数据库不要重新初始化：
+**上一冻结保留入口：**保留自己的8930世界与[8931网页](http://127.0.0.1:8931/)，读现场、键鼠操作不用模型，提问或委托才调用已有模型。固定版无回应实验8940／8941／8942与旧对照服务已停止，原8900／8901／8902及8811等旧入口、原repo脏修改和原备份受保护。重启时分别在两个终端运行以下世界与连接器命令，沿用既有运行环境和凭据注入；现有数据库不要重新初始化：
 
 ```sh
 cd /Users/mubin/Developer/agent-world/grove-composable-rules

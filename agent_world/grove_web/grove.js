@@ -153,9 +153,9 @@ async function hostCommand(path,body,{refresh=false,interrupt=false}={}){
 }
 function renderExecution(){
   const execution=host?.execution||{},status=execution.status||'idle',active=execution.delegation_active===true,busy=['starting','running'].includes(status),unknown=status==='unknown'||(execution.receipts||[]).some(receipt=>receipt.status==='unknown');
-  const goalCompleted=status==='completed'&&!!execution.task_id&&execution.goal_result?.status==='completed';
-  const labels={idle:'尚未委托',starting:'正在授权',running:'正在执行目标',completed:'目标已完成',result_unconfirmed:'目标结果未确认',paused:'目标已暂停',blocked:'目标受阻',error:'执行受阻',unknown:'结果待核对',budget_exhausted:'目标额度已用完'};
-  const displayedStatus=unknown?'unknown':status==='completed'&&!goalCompleted?'result_unconfirmed':status,requestLabels={idle:'尚未开始',preparing:'正在读取现场',summarizing:'正在整理会话历史',summary_failed:'会话历史整理失败',running:'推理与行动中',returned:'这一段请求已返回',timed_out:'这一段请求超时',settling:'正在核对原结果',idle_confirmed:'原请求已停止并核对',unsettled:'原请求状态待核对'};
+  const goalResult=execution.goal_result||{},goalClaimed=status==='completed'&&!!execution.task_id&&goalResult.status==='completed'&&goalResult.completion_source==='agent_claim';
+  const labels={idle:'尚未委托',starting:'正在授权',running:'正在执行目标',completed:'Agent报告完成',result_unconfirmed:'目标结果未确认',paused:'目标已暂停',blocked:'目标受阻',error:'执行受阻',unknown:'结果待核对',budget_exhausted:'目标额度已用完'};
+  const displayedStatus=unknown?'unknown':status==='completed'&&!goalClaimed?'result_unconfirmed':status,requestLabels={idle:'尚未开始',preparing:'正在读取现场',summarizing:'正在整理会话历史',summary_failed:'会话历史整理失败',running:'推理与行动中',returned:'这一段请求已返回',timed_out:'这一段请求超时',settling:'正在核对原结果',idle_confirmed:'原请求已停止并核对',unsettled:'原请求状态待核对'};
   $('execution-status').textContent=labels[displayedStatus]||displayedStatus;$('execution-status').dataset.status=displayedStatus;
   if(!goalDirty&&typeof execution.goal==='string'&&document.activeElement!==$('execution-goal'))$('execution-goal').value=execution.goal;
   $('execution-current-goal').textContent=execution.goal?'委托目标：'+execution.goal:'明确给出目标后才允许 Agent 行动。保存想法或普通提问不会授权。';
@@ -166,11 +166,25 @@ function renderExecution(){
   const recovery=execution.history_recovery||{},recoveryLabels={not_started:recovery.requested?'尚未开始整理会话历史':'未请求整理会话历史',running:'正在整理会话历史',completed:'会话历史整理完成；目标仍以行动与核对结果判断',failed:'会话历史整理失败；本目标不会自动重试整理',uncertain:'会话历史整理结果待核对；本目标不会自动重试整理'};
   $('execution-history-recovery').hidden=!execution.task_id||!recovery.status;
   $('execution-history-recovery').textContent=[recoveryLabels[recovery.status]||recovery.status,recovery.attempts>0?'摘要请求已计入这个目标的模型请求总额度，原记录保留。':'',recovery.error?.message].filter(value=>typeof value==='string'&&value).join('\n');
-  const detail=unknown?'原行动结果未确认。先核对原回执，才可接续或开始新目标；核对不会自动继续行动。':goalCompleted?'目标已完成。已经保存的行动和结果保留，可在现场继续查看。':status==='completed'?'原请求已结束，目标结果未确认。已经保存的行动保留；没有明确的目标完成记录，不能将请求结束视为成功。':active?'行动授权仍有效。Agent 可在总额度内继续；收回或亲手行动会停止后续行动，已保存的结果保留。':execution.resume_allowed===true?'当前没有行动授权。点击“接续这个目标”才再次授权；它会读取最新现场，继续原目标与剩余额度。':execution.goal?'当前没有行动授权。已保存的行动保留；请求结束或额度用完不代表目标完成。':'人可以直接玩，也可以在这里明确授权 Agent 帮你实现目标。';
+  const detail=unknown?'原行动结果未确认。先核对原回执，才可接续或开始新目标；核对不会自动继续行动。':goalClaimed?'Agent已结束本次委托。这是它对目标的判断；程序确认的具体世界结果另列。':status==='completed'?'原执行记录已结束，目标结果未确认。已经保存的行动保留；旧完成记录没有验证来源，不能将请求结束视为成功。':active?'行动授权仍有效。Agent 可在总额度内继续；收回或亲手行动会停止后续行动，已保存的结果保留。':execution.resume_allowed===true?'当前没有行动授权。点击“接续这个目标”才再次授权；它会读取最新现场，继续原目标与剩余额度。':execution.goal?'当前没有行动授权。已保存的行动保留；请求结束或额度用完不代表目标完成。':'人可以直接玩，也可以在这里明确授权 Agent 帮你实现目标。';
   $('execution-detail').textContent=[execution.stop_reason,execution.error?.message,detail].filter((value,index,values)=>typeof value==='string'&&value&&values.indexOf(value)===index).join('\n');
   const progress=execution.progress||{},progressNodes=[];
-  if(typeof progress.summary==='string'&&progress.summary)progressNodes.push(node('p','最近发现与行动：'+progress.summary,'small'));
-  if(typeof progress.next_intent==='string'&&progress.next_intent&&!goalCompleted)progressNodes.push(node('p','下一步打算：'+progress.next_intent,'small'));
+  if(goalClaimed&&typeof goalResult.summary==='string'&&goalResult.summary)progressNodes.push(node('p','Agent完成声明：'+goalResult.summary,'small'));
+  else if(typeof progress.summary==='string'&&progress.summary)progressNodes.push(node('p','最近发现与行动：'+progress.summary,'small'));
+  if(typeof progress.next_intent==='string'&&progress.next_intent)progressNodes.push(node('p','下一步打算：'+progress.next_intent,'small'));
+  const worldResults=(Array.isArray(execution.world_results)?execution.world_results:Array.isArray(goalResult.world_results)?goalResult.world_results:[]).filter(result=>result?.kind==='world_contract'&&result.entity_id===execution.context_entity_id);
+  const contractLabels={unoffered:'尚未提出条款',awaiting_acceptance:'等待双方接受',active:'进行中',complete:'已完成',failed:'已失败'};
+  for(const result of worldResults){
+    progressNodes.push(node('p','所选合同事实：'+(result.entity_name||result.entity_id)+' · '+(contractLabels[result.server_status]||result.server_status||'状态待核对'),'small'));
+    progressNodes.push(node('p','物件 '+result.entity_id+' · 物件版本 '+result.entity_version+' · 条款版本 '+result.terms_version+'\n材料身份 '+result.material_id+'\n累计交付 '+result.delivered_u+'u / 约定 '+result.quantity_u+'u'+(Number.isInteger(result.finished_tick)?' · 结算逻辑步 '+result.finished_tick:'')+(Number.isInteger(result.world_tick)?'\n读取逻辑步 '+result.world_tick:''),'small fact-reference'));
+    const verification=result.verification?.status;
+    if(verification==='reference_mismatch'){
+      const reference=result.reference||{};
+      progressNodes.push(node('p','当前合同与本目标起始时固定的物件、定义或条款引用不匹配。原条款版本 '+reference.terms_version+' · 原材料身份 '+reference.material_id+' · 原约定 '+reference.quantity_u+'u；当前结算不作为原引用的结果。','small fact-reference'));
+    }else if(verification==='verified_complete')progressNodes.push(node('p','服务器已确认固定引用的合同条款完成。它只证明该合同结算，不覆盖取回收益等附加目标，也不证明整段委托。','small'));
+    else if(verification==='not_complete')progressNodes.push(node('p','这是固定引用的合同条款状态；目标仍按你的实际意图核对。','small'));
+    else progressNodes.push(node('p','这个目标尚无已核对的起始合同引用；以上只是当前读取到的合同事实。','small'));
+  }
   const evidence=Array.isArray(progress.evidence)?progress.evidence:[],lastConfirmed=evidence[evidence.length-1]||[...(execution.receipts||[])].reverse().find(receipt=>['committed','confirmed'].includes(receipt.status));
   if(lastConfirmed)progressNodes.push(node('p','最后已确认行动：'+(lastConfirmed.function||'世界行动')+'\n原操作 '+(lastConfirmed.operation_id||'未返回')+(Number.isInteger(lastConfirmed.commit_seq)?' · 记录 '+lastConfirmed.commit_seq:''),'small fact-reference'));
   $('execution-progress').replaceChildren(...progressNodes);$('execution-progress').hidden=progressNodes.length===0;

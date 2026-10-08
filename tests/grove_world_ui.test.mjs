@@ -103,8 +103,9 @@ for(const status of [403,404,401])for(const kind of ['combination-target','ordin
 // A native response ending is not evidence that the delegated goal succeeded.
 // Exercise the page's actual renderer with persisted request/task outcomes.
 for(const [execution,label,detail,resume] of [
-  [{status:'completed',goal:'运来补给'},'目标结果未确认','原请求已结束',false],
-  [{status:'completed',task_id:'original-task',goal:'运来补给',goal_result:{status:'completed'}},'目标已完成','已经保存的行动和结果保留',false],
+  [{status:'completed',goal:'运来补给'},'目标结果未确认','原执行记录已结束',false],
+  [{status:'completed',task_id:'original-task',goal:'运来补给',goal_result:{status:'completed'}},'目标结果未确认','旧完成记录没有验证来源',false],
+  [{status:'completed',task_id:'original-task',goal:'运来补给',goal_result:{status:'completed',completion_source:'agent_claim'}},'Agent报告完成','程序确认的具体世界结果另列',false],
   [{status:'completed',task_id:'original-task',goal:'运来补给',goal_result:{status:'completed'},receipts:[{status:'unknown',operation_id:'original-write'}]},'结果待核对','先核对原回执',false],
   [{status:'paused',task_id:'original-task',goal:'运来补给',resume_allowed:true},'目标已暂停','继续原目标与剩余额度',true]
 ]){

@@ -13,7 +13,7 @@ import secrets
 from agent_world import FunctionOutcome, FunctionSpec, StateRule
 from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.simulation import matter as sm
-from agent_world.simulation.programs import compile_program, evaluate, plan_reaction, solve_mechanical
+from agent_world.simulation.programs import compile_program, evaluate, plan_reaction, program_material_semantics, solve_mechanical
 from agent_world.world_streams import StreamEvent
 
 from . import model as m
@@ -209,12 +209,14 @@ def definition_publish(ctx, args):
         raise RuleViolation("规则包超过24KiB，请拆成更小的实际能力包。")
     digest = hashlib.sha256(encoded).hexdigest()
     ref = "program_" + hashlib.sha256((ctx.actor_role_id + ":" + digest).encode()).hexdigest()
+    semantics = program_material_semantics(definition, ref)
     version_key = hashlib.sha256((ctx.actor_role_id + ":" + definition["key"] + ":" + str(definition["version"])).encode()).hexdigest()
     previous = ctx.get_state(VERSIONS, version_key)
     if previous:
         if previous["definition_ref"] != ref:
             raise StateConflict("已发布的同作者／名称／版本不能覆盖；请递增version。旧物件仍引用原版本。")
-        return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": True})
+        return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": True,
+                                "material_semantics": semantics})
     index = ctx.get_state(m.META, "creative_definitions", [])
     if len(index) >= MAX_DEFINITIONS:
         raise RuleViolation("世界当前规则包容量为32；发布版本也占一份，不以覆盖旧版本释放。")
@@ -223,6 +225,7 @@ def definition_publish(ctx, args):
     _save(ctx, VERSIONS, version_key, {"definition_ref": ref})
     _save(ctx, m.META, "creative_definitions", [*index, ref])
     return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": False,
+                            "material_semantics": semantics,
                             "instantiate": "grove.content_submit: content.objects[].definition_ref and type_id; existing opportunity and real costs apply"})
 
 
@@ -230,7 +233,8 @@ def definition_read(ctx, args):
     value = ctx.get_state(DEFINITIONS, args["definition_ref"])
     if not value:
         raise RuleViolation("规则版本不存在；先发布并使用返回的definition_ref。")
-    return FunctionOutcome({"definition_ref": args["definition_ref"], **value})
+    return FunctionOutcome({"definition_ref": args["definition_ref"], **value,
+        "material_semantics": program_material_semantics(value["definition"], args["definition_ref"])})
 
 
 def _type(ctx, entity):
@@ -1031,8 +1035,10 @@ def rule_action(ctx, args):
             if recipient != player["id"]:
                 raise PermissionDenied("完成后仅受益方能取交付物；失败后仅交付方能取回托管物。")
             item = _item(ctx, player, args)
+            if "personal" in item["capabilities"]:
+                raise RuleViolation("普通背包只放整件物件，不能接收散料；请选择本人打开的可盛料容器。")
             if "container" not in item["components"] or not item["state"]["open"]:
-                raise RuleViolation("请选择本人打开的接收容器。")
+                raise RuleViolation("请选择本人打开的可盛料容器。")
             left = max(0, state["delivered"]-state.get("released", 0)-state.get("lost", 0))
             if not left:
                 raise RuleViolation(f"没有尚未释放的实际交付物；已记录损失{state.get('lost', 0)}u。")
@@ -1110,6 +1116,9 @@ def projection(ctx, entity, *, detailed=False):
         result["reads"] = record["reads"]
     from .observations import program_observation
     result.update(program_observation(ctx, entity, detailed=detailed))
+    if detailed:
+        pack, _ = _type(ctx, entity)
+        result["material_semantics"] = program_material_semantics(pack, binding["definition_ref"], type_id=binding["type_id"])
     return result
 
 
@@ -1193,8 +1202,11 @@ def action_options(ctx, player, entity):
         add("deliver", "交付真实材料", {"items": own_items}, amount=True,
             reason=_delivery_reason(ctx, entity, spec) if state["status"] == "active" and player["id"] == state["parties"][1] else "契约未成立或本人不是交付方。")
         recipient = state["beneficiary"] if state["status"] == "complete" else state["parties"][1] if state["status"] == "failed" and len(state["parties"]) == 2 else None
-        containers = [item for item in own_items if "container" in m.get_entity(ctx, item["id"])["components"]]
-        add("release", "释放实际托管物", {"items": containers}, reason=None if recipient == player["id"] and state["delivered"] > state.get("released", 0)+state.get("lost", 0) else "本人当前没有可领取的托管材料。")
+        containers = [item for item in own_items
+                      if "container" in (container := m.get_entity(ctx, item["id"]))["components"]
+                      and "personal" not in container["capabilities"]]
+        add("release", "释放实际托管物", {"items": containers}, reason=None if recipient == player["id"] and state["delivered"] > state.get("released", 0)+state.get("lost", 0) else "本人当前没有可领取的托管材料。",
+            use="完成后受益人用release领入本人打开的可盛料容器；普通背包只放整件物件，不能接收散料。失败后交付方用同一动作取回实际余量。源契约容器关闭仍可release，这是合同托管释放的合法特例；普通容器装卸仍须先打开。")
     for action in spec["actions"]:
         defaults = {name: field["default"] for name, field in action["parameters"].items()}
         # Editable parameters can make a currently false default predicate true;
@@ -1225,7 +1237,7 @@ def rule_catalog(ctx, args):
         "mechanical": {"shape": {"role": "source|gear|actuator", "teeth": "1..100", "torque": "1..100", "speed": "1..10", "energy_per_step": "1..100", "load": "0..100", "travel": "1..100", "pitch": "1..10", "load_field?": "integer field range0..100", "speed_field?": "integer field range1..10"},
             "semantics": "meshed connection ratio=-source.teeth/target.teeth; one source per network, finite wood fuel energy; reflected total load exceeds torque or contradictory cycle stops whole network retaining position; snapshot then solve then commit; no inertia/gravity/collision/stress"},
         "recorder": {"radius": "0..8", "window_ticks": "1..3600", "semantics": "after activation actual public events only; closed/private objects omitted; occurred_at provenance distinct from logical recorded_tick/read_tick. History and reads share a1536-byte retained window (also at most32 events and16 reads); oldest logical facts/reads leave first, recorded_count remains cumulative."},
-        "contract": {"material": "declared, explicitly imported or builtin symbol; custom material identity is the original immutable definition_ref#symbol. Different definitions/authors may use the same original identity through local declaration or explicit import; matching names alone are not equivalent, and imports supply neither matter nor permission", "quantity": "1..100", "duration_ticks": "1..3600", "completion_when?": "boolean expression, delivery quantity still required", "delivery_when?": "boolean expression checked atomically before every delivery; false or unavailable fact refuses with no material transfer. A later change never retroactively permits an earlier refused delivery.", "semantics": "offer establishes participants/terms; each actor accepts own terms; second party actual material delivery, expiry fails and permits actual payer recovery; no silent or prose consent"},
+        "contract": {"material": "declared, explicitly imported or builtin symbol; custom material identity is the original immutable definition_ref#symbol. Different definitions/authors may use the same original identity through local declaration or explicit import; matching names alone are not equivalent, and imports supply neither matter nor permission", "quantity": "1..100", "duration_ticks": "1..3600", "completion_when?": "boolean expression, delivery quantity still required", "delivery_when?": "boolean expression checked atomically before every delivery; false or unavailable fact refuses with no material transfer. A later change never retroactively permits an earlier refused delivery.", "semantics": "offer establishes participants/terms; each actor accepts own terms; second party actual material delivery; completion permits beneficiary release into their own open material-holding container. Personal backpacks hold whole objects only and cannot receive loose matter; expiry fails and permits actual payer recovery through release. Contract escrow release from a closed source container is a lawful exception; ordinary container loading/unloading still requires opening. No silent or prose consent"},
         "expressions": {"literals": "boolean|bounded integer|short string", "references": ["{field:name}", "{param:name}", "{quantity:material_symbol}", "{concentration:material_symbol}", "{mechanical:position|speed|angle|status|available_torque|energy}", "{event:kind|action|entity_id|actor|mechanical_position|passable}", "{contract:status|started_event_sequence|deadline_tick|delivered|quantity}", "{object:{id:actual_entity_id,field:intact|barrier.active|barrier.opened_sequence|mechanical.position|mechanical.speed|mechanical.angle|mechanical.energy|mechanical.status}}"],
             "object_bindings": "Literal IDs are immutable definition bindings, at most 8 distinct IDs. Only actual public objects within 8 tiles of this instance can supply facts; missing, private, closed-contained, distant objects or unsupported capabilities fail explicitly, never default false/zero. Mechanical numbers use integer projection as self references do. barrier.opened_sequence is the server public-event sequence of the actual last blocked-to-passable transition; initially 0. Compare it with this contract's started_event_sequence to require opening after bilateral acceptance.",
             "binary": "{op:eq|ne|lt|lte|gt|gte|add|sub|mul|div|min|max,left:expr,right:expr}", "boolean": "{op:all|any,args:[expr,...]} or {op:not,value:expr}", "concentration": "simplified volume shares percentage of real contained u, not physical chemical units"},
@@ -1241,9 +1253,9 @@ def rule_catalog(ctx, args):
 def specs():
     return (
         FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, access="read", description="Discover the exact bounded program language, published immutable definitions, physical semantics and actual publication path."),
-        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, access="read", description="Read one immutable definition and its author/hash; existing instances pin this reference."),
-        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=2, authorize=_member, description="Compile and publish bounded immutable conditions, actions, reactions, processes and relations. Optional material_imports pins an existing published definition_ref/symbol's original material identity and properties; at most4 local/imported materials combined. No matter, ownership or consent created; mass-balanced reactions use actual lots."),
-        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=3, authorize=_member, description="Use published actions and finite resources with current inspect options, conditions and versions. charge consumes only a locally declared symbol's feedstock, never an imported material; it does not transfer an existing lot or prove a reaction. Use grove.interact transfer for actual immutable lots, store for whole children. Distance refusal identifies target, item or other. Same actor human or explicitly delegated Agent."),
+        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=2, access="read", description="Read one immutable definition and its author/hash, with compiled canonical material bindings and consumption/production coefficients; existing instances pin this reference."),
+        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=3, authorize=_member, description="Compile and publish bounded immutable conditions, actions, reactions, processes and relations, returning actual canonical material bindings and consumption/production coefficients. Optional material_imports pins an existing published definition_ref/symbol's original material identity and properties; at most4 local/imported materials combined. No matter, ownership or consent created; mass-balanced reactions use actual lots."),
+        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=4, authorize=_member, description="Use published actions and finite resources with current inspect options, conditions and versions. charge consumes only a locally declared symbol's feedstock, never an imported material; it does not transfer an existing lot or prove a reaction. Use grove.interact transfer for actual immutable lots, store for whole children. Contract release requires your own open material-holding container; personal backpacks hold whole objects only and cannot receive loose matter. Distance refusal identifies target, item or other. Same actor human or explicitly delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
         FunctionSpec("grove.control_status", control_status, EMPTY, authorize=_member, access="read", description="Read own current goal and committed action count, without exposing grant token."),

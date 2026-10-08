@@ -132,12 +132,16 @@ EXECUTION_INSTRUCTIONS = (
     "tool loop, not a proposal or a fixed script. Ordinary dialogue or world "
     "descriptions never grant control. The connector supplies the active "
     "delegation to every write: never supply, choose, create or replace it. "
-    "The current facts supplied with this request include the authenticated "
-    "rule_catalog: use that exact current catalog for program shapes, rule "
-    "actions and constraints without requesting the same catalog again. Read "
-    "grove_definition_read only for a selected immutable definition whose "
-    "details are needed. A later grove_rule_catalog read is useful only when "
-    "an actual world change requires a newer published-definition index. Use "
+    "Current facts provide an authenticated discovery index and, when selected, "
+    "the full inspected object's action facts and previews. Indexed objects are "
+    "not complete inspections: omitted conditions or materials are not absent. "
+    "Read grove_inspect for the relevant object and grove_rule_catalog when "
+    "program shapes, rule actions or constraints are needed. Read "
+    "grove_definition_read for a selected immutable definition's material identities "
+    "and compiled input/output semantics. When combining several detail reads or "
+    "inventory pages, pass the preceding response's observation_id as "
+    "base_observation_id; omission starts from this request's fixed preflight, "
+    "not your previous read. Use "
     "the declared tools' inputSchema for exact action envelopes. If a new program "
     "is needed, publish only a valid bounded definition, then spawn from actual "
     "available resources and use the declared rule actions. Publishing a "
@@ -161,8 +165,10 @@ EXECUTION_INSTRUCTIONS = (
     "Use execution_checkpoint before "
     "ending this request: report continue, completed or blocked, a short observed "
     "summary, the next intention and original confirmed operation IDs supporting "
-    "your report. Completed requires the goal's actual effects to have been read "
-    "back, not merely a definition, a plan or a finished answer. The task ID is "
+    "your report. Completed records your completion claim and stops execution; "
+    "confirmed receipts and readback do not verify a free-text goal. Report only "
+    "observed effects. Server-verified object or contract results remain separate "
+    "from your claim. The task ID is "
     "supplied by the connector; never create a replacement task. A checkpoint "
     "ends this segment's write admission. Stay within the granted goal and "
     "cumulative action/request budgets, at most 16 tools and 8 agentic steps "
@@ -339,22 +345,101 @@ def _companion_scene_index(scene):
         return scene
     index = {key: deepcopy(scene[key]) for key in (
         "player", "players", "nearby_players", "clock", "bounds", "inventory_total",
-        "inventory_next", "truncated", "region_entity_count") if key in scene}
+        "inventory_next", "truncated", "region_entity_count", "selected_inspection", "observed_at",
+        "world_results", "selected_inspection_unavailable") if key in scene}
     for field in ("entities", "inventory", "nearby_entities", "resource_nodes", "water_sources"):
         if isinstance(scene.get(field), list):
-            index[field] = [{key: deepcopy(entity[key]) for key in (
-                "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
-                "entity_ref") if key in entity} if isinstance(entity, dict) else entity
-                for entity in scene[field]]
+            rows = []
+            for entity in scene[field]:
+                if not isinstance(entity, dict):
+                    rows.append(deepcopy(entity))
+                    continue
+                row = {key: deepcopy(entity[key]) for key in (
+                    "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
+                    "entity_ref", "material", "capabilities", "container", "lifecycle", "created_by",
+                    "source", "barrier_active", "contents_visibility", "content_summary", "matter_unit") if key in entity}
+                # Viewport matter is an authorized quantity summary, not a list
+                # of transferable lots. Never manufacture lot IDs from it.
+                if isinstance(entity.get("matter"), list):
+                    row["matter"] = [{key: deepcopy(lot[key]) for key in
+                        ("material", "slot", "quantity", "role", "burning") if key in lot}
+                        for lot in entity["matter"] if isinstance(lot, dict)]
+                    quantities = entity.get("material_quantity")
+                    row["matter_unit"] = (quantities.get("unit", "logical_matter")
+                        if isinstance(quantities, dict) else row.get("matter_unit", "logical_matter"))
+                elif "material_quantity" in entity:
+                    row["material_quantity"] = deepcopy(entity["material_quantity"])
+                creative = entity.get("creative")
+                if isinstance(creative, dict):
+                    row["creative"] = {key: deepcopy(creative[key]) for key in
+                        ("definition_ref", "type_id") if key in creative}
+                state = entity.get("state")
+                if not isinstance(state, dict):
+                    state = entity.get("discovery_state", {})
+                row["discovery_state"] = {key: deepcopy(state[key]) for key in
+                    ("kind", "resource_kind", "stock", "open", "recipe") if key in state}
+                if (entity.get("owner") is None and "container" in entity.get("capabilities", [])
+                        and not state.get("open")):
+                    row["contents_visibility"] = "hidden"
+                rows.append(row)
+            index[field] = rows
     if "public_content" in scene:
         index["public_content"] = _companion_public_content_index(scene["public_content"])
     index["projection"] = {
         "scope": "authorized_scene_index",
         "meaning": "Actual identity/version/location index, not complete state or an action preview. "
-                   "Omitted matter, conditions and history are not absent. Read grove_inspect(entity_id) "
+                   "Matter rows are actual authorized slot/quantity summaries, not transferable lot IDs; "
+                   "canonical material identity is distinct from its display name and instance creator. "
+                   "Omitted conditions, contents and history are not absent. Read grove_inspect(entity_id) "
                    "for current physics/actions; grove_content_history(content_id) for history; "
                    "map_viewport for the current scene. Do not infer quantities or success from this index."}
     return index
+
+
+def _companion_selected_state_summary(inspection):
+    """Automatic write readback reports state; explicit inspect owns previews."""
+    entity = inspection.get("entity") if isinstance(inspection, dict) else None
+    if not isinstance(entity, dict):
+        return {"projection": {"scope": "selected_state_unexpanded",
+            "meaning": "The selected object's state and action previews were not supplied; read grove_inspect."}}
+    # Copy actual authorized values, including physical lots and program state.
+    # A new object must not inherit inspection-local references to omitted actions.
+    state = {key: deepcopy(entity[key]) for key in (
+        "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
+        "material", "materials", "matter", "matter_unit", "material_quantity", "simulation",
+        "state", "mechanical", "creative", "capabilities", "container", "lifecycle",
+        "barrier_active", "contents_visibility", "content_summary", "relations", "created_by", "source")
+        if key in entity}
+    summary = {"entity": state, "projection": {
+        "scope": "selected_object_state",
+        "omitted_sections": ["action_options", "action previews", "inspection contents and public history"],
+        "meaning": "Actual authorized object state at this readback, not a complete inspection or action preview. "
+                   "Read grove_inspect for this entity before choosing an action that needs current inputs or previews."}}
+    if isinstance(state.get("id"), str):
+        summary["read_request"] = {"tool": "grove_inspect", "arguments": {"entity_id": state["id"]}}
+    return summary
+
+
+def _companion_repair_viewport_references(payload):
+    """Keep only references to the retained readback's same named index fields."""
+    value = payload.get("result", payload)
+    viewport = value.get("viewport") if isinstance(value, dict) else None
+    readback = payload.get("execution_readback")
+    references = viewport.get("field_references") if isinstance(viewport, dict) else None
+    if not isinstance(references, dict):
+        return
+    missing = []
+    for field, target in list(references.items()):
+        if (field == "selected_inspection" or not isinstance(readback, dict) or field not in readback or
+                target != "#/execution_readback/" + field):
+            references.pop(field)
+            if field not in viewport:
+                missing.append(field)
+    if not references:
+        viewport.pop("field_references", None)
+    if missing:
+        viewport["unexpanded_fields"] = missing
+        viewport["unexpanded_read_request"] = {"tool": "map_viewport", "arguments": {}}
 
 
 def companion_projection(function: str, payload: dict) -> dict:
@@ -498,6 +583,8 @@ def companion_projection(function: str, payload: dict) -> dict:
         if isinstance(readback, dict):
             readback = compact_scene(readback)
             if index:
+                if "selected_inspection" in readback:
+                    readback["selected_inspection"] = _companion_selected_state_summary(readback["selected_inspection"])
                 readback = _companion_scene_index(readback)
             result["execution_readback"] = readback
             # The receipt still describes the committed operation. Later fresh
@@ -506,7 +593,7 @@ def companion_projection(function: str, payload: dict) -> dict:
             if isinstance(viewport, dict):
                 references = {}
                 for key in list(viewport):
-                    if key in readback and viewport[key] == readback[key]:
+                    if key != "selected_inspection" and key in readback and viewport[key] == readback[key]:
                         references[key] = "#/execution_readback/" + key
                         viewport.pop(key)
                 if references:
@@ -527,6 +614,7 @@ def companion_projection(function: str, payload: dict) -> dict:
                 public["readback_projection"] = "Only exactly equal returned records reference execution_readback; " \
                     "different state/version remains in this operation's public_facts. References are relative to the full tool response. " \
                     "Referenced indexes do not contain full entity state."
+            _companion_repair_viewport_references(result)
     if function in AGENT_WRITE_FUNCTIONS and function != "grove.generation_context":
         viewport = value.get("viewport")
         if isinstance(viewport, dict):
@@ -684,6 +772,153 @@ def _agent_tool_text(payload):
                                       for key, item in value.items()) + "\n}"
         return "[\n" + ",\n".join(render(item, depth+1) for item in value) + "\n]"
     return render(payload)
+
+
+_NATIVE_TOOL_MAX_BYTES = 50 * 1024
+_NATIVE_TOOL_MAX_LINES = 2000
+_AGENT_TOOL_MAX_BYTES = 48 * 1024
+_AGENT_TOOL_MAX_LINES = 1800
+
+
+def _agent_tool_text_fits(text, *, native=False):
+    byte_limit = _NATIVE_TOOL_MAX_BYTES if native else _AGENT_TOOL_MAX_BYTES
+    line_limit = _NATIVE_TOOL_MAX_LINES if native else _AGENT_TOOL_MAX_LINES
+    return len(text.encode("utf-8")) <= byte_limit and text.count("\n") + 1 <= line_limit
+
+
+def _companion_inspection_index(payload):
+    """Keep actual state and discovery when expanded action inputs do not fit."""
+    value = payload.get("result", payload)
+    if not isinstance(value, dict) or not isinstance(value.get("entity"), dict):
+        return None
+    entity = value["entity"]
+    projection = value.get("action_options_projection") or {}
+    if (projection.get("candidate_selection") or {}).get("candidate_id"):
+        return None  # A single complete candidate must never become a fake preview.
+    options = value.get("action_options", entity.get("action_options", []))
+    if not isinstance(options, list):
+        return None
+    state = _companion_selected_state_summary({"entity": entity})["entity"]
+    outlines = []
+    for option in options:
+        if not isinstance(option, dict) or not isinstance(option.get("action"), str):
+            continue
+        outline = {key: deepcopy(option[key]) for key in
+            ("action", "label", "function_id", "available", "reason", "use", "preconditions") if key in option}
+        request = {"tool": "grove_inspect", "arguments": {"entity_id": entity["id"], "action": option["action"]}}
+        outline["read_request"] = request
+        candidates = (option.get("input") or {}).get("candidates", [])
+        choices = option.get("choices") or {}
+        candidates = [*candidates, *choices.get("items", []), *choices.get("others", [])]
+        if candidates:
+            outline["candidates_index"] = [{key: deepcopy(candidate[key]) for key in
+                ("id", "name", "kind") if key in candidate} | {"read_request": {
+                    "tool": "grove_inspect", "arguments": request["arguments"] | {"candidate_id": candidate["id"]}}}
+                for candidate in candidates if isinstance(candidate, dict) and isinstance(candidate.get("id"), str)]
+        outlines.append(outline)
+    index = {"player": deepcopy(value.get("player")), "entity": state,
+        "action_options": outlines, "available_actions": deepcopy(value.get("available_actions", [])),
+        "action_options_projection": {"scope": "authorized_action_index", "expanded_actions": [],
+            "requested_projection": deepcopy(projection),
+            "meaning": "Actual authorized object state and action outlines only. Expanded action arguments, "
+                       "candidate versions, conditions and physical previews were not supplied or bound. "
+                       "Use the declared read_request for an action, or one candidate, before relying on those details."},
+        "projection": {"scope": "object_state_and_action_index", "complete_inspection": False,
+            "omitted_sections": ["expanded action inputs and previews", "child snapshots", "public content history"]}}
+    if "explanation" in value:
+        index["explanation"] = deepcopy(value["explanation"])
+    if "result" not in payload:
+        return index
+    return {key: deepcopy(payload[key]) for key in
+        ("world_id", "function_id", "function_version", "snapshot_seq") if key in payload} | {"result": index}
+
+
+def _bounded_agent_projection(function, payload):
+    """Run before observation binding; oversized reads never imply full inspect."""
+    if _agent_tool_text_fits(_agent_tool_text(payload)):
+        return payload
+    if function == "grove.inspect":
+        index = _companion_inspection_index(payload)
+        if index is not None and _agent_tool_text_fits(_agent_tool_text(index)):
+            return index
+    if function not in AGENT_WRITE_FUNCTIONS:
+        raise ConnectorError("ToolOutputTooLarge", "The complete world read exceeds the native tool output limit. "
+            "Its expanded content and action previews were not provided. For grove_inspect, specify its optional "
+            "action to read only that action's complete current inputs and previews; "
+            "do not claim a complete inspection or choose an action from missing previews.", 413)
+
+    # A committed write is never converted into a failed/retryable operation.
+    # This response omits expanded state explicitly and retains the real receipt.
+    result = {key: deepcopy(payload[key]) for key in (
+        "operation_id", "function_id", "ok", "status", "commit_seq", "actor_role_id",
+        "function_version", "replayed", "execution_control") if key in payload}
+    operation_result = payload.get("result")
+    if isinstance(operation_result, dict):
+        receipt_fields = {key: deepcopy(operation_result[key]) for key in
+            ("operation_id", "function_id", "ok", "status", "commit_seq", "function_version", "replayed")
+            if key in operation_result}
+        if receipt_fields:
+            result["result"] = receipt_fields
+    readback = payload.get("execution_readback", {})
+    compact = {}
+    if isinstance(readback, dict):
+        player = readback.get("player")
+        if isinstance(player, dict):
+            compact["player"] = {key: deepcopy(player[key]) for key in
+                ("id", "version", "x", "y", "location") if key in player}
+        selected = readback.get("selected_inspection", {})
+        entity = selected.get("entity") if isinstance(selected, dict) else None
+        if isinstance(entity, dict):
+            identity = {key: deepcopy(entity[key]) for key in ("id", "version") if key in entity}
+            compact["selected_inspection"] = {"entity": identity,
+                "projection": {"scope": "selected_identity_only", "state_and_previews_included": False}}
+            if isinstance(identity.get("id"), str):
+                compact["selected_inspection"]["read_request"] = {
+                    "tool": "grove_inspect", "arguments": {"entity_id": identity["id"]}}
+    result["execution_readback"] = compact
+    result["projection"] = {"scope": "write_receipt_and_read_entries", "expanded_state_included": False,
+        "world_verdict_included": False, "goal_result_included": False,
+        "reason": "NativeToolOutputLimit",
+        "omitted_sections": ["expanded result", "expanded execution_readback", "event sequence lists"],
+        "meaning": "The original operation's receipt and control are preserved; expanded state and action previews "
+                   "are unexpanded, not absent. Do not repeat the write to obtain its output. Read current state "
+                   "through the declared world tools before another consequential action. Receipt ok/commit "
+                   "metadata does not verify physical success or the person's natural-language goal."}
+    result["read_requests"] = [{"tool": "map_viewport", "arguments": {}},
+                               {"tool": "grove_control_status", "arguments": {}}]
+    # Keep each available verdict whole when it fits, or explicitly mark it
+    # unprovided; never turn call success into a goal/contract verdict.
+    omitted_verdicts = set()
+    for source, destination, field, marker, path in (
+        (payload, result, "world_results", "world_verdict_included", "world_results"),
+        (readback, compact, "world_results", "world_verdict_included", "execution_readback.world_results"),
+        (payload, result, "goal_result", "goal_result_included", "goal_result"),
+    ):
+        if not isinstance(source, dict) or field not in source:
+            continue
+        destination[field] = deepcopy(source[field])
+        if _agent_tool_text_fits(_agent_tool_text(result)):
+            result["projection"][marker] = True
+        else:
+            destination.pop(field)
+            omitted_verdicts.add(marker)
+            result["projection"]["omitted_sections"].append(path)
+    for marker in omitted_verdicts:
+        result["projection"][marker] = False
+    if not _agent_tool_text_fits(_agent_tool_text(result)):
+        raise ConnectorError("ToolOutputTooLarge", "The original write receipt itself exceeds the native output limit. "
+            "Its operation remains recorded; recover the original receipt before another write.", 413)
+    return result
+
+
+def _checked_agent_tool_text(payload):
+    """Serialize the final bound object without changing its displayed facts."""
+    text = _agent_tool_text(payload)
+    if not _agent_tool_text_fits(text, native=True):
+        raise ConnectorError("ToolOutputTooLarge", "The final tool response exceeds the native output limit. "
+            "Expanded content was not provided. A completed world operation remains committed; "
+            "recover its original receipt before retrying a write.", 413)
+    return text
 
 
 def _agent_version_field(name):
@@ -852,6 +1087,7 @@ class GroveSession:
             "grant_action_offset": 0, "pending_grant_action_offset": None, "grant_operation_id": None,
             "readback_actions_count": None, "no_progress_segments": 0,
             "segment_id": "", "checkpoint": None, "goal_result": None, "segments": [], "phase_timings": [],
+            "context_result_reference": None, "context_reference_attempted": True, "world_results": [],
             "settlement": None,
             "history_recovery": {"requested": False, "status": "not_started", "attempts": 0},
             "budget_extensions": [],
@@ -871,6 +1107,7 @@ class GroveSession:
         self._agent_observation_sequence = 0
         self.available_models: list[str] = []
         self.model_metadata: dict = {}
+        self._active_request_measurement = None
         self.unknown: list[dict] = []
         self.opportunity: dict | None = None
         self.claim_count = self.submit_count = self.world_call_count = 0
@@ -1018,12 +1255,20 @@ class GroveSession:
             "usage_scope": "OpenCode-reported completed response counters; interrupted/unreported work may be absent. Cost is not a billing confirmation."}
 
     async def world(self, method: str, path: str, body: dict | None = None):
+        started = time.monotonic()
+        measurement = self._active_request_measurement
         try:
             async with httpx.AsyncClient(timeout=15, trust_env=False, follow_redirects=False) as client:
                 response = await client.request(method, self.manager.world_url + path,
                     headers={"Authorization": "Bearer " + self.bearer}, json=body)
         except httpx.HTTPError:
             raise ConnectorError("WorldUnavailable", "世界连接或响应中断；请重连后核对当前状态及原操作结果。", 503) from None
+        finally:
+            if measurement is not None and measurement is self._active_request_measurement:
+                metrics = measurement["entry"]["timings"]
+                metrics["world_requests"] += 1
+                metrics["world_request_seconds"] = round(metrics["world_request_seconds"] +
+                    time.monotonic() - started, 3)
         try:
             payload = response.json()
         except ValueError:
@@ -1278,7 +1523,16 @@ class GroveSession:
                 self.execution_receipt(item["function"], item["operation_id"], receipt, status="confirmed")
         control = await self.invoke("grove.control_status", {})
         self.update_execution_control(control.get("result", control))
-        facts = await self.current_turn_facts(context_entity_id=context_entity_id)
+        selected = context_entity_id if context_entity_id is not None else self.execution.get("context_entity_id")
+        facts = await self.current_turn_facts(context_entity_id=selected, optional_selected=True)
+        unavailable = facts.get("selected_inspection_unavailable", {})
+        if (not self.execution.get("context_reference_attempted", True) and
+                unavailable.get("entity_id") == self.execution.get("context_entity_id") and
+                unavailable.get("code") in {"RuleViolation", "PermissionDenied", "ResourceNotFound"}):
+            # Recovery can see a definite refusal before the first model turn.
+            # That closes the window; a later successful read must not rebind it.
+            self.execution["context_reference_attempted"] = True
+        self.execution["world_results"] = self.execution_world_results(facts)
         self.execution.update(readback=facts, readback_actual=True,
             readback_actions_count=self.execution["actions_count"])
         self.execution_phase("receipt_readback", started)
@@ -1392,7 +1646,7 @@ class GroveSession:
                 if self.cancelled:
                     raise asyncio.CancelledError()
                 if checkpoint.get("status") == "completed":
-                    self.execution.update(status="completed", stop_reason="Agent 已依据真实读回报告目标完成。",
+                    self.execution.update(status="completed", stop_reason="Agent 已提交完成声明并结束本次委托。",
                         error=None, resume_allowed=False)
                     break
                 if checkpoint.get("status") == "blocked":
@@ -1949,28 +2203,33 @@ class GroveSession:
             # read must finish before counting/sending the one model request.
             # Refresh even automatic explanations: other people may have acted
             # since participate() obtained its scene or checked an opportunity.
-            facts = (await self.current_turn_facts() if context_entity_id is None else
-                     await self.current_turn_facts(context_entity_id=context_entity_id))
+            try:
+                facts = (await self.current_turn_facts() if context_entity_id is None else
+                         await self.current_turn_facts(context_entity_id=context_entity_id,
+                             optional_selected=executing and self.execution.get("context_reference_attempted", True)))
+            except ConnectorError as exc:
+                if (executing and context_entity_id is not None and
+                        not self.execution.get("context_reference_attempted", True) and
+                        exc.code in {"RuleViolation", "PermissionDenied", "ResourceNotFound"}):
+                    # A definite refusal at the original selection cannot be
+                    # replaced by later readable terms. A network outage before
+                    # any inference/action still permits the first valid read.
+                    self.execution["context_reference_attempted"] = True
+                    self.remember()
+                raise
             if executing:
-                # Supply the exact compact world catalog before the one model
-                # request. Repeating its discovery as a model tool call adds
-                # another inference step without adding facts to this request.
-                if self.catalog.get("grove.rule_catalog", {}).get("access") != "read":
-                    raise ConnectorError("RuleCatalogRequired", "当前规则目录无法只读获取；这次不会消耗模型请求。", 409)
-                rules = await self.invoke("grove.rule_catalog", {})
-                rules = companion_projection("grove.rule_catalog", rules)
-                facts["rule_catalog"] = rules.get("result", rules)
-                facts["rule_catalog_source"] = {
-                    "source": "Authenticated grove.rule_catalog read for this execution request.",
-                    "scope": "Complete current compact rule catalog; immutable definition details remain separate.",
-                    "meaning": "Use this supplied catalog without repeating the same read. "
-                               "Read grove_definition_read only when a selected definition's details are needed."}
+                facts["detail_reads"] = {
+                    "scope": "Discovery index plus selected inspection; full catalog/definitions not preloaded.",
+                    "tools": ["grove_inspect", "grove_rule_catalog", "grove_definition_read", "map_viewport"],
+                    "meaning": "Read relevant details as needed. Omission does not mean absence. "
+                               "Chain detail reads/pages with base_observation_id from the preceding read."}
                 facts["execution_control"] = {key: self.execution.get(key) for key in
                     ("goal", "max_actions", "actions_count", "remaining_actions", "delegation_active", "grant_version")}
                 facts["execution_task"] = {key: deepcopy(self.execution.get(key)) for key in
                     ("task_id", "segment_id", "goal", "requests_used", "max_requests", "remaining_actions", "progress")}
                 facts["execution_task"]["confirmed_receipts"] = [deepcopy(item) for item in
                     self.execution["receipts"] if item.get("status") == "confirmed"][-8:]
+                self.execution["world_results"] = self.execution_world_results(facts, establish_reference=True)
                 self.execution.update(readback=deepcopy(facts), readback_actual=True)
             facts = self.present_agent_result("map.viewport", facts, preflight=True)
             parts.append({"type": "text", "text": CURRENT_FACTS_INSTRUCTIONS + "\n" +
@@ -1984,11 +2243,29 @@ class GroveSession:
             self.execution_phase("preflight", preflight_started)
         inference = self.inference_started("entry" if initial else "execution" if executing else "explain")
         native_started = time.monotonic()
+        inference["timings"] = {"scope": "Observed connector/native event latency, not provider wire timing; "
+            "world requests count only this native phase; preflight and settlement have separate phase timings.",
+            "first_model_response_seconds": None, "first_tool_seconds": None,
+            "first_confirmed_action_seconds": None, "reasoning_completed_spans_seconds": None,
+            "world_requests": 0, "world_request_seconds": 0}
+        self._active_request_measurement = {"entry": inference, "started": native_started,
+            "started_at_ms": time.time() * 1000, "assistant_ids": set(), "reasoning_spans": {}}
+        native_returned = False
         try:
-            response = await asyncio.wait_for(self.host("POST", "/session/" + quote(self.session_id, safe="") + "/message",
-                {"agent": EXECUTOR_AGENT if executing else AGENT,
-                 "model": {"providerID": model_provider, "modelID": model_id},
-                 "parts": parts}, timeout=MAX_SECONDS), timeout=MAX_SECONDS)
+            try:
+                response = await asyncio.wait_for(self.host("POST", "/session/" + quote(self.session_id, safe="") + "/message",
+                    {"agent": EXECUTOR_AGENT if executing else AGENT,
+                     "model": {"providerID": model_provider, "modelID": model_id},
+                     "parts": parts}, timeout=MAX_SECONDS), timeout=MAX_SECONDS)
+                native_returned = True
+            finally:
+                # Joining/releasing/aborting after the native response is
+                # connector settlement, not provider or native response time.
+                inference["timings"]["native_phase_seconds"] = round(time.monotonic() - native_started, 3)
+                self._active_request_measurement = None
+                if executing:
+                    self.execution_phase("native_message", native_started,
+                        status="returned" if native_returned else "interrupted")
             if self.cancelled:
                 return
             self.inference_finished(inference, response)
@@ -2033,9 +2310,6 @@ class GroveSession:
                     await self.host("POST", "/session/" + quote(self.session_id, safe="") + "/abort", {}, timeout=5)
             raise ConnectorError("HostUnavailable", "OpenCode is slow or unavailable. Movement remains available after entry; reconnect the companion when ready.", 503)
         finally:
-            if executing:
-                self.execution_phase("native_message", native_started,
-                    status="returned" if inference["status"] != "started" else "interrupted")
             if inference["status"] == "started":
                 inference.update(status="failed", finished_at=time.time())
                 self.remember()
@@ -2093,7 +2367,8 @@ class GroveSession:
             "superseded_tool_output_chars": tool_chars, "scope": "Native original text/output retained; user goals, definitions, writes and receipts unchanged."}
         self.remember()
 
-    async def current_turn_facts(self, *, context_entity_id: str | None = None) -> dict:
+    async def current_turn_facts(self, *, context_entity_id: str | None = None,
+                                 optional_selected: bool = False) -> dict:
         """Fresh bounded world reads; no model request or automatic cursor change."""
         if not self.entered or self.catalog.get("map.viewport", {}).get("access") != "read":
             raise ConnectorError("CurrentWorldReadRequired", "先恢复现场连接，再请伙伴解释当前情况。", 409)
@@ -2107,40 +2382,34 @@ class GroveSession:
         if not isinstance(player.get("x"), int) or not isinstance(player.get("y"), int):
             raise ConnectorError("CurrentWorldReadRequired", "当前现场未能读回；这次不会消耗模型请求。", 502)
 
-        def entity_facts(entity):
-            value = {key: entity[key] for key in ("id", "name", "version", "x", "y", "material", "capabilities",
-                "owner", "container", "created_by", "source", "available_actions", "action_options", "construction_material",
-                "construction", "composition", "parts", "traits", "resolved", "matter", "components", "physical_parent",
-                "relations", "simulation", "material_quantity", "lifecycle", "authored_description", "process_refs", "content_summary",
-                "creative", "presentation", "barrier_active")
-                if key in entity}
-            value["state"] = {key: item for key, item in entity.get("state", {}).items() if key != "invested_materials"}
-            if (entity.get("owner") is None and "container" in entity.get("capabilities", []) and
-                    not entity.get("state", {}).get("open")):
-                value["contents_visibility"] = "hidden"
-            return value
-
         facts = {key: scene[key] for key in ("player", "players", "chunks", "bounds", "clock", "changes",
                                             "processes", "construction", "truncated", "public_content", "public_contents",
                                             "inventory_total", "inventory_next") if key in scene}
-        facts["entities"] = [entity_facts(entity) for entity in scene.get("entities", [])]
-        # Reuse the strict blueprint equivalence check for this one fresh read.
-        # The detailed anchor stays intact; differing fields or versions stay
-        # separate, and no persistent dialogue or world rule is rewritten.
-        referenced = self.blueprint_model_input({"public_content": facts.get("public_content"),
-                                                "public_entities": facts["entities"]})
-        facts["entities"] = referenced["public_entities"]
-        facts["inventory"] = [entity_facts(entity) for entity in scene.get("inventory", [])]
+        index = _companion_scene_index(scene)
+        facts["entities"] = index.get("entities", [])
+        facts["inventory"] = index.get("inventory", [])
+        facts["discovery_projection"] = index["projection"]
         if context_entity_id is not None:
             if self.catalog.get("grove.inspect", {}).get("access") != "read":
                 raise ConnectorError("SelectedInspectionRequired", "所选物件的详情当前无法读取；这次不会消耗模型请求。", 409)
-            inspection = await self.invoke("grove.inspect", {"entity_id": context_entity_id})
-            inspection = companion_projection("grove.inspect", inspection)
-            selected = inspection.get("result", inspection)
-            selected_entity = selected.get("entity") if isinstance(selected, dict) else None
-            if not isinstance(selected_entity, dict) or selected_entity.get("id") != context_entity_id:
-                raise ConnectorError("SelectedInspectionUnavailable", "所选物件的真实详情未能读回；这次不会消耗模型请求。", 502)
-            facts["selected_inspection"] = selected
+            try:
+                inspection = await self.invoke("grove.inspect", {"entity_id": context_entity_id})
+            except ConnectorError as exc:
+                if not optional_selected or exc.code not in {"RuleViolation", "PermissionDenied", "ResourceNotFound"}:
+                    raise
+                # A consumed, inaccessible or distant original selection does
+                # not make an otherwise confirmed operation unknown. No stale
+                # preview/version or contract verdict replaces this failed read.
+                facts["selected_inspection_unavailable"] = {"entity_id": context_entity_id,
+                    "code": exc.code, "meaning": "The original selection is currently unreadable; its state, "
+                    "action previews and world verdict are not supplied. Other current reads remain valid."}
+            else:
+                inspection = companion_projection("grove.inspect", inspection)
+                selected = inspection.get("result", inspection)
+                selected_entity = selected.get("entity") if isinstance(selected, dict) else None
+                if not isinstance(selected_entity, dict) or selected_entity.get("id") != context_entity_id:
+                    raise ConnectorError("SelectedInspectionUnavailable", "所选物件的真实详情未能读回；这次不会消耗模型请求。", 502)
+                facts["selected_inspection"] = selected
         facts["observed_at"] = time.time()
         facts["public_events_observed_at"] = page.get("observed_at")
         events = []
@@ -2640,6 +2909,7 @@ class GroveSession:
                         if not sid or sid not in {self.session_id, self.blueprint_session_id}:
                             continue
                         kind = event.get("type")
+                        self.observe_native_timing(kind, props)
                         # Draft text and reasoning are not product output. Only a
                         # completed validated /message response publishes text.
                         if kind == "message.part.updated" and part.get("type") == "tool":
@@ -2652,6 +2922,45 @@ class GroveSession:
                             self.note("host", "OpenCode 报告本轮错误")
         except (httpx.HTTPError, ConnectorError):
             self.note("connection", "实时回应流已断开；最终结果仍通过会话接口读取")
+
+    def request_milestone(self, key: str, *, source: str):
+        measurement = self._active_request_measurement
+        if measurement is None:
+            return
+        timings = measurement["entry"]["timings"]
+        if timings.get(key) is None:
+            timings[key] = round(time.monotonic() - measurement["started"], 3)
+            timings[key + "_source"] = source
+            self.remember()
+
+    def observe_native_timing(self, kind: str, props: dict):
+        """Record event times, never draft text, private reasoning or credentials."""
+        measurement = self._active_request_measurement
+        if measurement is None:
+            return
+        info = props.get("info", {})
+        if (kind == "message.updated" and info.get("role") == "assistant" and
+                info.get("sessionID") == measurement["entry"]["session_id"] and
+                info.get("time", {}).get("created", 0) >= measurement["started_at_ms"]):
+            measurement["assistant_ids"].add(info.get("id"))
+        part = props.get("part", {})
+        message_id = part.get("messageID") or props.get("messageID")
+        if message_id not in measurement["assistant_ids"]:
+            return
+        span = part.get("time", {})
+        if (kind == "message.part.updated" and part.get("type") == "reasoning" and
+                isinstance(span.get("start"), (int, float)) and isinstance(span.get("end"), (int, float))
+                and span["end"] >= span["start"] and part.get("id")):
+            measurement["reasoning_spans"][part["id"]] = (span["end"] - span["start"]) / 1000
+            measurement["entry"]["timings"]["reasoning_completed_spans_seconds"] = round(
+                sum(measurement["reasoning_spans"].values()), 3)
+        if ((kind == "message.part.delta" and props.get("delta")) or
+                (kind == "message.part.updated" and
+                 ((part.get("type") in {"text", "reasoning"} and part.get("text")) or
+                  part.get("type") == "tool"))):
+            self.request_milestone("first_model_response_seconds", source="native_content_event")
+        if kind == "message.part.updated" and part.get("type") == "tool":
+            self.request_milestone("first_tool_seconds", source="native_tool_event")
 
     def configure_automatic(self, options: dict):
         if isinstance(options, dict) and options.get("enabled") is True:
@@ -2964,6 +3273,11 @@ class GroveSession:
         response cannot alter the bundle selected by an already submitted write.
         """
         result = deepcopy(companion_projection(function, payload))
+        if not preflight:
+            # This is the exact object both MCP representations will deliver.
+            # User-message preflights are not native tool output; their complete
+            # selected previews have a different transport/input boundary.
+            result = _bounded_agent_projection(function, result)
         bundle = (self.agent_observation(base_id) if base_id is not None else
                   {"versions": {kind: {} for kind in ("player", "entity", "opportunity", "content")},
                    "continuation_bases": {}})
@@ -2975,7 +3289,7 @@ class GroveSession:
         def rows(value):
             return value if isinstance(value, list) else []
 
-        def options(values):
+        def options(values, *, target=None):
             for option in values if isinstance(values, list) else []:
                 if not isinstance(option, dict):
                     continue
@@ -2989,6 +3303,16 @@ class GroveSession:
                 for candidate in candidates:
                     if isinstance(candidate, dict):
                         remember("player" if candidate.get("kind") == "role" else "entity", candidate)
+                        preview = candidate.get("preview")
+                        if (option.get("action") in {"store", "attach"} and isinstance(target, str) and
+                                isinstance(candidate.get("id"), str) and isinstance(preview, dict) and
+                                re.fullmatch(r"[0-9a-f]{64}", str(preview.get("version_fingerprint", "")))):
+                            key = json.dumps([target, candidate["id"], option["action"]])
+                            bundle.setdefault("combination_previews", {})[key] = {
+                                "fingerprint": preview["version_fingerprint"],
+                                "player_version": bundle["versions"]["player"].get(self.role_id),
+                                "target_version": bundle["versions"]["entity"].get(target),
+                                "item_version": bundle["versions"]["entity"].get(candidate["id"])}
                 if isinstance(option.get("input_schema"), dict):
                     option["input_schema"] = agent_tool_schema(option["input_schema"])
                 if isinstance(option.get("arguments"), dict):
@@ -2998,7 +3322,7 @@ class GroveSession:
         def entity(value):
             if isinstance(value, dict):
                 remember("entity", value)
-                options(value.get("action_options"))
+                options(value.get("action_options"), target=value.get("id"))
 
         def content(value):
             if isinstance(value, list):
@@ -3028,7 +3352,8 @@ class GroveSession:
                 for item in rows(value.get(key)):
                     entity(item)
             entity(value.get("entity"))
-            options(value.get("action_options"))
+            selected = value.get("entity")
+            options(value.get("action_options"), target=selected.get("id") if isinstance(selected, dict) else None)
             opportunities = list(rows(value.get("opportunities")))
             if isinstance(value.get("opportunity"), dict):
                 opportunities.append(value["opportunity"])
@@ -3106,7 +3431,21 @@ class GroveSession:
                 node[key] = version
             return node
 
-        return bind(self.catalog[function]["input_schema"], root)
+        bound = bind(self.catalog[function]["input_schema"], root)
+        if function == "grove.interact" and bound.get("action") in {"store", "attach"}:
+            key = json.dumps([bound.get("target_id"), bound.get("item_id"), bound["action"]])
+            preview = bundle.get("combination_previews", {}).get(key)
+            if (not preview or preview.get("player_version") != bound.get("expected_player_version") or
+                    preview.get("target_version") != bound.get("expected_target_version") or
+                    preview.get("item_version") != bound.get("expected_item_version")):
+                raise ConnectorError("ObservedPreviewRequired", "装入或附着前，请读取目标物件的完整当前候选预览，并引用该读取的observation_id。", 409)
+            explicit = bound.get("expected_combination_fingerprint")
+            if explicit is not None and explicit != preview["fingerprint"]:
+                raise ConnectorError("ObservedPreviewMismatch", "组合指纹不是此观察中该行动的候选预览；请重新读取目标物件。", 409)
+            # The world rechecks this fingerprint's affected structures. A
+            # compact write readback cannot upgrade an older loading preview.
+            bound["expected_combination_fingerprint"] = preview["fingerprint"]
+        return bound
 
     def tools(self):
         result = [{"name": "world_bootstrap", "description": "Read authenticated entry facts of this world.",
@@ -3116,13 +3455,15 @@ class GroveSession:
                        "additionalProperties": False}}]
         result.append({"name": "execution_checkpoint",
             "description": "Finish this bounded execution segment. Report observed progress and next intention, "
-                "or report the granted goal complete only after real readback, referencing its confirmed operation IDs. "
-                "This local checkpoint does not change world facts or grant further actions.",
+                "or claim completion after real readback, referencing this task's confirmed operation IDs. "
+                "Completed stops execution and records an Agent claim; it does not verify the free-text goal. "
+                "Server-verified bound world results are reported separately. This checkpoint changes no world facts or permissions.",
             "inputSchema": {"type": "object", "additionalProperties": False,
                 "required": ["task_id", "execution_segment_id", "status", "summary", "next_intent", "evidence_operation_ids"],
                 "properties": {"task_id": {"type": "string", "minLength": 1, "maxLength": 100},
                     "execution_segment_id": {"type": "string", "minLength": 1, "maxLength": 100},
-                    "status": {"enum": ["continue", "completed", "blocked"]},
+                    "status": {"enum": ["continue", "completed", "blocked"],
+                        "description": "Completed is your completion claim and stops execution; the natural-language goal remains unverified."},
                     "summary": {"type": "string", "minLength": 1, "maxLength": 600},
                     "next_intent": {"type": "string", "maxLength": 600},
                     "evidence_operation_ids": {"type": "array", "maxItems": 8, "uniqueItems": True,
@@ -3148,7 +3489,8 @@ class GroveSession:
                     "description": "Use the opaque ID returned with the exact observations you are acting on. "
                                    "The connector supplies their fixed player/target/item/other and opportunity versions."}
                 schema["required"].append("observation_id")
-                description += " Snapshot guards are bound from observation_id; terms_version and combination fingerprints remain explicit."
+                description += " Snapshot guards are bound from observation_id; terms_version remains explicit. " \
+                    "Store/attach requires this observation's complete matching candidate.preview; its exact combination fingerprint is bound and rechecked by the world."
             else:
                 schema.setdefault("properties", {})["base_observation_id"] = {
                     "type": "string", "minLength": 1, "maxLength": 100,
@@ -3163,6 +3505,8 @@ class GroveSession:
             raise ConnectorError("NoActiveTurn", "No companion turn is active.", 409)
         if self.blueprint_active:
             raise ConnectorError("BlueprintToolsDenied", "Blueprint responses have no tool access.", 403)
+        self.request_milestone("first_tool_seconds", source="world_mcp_handler")
+        self.request_milestone("first_model_response_seconds", source="world_mcp_handler")
         self.world_call_count += 1
         if self.world_call_count > MAX_WORLD_CALLS:
             raise ConnectorError("TurnBudget", "World tool budget reached; stop this turn.", 429)
@@ -3240,11 +3584,68 @@ class GroveSession:
                 error={"code": exc.code, "message": "动作已提交，但当前结果未能核对；请恢复后查看。"})
             self.remember()
             raise
+        self.request_milestone("first_confirmed_action_seconds", source="receipt_and_world_readback")
         projection = deepcopy(result)
         projection["execution_readback"] = facts
         projection["execution_control"] = {key: self.execution.get(key) for key in
             ("actions_count", "max_actions", "remaining_actions", "delegation_active", "grant_version")}
         return self.present_agent_result(function, projection, base_id=observation_id)
+
+    def execution_world_results(self, facts: dict | None, *, establish_reference=False):
+        """Report the selected world's own verdict, without judging the goal text."""
+        # New tasks opt in once. Older saved tasks have no trustworthy initial
+        # binding attempt, so they must remain unbound rather than adopt later terms.
+        may_establish = establish_reference and self.execution.get("context_reference_attempted", True) is False
+        if may_establish:
+            self.execution["context_reference_attempted"] = True
+            self.remember()
+        if not isinstance(facts, dict):
+            return []
+        selected = facts.get("selected_inspection")
+        entity = selected.get("entity") if isinstance(selected, dict) else None
+        identity = self.execution.get("context_entity_id")
+        if (not identity or not isinstance(entity, dict) or entity.get("id") != identity or
+                type(entity.get("version")) is not int or entity["version"] < 1):
+            return []
+        binding = entity.get("creative")
+        contract = binding.get("contract") if isinstance(binding, dict) else None
+        if (not isinstance(contract, dict) or not isinstance(binding.get("definition_ref"), str) or
+                not isinstance(binding.get("type_id"), str) or not isinstance(contract.get("material"), str) or
+                type(contract.get("terms_version")) is not int or contract["terms_version"] < 0 or
+                type(contract.get("quantity")) is not int or contract["quantity"] < 1 or
+                type(contract.get("delivered")) is not int or contract["delivered"] < 0):
+            return []
+        current_reference = {"entity_id": identity, "definition_ref": binding["definition_ref"],
+            "type_id": binding["type_id"], "terms_version": contract["terms_version"],
+            "material_id": contract["material"], "quantity_u": contract["quantity"]}
+        reference = self.execution.get("context_result_reference")
+        # Only the execution preflight can establish this object reference.
+        # A checkpoint or later readback cannot choose new acceptance terms.
+        if reference is None and may_establish:
+            reference = deepcopy(current_reference)
+            self.execution["context_result_reference"] = reference
+            self.remember()
+        mismatches = ([key for key, value in current_reference.items() if reference.get(key) != value]
+                      if isinstance(reference, dict) else [])
+        verification = ("unbound" if not isinstance(reference, dict) else "reference_mismatch" if mismatches else
+                        "verified_complete" if contract.get("status") == "complete" else "not_complete")
+        # The world owns this verdict. Complete describes the fixed contract's
+        # settlement at finished_tick, not current conditions or extra goals
+        # such as reclaiming proceeds. Canonical identity is not lot provenance.
+        result = {"kind": "world_contract", "entity_id": identity, "entity_version": entity["version"],
+            "entity_name": entity.get("name"), "definition_ref": binding["definition_ref"],
+            "type_id": binding["type_id"], "terms_version": contract["terms_version"],
+            "material_id": contract["material"], "quantity_u": contract["quantity"],
+            "delivered_u": contract["delivered"], "server_status": contract.get("status"),
+            "verification": {"status": verification,
+                "scope": "bound_world_contract", "source": "authenticated_selected_inspection"},
+            "reference": deepcopy(reference), "reference_mismatches": mismatches,
+            "world_tick": binding.get("world_tick"), "observed_at": facts.get("observed_at")}
+        for key in ("parties", "accepted", "beneficiary", "deadline_tick", "finished_tick", "completion_proof",
+                    "released", "lost", "escrow_remaining", "physical_failure_tick", "failure_reason", "condition_error"):
+            if key in contract:
+                result[key] = deepcopy(contract[key])
+        return [result]
 
     async def execution_checkpoint(self, arguments: dict):
         schema = next(item["inputSchema"] for item in self.tools() if item["name"] == "execution_checkpoint")
@@ -3260,28 +3661,35 @@ class GroveSession:
                      if item.get("status") == "confirmed"}
         evidence = arguments["evidence_operation_ids"]
         if any(operation not in confirmed for operation in evidence):
-            raise ConnectorError("UnconfirmedEvidence", "完成依据必须引用本任务实际已确认的原操作。", 409)
+            raise ConnectorError("UnconfirmedEvidence", "报告引用必须属于本任务实际已确认的原操作。", 409)
         if arguments["status"] == "completed":
             if not evidence or not self.execution.get("readback_actual"):
-                raise ConnectorError("ReadbackRequired", "真实行动和结果尚未核对，不能报告目标完成。", 409)
+                raise ConnectorError("ReadbackRequired", "真实行动和结果尚未核对，不能提交完成声明。", 409)
             await self.execution_readback(context_entity_id=self.execution.get("context_entity_id"))
             if (self.cancelled or self.execution.get("readback_actions_count") != self.execution["actions_count"] or
                     self.execution.get("control_status") not in {"active", "exhausted"}):
-                raise ConnectorError("ReadbackRequired", "最新行动结果尚未核对，不能报告目标完成。", 409)
+                raise ConnectorError("ReadbackRequired", "最新行动结果尚未核对，不能提交完成声明。", 409)
+        world_results = self.execution_world_results(self.execution.get("readback"))
+        self.execution["world_results"] = world_results
         checkpoint = deepcopy(arguments)
         self.execution["checkpoint"] = checkpoint
         self.execution["progress"] = {"summary": arguments["summary"], "next_intent": arguments["next_intent"],
             "evidence": [deepcopy(confirmed[operation]) for operation in evidence]}
         if arguments["status"] == "completed":
             self.execution["goal_result"] = {"status": "completed", "summary": arguments["summary"],
+                "completion_source": "agent_claim", "verification": {"status": "unverified", "scope": "natural_language_goal"},
                 "evidence_operation_ids": evidence, "actions_count": self.execution["actions_count"],
-                "readback_actual": True, "source": "Agent checkpoint after authoritative receipt and current world reads"}
+                "readback_actual": True, "world_results": deepcopy(world_results),
+                "source": "Agent completion claim after confirmed operations and world readback; no natural-language adjudication"}
             self.execution["status"] = "completed"
         # No further write from this segment can begin after its checkpoint.
         self.active_execution = False
         self.remember()
-        return {"task_id": self.execution["task_id"], "status": arguments["status"],
-                "segment_finished": True, "world_facts_changed": False}
+        result = {"task_id": self.execution["task_id"], "status": arguments["status"],
+                  "segment_finished": True, "world_facts_changed": False, "world_results": deepcopy(world_results)}
+        if arguments["status"] == "completed":
+            result["goal_result"] = deepcopy(self.execution["goal_result"])
+        return result
 
 
 class ConnectorManager:
@@ -3517,6 +3925,7 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
             grant_action_offset=0, pending_grant_action_offset=None, grant_operation_id=None,
             readback_actions_count=None, no_progress_segments=0,
             segment_id="", checkpoint=None, goal_result=None, segments=[], phase_timings=[], settlement=None,
+            context_result_reference=None, context_reference_attempted=False, world_results=[],
             history_recovery={"requested": compact_history, "status": "not_started", "attempts": 0},
             budget_extensions=[],
             progress={"summary": "", "next_intent": "", "evidence": []})
@@ -3674,14 +4083,21 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
                 if not isinstance(params, dict) or not isinstance(params.get("arguments", {}), dict):
                     raise ConnectorError("InvalidArguments", "World tool arguments must be an object.")
                 value = await session.tool_call(str(params.get("name", "")), params.get("arguments", {}))
-                result = {"content": [{"type": "text", "text": _agent_tool_text(value)}],
+                result = {"content": [{"type": "text", "text": _checked_agent_tool_text(value)}],
                           "structuredContent": value, "isError": False}
             except (ConnectorError, httpx.HTTPError) as exc:
                 error = {"error": exc.code, "message": exc.message} if isinstance(exc, ConnectorError) else {
                     "error": "UnknownWorldResult", "message": "World request disconnected. Stop; recover the original receipt before another write."}
                 if isinstance(exc, ConnectorError) and exc.world_details is not None:
                     error["details"] = exc.world_details
-                result = {"content": [{"type": "text", "text": json.dumps(error)}], "structuredContent": error, "isError": True}
+                try:
+                    error_text = _checked_agent_tool_text(error)
+                except ConnectorError:
+                    error = {"error": "ToolOutputTooLarge", "original_error": error["error"],
+                        "message": "The world error's expanded details exceed the native output limit and were not provided. "
+                                   "Do not infer a completed inspection or retry an unresolved write; recover its original receipt."}
+                    error_text = _checked_agent_tool_text(error)
+                result = {"content": [{"type": "text", "text": error_text}], "structuredContent": error, "isError": True}
         else:
             return JSONResponse({"jsonrpc": "2.0", "id": request_id,
                 "error": {"code": -32601, "message": "Method outside game capability."}})

@@ -11,7 +11,7 @@ import httpx
 
 from agent_world import WorldRuntime
 from agent_world.errors import WorldRuntimeError
-from agent_world.grove_connector import ConnectorError, ConnectorManager, GroveSession, create_connector_app, _agent_tool_text
+from agent_world.grove_connector import ConnectorError, ConnectorManager, GroveSession, create_connector_app, _agent_tool_text, _checked_agent_tool_text
 from agent_world.worlds.shared_grove import make_world
 
 
@@ -117,6 +117,51 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.agent_observation(old), original)
         await self.write(inspected["observation_id"])
         self.assertEqual(self.scene()["result"]["player"]["x"], 2)
+
+    async def test_action_scoped_inspection_preserves_the_actual_complete_loading_preview(self):
+        item = next(e for e in self.scene()["result"]["inventory"]
+            if "container" in e["capabilities"] and not e["id"].startswith("backpack_"))
+        full = self.runtime.query_function("w", "grove.inspect", self.role, {"entity_id": item["id"]})["result"]
+        store = next(o for o in full["action_options"] if o["action"] == "store")
+        scoped = self.runtime.query_function("w", "grove.inspect", self.role,
+            {"entity_id": item["id"], "action": "store"})["result"]
+        self.assertEqual(scoped["action_options"], [store])
+        self.assertEqual(scoped["entity"]["action_options"], [store])
+        for key in ("id", "version", "state", "matter", "simulation"):
+            self.assertEqual(scoped["entity"][key], full["entity"][key])
+        projection = scoped["action_options_projection"]
+        self.assertEqual(projection["expanded_actions"], ["store"])
+        self.assertTrue(projection["unexpanded_actions"])
+        self.assertTrue(all("input" not in o and "choices" not in o and "preview" not in o
+            for o in projection["unexpanded_actions"]))
+        supplied = await self.session.tool_call("grove_inspect", {"entity_id": item["id"], "action": "store"})
+        previews = self.session.agent_observation(supplied["observation_id"])["combination_previews"]
+        self.assertEqual(len(previews), len(store["input"]["candidates"]))
+        for candidate in store["input"]["candidates"]:
+            key = json.dumps([item["id"], candidate["id"], "store"])
+            self.assertEqual(previews[key]["fingerprint"], candidate["preview"]["version_fingerprint"])
+
+        candidate = store["input"]["candidates"][0]
+        self.session._agent_preflight_observation_id = None
+        narrow = await self.session.tool_call("grove_inspect", {"entity_id": item["id"],
+            "action": "store", "candidate_id": candidate["id"]})
+        selected = narrow["result"]["action_options"][0]["input"]["candidates"]
+        self.assertEqual(selected, [candidate])
+        narrow_bundle = self.session.agent_observation(narrow["observation_id"])
+        self.assertEqual(set(narrow_bundle["combination_previews"]),
+            {json.dumps([item["id"], candidate["id"], "store"])})
+        for omitted in store["input"]["candidates"][1:]:
+            self.assertNotIn(omitted["id"], narrow_bundle["versions"]["entity"])
+
+    async def test_unknown_inspection_action_is_rejected_without_observation_binding(self):
+        item = self.scene()["result"]["inventory"][0]
+        before = deepcopy(self.session._agent_observations)
+        for args in ({"action": "imaginary_action"}, {"candidate_id": "imaginary_item"},
+                {"action": "store", "candidate_id": "imaginary_item"}):
+            with self.assertRaises(ConnectorError) as rejected:
+                await self.session.tool_call("grove_inspect", {"entity_id": item["id"]} | args)
+            self.assertEqual(rejected.exception.code, "RuleViolation")
+            self.assertEqual(self.session._agent_observations, before)
 
     async def test_missing_or_restarted_observation_does_not_submit_a_world_write(self):
         before = len(self.calls)
@@ -275,6 +320,95 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         tool = next(t for t in self.session.tools() if t["name"] == "grove_move")
         self.assertNotIn("expected_player_version", tool["inputSchema"]["properties"])
         self.assertIn("expected_player_version", self.session.catalog["grove.move"]["input_schema"]["required"])
+
+    def test_loading_requires_a_presented_matching_preview_not_an_index(self):
+        scene = {"player": {"id": self.role, "version": 11},
+            "entities": [{"id": "target", "version": 21}, {"id": "item", "version": 31}]}
+        indexed = self.session.present_agent_result("map.viewport", scene)["observation_id"]
+        arguments = {"action": "store", "target_id": "target", "item_id": "item"}
+        with self.assertRaises(ConnectorError) as missing:
+            self.session.bind_agent_versions("grove.interact", arguments, indexed)
+        self.assertEqual(missing.exception.code, "ObservedPreviewRequired")
+        inspection = {"entity": {"id": "target", "version": 21},
+            "action_options": [{"action": "store", "input": {"candidates": [
+                {"id": "item", "version": 31, "preview": {"version_fingerprint": "a"*64,
+                    "physics": {"known": True, "overloaded": False}}}]}}]}
+        read = self.session.present_agent_result("grove.inspect", inspection, base_id=indexed)["observation_id"]
+        bound = self.session.bind_agent_versions("grove.interact", arguments, read)
+        self.assertEqual(bound["expected_combination_fingerprint"], "a"*64)
+        self.assertEqual((bound["expected_target_version"], bound["expected_item_version"]), (21, 31))
+        with self.assertRaises(ConnectorError) as guessed:
+            self.session.bind_agent_versions("grove.interact", arguments | {"expected_combination_fingerprint": "b"*64}, read)
+        self.assertEqual(guessed.exception.code, "ObservedPreviewMismatch")
+
+    def test_oversized_write_keeps_receipt_and_control_before_observation_binding(self):
+        payload = {"operation_id": "confirmed-write", "function_id": "grove.interact", "ok": True,
+            "commit_seq": 42, "result": {"entity": {"id": "unshown", "version": 999,
+                "state": {"large": "x"*80000}}},
+            "execution_control": {"actions_count": 1, "remaining_actions": 7, "grant_version": 2},
+            "execution_readback": {"player": {"id": self.role, "version": 12},
+                "entities": [{"id": "also-unshown", "version": 888, "name": "x"*80000}],
+                "selected_inspection": {"entity": {"id": "selected", "version": 5}}}}
+        delivered = self.session.present_agent_result("grove.interact", payload)
+        self.assertEqual(json.loads(_checked_agent_tool_text(delivered)), delivered)
+        self.assertEqual(delivered["operation_id"], "confirmed-write")
+        self.assertEqual(delivered["commit_seq"], 42)
+        self.assertTrue(delivered["ok"])
+        self.assertEqual(delivered["execution_control"], payload["execution_control"])
+        self.assertFalse(delivered["projection"]["expanded_state_included"])
+        versions = self.session.agent_observation(delivered["observation_id"])["versions"]
+        self.assertEqual(versions["entity"], {"selected": 5})
+        self.assertEqual(versions["player"][self.role], 12)
+        self.assertLess(len(_checked_agent_tool_text(delivered).encode()), 51200)
+
+    def test_oversized_inspection_delivers_state_and_real_re_read_paths_without_binding_unshown_preview(self):
+        initial_sequence = self.session._agent_observation_sequence
+        inspection = {"entity": {"id": "target", "version": 77}, "action_options": [
+            {"action": "store", "input": {"candidates": [{"id": "item", "version": 88,
+                "preview": {"version_fingerprint": "a"*64, "physics": {"large": "x"*80000}}}]}}]}
+        supplied = self.session.present_agent_result("grove.inspect", inspection)
+        self.assertEqual(self.session._agent_observation_sequence, initial_sequence + 1)
+        self.assertFalse(supplied["projection"]["complete_inspection"])
+        self.assertEqual(supplied["action_options"][0]["read_request"]["arguments"],
+            {"entity_id": "target", "action": "store"})
+        candidate = supplied["action_options"][0]["candidates_index"][0]
+        self.assertEqual(candidate["read_request"]["arguments"]["candidate_id"], "item")
+        bundle = self.session.agent_observation(supplied["observation_id"])
+        self.assertEqual(bundle["versions"]["entity"], {"target": 77})
+        self.assertFalse(bundle.get("combination_previews"))
+        self.assertEqual(json.loads(_checked_agent_tool_text(supplied)), supplied)
+        single = deepcopy(inspection)
+        single["action_options_projection"] = {"candidate_selection": {"candidate_id": "item"}}
+        before_rejected = deepcopy(self.session._agent_observations)
+        with self.assertRaises(ConnectorError) as rejected:
+            self.session.present_agent_result("grove.inspect", single)
+        self.assertEqual(rejected.exception.code, "ToolOutputTooLarge")
+        self.assertEqual(self.session._agent_observations, before_rejected)
+        # A preflight is a full user-message input, not a native tool response.
+        supplied = self.session.present_agent_result("map.viewport", {"selected_inspection": inspection}, preflight=True)
+        self.assertEqual(supplied["selected_inspection"]["action_options"], inspection["action_options"])
+
+    def test_write_summary_cannot_upgrade_an_old_loading_preview(self):
+        inspection = {"player": {"id": self.role, "version": 11},
+            "entity": {"id": "target", "version": 21}, "action_options": [
+                {"action": "attach", "input": {"candidates": [{"id": "item", "version": 31,
+                    "preview": {"version_fingerprint": "a"*64}}]}}]}
+        read = self.session.present_agent_result("grove.inspect", inspection)["observation_id"]
+        original = self.session.agent_observation(read)
+        summary = {"player": {"id": self.role, "version": 12}, "entities": [
+            {"id": "target", "version": 22}, {"id": "item", "version": 31}]}
+        changed = self.session.present_agent_result("grove.interact", {"result": {},
+            "execution_readback": summary}, base_id=read)["observation_id"]
+        arguments = {"action": "attach", "target_id": "target", "item_id": "item"}
+        with self.assertRaises(ConnectorError) as missing:
+            self.session.bind_agent_versions("grove.interact", arguments, changed)
+        self.assertEqual(missing.exception.code, "ObservedPreviewRequired")
+        self.assertEqual(self.session.agent_observation(read), original)
+        inspection["player"]["version"] = 12
+        inspection["entity"]["version"] = 22
+        inspection["action_options"][0]["input"]["candidates"][0]["preview"]["version_fingerprint"] = "b"*64
+        fresh = self.session.present_agent_result("grove.inspect", inspection, base_id=changed)["observation_id"]
+        self.assertEqual(self.session.bind_agent_versions("grove.interact", arguments, fresh)["expected_combination_fingerprint"], "b"*64)
 
     def test_continuation_keeps_opportunity_basis_even_after_live_anchor_read(self):
         initial = self.session.present_agent_result("grove.generation_context", {"opportunity": {"id": "opp", "version": 2,
