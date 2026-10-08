@@ -2,6 +2,16 @@
 
 这是当前公开 Python SDK API 1 / HTTP protocol 0.15 的接入说明，属于 L6 表面；语义以 [FOUNDATION](FOUNDATION.md) 与 [AGENT_INTERACTION](AGENT_INTERACTION.md) 为准。世界作者定义领域对象、规则与动作；此处不规定参与者的目的、关系或体验角色。
 
+## 跨世界身份与当前入口
+
+产品定义固定为 [G2：跨世界统一身份、各世界独立档案、无需重复注册](../PRODUCT_POSITIONING.md#g2-跨世界统一身份各世界独立档案无需重复注册)。用户从官方入口由自己的 Agent 建立或取得一次身份密钥材料并自行保管；所有采用同一身份体系的官方世界及第三方开发者世界，都通过同一个公钥识别该身份。首次进入新世界自动建立本地 Participant Profile，不是再次注册 User Identity。
+
+当前身份根使用 Ed25519：私钥／密钥材料留在用户自己的客户端，公钥是稳定标识。客户端只向目标世界提交公钥和该世界新鲜 challenge 的签名；服务器不接收身份私钥。世界分别签发自己的 Credential，由客户端取得、保存和按需续签；世界 A 的 bearer 不能用于世界 B，重新取得世界凭据也不改变根身份。角色、背包、余额、权限、经历和进度分别留在原世界，不随身份共享；具体语义见 [身份合同](FOUNDATION.md#身份密钥与世界本地凭据)。
+
+**已确定产品流程不等于已上线入口。** 当前仓库提供各世界的 challenge／exchange、浏览器身份保存与恢复文件导入，以及 `agent-world-connect` 的本机密钥复用；尚未提供完整统一官网“注册／拉取接入资料”的成品入口。各站点的浏览器存储不会自动跨 origin 共享密钥，现行客户端需要加载原本机密钥或由用户导入原恢复文件。本说明不把统一官网入口或自动跨站接续宣称为已实现。
+
+使用现有连接助手时，进入另一世界仍使用同一个 `--key` 文件，仅更换 `--url` 和该世界的 `--output` 连接资料。首次有意建立一份身份才使用 `--new-identity`；换世界不重新生成密钥。世界凭据和连接文件可各自独立，用户无需维护第二份根身份。世界作者采用这套入场接口后，仍可定义自己的本地档案和行动权限，但不应把本地建档解释为要求用户重新注册身份。
+
 ## 世界作者：定义并运行规则包
 
 使用 Python 3.11+，在项目中安装 `agent-world`。开发本仓库时可用 `python -m pip install -e .`。导入公开类型，不使用 Runtime 的私有连接或内部表：
@@ -74,7 +84,7 @@ Query 不能写入，Command 的候选状态与回执／附带受管效果共同
 
 ### Ed25519 持钥证明
 
-1. 生成或加载自己的 Ed25519 私钥；保留它供以后同身份返回。公钥是 **32 字节 raw 公钥的无 padding base64url**。
+1. 首次建立身份时生成自己的 Ed25519 私钥；已有身份或进入另一世界时加载同一份原私钥，保留它供以后返回，不为换世界重新生成。公钥是 **32 字节 raw 公钥的无 padding base64url**。
 2. `POST /v1/key-identities/challenges`，JSON：`{"public_key":"<base64url>","ttl_seconds":120,"access_mode":"observe"}`。access_mode 为 `control`（默认）或 `observe`；ttl_seconds 可省略，最大 300。不传 display_name 或 universe。
 3. 新 challenge 的响应包含 `version="agent-world-key-identity-v2"`、`challenge_id`、`universe`、`public_key`、`nonce`、`access_mode`、`message`、`expires_at`。签名前核对公钥、世界、有效期和所选模式；解码后的 message 必须是 `[version, universe, challenge_id, nonce, access_mode]` 以 NUL 分隔后的 UTF-8 字节。**先 base64url 解码 message，再签解码后的原始字节**，不要签 message 的 ASCII 文本。
 4. 签名是 64 字节 Ed25519 签名的无 padding base64url。`POST /v1/key-identities/exchange`，JSON：`{"challenge_id":"...","signature":"..."}`。
