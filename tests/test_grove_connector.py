@@ -14,12 +14,31 @@ from starlette.testclient import TestClient
 
 from agent_world.grove_connector import (
     ConnectorError, ConnectorManager, GroveSession, create_connector_app, session_permissions_match,
-    companion_projection,
+    companion_projection, _companion_chunk_terrain, _companion_scene_index,
 )
 from agent_world.worlds.shared_grove.catalog import CONTENT_SCHEMA
+from agent_world.worlds.shared_grove.world import INTERACT_ARGS
 
 
 class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
+    def test_agent_terrain_preserves_negative_coordinates_actual_cells_and_unknowns(self):
+        tiles=['grass','dirt','water','rock']*64
+        chunks=[{"cx":x,"cy":y,"tiles":tiles} for x,y in [(-1,-1),(0,-1),(-1,0),(0,0)]]
+        scene=_companion_scene_index({"chunks":chunks,"construction":{"recipes":[
+            {"id":"hearth","terrain":["grass","dirt"],"material_cost_u":{"stone":12}}]}})
+        self.assertEqual(scene['construction']['recipes'][0]['material_cost_u'],{'stone':12})
+        for original,projected in zip(chunks,scene['chunks']):
+            encoded=projected['terrain']
+            self.assertEqual(encoded['origin'],{'x':original['cx']*16,'y':original['cy']*16})
+            decoded=[encoded['legend'][code] for row in encoded['rows'] for code in row]
+            self.assertEqual(decoded,tiles)
+            self.assertTrue(encoded['complete'])
+            self.assertEqual(_companion_chunk_terrain(projected),projected)
+        incomplete=_companion_chunk_terrain({'cx':-1,'cy':0,'tiles':['water','unknown']})['terrain']
+        self.assertFalse(incomplete['complete'])
+        self.assertEqual(incomplete['unknown_indexes'],[1])
+        self.assertEqual(incomplete['missing_index_range'],[2,255])
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="grove-connector-")
         self.addCleanup(temporary.cleanup)
@@ -492,6 +511,171 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("action_options", readback["selected_inspection"])
         self.assertEqual(readback["selected_inspection"]["read_request"]["arguments"], {"entity_id": "foreign-source"})
         self.assertEqual(readback["entities"][0]["matter"], facts["entities"][0]["matter"])
+
+    def test_movement_receipt_defers_repeated_scene_but_keeps_actor_and_resource_page(self):
+        entities = [{"id": f"nearby-{index}", "version": 3, "name": "公开物件" * 20,
+                     "x": index, "y": 2, "material": "wood"} for index in range(40)]
+        inventory = [{"id": "own-source", "version": 5, "name": "木材", "owner": "test-user",
+            "matter": [{"material": "wood", "slot": "body", "quantity": 12}],
+            "action_options": [{"action": "drop", "input": {"unused_expansion": "x" * 5000}}]}]
+        scene = {"player": {"id": "test-user", "version": 1, "x": 1, "y": 2},
+            "entities": entities, "inventory": inventory, "inventory_total": 7, "inventory_next": "own-source",
+            "chunks": [{"cx": x, "cy": y, "tiles": ["grass"] * 256} for x, y in ((0, 0), (0, -1), (-1, 0), (-1, -1))],
+            "construction": {"material_totals": {"wood": 12}, "unit": "logical_matter",
+                "recipes": [{"id": "example", "name": "配方" * 100}]},
+            "public_content": {"id": "content:0:0", "version": 9,
+                "anchors": [{"entity_id": row["id"], "version": 3, "entity": row} for row in entities]}}
+        base = self.session.present_agent_result("map.viewport", scene, preflight=True)["observation_id"]
+        current = deepcopy(scene)
+        current["player"].update(version=2, x=2)
+        original = {"operation_id": "one-move", "ok": True, "commit_seq": 44,
+            "result": {"player": current["player"], "changes": ["走了一格。"], "viewport": current},
+            "execution_readback": current, "execution_control": {"actions_count": 1}}
+        unchanged = deepcopy(original)
+        expanded = companion_projection("grove.move", original)
+        delivered = self.session.present_agent_result("grove.move", original, base_id=base)
+        readback = delivered["execution_readback"]
+        self.assertEqual(delivered["operation_id"], "one-move")
+        self.assertEqual(delivered["result"]["changes"], ["走了一格。"])
+        self.assertEqual(readback["player"], current["player"])
+        self.assertEqual(readback["entities"], [])
+        self.assertEqual(readback["construction"]["material_totals"], {"wood": 12})
+        self.assertEqual(readback["inventory"][0]["matter"][0]["quantity"], 12)
+        self.assertNotIn("action_options", readback["inventory"][0])
+        self.assertEqual(readback["inventory_total"], 7)
+        self.assertEqual(readback["inventory_next"], "own-source")
+        self.assertNotIn("chunks", readback)
+        self.assertNotIn("public_content", readback)
+        self.assertEqual(delivered["read_requests"], [{"tool": "map_viewport", "arguments": {}}])
+        self.assertLess(len(json.dumps(delivered, ensure_ascii=False)), len(json.dumps(expanded, ensure_ascii=False)) // 3)
+        versions = self.session.agent_observation(delivered["observation_id"])["versions"]
+        self.assertEqual(versions["player"]["test-user"], 2)
+        self.assertEqual(versions["entity"]["own-source"], 5)
+        self.assertEqual(original, unchanged)
+
+    def test_action_delta_keeps_explicit_target_and_never_binds_omitted_changes(self):
+        old = [{"id": f"nearby-{index}", "version": 1} for index in range(20)]
+        base = self.session.present_agent_result("map.viewport", {"entities": old})["observation_id"]
+        changed = [{"id": row["id"], "version": 2} for row in old]
+        changed.append({"id": "new-but-omitted", "version": 99})
+        scene = {"player": {"id": "test-user", "version": 7}, "entities": changed,
+            "changes": [{"entity_id": "nearby-19", "summary": "真实附近变化", "action": "interact"}]}
+        delivered = self.session.present_agent_result("grove.interact", {
+            "operation_id": "actual-action", "result": {"changes": ["真实动作结果"], "viewport": scene},
+            "execution_readback": scene}, base_id=base, action_entity_ids=["nearby-19"])
+        readback = delivered["execution_readback"]
+        self.assertIn({"id": "nearby-19", "version": 2, "discovery_state": {}}, readback["entities"])
+        self.assertEqual(len(readback["entities"]), 9)
+        self.assertGreater(readback["projection"]["omitted_changed_or_new_entity_count"], 0)
+        self.assertEqual(readback["changes"], scene["changes"])
+        versions = self.session.agent_observation(delivered["observation_id"])["versions"]["entity"]
+        self.assertEqual(versions["nearby-19"], 2)
+        self.assertEqual(versions["nearby-18"], 1)
+        self.assertNotIn("new-but-omitted", versions)
+        self.assertEqual(self.session.agent_observation(base)["versions"]["entity"]["nearby-19"], 1)
+
+    def test_compact_action_keeps_selected_state_and_explicit_inspect_action_arguments(self):
+        inspection = {"player": {"id": "test-user", "version": 7},
+            "entity": {"id": "hearth", "version": 22, "state": {"temperature": 8}, "pour_target_slot": "surface"},
+            "action_options": [{"action": "pour", "arguments": {
+                "action": "pour", "target_id": "hearth", "target_slot": "surface"},
+                "input_schema": {"type": "object", "properties": {"amount": {"type": "integer"}}}}]}
+        explicit = self.session.present_agent_result("grove.inspect", inspection)
+        self.assertEqual(explicit["action_options"][0]["arguments"]["target_slot"], "surface")
+        delivered = self.session.present_agent_result("grove.interact", {"result": {},
+            "execution_readback": {"selected_inspection": inspection}}, base_id=explicit["observation_id"])
+        selected = delivered["execution_readback"]["selected_inspection"]
+        self.assertEqual(selected["entity"]["state"], {"temperature": 8})
+        self.assertEqual(selected["entity"]["pour_target_slot"], "surface")
+        self.assertEqual(self.session.agent_observation(delivered["observation_id"])["pour_target_slots"], {"hearth": "surface"})
+        self.assertNotIn("action_options", selected)
+        self.assertEqual(selected["read_request"]["arguments"], {"entity_id": "hearth"})
+
+    def test_pour_binds_original_presented_slot_without_refreshing_versions(self):
+        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        observed = self.session.present_agent_result("map.viewport", {
+            "player": {"id": "test-user", "version": 7}, "entities": [
+                {"id": "target", "version": 22, "pour_target_slot": "contained"},
+                {"id": "source", "version": 8}]})["observation_id"]
+        original = self.session.agent_observation(observed)
+        arguments = {"action": "pour", "amount": 20, "target_id": "target", "item_id": "source"}
+        bound = self.session.bind_agent_versions("grove.interact", arguments, observed)
+        self.assertEqual(bound["target_slot"], "contained")
+        self.assertEqual((bound["expected_player_version"], bound["expected_target_version"], bound["expected_item_version"]), (7, 22, 8))
+        self.assertNotIn("target_slot", arguments)
+        explicit = self.session.bind_agent_versions("grove.interact", arguments | {"target_slot": "contained"}, observed)
+        self.assertEqual(explicit["target_slot"], "contained")
+        fresh = self.session.present_agent_result("grove.inspect", {
+            "entity": {"id": "target", "version": 23, "pour_target_slot": "surface"}}, base_id=observed)["observation_id"]
+        self.assertEqual(self.session.agent_observation(observed), original)
+        self.assertEqual(self.session.bind_agent_versions("grove.interact", arguments, observed)["target_slot"], "contained")
+        latest = self.session.bind_agent_versions("grove.interact", arguments, fresh)
+        self.assertEqual((latest["target_slot"], latest["expected_target_version"]), ("surface", 23))
+        with self.assertRaises(ConnectorError) as rejected:
+            self.session.bind_agent_versions("grove.interact", arguments | {"target_slot": "contained"}, fresh)
+        self.assertEqual(rejected.exception.code, "ObservedActionMismatch")
+        implicit = self.session.bind_agent_versions("grove.interact", {
+            "action": "pour", "target_id": "target", "item_id": "source"}, observed)
+        self.assertNotIn("target_slot", implicit)
+        tool = next(row for row in self.session.tools() if row["name"] == "grove_interact")
+        self.assertIn("pour_target_slot", tool["inputSchema"]["properties"]["target_slot"]["description"])
+
+    def test_pour_requires_presented_slot_and_does_not_derive_it_from_state(self):
+        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        observed = self.session.present_agent_result("map.viewport", {
+            "player": {"id": "test-user", "version": 7}, "entities": [
+                {"id": "target", "version": 22, "capabilities": ["container"],
+                    "state": {"open": True, "burning": False, "water_capacity": 40}},
+                {"id": "source", "version": 8}]})["observation_id"]
+        arguments = {"action": "pour", "amount": 20, "target_id": "target", "item_id": "source"}
+        for attempt in (arguments, arguments | {"target_slot": "contained"}):
+            with self.subTest(attempt=attempt), self.assertRaises(ConnectorError) as rejected:
+                self.session.bind_agent_versions("grove.interact", attempt, observed)
+            self.assertEqual(rejected.exception.code, "ObservedActionRequired")
+        actual = self.session.present_agent_result("grove.inspect", {
+            "entity": {"id": "target", "version": 22, "pour_target_slot": "contained"}}, base_id=observed)["observation_id"]
+        newer_without_slot = self.session.present_agent_result("grove.inspect", {
+            "entity": {"id": "target", "version": 23}}, base_id=actual)["observation_id"]
+        with self.assertRaises(ConnectorError) as rejected:
+            self.session.bind_agent_versions("grove.interact", arguments, newer_without_slot)
+        self.assertEqual(rejected.exception.code, "ObservedActionRequired")
+
+    async def test_mcp_capacity_rejection_preserves_action_facts_without_new_observation(self):
+        transfer = {"source_id": "source", "target_id": "target", "target_slot": "surface",
+            "requested": 20, "source_remaining": 20, "target_remaining_capacity": 12,
+            "maximum": 12, "unit": "u", "meaning": "Current rejection; no water was transferred."}
+        self.session.tool_call = AsyncMock(side_effect=ConnectorError("RuleViolation", "Capacity insufficient", 409,
+            world_details={"water_transfer": transfer | {"provider_trace": "private-diagnostic"},
+                "upstream": "private-diagnostic"}))
+        app = create_connector_app(storage=self.manager.storage, wrapper=None)
+        app.state.connector.capability_session = Mock(return_value=self.session)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://127.0.0.1:8891") as client:
+            response = await client.post("/connector/mcp", json={"jsonrpc": "2.0", "id": 1,
+                "method": "tools/call", "params": {"name": "grove_interact", "arguments": {}}},
+                headers={"Authorization": "Bearer test-capability"})
+        self.assertEqual(response.status_code, 200)
+        result = response.json()["result"]
+        self.assertTrue(result["isError"])
+        error = result["structuredContent"]
+        self.assertEqual(error["details"], {"water_transfer": transfer})
+        self.assertEqual(json.loads(result["content"][0]["text"]), error)
+        self.assertNotIn("private-diagnostic", json.dumps(result))
+        self.assertEqual(self.session._agent_observations, {})
+
+    def test_pour_slot_is_retained_in_final_indexes_but_never_bound_from_omitted_payload(self):
+        visible = {"id": "selected", "version": 5, "pour_target_slot": "surface"}
+        supplied = self.session.present_agent_result("grove.interact", {
+            "operation_id": "actual-write", "result": {"entity": {
+                "id": "unshown", "version": 99, "pour_target_slot": "contained", "state": {"large": "x" * 80000}}},
+            "execution_readback": {"selected_inspection": {"entity": visible}}})
+        self.assertEqual(supplied["execution_readback"]["selected_inspection"]["entity"]["pour_target_slot"], "surface")
+        self.assertEqual(self.session.agent_observation(supplied["observation_id"])["pour_target_slots"], {"selected": "surface"})
+        rows = [{"id": f"visible-{index}", "version": 1, "pour_target_slot": "contained"} for index in range(8)]
+        rows.append({"id": "omitted", "version": 7, "pour_target_slot": "surface"})
+        delta = self.session.present_agent_result("grove.move", {"result": {}, "execution_readback": {"entities": rows}})
+        self.assertEqual(delta["execution_readback"]["entities"][0]["pour_target_slot"], "contained")
+        self.assertNotIn("omitted", self.session.agent_observation(delta["observation_id"])["pour_target_slots"])
 
     async def test_unknown_publication_stops_new_generation_without_model_call(self):
         self.session.unknown = [{"envelope": {"operation_id": "original-publication"}}]

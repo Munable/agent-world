@@ -186,6 +186,36 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.requests, len(self.attempts)), (1, 1))
         self.assertFalse(self.session.active_execution)
 
+    async def test_fast_reclaim_confirms_world_before_slow_abort_and_blocks_new_tasks(self):
+        await self.session.invoke('grove.control_grant',{'goal':'Keep exploring','max_actions':4})
+        slow_abort=asyncio.Event()
+        async def delayed_host(method,path,body=None,**kwargs):
+            if path.endswith('/abort'):
+                await slow_abort.wait()
+            return await self.host(method,path,body)
+        self.session.host=delayed_host
+        try:
+            await asyncio.wait_for(self.session.cancel(background=True),1)
+            self.assertEqual(self.control['status'],'revoked')
+            self.assertFalse(self.session.execution['delegation_active'])
+            self.assertTrue(self.session.state()['reclaim_in_progress'])
+            with self.assertRaises(ConnectorError) as blocked:
+                self.session.ensure_not_reclaiming()
+            self.assertEqual(blocked.exception.code,'ReclaimBusy')
+            original=self.session.reclaim_task
+            await self.session.cancel(background=True)
+            self.assertIs(self.session.reclaim_task,original)
+            waiting=asyncio.create_task(self.session.cancel())
+            await asyncio.sleep(0)
+            self.assertFalse(waiting.done())
+            slow_abort.set()
+            await asyncio.wait_for(waiting,1)
+            self.assertFalse(self.session.state()['reclaim_in_progress'])
+            self.assertEqual(self.requests,0)
+        finally:
+            slow_abort.set()
+            await self.session.cancel()
+
     async def test_saved_task_resume_keeps_budget_receipts_and_original_identity(self):
         async def first(number):
             await self.move()

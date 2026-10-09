@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,reactionObservationLines} from './grove-world-ui.js?v=current-rule-observations';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,reactionObservationLines,operationIntentLabel} from './grove-world-ui.js?v=playable-context';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -23,9 +23,40 @@ let combinationCheckingForm=null,inspectionFlight=null,inspectionErrorStatus=nul
 const chosenBuildMaterials=new Map();
 const touchedBuildChoices=new Set();
 let activeRainChunks=new Set();
-let goalDirty=false,executionReclaimBusy=false,hostCommandEpoch=0;
+let goalDirty=false,executionReclaimBusy=false,hostCommandEpoch=0,manualControlRecoveryPending=false;
 let definitionReadEpoch=0,definitionReadBusy=false,definitionReadValue=null,definitionReadError=null,definitionReadRef=null,definitionReadOpen=false;
 const factDisclosures=new Map();
+let activeActionKey=null,hostCommandKind=null,hostCommandFlight=null;
+const actionDrafts=new Map();
+const terrainNames={grass:'草地',dirt:'泥地',water:'浅溪',rock:'岩壁'};
+const readableCandidate=candidate=>({...entityById(candidate?.id),...candidate});
+const actionKey=descriptor=>(descriptor.function_id||'grove.interact')+':'+descriptor.action;
+function friendlyInstruction(value){return String(value||'').replace(/\bfeedstock\b/g,'原料').replace(/\bsymbol\b/g,'材料名称').replace(/\blot_id\b/g,'材料批次').replace(/\bamount\b/g,'数量').replace(/\bitem_id\b/g,'来源物件').replace(/\btransfer\b/g,'转入材料').replace(/\bstore\b/g,'整件放入').replace(/\brelease\b/g,'领取').replace(/\bcontained\b/g,'内含').replace(/\blining\b/g,'衬层').replace(/(\d+)u(wood|cloth|stone|water)\b/g,(_,quantity,material)=>quantity+' 单位'+materialLabel(material));}
+function displayWorldText(value){return friendlyInstruction(value).replace(/program_[0-9a-f]{64}#[A-Za-z][A-Za-z0-9_]*/g,id=>materialLabel(id,selectedEntity())).replace(/(?:object_|seed_|item_|awr_)[A-Za-z0-9_]+/g,id=>entityById(id)?.name||'该物件');}
+function rememberActionDrafts(){
+  for(const form of $('selection-actions').querySelectorAll('.descriptor-action')){
+    const values=[...form.querySelectorAll('input,select,textarea')].map(control=>({value:control.value,checked:control.checked,text:control.selectedOptions?.[0]?.textContent}));
+    actionDrafts.set(form.dataset.entityId+':'+form.dataset.action,values);
+  }
+  if(actionDrafts.size>32)actionDrafts.delete(actionDrafts.keys().next().value);
+}
+function restoreActionDraft(form,update){
+  const values=actionDrafts.get(form.dataset.entityId+':'+form.dataset.action);if(!values)return;
+  const controls=[...form.querySelectorAll('input,select,textarea')];
+  const restore=(control,index)=>{const saved=values[index];if(!saved)return;if(control.tagName==='SELECT'&&saved.value&&![...control.options].some(option=>option.value===saved.value)){const option=node('option',(saved.text||'原选择')+' · 当前不可用，请重选');option.value=saved.value;option.disabled=true;control.append(option);}control.value=saved.value;if(control.type==='checkbox')control.checked=saved.checked;};
+  controls.forEach(restore);
+  update(true);
+  // Rebuilding source lots must not silently replace a previously chosen batch.
+  controls.forEach(restore);update(false);
+}
+function renderTargetChoices(location){
+  const area=$('target-choice');if(!area)return;area.replaceChildren();
+  const objects=ground().filter(e=>e.x===location?.x&&e.y===location?.y);
+  area.hidden=!objects.length;if(!objects.length)return;
+  area.append(node('span','这里有','small'));
+  for(const entity of objects){const pick=button(entity.name,()=>run(()=>select(entity.id)),{secondary:true});pick.setAttribute('aria-pressed',String(selectedId===entity.id));area.append(pick);}
+  const groundButton=button(terrainNames[terrain(location.x,location.y)]||'这块地面',()=>selectTile(location),{secondary:true});groundButton.setAttribute('aria-pressed',String(!!selectedTile));area.append(groundButton);
+}
 
 function node(tag,text,className){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(className)el.className=className;return el;}
 function plainMessage(text){return String(text??'').replace(/\*\*([^*\n]+)\*\*/g,'$1');}
@@ -57,11 +88,15 @@ const recipes=()=>world?.construction?.recipes||[];
 const materialItems=material=>inventory().filter(e=>e.construction_material?.eligible===true&&e.construction_material.material===material);
 const nearby=(x,y)=>!!world?.bounds&&Number.isFinite(x)&&Number.isFinite(y)&&x>=world.bounds.min_x&&x<=world.bounds.max_x&&y>=world.bounds.min_y&&y<=world.bounds.max_y;
 function eventNearby(event){const p=event.payload||{};return nearby(p.x,p.y)||(p.affected||[]).some(a=>nearby(a.x,a.y))||(p.centers||[]).some(a=>nearby(a.x,a.y));}
-function openContext(){document.body.classList.remove('agent-open');document.body.classList.add('context-open');$('agent-toggle').setAttribute('aria-expanded','false');}
+function closePanels(){document.body.classList.remove('agent-open','context-open','inventory-open');$('inventory-panel').open=false;for(const id of ['agent-toggle','context-toggle','inventory-toggle'])$(id).setAttribute('aria-expanded','false');}
+function openContext(){closePanels();document.body.classList.add('context-open');$('context-toggle').setAttribute('aria-expanded','true');}
+function openAgent(){closePanels();document.body.classList.add('agent-open');$('agent-toggle').setAttribute('aria-expanded','true');}
 
 async function readIdentity(){
   try{key=await savedKey();if(key){key=await validateKey(key);$('identity-status').textContent='本机身份已保存。进入后接续原来的位置与背包。';}else $('identity-status').textContent='首次进入会在本机保存一把身份密钥。';}
   catch(error){$('identity-status').textContent=error.message;}
+  try{const response=await fetch('/health',{cache:'no-store'});if(!response.ok)throw new Error('本机入口暂未响应。');const config=await response.json();if(typeof config.default_model!=='string'||!config.default_model)throw new Error('本机入口没有提供默认模型。');for(const id of ['entry-model','game-model'])$(id).options[0].textContent='默认：'+config.default_model;}
+  catch(error){$('identity-status').textContent=error.message||'默认模型暂未读到，请刷新后重试。';return;}
   $('enter').disabled=false;$('enter').textContent='连接我的 Agent，进入世界';
   try{const prefs=JSON.parse(localStorage.getItem('shared-grove-preferences')||'{}');$('entry-name').value=prefs.name||'';$('entry-model').value=prefs.model||'';$('entry-host').value=prefs.host||'';}catch{}
 }
@@ -95,7 +130,7 @@ async function showGame(epoch=session){
   if(epoch!==session||!current())return;
   playing=true;entering=false;document.body.classList.add('playing');$('entry').hidden=true;$('game').hidden=false;$('entry-cancel').hidden=true;$('enter').disabled=false;
   $('game-host').value=host?.host_url||$('entry-host').value;$('game-model').value=host?.model||$('entry-model').value;
-  $('world-status').textContent='共同世界 · 已进入';resize();renderHost();
+  $('world-status').textContent='共同世界 · 已进入';window.scrollTo(0,0);resize();renderHost();
   if(client.pending())renderPending();
   await refreshWorld(true);scheduleWorld();scheduleHost();
   try{
@@ -116,15 +151,23 @@ async function pollHost(){
   try{const value=await client.connector('state');if(epoch!==session||reading!==hostReadEpoch)return;host=value;renderHost();
     if(entering&&host.entered&&host.world_read&&host.first_response_success)await showGame(epoch);
     if(entering&&['error','disconnected','paused'].includes(host.status)){entering=false;$('enter').disabled=false;$('entry-cancel').hidden=true;}
-  }catch(error){if(epoch===session){$('agent-status').textContent='宿主暂不可达';$('agent-detail').textContent='你的世界操作仍可继续。恢复宿主后再提问或共创。';if(entering){entering=false;$('enter').disabled=false;fail(error);}}}
+  }catch(error){if(epoch===session){$('agent-status').textContent='宿主暂不可达';$('agent-detail').textContent=manualControlRecoveryPending?'原行动结果尚未核对；恢复宿主后先核对原回执，再继续行动。':'你的世界操作仍可继续。恢复宿主后再提问或共创。';if(entering){entering=false;$('enter').disabled=false;fail(error);}}}
   finally{scheduleHost();}
 }
 function scheduleHost(delay=1200){clearTimeout(hostTimer);if(current()&&(entering||playing)&&host?.status!=='disconnected')hostTimer=setTimeout(pollHost,delay);}
 function renderHost(){
-  if(!host)return;const busy=hostCommandBusy||['connecting','thinking'].includes(host.status);
+  if(!host)return;const busy=hostCommandBusy||host.reclaim_in_progress===true||['connecting','thinking'].includes(host.status);
+  const execution=host.execution;
+  // Recovery is asynchronous: clear the local gate only from settled receipts
+  // and a closed world grant, never from the /recover acknowledgement alone.
+  if(manualControlRecoveryPending&&['ready','paused'].includes(host.status)&&host.reclaim_in_progress===false&&host.unknown_operations===0&&
+    execution?.delegation_active===false&&['idle','revoked','reclaimed','exhausted'].includes(execution.control_status)&&
+    !['starting','running','unknown'].includes(execution.status)&&execution.request_status==='idle_confirmed'&&execution.settlement?.status==='idle_confirmed'&&
+    execution.readback_actual===true&&Number.isInteger(execution.actions_count)&&execution.readback_actions_count===execution.actions_count&&
+    Array.isArray(execution.receipts)&&execution.receipts.every(receipt=>['confirmed','rejected'].includes(receipt.status)))manualControlRecoveryPending=false;
   renderModelChoices();$('game-host').value=host.host_url||'';
   $('agent-status').textContent=hostNames[host.status]||host.status||'状态待核对';$('agent-status').dataset.status=host.status;
-  $('agent-detail').textContent=host.error?.message||(busy?'你的 Agent 正在读取、解释、创作或执行已授权目标。你可以继续亲手操作世界。':host.entered?'你的 Agent 已读取世界。普通提问只解释现场；明确委托目标后，它可以用同一角色行动。':'完成首次真实回应与现场读取后，即可进入。');
+  $('agent-detail').textContent=manualControlRecoveryPending?'收回或原行动结果尚未核对，连接恢复后先核对原回执，再继续行动。':host.error?.message||(host.reclaim_in_progress?'行动权已收回，原模型请求正在收尾。已确认的后果保留，可以亲手继续。':busy?'你的 Agent 正在读取、解释、创作或执行已授权目标。你可以继续亲手操作世界。':host.entered?'你的 Agent 已读取世界。普通提问只解释现场；明确委托目标后，它可以用同一角色行动。':'完成首次真实回应与现场读取后，即可进入。');
   if(!intentDirty&&typeof host.context?.intent==='string'&&document.activeElement!==$('host-intent'))$('host-intent').value=host.context.intent;
   $('intent-save').disabled=hostCommandBusy;
   $('chat-send').disabled=busy||!['ready','paused'].includes(host.status);$('agent-cancel').hidden=!busy;$('agent-reconnect').hidden=!['disconnected','error','paused'].includes(host.status);$('agent-disconnect').disabled=host.status==='disconnected';
@@ -135,7 +178,7 @@ function renderHost(){
   const lastReply=[...messages].reverse().find(m=>!['user','event'].includes(m.role)&&m.text);
   const failed=host.status==='error';
   $('companion-update').hidden=!failed&&!busy&&!lastReply;
-  $('companion-update').textContent=failed?'当前 Agent 请求未完成：'+previewMessage(host.error?.message||'回应暂不可用，请打开“目标与交谈”查看。'):busy?'你的 Agent 正在看现场。你可以继续走动与操作。':lastReply?'Agent 回应：'+previewMessage(lastReply.text):'';
+  $('companion-update').textContent=manualControlRecoveryPending?'原行动结果尚未核对；恢复连接后先核对原回执，再继续行动。':failed?'当前 Agent 请求未完成：'+previewMessage(host.error?.message||'回应暂不可用，请打开“目标与交谈”查看。'):busy?'你的 Agent 正在看现场。你可以继续走动与操作。':lastReply?'Agent 回应：'+previewMessage(lastReply.text):'';
   const signature=JSON.stringify(messages);
   if(signature!==lastChatSignature){lastChatSignature=signature;$('agent-messages').replaceChildren(...messages.slice(-12).map(m=>{const el=node('div',undefined,'chat-message '+(m.role==='user'?'user':m.role==='event'?'event':'agent'));el.append(node('small',m.role==='user'?'你':m.role==='event'?'现场变化':'你的 Agent'),messageNode(m.text));return el;}));$('agent-messages').scrollTop=$('agent-messages').scrollHeight;}
   if(!messages.length&&host.text)$('agent-messages').replaceChildren(messageNode(host.text));
@@ -146,13 +189,13 @@ function renderHost(){
 }
 async function hostCommand(path,body,{refresh=false,interrupt=false}={}){
   if(hostCommandBusy&&!interrupt||!playing||!current())return false;
-  const epoch=session,command=++hostCommandEpoch;++hostReadEpoch;hostCommandBusy=true;renderHost();
-  try{const value=await client.connector(path,body);if(epoch!==session||command!==hostCommandEpoch||!playing)return false;host=value;renderHost();if(refresh)await refreshWorld(true);return epoch===session&&playing;}
+  const epoch=session,command=++hostCommandEpoch;++hostReadEpoch;hostCommandBusy=true;hostCommandKind=path;renderHost();
+  try{hostCommandFlight=client.connector(path,body);const value=await hostCommandFlight;if(epoch!==session||command!==hostCommandEpoch||!playing)return false;host=value;renderHost();if(refresh)await refreshWorld(true);return epoch===session&&playing;}
   catch(error){if(epoch!==session||command!==hostCommandEpoch||!playing)return false;throw error;}
-  finally{if(epoch===session&&command===hostCommandEpoch){hostCommandBusy=false;renderHost();scheduleHost(250);}}
+  finally{if(epoch===session&&command===hostCommandEpoch){hostCommandBusy=false;hostCommandKind=null;hostCommandFlight=null;renderHost();scheduleHost(250);}}
 }
 function renderExecution(){
-  const execution=host?.execution||{},status=execution.status||'idle',active=execution.delegation_active===true,busy=['starting','running'].includes(status),unknown=status==='unknown'||(execution.receipts||[]).some(receipt=>receipt.status==='unknown');
+  const execution=host?.execution||{},status=execution.status||'idle',active=execution.delegation_active===true,busy=['starting','running'].includes(status),unknown=manualControlRecoveryPending||status==='unknown'||Number(host?.unknown_operations)>0||(execution.receipts||[]).some(receipt=>receipt.status==='unknown');
   const goalResult=execution.goal_result||{},goalClaimed=status==='completed'&&!!execution.task_id&&goalResult.status==='completed'&&goalResult.completion_source==='agent_claim';
   const labels={idle:'尚未委托',starting:'正在授权',running:'正在执行目标',completed:'Agent报告完成',result_unconfirmed:'目标结果未确认',paused:'目标已暂停',blocked:'目标受阻',error:'执行受阻',unknown:'结果待核对',budget_exhausted:'目标额度已用完'};
   const displayedStatus=unknown?'unknown':status==='completed'&&!goalClaimed?'result_unconfirmed':status,requestLabels={idle:'尚未开始',preparing:'正在读取现场',summarizing:'正在整理会话历史',summary_failed:'会话历史整理失败',running:'推理与行动中',returned:'这一段请求已返回',timed_out:'这一段请求超时',settling:'正在核对原结果',idle_confirmed:'原请求已停止并核对',unsettled:'原请求状态待核对'};
@@ -174,41 +217,41 @@ function renderExecution(){
   if(typeof progress.next_intent==='string'&&progress.next_intent)progressNodes.push(node('p','下一步打算：'+progress.next_intent,'small'));
   const worldResults=(Array.isArray(execution.world_results)?execution.world_results:Array.isArray(goalResult.world_results)?goalResult.world_results:[]).filter(result=>result?.kind==='world_contract'&&result.entity_id===execution.context_entity_id);
   const contractLabels={unoffered:'尚未提出条款',awaiting_acceptance:'等待双方接受',active:'进行中',complete:'已完成',failed:'已失败'};
+  const functionLabels={'grove.move':'走动','grove.interact':'操作物件','grove.rule_action':'使用物件的做法','grove.build':'搭建','grove.publish':'留下共同内容','grove.control_grant':'授权目标','grove.control_revoke':'接回角色'};
   for(const result of worldResults){
-    progressNodes.push(node('p','所选合同事实：'+(result.entity_name||result.entity_id)+' · '+(contractLabels[result.server_status]||result.server_status||'状态待核对'),'small'));
-    progressNodes.push(node('p','物件 '+result.entity_id+' · 物件版本 '+result.entity_version+' · 条款版本 '+result.terms_version+'\n材料身份 '+result.material_id+'\n累计交付 '+result.delivered_u+'u / 约定 '+result.quantity_u+'u'+(Number.isInteger(result.finished_tick)?' · 结算逻辑步 '+result.finished_tick:'')+(Number.isInteger(result.world_tick)?'\n读取逻辑步 '+result.world_tick:''),'small fact-reference'));
+    progressNodes.push(node('p','所选合同事实：'+(result.entity_name||'这份合同')+' · '+(contractLabels[result.server_status]||result.server_status||'状态待核对'),'small'));
+    progressNodes.push(node('p','累计交付 '+result.delivered_u+' 单位 / 约定 '+result.quantity_u+' 单位','small'));
     const verification=result.verification?.status;
     if(verification==='reference_mismatch'){
-      const reference=result.reference||{};
-      progressNodes.push(node('p','当前合同与本目标起始时固定的物件、定义或条款引用不匹配。原条款版本 '+reference.terms_version+' · 原材料身份 '+reference.material_id+' · 原约定 '+reference.quantity_u+'u；当前结算不作为原引用的结果。','small fact-reference'));
+      progressNodes.push(node('p','当前合同与本目标起始时的物件、材料或条款不匹配，当前结算不作为原约定的结果。','small'));
     }else if(verification==='verified_complete')progressNodes.push(node('p','服务器已确认固定引用的合同条款完成。它只证明该合同结算，不覆盖取回收益等附加目标，也不证明整段委托。','small'));
     else if(verification==='not_complete')progressNodes.push(node('p','这是固定引用的合同条款状态；目标仍按你的实际意图核对。','small'));
     else progressNodes.push(node('p','这个目标尚无已核对的起始合同引用；以上只是当前读取到的合同事实。','small'));
   }
   const evidence=Array.isArray(progress.evidence)?progress.evidence:[],lastConfirmed=evidence[evidence.length-1]||[...(execution.receipts||[])].reverse().find(receipt=>['committed','confirmed'].includes(receipt.status));
-  if(lastConfirmed)progressNodes.push(node('p','最后已确认行动：'+(lastConfirmed.function||'世界行动')+'\n原操作 '+(lastConfirmed.operation_id||'未返回')+(Number.isInteger(lastConfirmed.commit_seq)?' · 记录 '+lastConfirmed.commit_seq:''),'small fact-reference'));
+  if(lastConfirmed)progressNodes.push(node('p','最后已确认行动：'+(functionLabels[lastConfirmed.function]||'世界行动')+(Number.isInteger(lastConfirmed.commit_seq)?' · 记录 '+lastConfirmed.commit_seq:''),'small'));
   $('execution-progress').replaceChildren(...progressNodes);$('execution-progress').hidden=progressNodes.length===0;
   const receipts=Array.isArray(execution.receipts)?execution.receipts:[],receiptLabels={committed:'已保存',confirmed:'已核对',rejected:'已拒绝',unknown:'待核对'};
-  $('execution-actions').replaceChildren(...receipts.slice(-8).map(receipt=>{const row=node('div',undefined,'execution-receipt');row.append(node('strong',(receipt.function||'世界行动')+' · '+(receiptLabels[receipt.status]||receipt.status||'状态未读')),node('small','操作 '+(receipt.operation_id||'未返回')+(Number.isInteger(receipt.commit_seq)?' · 记录 '+receipt.commit_seq:''),'fact-reference'));return row;}));
+  $('execution-actions').replaceChildren(...receipts.slice(-8).map(receipt=>{const row=node('div',undefined,'execution-receipt');row.append(node('strong',(functionLabels[receipt.function]||'世界行动')+' · '+(receiptLabels[receipt.status]||receipt.status||'状态未读')));return row;}));
   if(receipts.length>8)$('execution-actions').append(node('p','显示最近 8 个回执，共 '+receipts.length+' 个；它们记录行动，不替代当前现场。','small'));
   if(execution.readback_actual===true)$('execution-actions').append(node('p','这个目标已有实际世界读回。物件的最新状态仍以地图与详情为准。','small'));
-  $('execution-start').disabled=hostCommandBusy||busy||active||unknown||!['ready','paused'].includes(host?.status)||actionBusy||!!client.pending();
+  $('execution-start').disabled=hostCommandBusy||host.reclaim_in_progress===true||busy||active||unknown||!['ready','paused'].includes(host?.status)||actionBusy||!!client.pending();
   const additionalControl=$('execution-additional-requests'),additionalLimit=Math.max(0,8-(execution.max_requests||0));
   additionalControl.max=String(additionalLimit);additionalControl.disabled=execution.extension_allowed!==true;
   if(Number(additionalControl.value)>additionalLimit)additionalControl.value=String(additionalLimit);
   const additional=Number(additionalControl.value),canResume=execution.resume_allowed===true||(execution.extension_allowed===true&&Number.isInteger(additional)&&additional>0&&additional<=additionalLimit);
   $('execution-resume').hidden=(execution.resume_allowed!==true&&execution.extension_allowed!==true)||!execution.task_id||unknown;
-  $('execution-resume').disabled=!canResume||hostCommandBusy||executionReclaimBusy||busy||active||unknown||['connecting','thinking','disconnected'].includes(host?.status)||actionBusy||!!client.pending();
+  $('execution-resume').disabled=!canResume||hostCommandBusy||host.reclaim_in_progress===true||executionReclaimBusy||busy||active||unknown||['connecting','thinking','disconnected'].includes(host?.status)||actionBusy||!!client.pending();
   $('execution-reclaim').disabled=executionReclaimBusy||!(active||busy||unknown);
   $('execution-reclaim').textContent=executionReclaimBusy?'正在收回…':'收回行动权';
   $('execution-recover').hidden=!unknown;$('execution-recover').disabled=hostCommandBusy||executionReclaimBusy;
-  const summary=execution.goal?(labels[displayedStatus]||displayedStatus)+' · '+count+' / '+limit+' 个动作'+(execution.task_id?' · '+requests+' / '+requestLimit+' 次模型请求':''):'未委托行动 · 你可以直接操作或给 Agent 一个目标';
+  const summary=unknown?'有原行动待核对':active?'Agent 正在为你行动 · 随时可接回':executionReclaimBusy?'正在接回角色…':'你正在亲手操作';
   $('execution-summary').textContent=summary;$('execution-reclaim-quick').hidden=!(active||busy||unknown);$('execution-reclaim-quick').disabled=executionReclaimBusy;
 }
 async function reclaimExecution(){
   if(executionReclaimBusy||!playing||!current())return;
   const epoch=session;stopWalking();executionReclaimBusy=true;renderExecution();
-  try{if(await hostCommand('reclaim',{}, {refresh:true,interrupt:true})){const execution=host?.execution;if(execution?.delegation_active===false&&execution.status!=='unknown')announce('行动权已收回。已保存的行动保留，你可以亲手接着玩。');else announce(execution?.error?.message||'收回结果尚未确认，请核对原回执。',true);}}
+  try{if(await takeManualControl(()=>epoch===session&&playing&&current()))announce('行动权已收回。已保存的行动保留，你可以亲手接着玩。');}
   finally{if(epoch===session){executionReclaimBusy=false;if(playing)renderExecution();}}
 }
 async function restartHost(){
@@ -218,7 +261,7 @@ function renderModelChoices(){
   for(const id of ['entry-model','game-model']){
     const select=$(id),selected=select.value,models=host.available_models||[];
     for(const model of models)if(![...select.options].some(o=>o.value===model)){const option=node('option',model.split('/').slice(1).join('/'));option.value=model;select.append(option);}
-    if(selected)select.value=selected;
+    if(id==='game-model'&&!select.dataset.populated&&host.model){select.value=host.model;select.dataset.populated='true';}else if(selected)select.value=selected;
   }
 }
 function renderGeneration(){
@@ -276,6 +319,7 @@ function acceptWorld(value){
 }
 function renderPending(){
   if(!identity)return;let pending;try{pending=client.pending();}catch{return;}
+  for(const id of ['move-up','move-left','move-down','move-right'])$(id).disabled=actionBusy||executionReclaimBusy||operationRecoveryBusy||!!pending||!playing||!point();
   $('pending').hidden=!pending;
   $('recover-operation').disabled=operationRecoveryBusy||actionBusy;$('release-operation').disabled=operationRecoveryBusy||actionBusy;
   if(pending){$('pending-detail').textContent=pending.rejection?'服务器拒绝了原操作：'+pending.rejection.message:'回应中断，结果尚未核对。操作 '+pending.body.operation_id.slice(0,8)+' 保留；不会自动发出替代操作。';$('release-operation').hidden=!pending.rejection;$('recover-operation').hidden=!!pending.rejection;}
@@ -287,21 +331,55 @@ async function recoverWorldOperation(release=false){
   catch(error){if(epoch===session&&playing)throw error;}
   finally{if(epoch===session){operationRecoveryBusy=false;renderPending();renderSelection();}}
 }
-async function perform(name,args,label){
-  if(!playing||!current()||!point()||actionBusy)return false;
-  const epoch=session,isCurrent=()=>epoch===session&&playing&&current();
-  if(client.pending()){announce('先核对上一个操作，再继续。');renderPending();return false;}
-  actionBusy=true;++readEpoch;lastAction=label;$('error').hidden=true;$('movement-feedback').textContent=label+'，等待世界保存…';renderSelection();
+async function takeManualControl(isCurrent){
+  // A goal admission returns before model inference. Settle that short response
+  // first so a late /execute cannot authorize after the person's reclaim.
+  if(['execute','execute-resume'].includes(hostCommandKind)&&hostCommandFlight){
+    const admitted=await hostCommandFlight;if(!isCurrent())return false;host=admitted;
+  }
+  const execution=host?.execution;
+  const unknown=execution?.status==='unknown'||(execution?.receipts||[]).some(receipt=>receipt.status==='unknown')||Number(host?.unknown_operations)>0;
+  if(execution?.delegation_active!==true&&!['starting','running'].includes(execution?.status)&&!manualControlRecoveryPending){
+    if(unknown){announce('仍有原操作结果待核对，先核对后继续。',true);return false;}
+    return true;
+  }
+  $('movement-feedback').textContent='接回你的角色，已保存的后果保留…';
+  const epoch=session,command=++hostCommandEpoch;++hostReadEpoch;hostCommandBusy=true;
   try{
+    let state,receiptsChecked=false;
+    try{state=await client.connector('reclaim',{background:true});receiptsChecked=true;}
+    catch(error){
+      // Revoke future world writes, but a cached zero is not a receipt read.
+      manualControlRecoveryPending=true;
+      if(error.status===409)throw error;
+      if(execution?.delegation_active===true||['starting','running'].includes(execution?.status))await client.mutate('grove.control_revoke',{}, {},isCurrent);
+      state={...host,execution:{...execution,delegation_active:false,stop_reason:'后续行动权已收回；原行动结果尚未核对，连接恢复后先核对原回执。'}};
+    }
+    if(!isCurrent()||command!==hostCommandEpoch)return false;
+    if(receiptsChecked)manualControlRecoveryPending=false;
+    host=state;renderHost();await refreshWorld(true);
+    if(manualControlRecoveryPending||state.execution?.delegation_active!==false||state.execution?.status==='unknown'||Number(state.unknown_operations)>0||(state.execution?.receipts||[]).some(receipt=>receipt.status==='unknown')){announce(manualControlRecoveryPending?'后续行动权已收回；连接恢复后先核对原回执，再继续行动。':state.execution?.delegation_active!==false?'行动权尚未确认收回，先恢复连接并核对后继续。':'后续行动权已收回；仍有原操作结果待核对，先核对后继续。',true);return false;}
+    return isCurrent();
+  }finally{if(epoch===session&&command===hostCommandEpoch){hostCommandBusy=false;hostCommandKind=null;hostCommandFlight=null;renderHost();scheduleHost(250);}}
+}
+async function perform(name,args,label){
+  if(!playing||!current()||!point()||actionBusy||executionReclaimBusy)return false;
+  const epoch=session,isCurrent=()=>epoch===session&&playing&&current(),initiator=document.activeElement;
+  if(client.pending()){announce('先核对上一个操作，再继续。');renderPending();return false;}
+  actionBusy=true;++readEpoch;lastAction=label;$('error').hidden=true;$('movement-feedback').textContent=label+'，等待世界保存…';renderPending();renderSelection();
+  try{
+    if(!await takeManualControl(isCurrent))return false;
     const prepared=typeof args==='function'?await args(isCurrent):args;
     if(!isCurrent()||prepared==null)return false;
     const result=await client.mutate(name,prepared,{},isCurrent);if(!isCurrent())return false;
     if(result.viewport?.player&&!client.inventoryAfter){client.world.view=null;acceptWorld(result.viewport);}else await refreshWorld(true);
     if(!isCurrent())return false;
-    if(result.changes?.length)announce(result.changes.map(c=>typeof c==='string'?c:c.summary||'').filter(Boolean).join(' · '));
-    $('movement-feedback').textContent=result.changes?.map(c=>typeof c==='string'?c:c.summary||'').filter(Boolean).join(' · ')||label+'已由世界保存。';
+    const changes=result.changes?.map(c=>displayWorldText(typeof c==='string'?c:c.summary||'')).filter(Boolean).join(' · ');
+    if(changes)announce(changes);
+    $('movement-feedback').textContent=changes||label+'已由世界保存。';
     if(selectedId)await select(selectedId,selectedFromBag,true);
     if(!isCurrent())return false;
+    if(initiator?.tagName==='BUTTON'&&[initiator,document.body].includes(document.activeElement))canvas.focus({preventScroll:true});
     scheduleWorld(200);return true;
   }catch(error){
     if(!isCurrent())return false;
@@ -311,7 +389,7 @@ async function perform(name,args,label){
     $('movement-feedback').textContent=client.pending()?'原操作需要核对，走动已暂停。':'行动未保存；可以重新选择。';return false;
   }finally{if(epoch===session)actionBusy=false;if(isCurrent()){renderPending();renderSelection();}}
 }
-async function move(dx,dy){return perform('grove.move',{dx,dy,expected_player_version:point().version},'走动');}
+async function move(dx,dy){return perform('grove.move',()=>({dx,dy,expected_player_version:point().version}),'走动');}
 function stopWalking(){held=null;walkPath=[];pathTarget=null;clearTimeout(walkTimer);}
 async function walk(){
   clearTimeout(walkTimer);if(!playing||!current()||!point()||actionBusy)return;
@@ -343,7 +421,7 @@ function goTo(x,y,adjacent=false){
   walkPath=path;pathTarget={x,y};if(!path.length){$('movement-feedback').textContent='已经在这里。';return;}$('movement-feedback').textContent='按四方向沿路走动；按键可改向，点击可重选路线。';run(walk);
 }
 async function select(id,fromBag=false,force=false){
-  if(!current()||!world)return;selectedId=id;selectedTile=null;selectedFromBag=fromBag;if(fromBag)document.querySelector('.inventory-card').open=false;openContext();const epoch=++inspectEpoch,sessionEpoch=session;
+  if(!current()||!world)return;if(selectedId!==id){rememberActionDrafts();activeActionKey=null;}selectedId=id;selectedTile=null;selectedFromBag=fromBag;if(fromBag&&!force)document.querySelector('.inventory-card').open=false;if(!force)openContext();const epoch=++inspectEpoch,sessionEpoch=session;
   if(!force&&inspection?.entity?.id===id&&!inspection.reading&&!inspectionError){renderSelection();return;}
   const previousEntity=entityById(id),flight={id};inspectionFlight=flight;inspection=previousEntity?{entity:previousEntity,reading:true}:null;inspectionError=null;inspectionErrorStatus=null;renderSelection();
   try{const result=await client.query('grove.inspect',{entity_id:id});if(epoch!==inspectEpoch||sessionEpoch!==session||selectedId!==id)return;inspection=result;renderSelection();}
@@ -383,23 +461,30 @@ function stat(label,value){const el=node('div');el.append(node('small',label),no
 function stateLine(e){const s=e?.state||{};if(matterLots(e).length)return entitySummary(e,point()?.backpack_id);const body=bodyQuantities(e),material=body.length?body.map(lot=>'本体 '+materialLabel(lot.material)+' '+lot.quantity+' 单位').join('，'):materialLabel(e.material);return [material,lifecycleLabel(e),s.burning?'有材料正在燃烧':null,s.wetness>0?'湿度 '+s.wetness:null,s.water_capacity>0?Number.isFinite(s.water)?'水 '+s.water+'/'+s.water_capacity:'存水未公开':null].filter(Boolean).join(' · ');}
 function entityGlyph(e){return genericGlyph(e);}
 function selectTile(tile){
-  stopWalking();++inspectEpoch;selectedId=null;selectedFromBag=false;inspection=null;inspectionError=null;inspectionErrorStatus=null;inspectionFlight=null;
+  rememberActionDrafts();activeActionKey=null;stopWalking();++inspectEpoch;selectedId=null;selectedFromBag=false;inspection=null;inspectionError=null;inspectionErrorStatus=null;inspectionFlight=null;
   if(selectedTile?.x!==tile.x||selectedTile?.y!==tile.y){chosenBuildMaterials.clear();touchedBuildChoices.clear();}
   selectedTile={x:tile.x,y:tile.y};lastSelectionSignature='';openContext();renderSelection();renderInventory();
 }
 function renderTileSelection(){
   const tile=selectedTile,t=terrain(tile.x,tile.y),d=Math.abs(tile.x-point().x)+Math.abs(tile.y-point().y);
   const occupied=ground().filter(e=>e.x===tile.x&&e.y===tile.y&&!e.state?.destroyed);
-  $('selection-name').textContent='选择位置 · '+tile.x+'，'+tile.y;$('selection-distance').textContent=d===0?'脚下':d+' 格';
+  $('selection-name').textContent=terrainNames[t]||'未读取的地面';$('selection-distance').textContent=d===0?'脚下':d+' 格';renderTargetChoices(tile);
   $('selection-description').textContent={grass:'草地，可以在规则允许的位置留下设施。',dirt:'泥地，可以在规则允许的位置留下设施。',water:'浅溪仍可涉水；随身可湿物件会受湿，包括合上容器里的物件。木板路可以免去这一格的涉水受湿。',rock:'岩壁不能通行，也不能搭建设施。'}[t]||'这块地方还没有读取。靠近后再选择。';
   $('selection-stats').replaceChildren(stat('地面',{grass:'草地',dirt:'泥地',water:'浅溪',rock:'岩壁'}[t]||'未读取'),stat('距离',d+' 格'));
   $('selection-history').replaceChildren();$('selection-content').replaceChildren();$('selection-effects').replaceChildren();$('selection-actions').replaceChildren();
   const disabled=actionBusy||!!client.pending();
   $('selection-actions').append(button(d?'沿路走到这里':'已经在这里',()=>goTo(tile.x,tile.y),{disabled:disabled||!d||!walkable(tile.x,tile.y),secondary:true}));
+  if(t==='water'){
+    const sources=ground().filter(e=>caps(e).includes('water_source'));
+    $('selection-actions').append(node('p','涉水会弄湿随身材料。装水要选择可取水的水源和你的容器。','small'));
+    for(const source of sources)$('selection-actions').append(button('查看取水处 · '+source.name,()=>run(()=>select(source.id)),{secondary:true}));
+  }
+  if(t==='rock')$('selection-note').textContent='岩壁挡路，可以选择相邻空地绕行。';
   for(const entity of occupied)$('selection-content').append(button('查看 '+entity.name,()=>run(()=>select(entity.id)),{secondary:true}));
   for(const recipe of recipes()){
-    const section=node('section',undefined,'build-option'),cost=recipe.cost||{},costUnits=recipe.material_cost_u||{},costText=Object.entries(cost).map(([material,count])=>(materialNames[material]||material)+' '+count+' 份'+(Number.isInteger(costUnits[material])?'（'+costUnits[material]+' 单位）':'')).join(' + '),totals=world.construction?.material_totals||{};
-    section.append(node('h4',recipe.name||recipe.id),node('p',(recipe.use||'')+' · 投入 '+costText,'small'));
+    if(t&&Array.isArray(recipe.terrain)&&!recipe.terrain.includes(t))continue;
+    const section=node('details',undefined,'build-option'),cost=recipe.cost||{},costUnits=recipe.material_cost_u||{},costText=Object.entries(cost).map(([material,count])=>(materialNames[material]||material)+' '+(costUnits[material]??count)+' 单位').join(' + '),totals=world.construction?.material_totals||{};
+    section.append(node('summary','搭建 '+(recipe.name||recipe.id)),node('p',(recipe.use||'')+' · 投入 '+costText,'small'));
     section.append(node('p','全库存当前可投：'+Object.keys(cost).map(material=>materialLabel(material)+' '+finite(totals[material])+' 单位').join(' · '),'small'));
     const allowedTerrain=recipe.terrain||[],reason=!t?'请靠近，读取这块地面':allowedTerrain.length&&!allowedTerrain.includes(t)?'需要'+allowedTerrain.map(x=>({water:'水面',grass:'草地',dirt:'泥地'}[x]||x)).join('或'):d>1?'先走到相邻一格':occupied.some(blocks)?'这里有障碍，需要先移开':occupied.some(e=>e.state?.recipe||e.state?.kind==='resource_node')?'这里已有设施或资源节点':'';
     let chosen=chosenBuildMaterials.get(recipe.id);
@@ -424,23 +509,23 @@ async function build(recipe,materialIds){
 }
 function renderSelection(){
   const entity=inspection?.entity?.id===selectedId?inspection.entity:entityById(selectedId);
-  const signature=JSON.stringify([selectedId,selectedTile,entity,inspection,inspectionError,entity?.state?.regrowth_tick!=null?world?.clock?.sequence:null,world?.construction,point()?.x,point()?.y,actionBusy,!!identity&&client.pending(),inventory().map(e=>[e.id,e.version]),definitionReadRef,definitionReadBusy,definitionReadValue,definitionReadError]);
+  const signature=JSON.stringify([selectedId,selectedTile,activeActionKey,entity,inspection,inspectionError,entity?.state?.regrowth_tick!=null?world?.clock?.sequence:null,world?.construction,point()?.x,point()?.y,actionBusy,!!identity&&client.pending(),inventory().map(e=>[e.id,e.version]),definitionReadRef,definitionReadBusy,definitionReadValue,definitionReadError]);
   if(signature===lastSelectionSignature)return;
   const checkingForm=combinationCheckingForm?.isConnected&&combinationCheckingForm.dataset.entityId===selectedId?combinationCheckingForm:null;
-  const editing=checkingForm?.closest('#selection-actions')||document.activeElement?.closest('#selection-actions');
-  const editingForm=checkingForm||document.activeElement?.closest('.descriptor-action'),editingAction=editingForm?.dataset.action;
-  const preserveInputs=editing&&lastSelectionSignature&&selectedId===editing.dataset.entityId&&(!actionBusy||checkingForm)&&!client.pending()&&!inspectionError&&(!inspection||!editingAction||editingForm?.dataset.combination==='true'||actionIds(inspection.available_actions).includes(editingAction));
+  const activeForm=$('selection-actions').querySelector('.descriptor-action');
+  const editingForm=checkingForm||(activeForm?.dataset.actionKey===activeActionKey?activeForm:document.activeElement?.closest('.descriptor-action'));
+  const editing=editingForm?.closest('#selection-actions');
+  const preserveInputs=editingForm&&editing&&activeActionKey===editingForm.dataset.actionKey&&lastSelectionSignature&&selectedId===editing.dataset.entityId&&!inspectionError;
+  if(!preserveInputs)rememberActionDrafts();
   lastSelectionSignature=signature;$('selection-actions').dataset.entityId=selectedId||'';
   if(selectedTile){renderTileSelection();return;}
   if(!entity){$('selection-name').textContent=selectedId?inspectionError?'当前无法查看物件':'正在读取所选物件':'选择物件或位置';$('selection-description').textContent=selectedId?inspectionError?([403,404].includes(inspectionErrorStatus)?'当前不可访问：':'尚未取得当前状态：')+inspectionError:'正在按你的权限重新读取。物件未出现在地面列表，不代表已经消失。':'点一件物件，查看它当前的材料、数量、关系与可用行动。你可以亲手使用，也可以明确委托 Agent 行动。';$('selection-distance').textContent='';$('selection-stats').replaceChildren();$('selection-actions').replaceChildren();$('selection-content').replaceChildren();$('selection-effects').replaceChildren();$('selection-history').replaceChildren();$('selection-note').textContent=selectedId?'取得当前状态与操作资格后才能动手。':'';if(selectedId&&inspectionError)$('selection-actions').append(button('重新读取这件物件',()=>run(()=>select(selectedId,selectedFromBag,true)),{disabled:actionBusy,secondary:true}));return;}
   const d=distance(entity),own=inventory().some(e=>e.id===entity.id),s=entity.state||{},near=d<=1;
   $('selection-name').textContent=entity.name;$('selection-description').textContent=(inspectionError||inspection?.reading?'上次已读状态：':'当前状态：')+stateLine(entity);$('selection-distance').textContent=own?'随身':d===0?'脚下':Number.isFinite(d)?d+' 格':'位置未读';
   $('selection-history').replaceChildren();if(entity.authored_description){const detail=node('details');detail.append(node('summary','发表时的说明'),node('p',entity.authored_description,'small'));$('selection-history').append(detail);}
-  $('selection-history').append(node('p','对象 '+entity.id+' · 当前版本 '+entity.version,'fact-reference'));
-  if(entity.relations?.parent?.id)$('selection-history').append(node('p','物理父关系标识 '+entity.relations.parent.id,'fact-reference'));
-  if(entity.created_by)$('selection-history').append(node('p','创作来源 '+entity.created_by,'fact-reference'));
+  if(entity.created_by)$('selection-history').append(node('p','创作来源：'+authorLabel(entity.created_by),'small'));
   const references=(world?.public_content?.contributions||[]).filter(contribution=>(contribution.entity_ids||[]).includes(entity.id));
-  for(const reference of references)$('selection-history').append(node('p','公共贡献 '+reference.id+' · '+authorLabel(reference.author),'fact-reference'));
+  for(const reference of references)$('selection-history').append(node('p','公共贡献 · '+authorLabel(reference.author),'small'));
   renderEffects(entity);
   const lots=matterLots(entity),stats=[stat('本体材质',materialLabel(entity.material,entity))];
   if(entity.simulation){stats.push(...simulationStats(entity,point()?.backpack_id).map(([label,value])=>stat(label,value)));stats.push(stat('结构与残材',lifecycleLabel(entity)||'结构完整'),stat('材料反应',lots.some(lot=>lot.burning)||(entity.simulation.burning_lots||[]).length?'有批次正在燃烧':'未燃烧'));}
@@ -453,6 +538,7 @@ function renderSelection(){
   if(!preserveInputs)$('selection-actions').replaceChildren();$('selection-content').replaceChildren();
   $('selection-note').textContent=near?'行动按服务器当前状态结算；多人改变同一件物件时，会先读取新状态。':'走到相邻一格才能动手。选择“走近”沿路前往，不会穿过障碍。';
   const location=entityLocation(entity);
+  renderTargetChoices(location);
   if(!preserveInputs&&!own&&d>1&&Number.isFinite(location.x)&&Number.isFinite(location.y))$('selection-actions').append(button('走近这件物件',()=>goTo(location.x,location.y,true),{disabled:actionBusy}));
   if(!inspection||inspection.reading){if(preserveInputs){for(const form of $('selection-actions').querySelectorAll('.descriptor-action'))form.dispatchEvent(new Event('refresh-candidate-preview'));}else{$('selection-actions').append(node('p',inspectionError?([403,404].includes(inspectionErrorStatus)?'当前不可访问：':'')+inspectionError:'正在读取可用行动…',inspectionError?'action-reason':'small'));if(inspectionError)$('selection-actions').append(button('重新读取这件物件',()=>run(()=>select(entity.id,selectedFromBag,true)),{disabled:actionBusy,secondary:true}));}if(inspectionError)$('selection-note').textContent='没有取得当前操作资格。原操作与身份保留；重新读取后再选择。';renderMatter(entity);renderRelatedObjects(entity,actionBusy||!!client.pending());renderCreative(entity,true);return;}
   const available=actionIds(inspection.available_actions);
@@ -463,7 +549,11 @@ function renderSelection(){
   renderCreative(entity);
   if(preserveInputs){for(const form of $('selection-actions').querySelectorAll('.descriptor-action'))form.dispatchEvent(new Event('refresh-candidate-preview'));$('selection-note').textContent='材料和关系已刷新。保留你正在选择的输入；提交前会再次核对当前资格、版本与数量。';return;}
   const descriptors=actionDescriptors(inspection);
-  for(const descriptor of descriptors)renderDescriptorAction(descriptor,entity,disabled);
+  const unavailable=descriptors.filter(descriptor=>descriptor.available===false);
+  const active=descriptors.find(descriptor=>actionKey(descriptor)===activeActionKey&&descriptor.available!==false);
+  if(active){$('selection-actions').append(button('返回其他做法',()=>{rememberActionDrafts();activeActionKey=null;lastSelectionSignature='';renderSelection();},{secondary:true}));renderDescriptorEditor(active,entity,disabled);}
+  else for(const descriptor of descriptors.filter(descriptor=>descriptor.available!==false))renderDescriptorAction(descriptor,entity,disabled);
+  if(unavailable.length){const detail=node('details',undefined,'unavailable-actions');detail.append(node('summary','暂时不能做 · '+unavailable.length+' 项'));for(const descriptor of unavailable)detail.append(node('p',descriptorLabel(descriptor)+'：'+friendlyInstruction(descriptor.reason||'当前条件不满足'),'small'));$('selection-actions').append(detail);}
   if(!available.length&&!s.destroyed)$('selection-actions').append(node('p','这件物件当前没有可用行动。','small'));
   if(available.length&&!descriptors.length)$('selection-actions').append(node('p','可用行动的描述尚未读取，请刷新当前物件。','small'));
 }
@@ -483,14 +573,14 @@ function renderEffects(entity){
   if(entity.construction_material?.eligible)lines.push('可投入搭建'+(entity.material==='wood'?'，也可作为石炉燃料。':'。'));
   else if(entity.construction_material?.reason&&!s.recipe&&s.kind!=='resource_node')lines.push('目前不能投入搭建：'+entity.construction_material.reason);
   const actionOptions=inspection?.entity?.id===entity.id?inspection.action_options||[]:[];
-  for(const option of actionOptions.filter(o=>o.available&&o.use))lines.push(descriptorLabel(option)+'：'+option.use+(option.cost?' · '+formatCost(option.cost):''));
+  for(const option of actionOptions.filter(o=>o.available&&o.use))lines.push(descriptorLabel(option)+'：'+friendlyInstruction(option.use)+(option.cost?' · '+formatCost(option.cost):''));
   $('selection-effects').replaceChildren(...[...new Set(lines)].map(line=>node('p',line,'small')));
 }
 function formatCost(cost){if(typeof cost==='string')return cost;return Object.entries(cost).map(([key,value])=>(materialNames[key]||({water:'水',stored_water:'棚内存水',uses:'点火次数',ignition_uses:'点火次数',stock:'公共原料'}[key])||key)+' '+value).join(' · ');}
 function renderMatter(entity){
   const lots=matterLots(entity);if(!lots.length)return;
   const section=node('section',undefined,'matter-list');section.append(node('h4','当前材料批次'),node('p','数量由世界保存；湿度由实际附水计算。关闭的容器只显示你获准查看的批次。','small'));
-  for(const lot of lots){const row=node('div',undefined,'matter-row'),burning=lot.burning||(entity.simulation?.burning_lots||[]).includes(lot.id);row.append(node('strong',slotLabel(lot.slot)+' · '+materialLabel(lot.material,entity)),node('span',lot.quantity+' 单位'+(burning?' · 燃烧中':'')),node('small',lot.id,'fact-reference'));section.append(row);}
+  for(const lot of lots){const row=node('div',undefined,'matter-row'),burning=lot.burning||(entity.simulation?.burning_lots||[]).includes(lot.id);row.append(node('strong',slotLabel(lot.slot)+' · '+materialLabel(lot,entity)),node('span',lot.quantity+' 单位'+(burning?' · 燃烧中':'')));section.append(row);}
   $('selection-content').append(section);
 }
 function renderRelatedObjects(entity,disabled){
@@ -499,8 +589,8 @@ function renderRelatedObjects(entity,disabled){
     for(const child of children){const row=node('div',undefined,'contents-row');row.append(node('span',child.name||child.id),node('small',child.relation==='attached'?'绑定部件':child.relation==='contained'?'容纳物件':String(child.relation||'')),button('查看',()=>run(()=>select(child.id)),{disabled,secondary:true}));section.append(row);}$('selection-content').append(section);}
   const links=entity.process_refs||[],references=new Set(links.map(reference=>typeof reference==='string'?reference:reference.id)),processes=(world?.processes||[]).filter(process=>references.has(process.id)||process.entity_id===entity.id||(process.participants||[]).includes(entity.id));
   if(processes.length||links.length){const section=node('section',undefined,'process-list');section.append(node('h4','实际过程与保存的引用'));
-    for(const process of processes)section.append(node('p',(process.label||process.kind||process.rule_id||'世界过程')+' · '+(process.status||'状态未标明')+' · '+process.id,'small'));
-    for(const link of links){const id=typeof link==='string'?link:link.id;if(!processes.some(process=>process.id===id))section.append(node('p',(link.kind||'过程')+' · '+id+' · 视口未返回当前过程状态','small'));}$('selection-content').append(section);}
+    for(const process of processes)section.append(node('p',(process.label||'物件变化')+' · '+(process.status==='active'?'正在发生':process.status==='complete'?'已结束':'当前状态待读取'),'small'));
+    for(const link of links){const id=typeof link==='string'?link:link.id;if(!processes.some(process=>process.id===id))section.append(node('p','视口未返回这个过程的当前状态。','small'));}$('selection-content').append(section);}
 }
 function appendFacts(parent,value,depth=0,scope='facts',path=[]){
   if(!value||typeof value!=='object'){parent.append(node('p',factValue(value),'small'));return;}
@@ -527,7 +617,7 @@ function renderCreative(entity,previous=false){
   const ref=creative.definition_ref;
   if(ref&&typeof ref==='string'){
     if(definitionReadRef!==ref){definitionReadRef=ref;definitionReadValue=null;definitionReadError=null;definitionReadBusy=false;definitionReadOpen=false;++definitionReadEpoch;}
-    const detail=node('details',undefined,'rule-definition');detail.open=definitionReadOpen;detail.addEventListener('toggle',()=>{if(detail.isConnected)definitionReadOpen=detail.open;});detail.append(node('summary','这件对象使用的规则定义'),node('p',ref,'fact-reference'),button(definitionReadBusy?'正在读取…':'读取完整定义',()=>run(()=>readRuleDefinition(ref,entity.id)),{disabled:previous||definitionReadBusy,secondary:true}));
+    const detail=node('details',undefined,'rule-definition');detail.open=definitionReadOpen;detail.addEventListener('toggle',()=>{if(detail.isConnected)definitionReadOpen=detail.open;});detail.append(node('summary','这件对象的详细做法'),button(definitionReadBusy?'正在读取…':'读取详细做法',()=>run(()=>readRuleDefinition(ref,entity.id)),{disabled:previous||definitionReadBusy,secondary:true}));
     if(definitionReadError)detail.append(node('p',definitionReadError,'action-reason'));
     if(definitionReadValue)appendFacts(detail,definitionReadValue,0,ref);section.append(detail);
   }
@@ -542,8 +632,8 @@ async function readRuleDefinition(ref,id){
 function renderRuleAction(descriptor,entity,disabled){
   const label=descriptorLabel(descriptor);
   if(descriptor.available===false){$('selection-actions').append(node('p',label+'：'+(descriptor.reason||'当前条件不满足。'),'action-reason'));for(const line of conditionObservationLines(descriptor.condition_observation,entity))$('selection-actions').append(node('p',line,'small'));return;}
-  const form=node('form',undefined,'descriptor-action rule-action');form.dataset.action=descriptor.action;form.dataset.entityId=entity.id;form.append(node('p',label,'descriptor-label'));
-  if(descriptor.use)form.append(node('p',descriptor.use,'small'));
+  const form=node('form',undefined,'descriptor-action rule-action');form.dataset.action=descriptor.action;form.dataset.actionKey=actionKey(descriptor);form.dataset.entityId=entity.id;form.append(node('p',label,'descriptor-label'));
+  if(descriptor.use)form.append(node('p',friendlyInstruction(descriptor.use),'small'));
   for(const line of conditionObservationLines(descriptor.condition_observation,entity))form.append(node('p',line,'small'));
   const fields=[],unsupported=[],fixed=descriptor.arguments||{},topSchema=descriptor.input_schema||{type:'object',properties:{},required:[]};
   const candidateKeys={item_id:'items',other_id:'others',material:'materials'};
@@ -557,7 +647,7 @@ function renderRuleAction(descriptor,entity,disabled){
       if(['__proto__','constructor','prototype'].includes(name))continue;
       const path=[...prefix,name],required=requiredNames.has(name),fallback=defaults?.[name]??property.default;
       if(prefix.length===0&&name==='terms_version'&&Object.hasOwn(fixed,name)){
-        container.append(node('p',(property.title||factLabel(name))+'：'+factValue(fixed[name])+'（当前规则固定值）','small'));continue;
+        continue;
       }
       if(property.type==='object'){
         const section=node('fieldset',undefined,'schema-group');section.append(node('legend',property.title||factLabel(name)));container.append(section);
@@ -568,7 +658,7 @@ function renderRuleAction(descriptor,entity,disabled){
       let control,enumValues=null;
       if(choiceKey&&Object.hasOwn(descriptor.choices||{},choiceKey)){
         control=node('select');const empty=node('option','请选择');empty.value='';control.append(empty);
-        for(const candidate of candidates){const option=node('option',candidateLabel(candidate));option.value=candidate.id;control.append(option);}
+        for(const candidate of candidates){const option=node('option',candidateLabel(readableCandidate(candidate),candidates.map(readableCandidate)));option.value=candidate.id;control.append(option);}
       }else if(Array.isArray(property.enum)||property.type==='boolean'){
         control=node('select');enumValues=Array.isArray(property.enum)?property.enum:[true,false];const empty=node('option','请选择');empty.value='';control.append(empty);
         enumValues.forEach((value,index)=>{const option=node('option',factValue(value));option.value=String(index);control.append(option);});
@@ -584,8 +674,8 @@ function renderRuleAction(descriptor,entity,disabled){
   }
   addFields(topProperties,[],fixed,topRequired);
   addFields(descriptor.params_schema?.properties||{},['params'],fixed.params||{},new Set(descriptor.params_schema?.required||[]));
-  const note=node('p',undefined,'small'),controls=node('div',undefined,'descriptor-controls'),submit=button(label,()=>{}, {disabled:true});submit.type='submit';
-  controls.append(submit,button('取消选择',()=>{form.reset();for(const field of fields)if(field.control.tagName==='SELECT')field.control.value='';update();},{disabled,secondary:true}));form.append(note,controls);
+  const intent=node('p',undefined,'interaction-preview'),note=node('p',undefined,'small'),controls=node('div',undefined,'descriptor-controls'),submit=button(label,()=>{}, {disabled:true});submit.type='submit';
+  controls.append(submit,button('取消选择',()=>{actionDrafts.delete(entity.id+':'+descriptor.action);form.reset();for(const field of fields)if(field.control.tagName==='SELECT')field.control.value='';update();},{disabled,secondary:true}));form.append(intent,note,controls);
   const liveDescriptor=()=>inspection?.entity?.id===entity.id&&!inspection.reading?actionDescriptors(inspection).find(option=>option.function_id==='grove.rule_action'&&option.action===descriptor.action):null;
   function readValues(live){
     const result={},errors=[];
@@ -602,13 +692,20 @@ function renderRuleAction(descriptor,entity,disabled){
   }
   function update(){
     const live=liveDescriptor(),reading=!live;
-    for(const field of fields)if(field.choiceKey){const candidates=ruleChoices(live||descriptor,field.choiceKey);for(const option of field.control.options)if(option.value){const candidate=candidates.find(candidate=>candidate.id===option.value);option.textContent=candidate?candidateLabel(candidate):'当前已不可选择';}}
+    for(const field of fields)if(field.choiceKey&&field.control.tagName==='SELECT'){
+      const selected=field.control.value,candidates=ruleChoices(live||descriptor,field.choiceKey),empty=node('option','请选择');empty.value='';field.control.replaceChildren(empty);
+      for(const candidate of candidates){const option=node('option',candidateLabel(readableCandidate(candidate),candidates.map(readableCandidate)));option.value=candidate.id;field.control.append(option);}
+      if(selected&&!candidates.some(candidate=>candidate.id===selected)){const previous=node('option','原选择当前不可用，请重选');previous.value=selected;previous.disabled=true;field.control.append(previous);}
+      field.control.value=selected;field.control.disabled=disabled||!candidates.length;
+    }
     const values=live?readValues(live):{errors:[]};submit.disabled=disabled||actionBusy||reading||live?.available===false||unsupported.length>0||values.errors.length>0;
+    const result=values.result||{},item=ruleChoices(live||descriptor,'items').find(candidate=>candidate.id===result.item_id);
+    intent.textContent=operationIntentLabel(live||descriptor,entity,{item:item?readableCandidate(item):null,amount:result.params?.amount,choice:result.material});
     note.textContent=reading?'正在核对当前行动条件。取得当前状态后再提交。':live.available===false?live.reason||'当前条件不满足。':unsupported.length?'此参数结构尚未接入网页：'+unsupported.join('、')+'。可明确委托 Agent 通过正式接口操作。':values.errors[0]||'普通操作直接由规则结算，不调用模型；提交前重新读取版本和资格。';
   }
   form.addEventListener('input',update);form.addEventListener('change',update);form.addEventListener('refresh-candidate-preview',update);
   form.addEventListener('submit',event=>{event.preventDefault();if(submit.disabled)return;const live=liveDescriptor(),values=readValues(live);if(values.errors.length)return;run(()=>ruleAction(descriptor.action,entity,values.result,live));});
-  update();$('selection-actions').append(form);
+  restoreActionDraft(form,update);update();$('selection-actions').append(form);
 }
 async function ruleAction(action,entity,values,chosenDescriptor){
   stopWalking();const epoch=session;
@@ -636,42 +733,56 @@ async function ruleAction(action,entity,values,chosenDescriptor){
   },label);
 }
 function renderDescriptorAction(descriptor,entity,disabled){
+  if(descriptor.available===false)return;
+  const generated=['action','target_id','expected_target_version','expected_player_version','expected_item_version','expected_other_version','params','delegation','terms_version'];
+  const needsInput=!!descriptor.input||descriptor.function_id==='grove.rule_action'&&(Object.keys(descriptor.choices||{}).some(key=>(descriptor.choices[key]||[]).length)||Object.keys(descriptor.params_schema?.properties||{}).length||Object.keys(descriptor.input_schema?.properties||{}).some(key=>!generated.includes(key)));
+  const choose=()=>{rememberActionDrafts();activeActionKey=actionKey(descriptor);lastSelectionSignature='';renderSelection();};
+  if(needsInput){const option=button(descriptorLabel(descriptor)+'…',choose,{disabled,secondary:true});option.classList.add('action-option');$('selection-actions').append(option);return;}
+  if(descriptor.function_id==='grove.rule_action'){$('selection-actions').append(button(descriptorLabel(descriptor),()=>run(()=>ruleAction(descriptor.action,entity,{},descriptor)),{disabled}));return;}
+  renderDescriptorEditor(descriptor,entity,disabled);
+}
+function renderDescriptorEditor(descriptor,entity,disabled){
   if(descriptor.function_id==='grove.rule_action'){renderRuleAction(descriptor,entity,disabled);return;}
   const available=descriptor.available!==false&&actionIds(inspection.available_actions).includes(descriptor.action),label=descriptorLabel(descriptor);
   if(!available){if(descriptor.reason)$('selection-actions').append(node('p',label+'：'+descriptor.reason,'action-reason'));return;}
   const input=descriptor.input;
   if(!input){$('selection-actions').append(button(label,()=>interact(descriptor.action,entity),{disabled,secondary:descriptor.action==='close'}));return;}
-  const form=node('form',undefined,'descriptor-action'),caption=node('p',label,'descriptor-label');form.dataset.action=descriptor.action;form.dataset.entityId=entity.id;if(['store','attach'].includes(descriptor.action))form.dataset.combination='true';form.append(caption);
-  if(descriptor.use)form.append(node('p',descriptor.use,'small'));
+  const form=node('form',undefined,'descriptor-action'),caption=node('p',label,'descriptor-label');form.dataset.action=descriptor.action;form.dataset.actionKey=actionKey(descriptor);form.dataset.entityId=entity.id;if(['store','attach'].includes(descriptor.action))form.dataset.combination='true';form.append(caption);
+  if(descriptor.use)form.append(node('p',friendlyInstruction(descriptor.use),'small'));
   let itemSelect,lotSelect,choiceSelect,quantityInput;
   const candidates=descriptorCandidates(descriptor),requiresEntity=['entity','entity_quantity'].includes(input.kind);
-  if(requiresEntity){const field=node('label','选择物件');itemSelect=node('select');itemSelect.setAttribute('aria-label',label+'的物件');const placeholder=node('option','请选择');placeholder.value='';itemSelect.append(placeholder);
-    for(const candidate of candidates){const option=node('option',candidateLabel(candidate));option.value=candidate.id;itemSelect.append(option);}itemSelect.disabled=disabled||!candidates.length;field.append(itemSelect);form.append(field);}
+  if(requiresEntity){const field=node('label',['store','attach'].includes(descriptor.action)?'选择整件物品':['transfer','pour','ignite','fuel','tend'].includes(descriptor.action)?'用哪件物品作用于它':'选择物品');itemSelect=node('select');itemSelect.setAttribute('aria-label',label+'的物件');const placeholder=node('option','请选择');placeholder.value='';itemSelect.append(placeholder);
+    for(const candidate of candidates){const option=node('option',candidateLabel(readableCandidate(candidate),candidates.map(readableCandidate)));option.value=candidate.id;itemSelect.append(option);}if(candidates.length===1)itemSelect.value=candidates[0].id;itemSelect.disabled=disabled||!candidates.length;field.append(itemSelect);form.append(field);}
   const hasLots=Array.isArray(input.lots)||candidates.some(candidate=>Array.isArray(candidate.lots));
-  if(hasLots){const field=node('label','选择材料批次');lotSelect=node('select');lotSelect.setAttribute('aria-label',label+'的材料批次');field.append(lotSelect);form.append(field);}
+  if(hasLots){const field=node('label','取出其中哪种材料');lotSelect=node('select');lotSelect.setAttribute('aria-label',label+'的材料批次');field.append(lotSelect);form.append(field);}
   if(input.kind==='choice'){const field=node('label','选择方式');choiceSelect=node('select');choiceSelect.setAttribute('aria-label',label+'的方式');for(const choice of input.choices||[]){if(!choice||typeof choice.value!=='string')continue;const option=node('option',choice.label||choice.value);option.value=choice.value;choiceSelect.append(option);}choiceSelect.disabled=disabled;field.append(choiceSelect);form.append(field);}
-  if(input.quantity||['quantity','entity_quantity'].includes(input.kind)){const field=node('label',input.quantity?.label||'数量');quantityInput=node('input');quantityInput.type='number';quantityInput.step='1';quantityInput.inputMode='numeric';quantityInput.setAttribute('aria-label',label+'的数量');quantityInput.disabled=disabled;field.append(quantityInput);form.append(field);}
+  if(input.quantity||['quantity','entity_quantity'].includes(input.kind)){const field=node('label','数量（份）');quantityInput=node('input');quantityInput.type='number';quantityInput.step='1';quantityInput.inputMode='numeric';quantityInput.setAttribute('aria-label',label+'的数量');quantityInput.disabled=disabled;field.append(quantityInput);form.append(field);}
   const preview=node('div',undefined,'candidate-preview');preview.setAttribute('aria-live','polite');
-  const note=node('p',undefined,'small'),controls=node('div',undefined,'descriptor-controls'),submit=button(label,()=>{}, {disabled:true});submit.type='submit';
-  const cancel=button('取消选择',()=>{form.reset();if(itemSelect)itemSelect.value='';update(true);},{disabled,secondary:true});controls.append(submit,cancel);form.append(preview,note,controls);
+  const intent=node('p',undefined,'interaction-preview'),note=node('p',undefined,'small'),controls=node('div',undefined,'descriptor-controls'),submit=button('尝试'+label,()=>{}, {disabled:true});submit.type='submit';
+  const cancel=button('取消选择',()=>{actionDrafts.delete(entity.id+':'+descriptor.action);form.reset();if(itemSelect)itemSelect.value='';update(true);},{disabled,secondary:true});controls.append(submit,cancel);form.append(intent,preview,note,controls);
   const currentDescriptor=()=>inspection?.entity?.id===entity.id&&!inspection.reading?actionDescriptors(inspection).find(option=>option.action===descriptor.action&&option.function_id!=='grove.rule_action')||{...descriptor,available:false,reason:'当前行动条件已改变，请按新状态重新选择。',input:{...descriptor.input,candidates:[]}}:descriptor;
   const selectedLot=()=>descriptorLots(currentDescriptor(),itemSelect?.value).find(lot=>(lot.id||lot.lot_id)===lotSelect?.value);
   function update(rebuildLots=false){
     const live=currentDescriptor(),liveCandidates=descriptorCandidates(live),candidate=liveCandidates.find(item=>item.id===itemSelect?.value);
-    if(itemSelect)for(const option of itemSelect.options){if(!option.value)continue;const value=liveCandidates.find(item=>item.id===option.value);option.textContent=value?candidateLabel(value):'物件条件已改变，请重新选择';}
+    if(itemSelect){const selected=itemSelect.value,empty=node('option','请选择');empty.value='';itemSelect.replaceChildren(empty);
+      for(const value of liveCandidates){const option=node('option',candidateLabel(readableCandidate(value),liveCandidates.map(readableCandidate)));option.value=value.id;itemSelect.append(option);}
+      if(selected&&!liveCandidates.some(value=>value.id===selected)){const previous=node('option','原选择当前不可用，请重选');previous.value=selected;previous.disabled=true;itemSelect.append(previous);}itemSelect.value=selected;itemSelect.disabled=disabled||!liveCandidates.length;}
     const awaitingInspection=inspection?.entity?.id!==entity.id||!!inspection?.reading,awaitingPreview=candidates.some(item=>item.preview)&&awaitingInspection;
     const previewLines=awaitingPreview?['组合预览正在重新读取。你的选择保留，取得当前状态后再提交。']:candidatePreviewLines(candidate);preview.hidden=!previewLines.length;preview.replaceChildren(...previewLines.map(line=>node('p',line,'small')));
-    if(lotSelect&&rebuildLots){const selected=lotSelect.value,options=descriptorLots(live,itemSelect?.value);lotSelect.replaceChildren();for(const lot of options){const option=node('option',materialLabel(lot.material)+' · '+slotLabel(lot.slot)+' · '+lot.quantity+' 单位');option.value=lot.id||lot.lot_id;lotSelect.append(option);}if(options.some(lot=>(lot.id||lot.lot_id)===selected))lotSelect.value=selected;lotSelect.disabled=disabled||!options.length;}
+    if(lotSelect){const selected=lotSelect.value,options=descriptorLots(live,itemSelect?.value),empty=node('option','请选择材料');empty.value='';lotSelect.replaceChildren(empty);
+      for(const lot of options){const option=node('option',materialLabel(lot,candidate?readableCandidate(candidate):entity)+' · '+slotLabel(lot.slot)+' · '+lot.quantity+' 单位');option.value=lot.id||lot.lot_id;lotSelect.append(option);}
+      if(selected&&!options.some(lot=>(lot.id||lot.lot_id)===selected)){const previous=node('option','原材料批次当前不可用，请重选');previous.value=selected;previous.disabled=true;lotSelect.append(previous);}lotSelect.value=selected||(!selected&&rebuildLots&&options.length?(options[0].id||options[0].lot_id):'');lotSelect.disabled=disabled||!options.length;}
     const bounds=quantityBounds(live,selectedLot());if(quantityInput){quantityInput.min=String(bounds.min);if(Number.isFinite(bounds.max))quantityInput.max=String(bounds.max);else quantityInput.removeAttribute('max');if(!quantityInput.value||rebuildLots)quantityInput.value=String(bounds.value);}
     const quantity=quantityInput?Number(quantityInput.value):null,invalidQuantity=quantityInput&&(!Number.isInteger(quantity)||quantity<bounds.min||quantity>bounds.max);
-    const candidateUnavailable=requiresEntity&&itemSelect.value&&!candidate||candidate?.preview?.available===false;
-    submit.disabled=disabled||actionBusy||awaitingInspection||live.available===false||candidateUnavailable||(requiresEntity&&!itemSelect.value)||(lotSelect&&!lotSelect.value)||(choiceSelect&&!choiceSelect.value)||!!invalidQuantity;
-    note.textContent=awaitingInspection?'正在重新读取操作资格；输入保留，取得当前状态后再提交。':live.available===false?live.reason||'当前操作条件不满足。':candidateUnavailable?candidate?.preview?.reason||'所选物件的条件已经改变，请重新选择。':!liveCandidates.length&&requiresEntity?'当前没有可选择的合适物件。':invalidQuantity?'数量须为 '+bounds.min+' 至 '+(Number.isFinite(bounds.max)?bounds.max:'可用量')+' 的整数。':live.cost?'成本：'+formatCost(live.cost):'提交时会重新核对当前物件和数量；取消选择不改变世界。';
+    intent.textContent=operationIntentLabel(live,entity,{item:candidate?readableCandidate(candidate):null,lot:selectedLot(),amount:quantity,choice:choiceSelect?.selectedOptions[0]?.textContent});
+    const candidateUnavailable=requiresEntity&&itemSelect.value&&!candidate||candidate?.preview?.available===false,lotUnavailable=lotSelect&&lotSelect.value&&!selectedLot();
+    submit.disabled=disabled||actionBusy||!!client.pending()||awaitingInspection||live.available===false||candidateUnavailable||(requiresEntity&&!itemSelect.value)||(lotSelect&&!selectedLot())||(choiceSelect&&!choiceSelect.value)||!!invalidQuantity;
+    note.textContent=awaitingInspection?'正在重新读取操作资格；输入保留，取得当前状态后再提交。':live.available===false?live.reason||'当前操作条件不满足。':candidateUnavailable?candidate?.preview?.reason||'所选物件的条件已经改变，请重新选择。':lotUnavailable?'所选材料批次已耗尽或条件改变，请重新选择材料。':!liveCandidates.length&&requiresEntity?'当前没有可选择的合适物件。':invalidQuantity?'数量须为 '+bounds.min+' 至 '+(Number.isFinite(bounds.max)?bounds.max:'可用量')+' 的整数。':live.cost?'成本：'+formatCost(live.cost):'提交时会重新核对当前物件和数量；取消选择不改变世界。';
   }
   form.addEventListener('refresh-candidate-preview',()=>update());
   itemSelect?.addEventListener('change',()=>update(true));lotSelect?.addEventListener('change',()=>update(true));choiceSelect?.addEventListener('change',()=>update());quantityInput?.addEventListener('input',()=>update());
-  form.addEventListener('submit',event=>{event.preventDefault();if(submit.disabled)return;const extra={};if(lotSelect)extra.lot_id=lotSelect.value;if(choiceSelect)extra.mode=choiceSelect.value;const combination=form.dataset.combination==='true'?{form,fingerprint:descriptorCandidates(currentDescriptor()).find(candidate=>candidate.id===itemSelect?.value)?.preview?.version_fingerprint}:undefined;run(()=>interact(descriptor.action,entity,itemSelect?.value,quantityInput?Number(quantityInput.value):undefined,extra,combination));});
-  update(true);$('selection-actions').append(form);
+  form.addEventListener('submit',event=>{event.preventDefault();update();if(submit.disabled||lotSelect&&!selectedLot())return;const extra={};if(lotSelect)extra.lot_id=lotSelect.value;if(choiceSelect)extra.mode=choiceSelect.value;if(['contained','surface'].includes(descriptor.arguments?.target_slot))extra.target_slot=descriptor.arguments.target_slot;const combination=form.dataset.combination==='true'?{form,fingerprint:descriptorCandidates(currentDescriptor()).find(candidate=>candidate.id===itemSelect?.value)?.preview?.version_fingerprint}:undefined;run(()=>interact(descriptor.action,entity,itemSelect?.value,quantityInput?Number(quantityInput.value):undefined,extra,combination));});
+  update(true);restoreActionDraft(form,update);$('selection-actions').append(form);
 }
 async function interact(action,entity,itemId,amount,extra={},combination){
   stopWalking();
@@ -698,7 +809,7 @@ async function interact(action,entity,itemId,amount,extra={},combination){
     if(client.pending()){announce('先核对上一个操作，再继续。');renderPending();return;}
     if(!combination?.form||!/^[0-9a-f]{64}$/.test(combination.fingerprint||'')){announce('组合预览尚未取得。请重新读取当前物件后选择。',true);return;}
     const epoch=session,form=combination.form,focus=document.activeElement,controls=[...form.querySelectorAll('input,select,button')].map(control=>[control,control.disabled]);
-    actionBusy=true;++readEpoch;++inspectEpoch;inspectionFlight=null;combinationCheckingForm=form;form.tabIndex=-1;form.focus({preventScroll:true});for(const [control] of controls)control.disabled=true;$('movement-feedback').textContent='正在核对你选择的组合…';
+    actionBusy=true;++readEpoch;++inspectEpoch;inspectionFlight=null;combinationCheckingForm=form;form.tabIndex=-1;form.focus({preventScroll:true});for(const [control] of controls)control.disabled=true;$('movement-feedback').textContent='正在核对你选择的组合…';renderPending();
     try{
       const latest=await readInteractionEntity(entity.id,'目标物件');if(!latest)return;
       if(epoch!==session||!playing||!current()||selectedId!==entity.id){if(epoch===session&&playing&&current()){$('movement-feedback').textContent='选择已改变，这次组合尚未提交。';announce('选择已改变，这次组合尚未提交。');}return;}
@@ -706,7 +817,7 @@ async function interact(action,entity,itemId,amount,extra={},combination){
       if(candidate?.preview?.version_fingerprint!==combination.fingerprint){const message='组合已改变，尚未提交。'+(candidate?.preview?.reason||option?.reason||'')+' 请查看当前预览，再点一次。';announce(message);$('movement-feedback').textContent=message;return;}
       checkedCombination=latest;
     }finally{
-      if(epoch===session){actionBusy=false;const retainFocus=document.activeElement===form;for(const [control,disabled] of controls)control.disabled=disabled;if(retainFocus&&focus?.isConnected)focus.focus({preventScroll:true});if(playing&&selectedId===entity.id)renderSelection();}
+      if(epoch===session){actionBusy=false;renderPending();const retainFocus=document.activeElement===form;for(const [control,disabled] of controls)control.disabled=disabled;if(retainFocus&&focus?.isConnected)focus.focus({preventScroll:true});if(playing&&selectedId===entity.id)renderSelection();}
       if(combinationCheckingForm===form)combinationCheckingForm=null;
     }
   }
@@ -725,7 +836,8 @@ async function interact(action,entity,itemId,amount,extra={},combination){
     else if(amount!==undefined&&descriptor?.input?.quantity){const bounds=quantityBounds(descriptor);if(amount<bounds.min||amount>bounds.max)throw new Error('当前可操作数量已改变，请重新选择数量。');}
     const args={action,expected_player_version:point().version,...extra};
     if(combination)args.expected_combination_fingerprint=combination.fingerprint;
-    if(['contained','surface'].includes(descriptor?.arguments?.target_slot))args.target_slot=descriptor.arguments.target_slot;
+    if(extra.target_slot!==undefined&&extra.target_slot!==descriptor?.arguments?.target_slot)throw new Error('所选材料的目标位置已改变，尚未提交。请按当前状态重新选择。');
+    if(extra.target_slot===undefined&&['contained','surface'].includes(descriptor?.arguments?.target_slot))args.target_slot=descriptor.arguments.target_slot;
     if(action==='drop')args.item_id=entity.id;else{args.target_id=entity.id;args.expected_target_version=latest.entity.version;if(itemId)args.item_id=itemId;}
     if(item)args.expected_item_version=item.version;
     if(action==='drop')args.expected_item_version=latest.entity.version;
@@ -733,7 +845,7 @@ async function interact(action,entity,itemId,amount,extra={},combination){
     return args;
   },actionNames[action]||action);
 }
-function authorLabel(author){if(typeof author==='string')return author;if(author&&typeof author==='object')return String(author.name||author.id||'创作者');return '创作者';}
+function authorLabel(author){if(typeof author==='string')return (world?.players||[]).find(player=>player.id===author)?.name||(author.startsWith('awr_')?'世界中的另一位玩家':author);if(author&&typeof author==='object')return String(author.name||'创作者');return '创作者';}
 function renderPublicContent(){
   const content=world?.public_content;
   if(contentHistoryId!==content?.id){contentHistoryId=content?.id||null;contentHistoryPages=[];contentHistoryBusy=false;}
@@ -741,7 +853,7 @@ function renderPublicContent(){
   const list=$('public-content-list');list.replaceChildren();
   if(!content){$('public-content-note').textContent='当前没有已读的公共内容';list.append(node('p','公共物件和真实操作仍可在地图查看。','small'));return;}
   const anchors=content.anchors||[],page=contentHistoryPages.at(-1),contributions=page?.contributions||content.contributions||[],outcomes=page?.outcome_refs||content.outcome_refs||[],history=page?.history||content.history||{};
-  $('public-content-note').textContent='共同地点 · '+content.id+' · 版本 '+content.version;
+  $('public-content-note').textContent='这处地点的共同记录';
   list.append(node('p','这是当前获准读取的一页公共记录。物件详情显示当前事实；创作说明保留发表时的想法，不代表结果已发生。','small'));
   const anchorSection=node('section',undefined,'content-section');anchorSection.append(node('h4','同一现场的对象'));
   for(const anchor of anchors){const entity=anchor.entity,row=node('div',undefined,'content-anchor');row.append(button(entity?.name||anchor.entity_id,()=>run(()=>select(anchor.entity_id)),{secondary:true}),node('p',entity?stateLine(entity):'当前状态需查看物件','small'),node('small','原对象 '+anchor.entity_id+' · 版本 '+(entity?.version??anchor.version),'fact-reference'));anchorSection.append(row);}
@@ -874,7 +986,7 @@ function draw(now){
 canvas.addEventListener('pointermove',event=>{hoverTile=tileAt(event.clientX,event.clientY);});canvas.addEventListener('pointerleave',()=>{hoverTile=null;});
 canvas.addEventListener('pointerdown',event=>{if(!playing||!world)return;const tile=tileAt(event.clientX,event.clientY);canvas.focus({preventScroll:true});const objects=ground().filter(e=>e.x===tile.x&&e.y===tile.y);if(objects.length){stopWalking();run(()=>select(objects.find(e=>!e.state?.destroyed)?.id||objects[0].id));}else selectTile(tile);});
 canvas.addEventListener('dblclick',event=>{if(!playing||!world)return;const tile=tileAt(event.clientX,event.clientY);if(selectedTile?.x===tile.x&&selectedTile?.y===tile.y)goTo(tile.x,tile.y);});
-window.addEventListener('keydown',event=>{if(event.key==='Escape'){stopWalking();document.body.classList.remove('context-open','agent-open');$('agent-toggle').setAttribute('aria-expanded','false');return;}const pressed=event.key.length===1?event.key.toLowerCase():event.key;if(!playing||!directions[pressed]||event.altKey||event.ctrlKey||event.metaKey||['INPUT','TEXTAREA','SELECT','BUTTON'].includes(document.activeElement?.tagName))return;event.preventDefault();if(event.repeat||held===pressed)return;held=pressed;walkPath=[];pathTarget=null;run(walk);});
+window.addEventListener('keydown',event=>{if(event.key==='Escape'){stopWalking();if(activeActionKey){const form=$('selection-actions').querySelector('.descriptor-action');if(form){actionDrafts.delete(form.dataset.entityId+':'+form.dataset.action);form.remove();}activeActionKey=null;lastSelectionSignature='';renderSelection();}else closePanels();canvas.focus({preventScroll:true});return;}const pressed=event.key.length===1?event.key.toLowerCase():event.key;if(!playing||!directions[pressed]||event.altKey||event.ctrlKey||event.metaKey||['INPUT','TEXTAREA','SELECT','BUTTON'].includes(document.activeElement?.tagName))return;event.preventDefault();if(event.repeat||held===pressed)return;held=pressed;walkPath=[];pathTarget=null;run(walk);});
 window.addEventListener('keyup',event=>{const released=event.key.length===1?event.key.toLowerCase():event.key;if(held===released){held=null;clearTimeout(walkTimer);}});window.addEventListener('blur',stopWalking);
 for(const el of document.querySelectorAll('[data-direction]'))el.addEventListener('click',()=>{stopWalking();if(point())run(()=>move(...el.dataset.direction.split(',').map(Number)));});
 $('entry-form').addEventListener('submit',event=>{event.preventDefault();run(enter);});$('entry-cancel').addEventListener('click',()=>run(cancelEntry));
@@ -890,12 +1002,16 @@ $('import-key').addEventListener('change',event=>run(async()=>{
 $('refresh').addEventListener('click',()=>run(async()=>{stopWalking();const epoch=session;await refreshWorld(true);if(epoch===session&&playing)announce('已读取最新附近现场。');}));
 $('backup').addEventListener('click',()=>{if(!key)return;const blob=new Blob([JSON.stringify(key,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=node('a');a.href=url;a.download='shared-grove-identity.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);announce('恢复文件包含你的身份密钥，请保存在自己的安全位置。');});
 $('follow-player').addEventListener('click',()=>{if(point()){camera={x:point().x,y:point().y};canvas.focus({preventScroll:true});}});$('dismiss-onboarding').addEventListener('click',()=>{$('onboarding').hidden=true;});
-$('selection-close').addEventListener('click',()=>{document.body.classList.remove('context-open');canvas.focus({preventScroll:true});});
+$('selection-close').addEventListener('click',()=>{rememberActionDrafts();closePanels();canvas.focus({preventScroll:true});});
+$('context-toggle').addEventListener('click',()=>{if(document.body.classList.contains('context-open'))closePanels();else openContext();});
+$('inventory-toggle').addEventListener('click',()=>{const open=!$('inventory-panel').open;rememberActionDrafts();closePanels();$('inventory-panel').open=open;document.body.classList.toggle('inventory-open',open);$('inventory-toggle').setAttribute('aria-expanded',String(open));});
+$('inventory-panel').addEventListener('toggle',()=>{document.body.classList.toggle('inventory-open',$('inventory-panel').open);$('inventory-toggle').setAttribute('aria-expanded',String($('inventory-panel').open));});
 $('inventory-first').addEventListener('click',()=>run(()=>changeInventoryPage('first')));
 $('inventory-previous').addEventListener('click',()=>run(()=>changeInventoryPage('previous')));
 $('inventory-next').addEventListener('click',()=>run(()=>changeInventoryPage('next')));
-$('agent-toggle').addEventListener('click',()=>{const open=document.body.classList.toggle('agent-open');if(open)document.body.classList.remove('context-open');$('agent-toggle').setAttribute('aria-expanded',String(open));if(open){if(window.matchMedia('(min-width:761px)').matches)$('agent-panel').scrollIntoView({block:'nearest'});$('chat-text').focus({preventScroll:true});}});
-$('ask-selection').addEventListener('click',()=>run(async()=>{if(!world)return;const entity=selectedEntity(),tile=selectedTile,location=entityLocation(entity);const text=entity?'我正在看'+entity.name+'（'+(location.x??point().x)+'，'+(location.y??point().y)+'）。请读取当前现场，解释它能怎样用，以及不同办法的材料和环境取舍。':tile?'我正在看位置（'+tile.x+'，'+tile.y+'）。请读取当前现场，解释在这里走动或搭建设施有哪些取舍。':'请读取我身边的现场，解释我现在有哪些不同的办法。';document.body.classList.add('agent-open');document.body.classList.remove('context-open');$('agent-toggle').setAttribute('aria-expanded','true');await hostCommand('prompt',{text,intent:$('host-intent').value.trim(),...(entity?{context_entity_id:entity.id}:{})});}));
+$('agent-toggle').addEventListener('click',()=>{const open=!document.body.classList.contains('agent-open');rememberActionDrafts();if(open){openAgent();$('chat-text').focus({preventScroll:true});}else closePanels();});
+$('agent-close').addEventListener('click',()=>{closePanels();canvas.focus({preventScroll:true});});
+$('ask-selection').addEventListener('click',()=>run(async()=>{if(!world)return;const entity=selectedEntity(),tile=selectedTile,location=entityLocation(entity);const text=entity?'我正在看'+entity.name+'（'+(location.x??point().x)+'，'+(location.y??point().y)+'）。请读取当前现场，解释它能怎样用，以及不同办法的材料和环境取舍。':tile?'我正在看位置（'+tile.x+'，'+tile.y+'）。请读取当前现场，解释在这里走动或搭建设施有哪些取舍。':'请读取我身边的现场，解释我现在有哪些不同的办法。';openAgent();await hostCommand('prompt',{text,intent:$('host-intent').value.trim(),...(entity?{context_entity_id:entity.id}:{})});}));
 $('recover-operation').addEventListener('click',()=>run(()=>recoverWorldOperation()));
 $('release-operation').addEventListener('click',()=>run(()=>recoverWorldOperation(true)));
 $('reconnect-world').addEventListener('click',()=>run(async()=>{const epoch=session;await authenticate(key);if(epoch!==session)return;if(await hostCommand('recover',{token:client.token,public_key:key.public_key,name:point()?.name||prefs().name},{refresh:true})){scheduleWorld();scheduleHost();}}));
@@ -940,11 +1056,11 @@ $('agent-disconnect').addEventListener('click',()=>run(async()=>{if(await hostCo
 $('leave').addEventListener('click',()=>{
   stopWalking();++session;++readEpoch;++hostReadEpoch;++inspectEpoch;++hostCommandEpoch;++definitionReadEpoch;
   playing=false;entering=false;actionBusy=false;hostCommandBusy=false;executionReclaimBusy=false;
-  chosenBuildMaterials.clear();touchedBuildChoices.clear();activeRainChunks.clear();factDisclosures.clear();
+  chosenBuildMaterials.clear();touchedBuildChoices.clear();activeRainChunks.clear();factDisclosures.clear();actionDrafts.clear();activeActionKey=null;hostCommandKind=null;hostCommandFlight=null;
   clearTimeout(worldTimer);clearTimeout(hostTimer);client.cancel();client.token=null;identity=null;world=null;inspection=null;inspectionError=null;inspectionErrorStatus=null;inspectionFlight=null;selectedId=null;selectedTile=null;combinationCheckingForm=null;
   ledger.clear();streamCursor=null;lastSelectionSignature='';lastInventorySignature='';lastChatSignature='';lastGenerationSignature='';lastContentSignature='';contentHistoryId=null;contentHistoryPages=[];contentHistoryBusy=false;operationRecoveryBusy=false;inventoryPageBusy=false;inventoryPageCursors=[null];intentDirty=false;goalDirty=false;
   definitionReadBusy=false;definitionReadValue=null;definitionReadError=null;definitionReadRef=null;definitionReadOpen=false;$('rule-catalog-result').replaceChildren();$('rule-catalog-read').disabled=false;
-  document.body.classList.remove('playing','context-open','agent-open');$('agent-toggle').setAttribute('aria-expanded','false');$('game').hidden=true;$('entry').hidden=false;$('world-status').textContent='已离开 · 可接续';$('entry-progress').replaceChildren();$('enter').disabled=false;
+  closePanels();document.body.classList.remove('playing');$('game').hidden=true;$('entry').hidden=false;$('world-status').textContent='已离开 · 可接续';$('entry-progress').replaceChildren();$('enter').disabled=false;
   announce('已离开网页。身份、目标进度与变化保留；已委托行动仍受这个目标的总额度约束。离开网页不等于收回行动权。');
 });
 window.addEventListener('resize',resize);window.addEventListener('pagehide',()=>{stopWalking();client.cancel();});document.addEventListener('visibilitychange',()=>{if(document.hidden)stopWalking();else if(playing){run(()=>refreshWorld());scheduleHost(250);}});

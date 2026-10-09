@@ -1,12 +1,28 @@
 # Shared Grove（溪源）：当前官方世界
 
-复核：2026-10-09。本文是官方 World Package 的合同、入口和唯一研发记录，不改变 Runtime 的领域中立、跨世界 Ed25519 身份或提交语义。**0.26.0候选已出现真实Agent生产到交付链，另一人经自然反馈与接口修复后已消费旧合同外来材料发生反应并取出混合库存；随后本轮B新交付的2u也由同一A会话合法领取、投入原炉、反应并取出1u，跨作者新货接续成立。** 同类材料合批后不作取出份额来源断言。代码检查、代理玩家操作与真实 Agent 结果分别记录；历史最佳仍为0.24.0，产品未完成。
+复核：2026-10-09。当前官方世界采用地图首屏，人可以亲手探索或明确委托自己的 Agent。**本轮真实 Agent 采集40u木料、点燃后浇灭并处理复燃，最终留下4u；另一身份从公共地面拿取，将2u投入原有混合器，与2u布反应得到4u混合产物，背包仍保留2u木料。** Agent 曾引燃旁边的材料点，“别烧旁边的东西”失败；整体产品与真人趣味性尚未完成，历史最佳仍为0.24。Runtime、跨世界身份与提交语义不因此改成游戏专用。
 
 ## 当前研发记录
 
 **当前判断与方法：**以玩家意图、发现、选择、行动、共享后果和下一次选择判断实际推进。轮次用于关联这些过程，不设固定数量目标；请求数只作费用边界，物理tick、停机和连接超时各自承担运行责任，天数或日活不算体验深度。当前最佳仍为0.24；新代码必须形成更好的完整玩家路径才能替换，不因检查数量或局部成功升级。
 
-**当前实现：**工作轮起点`73d0e9a`；world17／state8／inspect6／interact5／rule_action4，固定201文件摘要`db1700ba666efaffd19ae2e2a84ec3f2ad7fa1809e0fc747e89178c4d8939816`。非选中现场保留真实身份、位置、数量的发现索引；详细定义与完整动作／候选按需读取，概要明确未展开项，不绑定未交付的版本／预览。自动写输出保留原回执和control，字节裁剪先于观察绑定；store／attach仍须当前完整组合预览和世界指纹。超大默认inspect返回可继续读取的真实状态及动作索引，单个完整候选仍超大则明确拒绝。
+**本轮地图路径：**以地图为首屏，从地面／物件菜单发现动作，明确“用什么 → 作用于什么”，亲手完成拿放、装卸材料、点火与浇灭，再由另一人或自己的 Agent 读取并接续后果。试玩记录按交流、发现、选择和工作轮次串联；相同操作重复、经过一天或累计在线时长均不算体验推进。换路条件是完整链无法被首次进入者理解、共同后果不能接续，或手动接管仍被模型停止过程卡住；不另造世界引擎。
+
+**地图工作轮实测：**渡叶在最终页面手动进入、恢复原身份、移动、选物件与脚下地面、取消和刷新选料、整件存入原公共炉；连续双击只提交一次存入，随后无需再点地图即可用键盘移动。她在另一人的真实余料处拿取4u，返回已有工坊，按明确来源／批次／数量转入2u木料，正常物理过程消费2u木和2u布，混合库存从0增至4u；原木料ID保留，背包剩2u。最后刷新网页仍是同一身份、(3,2)位置、2u余料和公共4u产物。以上手动操作由根任务代理玩家完成，不称作真人试玩。
+
+**真实Agent与原失败：**同一阿岚身份、Qwen3.8 Flash Go路线和原native会话。旧任务的点火后浇水先遭物件版本变化，world19尝试又因省略原作用槽走旧校验而失败；损耗与原回执保留。修复后正式新委托一次给予32个动作／3次请求，实际18个确认动作：自主前往仍有库存的另一个材料点，合法采集、放置、点火，在20／18u容量拒绝后改为10u浇灭，又浇灭受波及材料点并处理复燃，最终留下4u。它的选址只隔一格，邻火约束失败，任务请求用尽后暂停；不能写成完整目标成功。一次native显示“点火工具中止”，原回执确认点火已提交，原请求收尾按该回执接续，没有重复点火。另一人实际消费的正是这次留下的同一木料。
+
+**实现与判断：**world20／state11／inspect9／interact7／rule_action4。自动写回执保留真实操作、授权和变化，重复全景改为有界增量与按需读取；实际移动输出约5.7–6.9千字符，此前约2.1万字符。固定水量的pour从所选观察中呈现的原槽绑定；只对这类明确意图重验当前合法性，不临时换来源、目标、数量或槽，不取消玩家／授权、距离、所有权和容量校验。容量不足的正式错误通过MCP传递准确剩量和可倒上限，旧native实测的盲猜发生于这最后投影补齐之前；该小修复由正式MCP回归验证，未再调用模型。普通燃料消费及传播统一每3个tick一批，每批2u；水淬灭、干燥、反应和过载仍每tick，停机不补墙钟。40u约60tick耗尽，未启用先前考虑的30tick延缓。邻火能够复燃是实际规则后果。
+
+**验证与交付：**最终固定源码645项完整Python通过（232.464秒），两份Node和安装包检查通过。39项槽位／倒水／迁移检查与最后MCP容量错误回归保留独立证据。完整检查曾发现3个旧fixture仍按每tick燃烧，已对齐公开3tick节拍，保留石体完整、破损材料接续／同ID／守恒和托管资产断言；3项定向及完整重跑均通过，未因此改运行规则。固定198个实现／测试／打包输入的摘要为`53eb57bddb570f3dad53248271d3d0567315549e960ce6a82f6d73bfa69d47a6`，文档除外。world19→20全部242条世界状态仅时钟epoch及版本变化，原sequence30559、last_tick_at、身份、物料和原回执保留。
+
+**本轮恢复点：**一致SQLite备份`private/shared-grove/interoperable-rules/on-demand/world-map-v20-backup.sqlite3`，164200448字节，SHA256 `b61caf479c8d7c90ee8b8497a6eb4ce18911c9b61a5070c351164d59b678d7fd`。独立恢复库中260条世界状态、三人player状态和身份表计数逐值保持，原A／B凭据经API恢复身份，18个已确认原操作回执经API逐值相同；渡叶的恢复核对为数据库状态，另有正常服务网页刷新读回，未称作恢复库中的第三人API登录。恢复对比关闭物理timer以固定快照，零新模型请求，验证副本已移除。
+
+当前可体验[渡叶8963](http://127.0.0.1:8963/)、[阿岚8961](http://127.0.0.1:8961/)和[林舟8962](http://127.0.0.1:8962/)。实际桌面与390×844地图／结果菜单截图沿唯一`implementation.json`的`map_interaction_round`；窄屏scrollWidth390，模拟尺寸已恢复。最终连接器重启后，两人首次进入都遇到“本机伙伴初始化仍未就绪”；使用已有“重新连接”入口后恢复为已连接，原会话和任务保持，新增模型请求为0。冷启动体验尚未稳定，重连可恢复，列为后续优先缺口，未伪称首用无失败。真实推理过程中已执行手动收回并继续移动，但未观察到模型迟到写请求；真人趣味性、跨机器与全自然目标稳定完成仍未验证。全轮11次新增native请求，已完成evaluation报告0.7990386美元，另有本轮2次中止／错误请求用量不完整；报告值不当作实际账单。停止新模型调用，不充值、改隐私或触及生产。
+
+**本轮收尾：**仅本地提交19个本任务文件。旧world17恢复点以同卷原子改名归档，最新world20恢复点保留；清理自有重复截图、诊断文件及已关闭测试临时库，共2876390个文件字节，不当作APFS实际释放量。小型频繁SQLite测试临时库改在任务内`work/`，检查结束即清理，活动世界、大型数据、个人profiles、原生会话、失败证据和原预览保持原位。源码、状态、启动方式及唯一证据索引已核对，不推送、不部署、不建后台清理。
+
+**此前world17冻结范围：**以下原加工目标、失败、自然反馈与632项检查保留各自的源码与回执归因，不作为本轮通过。
 
 **目标与原失败：**B独立完成12个确认动作，消耗真实木料合法制备2u canonical混合产物、开桥、停机并交付原合同；合同完成不证明所有自然语言附加目标。A原目标是用大家已有产物接着加工；它发表并放置真实进口器皿，也自行适应另一人关闭器皿的变化，但8次请求／13个确认动作后没有消费外来材料，原目标失败。它以木料直接制出的2u新料不替代玩家要求；定义误报、非法托管转移及原失败回执均保留。
 
@@ -20,23 +36,7 @@
 
 **验证范围与预算：**最终world17固定实现的632项完整Python通过（192.415秒）、两份Node及安装probe通过；之前65项定向与连续计时回归也通过，旧630项结果仍只属于前world15冻结。确定性fixture、代理玩家动作、真实模型和浏览器各自标明，不把它们当真人趣味性。本轮累计23次外部native请求，已完成evaluation报告费用0.713181088美元；另有2次中止，实际账单未知，留0.70美元估算储备。最多24次／约3美元是规划边界，不是提供商硬上限；失败／中止／修正均计入，剩余1次不使用，停止新模型调用。独立前轮29次费用保留，控制任务与协作子任务的Codex用量不含在上述统计内。当前调用、主会话、所有冻结／回执／截图与恢复证据仍集中在[唯一implementation.json](/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/implementation.json)的`on_demand_execution_round`，不另建报告。
 
-**当前入口：**[阿岚8961](http://127.0.0.1:8961/)和[林舟8962](http://127.0.0.1:8962/)共享世界8960。个人profiles与既有安全注入保持分离，无目标不自主调用模型。当前服务已在运行；只有停止后才重新启动，分别在三个终端执行下列正式模块命令，每个终端先进入源码目录并设置`TASK_PY`，既有库不得加`--init`：
-
-```sh
-cd /Users/mubin/Developer/agent-world/grove-composable-rules
-TASK_PY=/Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python
-
-# 终端一：先启动共享世界。
-"$TASK_PY" -m agent_world.grove_app --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/interoperable-rules/on-demand/new/world.sqlite3 --port 8960
-
-# 终端二：阿岚的本地连接器。
-"$TASK_PY" -m agent_world.grove_connector --world-url http://127.0.0.1:8960 --port 8961 --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/interoperable-rules/on-demand/connector-new-b --runtime-storage /Users/mubin/Developer/agent-world/work/on-demand-runtime/new-b --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode --credential-wrapper /Users/mubin/.local/bin/opencode-env
-
-# 终端三：林舟的本地连接器。
-"$TASK_PY" -m agent_world.grove_connector --world-url http://127.0.0.1:8960 --port 8962 --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/interoperable-rules/on-demand/connector-new-a --runtime-storage /Users/mubin/Developer/agent-world/work/on-demand-runtime/new-a --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode --credential-wrapper /Users/mubin/.local/bin/opencode-env
-```
-
-**实际恢复与页面：**同一最终源码重启世界与两个连接器后，旧4笔原回执逐值相同；新货接续后又取得一致SQLite备份，独立恢复经API读回原两人身份、全部232条世界状态以及旧／新7笔原回执，逐值相同。恢复对比关闭物理timer以保持同一快照，不能代替正常服务的连续结算验证。唯一最新备份为`private/shared-grove/interoperable-rules/on-demand/world-on-demand-release-backup.sqlite3`，99684352字节，SHA256 `e0bab5212e07a53a6cebb2b83ef171a72b843f047bf79aae0f524197a81e352f`；完整绝对路径在唯一索引。浏览器以原B身份返回并读取另一人的加工炉3u；真实视口390×844时`innerWidth=scrollWidth=390`，无横向溢出。窄屏截图文件实际只有390×219，不能冒充844高的页面证据；桌面截图保留实际现场。页面仍有原恢复失败历史提示／旧请求状态，需要用户正确区分历史与当前；本轮未证明真人趣味性、四玩家、多CLI或完整首次游玩。默认不推送、不部署，不触碰原世界／备份／repo脏修改。
+**实际恢复与页面：**同一最终源码重启世界与两个连接器后，旧4笔原回执逐值相同；新货接续后又取得一致SQLite备份，独立恢复经API读回原两人身份、全部232条世界状态以及旧／新7笔原回执，逐值相同。恢复对比关闭物理timer以保持同一快照，不能代替正常服务的连续结算验证。该world17冻结范围的恢复点已归档至`/Volumes/DevDisk/DeveloperData/Archives/agent-world/shared-grove/on-demand-world17/world-on-demand-release-backup.sqlite3`，99684352字节，SHA256 `e0bab5212e07a53a6cebb2b83ef171a72b843f047bf79aae0f524197a81e352f`；完整绝对路径在唯一索引。浏览器以原B身份返回并读取另一人的加工炉3u；真实视口390×844时`innerWidth=scrollWidth=390`，无横向溢出。窄屏截图文件实际只有390×219，不能冒充844高的页面证据；桌面截图保留实际现场。页面仍有原恢复失败历史提示／旧请求状态，需要用户正确区分历史与当前；本轮未证明真人趣味性、四玩家、多CLI或完整首次游玩。默认不推送、不部署，不触碰原世界／备份／repo脏修改。
 
 **本轮收尾：**新备份验证后清理自己的旧阶段备份、两份临时恢复库及空测试临时目录；活动世界、个人profiles、原生会话、失败现场、关键截图和唯一最新恢复备份保留。精确文件清单、文件／分配占用与实际可用空间变化沿用唯一索引，不把APFS同时变化全部归因于清理。原repo差异摘要、两份受保护原备份和原8900／8901／8902进程复核不变。仅提交本任务完成并验证的12个文件，不推送、部署或创建后台清理任务。
 
@@ -268,6 +268,25 @@ reactor／contract引用自定义材料时，双方须引用同一个不可变�
 ## 本轮入口与保护
 
 本轮实际入口、数据库、profile和启动参数已在当前研发记录读回复核。世界与连接器使用独立数据库／运行目录；不得使用当前源码执行下方历史旧库恢复命令。复用原身份密钥不等于复制另一人的profile／记忆，不重复注册；世界本地档案、资产与token仍各自独立。现有库恢复不加`--init`，新库才在另一个私有parent首次初始化。DevDisk挂载、真实路径与占用须在启动前核对。
+
+**当前入口：**[渡叶8963](http://127.0.0.1:8963/)、[阿岚8961](http://127.0.0.1:8961/)和[林舟8962](http://127.0.0.1:8962/)共享世界8960。个人profiles与既有安全注入保持分离，无目标不自主调用模型。当前服务已在运行；只有停止后才重新启动，分别在四个终端执行下列正式模块命令，每个终端先进入源码目录并设置`TASK_PY`，既有库不得加`--init`：
+
+```sh
+cd /Users/mubin/Developer/agent-world/grove-composable-rules
+TASK_PY=/Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python
+
+# 终端一：先启动共享世界。
+"$TASK_PY" -m agent_world.grove_app --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/interoperable-rules/on-demand/new/world.sqlite3 --port 8960
+
+# 终端二：阿岚的本地连接器。
+"$TASK_PY" -m agent_world.grove_connector --world-url http://127.0.0.1:8960 --port 8961 --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/interoperable-rules/on-demand/connector-new-b --runtime-storage /Users/mubin/Developer/agent-world/work/on-demand-runtime/new-b --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode --credential-wrapper /Users/mubin/.local/bin/opencode-env
+
+# 终端三：林舟的本地连接器。
+"$TASK_PY" -m agent_world.grove_connector --world-url http://127.0.0.1:8960 --port 8962 --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/interoperable-rules/on-demand/connector-new-a --runtime-storage /Users/mubin/Developer/agent-world/work/on-demand-runtime/new-a --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode --credential-wrapper /Users/mubin/.local/bin/opencode-env
+
+# 终端四：渡叶的本地连接器。
+"$TASK_PY" -m agent_world.grove_connector --world-url http://127.0.0.1:8960 --port 8963 --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/interoperable-rules/on-demand/connector-map-newcomer --runtime-storage /Users/mubin/Developer/agent-world/work/on-demand-runtime/map-newcomer --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode --credential-wrapper /Users/mubin/.local/bin/opencode-env
+```
 
 ## 0.25 历史入口与恢复结果
 

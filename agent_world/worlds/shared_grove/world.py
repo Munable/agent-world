@@ -13,7 +13,7 @@ from agent_world.world_timers import TimerNotFound
 from . import model as m
 from . import processes
 from . import building
-from .definitions import COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for
+from .definitions import COMBUSTION_CADENCE_TICKS, COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 ID = {"type": "string", "minLength": 1, "maxLength": 128}
@@ -208,6 +208,12 @@ def handbook(ctx, args):
     return FunctionOutcome({
         "world": "shared-grove", "title": "溪源", "player": _public_self(m.get_player(ctx, required=False)),
         "clock": ctx.get_state(m.META, "clock"), "rules_version": RULES_VERSION, "process_order": list(PHASES),
+        "combustion": {"cadence_ticks": COMBUSTION_CADENCE_TICKS,
+                       "schedule": "clock.sequence multiples; quantity is consumed once per burning lot at its combustion.rate",
+                       "rate_unit": "u_per_burning_lot_per_settlement",
+                       "spread_cadence_ticks": COMBUSTION_CADENCE_TICKS,
+                       "quenching_cadence_ticks": 1,
+                       "observation": "entity.simulation.combustion in grove.inspect"},
         "process_limits": {"active_entities": processes.MAX_WET_ENTITIES, "burning_entities": processes.MAX_BURNING_ENTITIES,
                            "burning_contents": processes.MAX_BURNING_CONTENTS, "events": processes.MAX_EVENTS,
                            "active_processes": processes.MAX_PROCESSES, "hearths": building.MAX_HEARTHS, "growth": processes.MAX_GROWTH,
@@ -233,13 +239,15 @@ def handbook(ctx, args):
                          "water_source": "有限真实取水源", "ignition": "点燃实际可燃批次", "personal": "背包保护边界，不能公开丢弃",
                          "resource_node": "有限原材料库存", "attachment": "兼容部件的唯一附着关系", "buoyant": "按实际总载荷决定浮力"},
         "rules": ["人可亲自移动与行动，或明确一个目标委托自己的外部Agent用同一角色实际读取、计划、行动、读回与调整；亲手行动或收回会停止后续委托，已完成事实保留。",
-                  "行动需当前人物版本；目标和使用物件可带当前版本，过期拒绝且无半次结果。",
+                  "行动需当前人物版本；目标和使用物件可带当前版本，过期拒绝且无半次结果。倒水若明确amount和target_slot，则固定来源、目标、数量和作用槽，在提交时重新校验当前权限、距离、存在性、水量和容量；正常物理变化不单独阻塞这个仍合法的意图。作用槽改变时拒绝，不自动改量或改灌入位置。物件投影pour_target_slot保存该次读取的接触位置；连接器可从指定原观察绑定省略的target_slot，不能从新状态换槽。",
                   "公共地面可由附近任何人取用和修改，作者不是永久产权；别人的背包及其保护内容不能取用。放下即公开。",
                   "同一物件只有一个物理父关系，容纳和附着不能循环，关闭容器内不能装卸。",
                   "数量u是公开逻辑单位，不是SI重量；木、石、布、水真实批次都有当前余量，移动或装卸不复制。",
                   "装入水、燃料和物件都会增加载荷；超载、受湿及燃烧可能损伤结构。破损释放原物件身份，背包保护内容不凭空公开。",
                   "水只能从声明的有限来源转移；雨、接触、装水、倒水和养护均记录真实水或明确消耗。水不会因为一句描述出现。",
                   "点火消费工具次数，燃烧消费真实木布批次；石壳内有木布也可点燃，衬层燃尽不销毁石壳。",
+                  "普通物件燃烧耗材与相邻蔓延在世界逻辑步每3步共同结算；每个燃烧批次按物件combustion.rate耗材，不补累计3倍。读取inspect的燃料余量、rate、cadence_ticks和ticks_until_next_consumption判断行动窗口。点火后遇最近的共同结算点就耗材，并非每次点火后保证3步。",
+                  "倒水即时接触、每步水淬灭及过载损伤保持原节奏；只浇灭一个物件，邻近火源仍可能在下一蔓延结算点使已经干燥且暴露的可燃批次复燃。",
                   "外表浇水不穿透关闭容器；蒸发和燃烧进入明确环境终点，已耗物质不能在拆除时复活。",
                   "结构、材料损伤、失效、泄出及运输按同一确定过程顺序裁决，来源和物件名字不改变机制。",
                   "配方按真实材料u投入，部分用料的余量保留；拆除只取回仍存在的投资批次。",
@@ -577,6 +585,11 @@ def _launch_route(ctx, entity):
     return route if len(route) >= 2 else None
 
 
+def _pour_target_slot(entity):
+    state = entity["state"]
+    return "contained" if "container" in entity["components"] and state["open"] and not state["burning"] and state["water_capacity"] > 0 else "surface"
+
+
 def _action_options(ctx, player, entity):
     caps, components = set(entity["capabilities"]), entity.get("components", {})
     state, personal = entity["state"], "personal" in caps
@@ -622,10 +635,14 @@ def _action_options(ctx, player, entity):
         disclosed = source_quantity if state["open"] or entity["owner"] is not None else 1
         add("fill", reason or ("没有打开且未满的本人容器。" if not candidates else None), "从目标的有限水量转移到所选本人容器。", _input(candidates, quantity=disclosed))
     if ("container" in components and state["water_capacity"] > 0) or "absorbent" in components:
-        wet = building._water_items(ctx, player)
-        candidates = [_candidate(e) for e in wet if e["id"] != entity["id"]]
+        wet = [e for e in building._water_items(ctx, player) if e["id"] != entity["id"]]
+        candidates = [_candidate(e) for e in wet]
+        room = m.water_transfer_room(entity, _pour_target_slot(entity))
+        maximum = min(room, max([e["state"]["water"] for e in wet] or [0]))
         reason = _reason(ctx, player, entity, burning=True) or ("没有可用的本人水。" if not candidates else None)
-        add("pour", reason, "转入打开容器；关闭或燃烧时只浇外表面，水不穿透容器。", _input(candidates, quantity=max([e["state"]["water"] for e in wet] or [1])))
+        reason = reason or ("目标真实储水或吸水容量不足。" if room <= 0 else None)
+        add("pour", reason, "固定数量和作用槽倒水；提交时重验当前水量、容量、距离和权限。去向变化拒绝，水不穿透关闭容器。",
+            _input(candidates, quantity=maximum), target_slot=_pour_target_slot(entity))
     fuel_lots = [lot for lot in entity.get("matter", []) if registry_for(entity).materials[lot["material"]].combustible and lot["quantity"] > 0
                  and (state["open"] or lot["slot"] != "contained" and lot["role"] != "lining")]
     if fuel_lots:
@@ -747,6 +764,11 @@ def inspect(ctx, args):
     explanation = f"{entity['name']}：完整性{visible['simulation']['integrity']}，实际载荷{visible['simulation']['total']}，支撑{visible['simulation']['limit']}。"
     if entity["state"].get("kind") == "resource_node":
         explanation = f"{entity['name']}：公共库存{entity['state']['stock']}/{entity['state']['stock_capacity']}；"+("石材有限。" if entity['state']['resource_kind'] == 'stone' else '养护消耗本人5u水。')
+    combustion = visible["simulation"].get("combustion")
+    if combustion and combustion["burning_quantity"] and combustion["rate"]:
+        explanation += (f" 可见燃料{combustion['fuel_quantity']}u，当前燃烧{combustion['burning_quantity']}u；"
+                        f"每燃烧批次每{combustion['cadence_ticks']}逻辑步耗{combustion['rate']}u，"
+                        f"距下一耗材结算{combustion['ticks_until_next_consumption']}逻辑步。")
     result = {"player": _public_self(player), "entity": visible,
         "contents": [_project_entity(ctx, player, e, include_options=False) for e in contents],
         "available_actions": visible["available_actions"], "action_options": visible["action_options"], "explanation": explanation,
@@ -756,21 +778,21 @@ def inspect(ctx, args):
     return FunctionOutcome(result)
 
 
-def _target(ctx, args):
+def _target(ctx, args, *, revalidate=False):
     eid = args.get("target_id") or args.get("item_id")
     if not eid:
         raise RuleViolation("此行动需要选择目标物件。")
     entity = m.get_entity(ctx, eid)
-    if args.get("expected_target_version") is not None and args["expected_target_version"] != entity["version"]:
+    if not revalidate and args.get("expected_target_version") is not None and args["expected_target_version"] != entity["version"]:
         raise StateConflict("目标物件已经变化，请刷新后再行动。")
     return entity
 
 
-def _own_item(ctx, player, args, capability=None):
+def _own_item(ctx, player, args, capability=None, *, revalidate=False):
     if not args.get("item_id"):
         raise RuleViolation("请从背包选择使用的物件。")
     item = m.get_entity(ctx, args["item_id"])
-    if args.get("expected_item_version") is not None and args["expected_item_version"] != item["version"]:
+    if not revalidate and args.get("expected_item_version") is not None and args["expected_item_version"] != item["version"]:
         raise StateConflict("所选物件已经变化，请刷新后再行动。")
     _accessible(ctx, player, item, subject="item")
     if item["owner"] != player["id"] or item.get("lifecycle") == "consumed" or item["state"].get("retired") or "personal" in item["capabilities"]:
@@ -806,7 +828,11 @@ def interact(ctx, args):
     player = m.get_player(ctx)
     m.check_player_version(player, args["expected_player_version"])
     action = args["action"]
-    target = _target(ctx, args)
+    # An explicit pour is a fixed intent, not a promise about a past temperature
+    # or fuel amount. Current legality is rechecked inside this transaction;
+    # implicit/default pours and other actions retain strict observed versions.
+    revalidate_pour = action == "pour" and "amount" in args and "target_slot" in args
+    target = _target(ctx, args, revalidate=revalidate_pour)
     guard_ordinary_action(ctx, action, target, m.get_entity(ctx, args["item_id"]) if args.get("item_id") else None)
     if action in {"store", "attach"} and "expected_combination_fingerprint" in args:
         if not args.get("item_id"):
@@ -879,12 +905,17 @@ def interact(ctx, args):
         result = m.transfer_water(ctx, target, item, amount, reason="fill")
         summary = f"向{item['name']}转入{result['transferred']}u真实水。"
     elif action == "pour":
-        item = _own_item(ctx, player, args, "container")
+        item = _own_item(ctx, player, args, "container", revalidate=revalidate_pour)
         _container(ctx, player, item)
-        amount = args.get("amount", min(5, item["state"]["water"]))
-        slot = "contained" if "container" in target["components"] and target["state"]["open"] and not target["state"]["burning"] and target["state"]["water_capacity"] > 0 else "surface"
+        slot = _pour_target_slot(target)
+        if args.get("target_slot", slot) != slot:
+            raise StateConflict("倒水作用位置已变化，请重新选择浇表面或灌入容器；没有自动改去向或数量。")
+        amount = args.get("amount", min(5, item["state"]["water"], m.water_transfer_room(target, slot)))
+        was_burning = target["state"]["burning"]
         result = m.transfer_water(ctx, item, target, amount, target_slot=slot, reason="pour")
         summary = f"向{target['name']}转移{result['transferred']}u水，{'装入容器' if slot == 'contained' else '只接触外表面'}。"
+        if was_burning and not target["state"]["burning"]:
+            summary += "本次燃烧已熄灭。"
     elif action == "transfer":
         if not args.get("item_id"):
             raise RuleViolation("请选择实际来源物件。")
@@ -961,6 +992,10 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
                 component["supports"] = {key: support for key,support in component["supports"].items() if key in visible_ids}
         children = [child for child in children if child["physical_parent"]["relation"] != "contained"]
     value["contents"] = list(value["state"]["contents"])
+    if ("container" in value["components"] and value["state"]["water_capacity"] > 0) or "absorbent" in value["components"]:
+        # A compact post-action observation can preserve where a later named
+        # pour would contact this object without pretending to be a full menu.
+        value["pour_target_slot"] = _pour_target_slot(entity)
     if include_options:
         from .creative import action_options
         value["action_options"] = [*_action_options(ctx, player, entity), *action_options(ctx, player, entity)]
@@ -1024,6 +1059,23 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
             if lot["slot"] == "body":
                 body[lot["material"]] = body.get(lot["material"], 0)+lot["quantity"]
         value["simulation"]["body"] = [{"material": material, "quantity": quantity} for material, quantity in body.items()]
+    entity_registry = registry_for(entity)
+    combustible_lots = [lot for lot in value["matter"] if entity_registry.materials[lot["material"]].combustible]
+    if combustible_lots or "combustion" in value["components"]:
+        tick = ctx.get_state(m.META, "clock", {"sequence": 0})["sequence"]
+        burning_quantity = sum(lot["quantity"] for lot in combustible_lots if lot.get("burning"))
+        rate = value["components"].get("combustion", {}).get("rate", 2)
+        distance = COMBUSTION_CADENCE_TICKS-tick % COMBUSTION_CADENCE_TICKS
+        value["simulation"]["combustion"] = {
+            "fuel_quantity": sum(lot["quantity"] for lot in combustible_lots),
+            "burning_quantity": burning_quantity, "quantity_unit": "u",
+            "quantity_scope": "visible_material_lots", "hidden_contents": hidden,
+            "rate": rate, "rate_unit": "u_per_burning_lot_per_settlement",
+            "cadence_ticks": COMBUSTION_CADENCE_TICKS, "clock_sequence": tick,
+            "next_consumption_tick": tick+distance if burning_quantity and rate else None,
+            "ticks_until_next_consumption": distance if burning_quantity and rate else None,
+            "spread_cadence_ticks": COMBUSTION_CADENCE_TICKS,
+            "quenching_cadence_ticks": 1}
     quantities = {}
     for lot in value["matter"]:
         slots = quantities.setdefault(lot["material"], {})
@@ -1174,19 +1226,19 @@ def make_world():
     return WorldDefinition("shared-grove","溪源",(
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
-        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=6,access="read",authorize=member,description="在同一次读取中返回本人状态、物件的自身材料槽、完整子物件、当前反应条件与缺口、历史过程、编译定义的材料身份与反应系数，及实际行动和装入/绑定候选的只读载荷预览。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
-        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=5,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。"),
+        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=9,access="read",authorize=member,description="在同一次读取中返回本人状态、物件的自身材料槽、完整子物件、当前反应条件与缺口、历史过程、编译定义的材料身份与反应系数，及实际行动和装入/绑定候选的只读载荷预览。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
+        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=7,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。pour提供固定amount与target_slot时重验当前合法性；燃料或湿度改变版本不单独阻塞，去向改变、来源不足、容量不足或权限/距离改变仍原子拒绝，不换量、来源、目标或槽。"),
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=2,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=17,state_version=8,
+        *generation_specs(), *creative.specs()),version=20,state_version=11,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
-        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: resume_clock},
+        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: resume_clock},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),

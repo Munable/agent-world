@@ -1,4 +1,6 @@
 """Reusable material/relationship rules; no names, templates or world IDs."""
+from functools import partial
+
 from .effects import Break, Damage, Move, SetBurning, Sink, Source, SpillSink, SpillTransfer, Transfer
 from .matter import absorption_targets, component_capacity, exposed, load_summary, lot_moisture, quantity
 from .registry import RuleSpec
@@ -36,8 +38,9 @@ def water_rule(snapshot):
     return effects
 
 
-def damage_rule(snapshot):
+def damage_rule(snapshot, *, combustion_cadence=1):
     effects = []
+    combustion_due = snapshot.tick % combustion_cadence == 0
     for entity_id, entity in sorted(snapshot.objects.items()):
         if entity.get("lifecycle") == "consumed" or entity["state"].get("retired"):
             continue
@@ -51,6 +54,10 @@ def damage_rule(snapshot):
                 continue
             if entity_id in snapshot.protected or lot_moisture(entity, lot) >= 35 or quantity(entity, "water", "surface") or not exposed(entity, lot, snapshot.objects):
                 effects.append(SetBurning(entity_id, lot["id"], False))
+                continue
+            # Protection and water contact still quench on every physical step.
+            # Only actual fuel consumption follows the world's chosen cadence.
+            if not combustion_due:
                 continue
             amount = min(lot["quantity"], entity["components"].get("combustion", {}).get("rate", 2))
             effects.append(Sink(entity_id, lot["id"], amount, "combustion"))
@@ -127,11 +134,13 @@ def transport_rule(snapshot):
     return effects
 
 
-def register_material_rules(registry):
+def register_material_rules(registry, *, combustion_cadence=1):
+    if type(combustion_cadence) is not int or combustion_cadence < 1:
+        raise ValueError("Combustion cadence must be a positive logical tick count")
     registry.register_rule(RuleSpec("material.water", 1, "water", water_rule,
         reads=frozenset({"matter", "heater", "exposure"}), writes=frozenset({"matter"}), reducers={"matter": "transfer"},
         sources=frozenset({"rain", "growth", "seed"}), sinks=frozenset({"evaporation", "drain"})))
-    registry.register_rule(RuleSpec("material.damage", 1, "damage", damage_rule,
+    registry.register_rule(RuleSpec("material.damage", 1, "damage", partial(damage_rule, combustion_cadence=combustion_cadence),
         reads=frozenset({"matter", "relationships", "structure"}), writes=frozenset({"matter", "structure.integrity", "matter.burning"}),
         reducers={"matter": "transfer", "structure.integrity": "sum", "matter.burning": "exclusive"}, sinks=frozenset({"combustion"})))
     registry.register_rule(RuleSpec("material.failure", 1, "failure", failure_rule,

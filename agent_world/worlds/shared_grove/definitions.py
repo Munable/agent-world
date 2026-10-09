@@ -9,6 +9,7 @@ from agent_world.simulation.registry import ComponentDef, MaterialDef, Registry
 from agent_world.simulation.compiler import compile_composition
 
 RULES_VERSION = "grove-matter-1"
+COMBUSTION_CADENCE_TICKS = 3
 PHASES = ("water", "damage", "failure", "spill", "transport")
 REGISTRY = Registry(RULES_VERSION, PHASES)
 for material in (MaterialDef("wood", "木", 1, 40, True, 20),
@@ -185,4 +186,4 @@ def composition_catalog():
 
 
 from agent_world.simulation.rules import register_material_rules
-register_material_rules(REGISTRY)
+register_material_rules(REGISTRY, combustion_cadence=COMBUSTION_CADENCE_TICKS)

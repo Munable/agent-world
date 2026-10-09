@@ -20,7 +20,7 @@ assert.ok(ui.simulationStats(first).some(([label,value])=>label==='承载上限'
 // Values are displayed from the server; appearance text never loads an asset.
 const partialReaction=ui.reactionObservationLines({reaction_observations:[{rule_id:'expand',
   blockers:[],inputs:[],capacity_limited:true,isolated_extent:2}]},{});
-assert.ok(partialReaction.some(line=>line.includes('仍可支持 2 份反应')));
+assert.ok(partialReaction.some(line=>line.includes('可进行 2 次')));
 assert.ok(!partialReaction.some(line=>line.includes('容量不满足')));
 assert.deepEqual(ui.safePresentation({presentation:{shape:'<script>',color:'url(secret)',glyph:'<img src=x>'}}),
   {shape:'part',color:'#aaac8c',glyph:'◆',size:1});
@@ -62,6 +62,70 @@ assert.ok(ui.candidatePreviewLines({preview}).some(line=>line.includes('不保�
 // become private between selection and submission without revoking the user.
 const pageSource=readFileSync(new URL('../agent_world/grove_web/grove.js',import.meta.url),'utf8');
 const extract=(start,end)=>pageSource.slice(pageSource.indexOf(start),pageSource.indexOf(end));
+// Keep selected IDs while the actual editors reconcile a fresh server projection.
+function formNode(tag,text,className){
+  const listeners=new Map();
+  return {tagName:tag.toUpperCase(),textContent:text||'',className:className||'',dataset:{},children:[],disabled:false,_value:null,
+    get options(){return this.children.filter(child=>child.tagName==='OPTION');},
+    get value(){return this._value??(this.tagName==='SELECT'?this.options[0]?.value||'':'');},
+    set value(value){const raw=String(value);this._value=this.tagName==='SELECT'&&!this.options.some(option=>option.value===raw)?'':raw;},
+    get selectedOptions(){return this.options.filter(option=>option.value===this.value);},
+    append(...children){this.children.push(...children);},
+    replaceChildren(...children){this.children=[];this._value=null;this.append(...children);},
+    setAttribute(name,value){this[name]=String(value);},removeAttribute(name){delete this[name];},
+    addEventListener(type,handler){listeners.set(type,[...(listeners.get(type)||[]),handler]);},
+    dispatchEvent(event){for(const handler of listeners.get(event.type)||[])handler(event);},
+    querySelectorAll(selector){const tags=selector.toUpperCase().split(',');return this.children.flatMap(child=>[...(tags.includes(child.tagName)?[child]:[]),...child.querySelectorAll(selector)]);}};
+}
+{
+  const target={id:'target',name:'器皿'},actions=formNode('section'),writes=[];
+  const initial={...descriptor,available:true},context={inspection:{entity:target,available_actions:['transfer'],action_options:[initial]},
+    actionBusy:false,client:{pending:()=>null},node:formNode,$:()=>actions,actionKey:option=>option.action,
+    actionDescriptors:ui.actionDescriptors,actionIds:ui.actionIds,descriptorLabel:ui.descriptorLabel,
+    descriptorCandidates:ui.descriptorCandidates,descriptorLots:ui.descriptorLots,quantityBounds:ui.quantityBounds,
+    candidateLabel:ui.candidateLabel,candidatePreviewLines:ui.candidatePreviewLines,readableCandidate:value=>value,
+    materialLabel:ui.materialLabel,slotLabel:ui.slotLabel,operationIntentLabel:ui.operationIntentLabel,
+    restoreActionDraft:()=>{},run:fn=>fn(),interact:(...args)=>writes.push(args)};
+  vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('function renderDescriptorEditor(','async function interact('),context);
+  context.renderDescriptorEditor(initial,target,false);
+  const form=actions.children[0],[items,lots]=form.querySelectorAll('select'),amount=form.querySelectorAll('input')[0],submit=form.querySelectorAll('button').find(button=>button.type==='submit');
+  items.value='source-a';items.dispatchEvent({type:'change'});amount.value='2';amount.dispatchEvent({type:'input'});
+  const refresh=candidates=>{context.inspection={entity:target,available_actions:['transfer'],action_options:[{...initial,input:{...initial.input,candidates}}]};form.dispatchEvent({type:'refresh-candidate-preview'});};
+  refresh([{id:'source-a',lots:[{id:'a-wood',material:'wood',quantity:6,slot:'contained'}]},
+    {id:'source-c',lots:[{id:'c-water',material:'water',quantity:5,slot:'contained'}]}]);
+  assert.equal(items.value,'source-a');assert.equal(lots.value,'a-water');assert.equal(amount.value,'2');
+  assert.equal(lots.options.find(option=>option.value==='a-water').disabled,true);
+  assert.ok(lots.options.some(option=>option.value==='a-wood'));
+  assert.ok(items.options.some(option=>option.value==='source-c'));
+  assert.equal(submit.disabled,true);assert.ok(form.querySelectorAll('p').some(note=>note.textContent.includes('请重新选择材料')));
+  form.dispatchEvent({type:'submit',preventDefault(){}});assert.equal(writes.length,0);
+  lots.value='a-wood';lots.dispatchEvent({type:'change'});amount.value='2';amount.dispatchEvent({type:'input'});
+  form.dispatchEvent({type:'submit',preventDefault(){}});assert.equal(writes[0][4].lot_id,'a-wood');
+  refresh([]);assert.equal(items.value,'source-a');assert.equal(items.options.find(option=>option.value==='source-a').disabled,true);assert.equal(items.disabled,true);
+  refresh([{id:'source-c',lots:[{id:'c-water',material:'water',quantity:5,slot:'contained'}]}]);
+  assert.equal(items.disabled,false);assert.equal(items.value,'source-a');assert.equal(amount.value,'2');assert.equal(submit.disabled,true);
+}
+{
+  const target={id:'rule-target',name:'做法'},actions=formNode('section'),writes=[];
+  const initial={function_id:'grove.rule_action',action:'process',available:true,choices:{items:[{id:'old-item',name:'原料'}]},
+    params_schema:{properties:{amount:{type:'integer',minimum:1,default:1}},required:['amount']}};
+  const context={inspection:{entity:target,action_options:[initial]},actionBusy:false,node:formNode,$:()=>actions,
+    actionKey:option=>option.action,descriptorLabel:ui.descriptorLabel,actionDescriptors:ui.actionDescriptors,
+    conditionObservationLines:()=>[],ruleChoices:ui.ruleChoices,candidateLabel:ui.candidateLabel,
+    readableCandidate:value=>value,factLabel:ui.factLabel,operationIntentLabel:ui.operationIntentLabel,
+    restoreActionDraft:()=>{},run:fn=>fn(),ruleAction:(...args)=>writes.push(args)};
+  vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('function renderRuleAction(','async function ruleAction('),context);
+  context.renderRuleAction(initial,target,false);
+  const form=actions.children[0],items=form.querySelectorAll('select')[0],amount=form.querySelectorAll('input')[0],submit=form.querySelectorAll('button').find(button=>button.type==='submit');
+  items.value='old-item';amount.value='2';form.dispatchEvent({type:'change'});
+  context.inspection={entity:target,action_options:[{...initial,choices:{items:[{id:'new-item',name:'新原料'}]}}]};
+  form.dispatchEvent({type:'refresh-candidate-preview'});
+  assert.equal(items.value,'old-item');assert.equal(amount.value,'2');assert.equal(items.options.find(option=>option.value==='old-item').disabled,true);
+  assert.ok(items.options.some(option=>option.value==='new-item'));assert.equal(submit.disabled,true);
+  items.value='new-item';form.dispatchEvent({type:'change'});form.dispatchEvent({type:'submit',preventDefault(){}});
+  assert.equal(writes[0][2].item_id,'new-item');assert.equal(writes[0][2].params.amount,2);
+}
+
 for(const status of [403,404,401])for(const kind of ['combination-target','ordinary-target','item']){
   const target={id:'target',version:1},feedback={textContent:''},errorBox={hidden:true};
   const controls=[{disabled:false}],form={isConnected:true,reset(){this.resets=(this.resets||0)+1;},
@@ -71,7 +135,7 @@ for(const status of [403,404,401])for(const kind of ['combination-target','ordin
   const context={session:1,playing:true,identity:{},actionBusy:false,readEpoch:0,inspectEpoch:0,
     selectedId:target.id,selectedFromBag:false,inspection:{entity:target},inspectionError:null,
     inspectionErrorStatus:null,inspectionFlight:null,combinationCheckingForm:null,
-    held:null,walkPath:[],pathTarget:null,lastAction:'',document:{activeElement:null},
+    held:null,walkPath:[],pathTarget:null,lastAction:'',executionReclaimBusy:false,document:{activeElement:null},
     client:{token:'still-valid',pending:()=>null,query:async(name,args)=>{
       if(kind==='item'&&args.entity_id===target.id)return {entity:target,available_actions:['pour'],
         action_options:[{action:'pour',available:true,input:{kind:'entity',candidates:[{id:'item'}]}}]};
@@ -79,7 +143,7 @@ for(const status of [403,404,401])for(const kind of ['combination-target','ordin
     },mutate:async()=>{writes++;}},
     $:id=>id==='movement-feedback'?feedback:id==='selection-actions'?{querySelectorAll:()=>[form]}:
       id==='error'?errorBox:{hidden:true,textContent:''},
-    current:()=>context.client.token,point:()=>({version:1}),entityById:()=>target,
+    current:()=>context.client.token,point:()=>({version:1}),entityById:()=>target,takeManualControl:async()=>true,
     announce:()=>{},stopWalking:()=>{},renderSelection:()=>{},renderPending:()=>{},
     actionNames:{pour:'倒水',store:'存入'},actionDescriptors:ui.actionDescriptors,
     actionIds:ui.actionIds,descriptorCandidates:ui.descriptorCandidates,descriptorLabel:ui.descriptorLabel};
@@ -100,6 +164,61 @@ for(const status of [403,404,401])for(const kind of ['combination-target','ordin
   }
 }
 
+// A preflight refresh may change the receiving slot; preserve the chosen slot
+// and refuse the changed intent rather than silently pouring somewhere else.
+for(const targetSlot of ['surface','contained']){
+  const target={id:'target',version:7},item={id:'item',version:4},writes=[];
+  const context={session:1,playing:true,selectedId:target.id,inspection:{entity:target},
+    stopWalking:()=>{},renderSelection:()=>{},point:()=>({version:3}),actionNames:{pour:'倒水'},
+    actionIds:ui.actionIds,actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,
+    descriptorCandidates:ui.descriptorCandidates,quantityBounds:ui.quantityBounds,
+    client:{query:async(name,args)=>args.entity_id===item.id?{entity:item}:{entity:target,available_actions:['pour'],
+      action_options:[{action:'pour',available:true,arguments:{target_slot:targetSlot},input:{kind:'entity_quantity',candidates:[item],quantity:{min:1,max:3}}}]}},
+    perform:async(name,prepare)=>writes.push(await prepare(()=>true))};
+  vm.createContext(context);vm.runInContext(extract('async function interact(','function authorLabel('),context);
+  if(targetSlot==='contained'){await assert.rejects(context.interact('pour',target,item.id,2,{target_slot:'surface'}),/目标位置已改变/);assert.equal(writes.length,0);}
+  else{await context.interact('pour',target,item.id,2,{target_slot:'surface'});assert.equal(writes[0].target_slot,'surface');assert.equal(writes[0].expected_target_version,7);assert.equal(writes[0].expected_item_version,4);}
+}
+
+// The same source and target remain visible; storing an object does not count
+// its body as a transferred batch or claim that a preview has already happened.
+const bowl={name:'石碗'},flask={name:'水壶'},box={name:'木箱'};
+assert.equal(ui.operationIntentLabel({action:'store'},bowl,{item:box}),'把 木箱 整件放进 石碗');
+assert.equal(ui.operationIntentLabel({action:'transfer'},bowl,{item:box,lot:{material:'wood'},amount:3}),'从 木箱 转入 3 份木 → 石碗');
+assert.equal(ui.operationIntentLabel({action:'pour'},box,{item:flask,amount:2}),'从 水壶 倒出 2 份水 → 木箱');
+assert.equal(ui.operationIntentLabel({action:'fill'},bowl,{item:flask,amount:2}),'从 石碗 装 2 份水 → 水壶');
+assert.equal(ui.operationIntentLabel({action:'ignite'},box,{item:{name:'打火石'}}),'用 打火石 → 木箱');
+const sameNamed=[{id:'one',name:'器皿',x:1,y:2},{id:'two',name:'器皿',x:3,y:4}];
+assert.ok(ui.candidateLabel(sameNamed[0],sameNamed).includes('1，2'));
+assert.ok(!ui.candidateLabel(sameNamed[0],sameNamed).includes('one'));
+
+// Exercise the page's actual control handoff. The quick acknowledgement may
+// leave native cleanup pending, while counts and an offline receipt read block.
+for(const mode of ['active','starting','unknown','fallback','starting-offline']){
+  const original={task_id:'task',status:mode==='starting'||mode==='starting-offline'?'starting':'running',delegation_active:mode!=='starting'&&mode!=='starting-offline'};
+  const events=[],context={host:{execution:original,unknown_operations:0},session:1,playing:true,
+    hostCommandEpoch:0,hostReadEpoch:0,hostCommandKind:null,hostCommandFlight:null,hostCommandBusy:false,manualControlRecoveryPending:false,
+    $:()=>({textContent:''}),announce:text=>events.push(text),renderHost:()=>{},scheduleHost:()=>{},
+    refreshWorld:async()=>events.push('read'),client:{
+      connector:async(path,body)=>{events.push('reclaim');assert.equal(body.background,true);if(['fallback','starting-offline'].includes(mode))throw new Error('offline');return {unknown_operations:mode==='unknown'?1:0,reclaim_in_progress:true,execution:{...original,delegation_active:false,status:mode==='unknown'?'unknown':'paused'}};},
+      mutate:async function(name){events.push(name);}}
+  };
+  vm.createContext(context);vm.runInContext(extract('async function takeManualControl(','async function perform('),context);
+  assert.equal(await context.takeManualControl(()=>true),['active','starting'].includes(mode));
+  assert.equal(context.hostCommandBusy,false);
+  assert.equal(events.filter(event=>event==='grove.control_revoke').length,['fallback','starting-offline'].includes(mode)?1:0);
+  if(['active','starting'].includes(mode))assert.equal(context.host.reclaim_in_progress,true);
+  if(['fallback','starting-offline'].includes(mode)){
+    assert.equal(context.host.unknown_operations,0);assert.equal(context.host.execution.status,original.status);
+    assert.equal(context.host.execution.delegation_active,false);assert.equal(context.manualControlRecoveryPending,true);
+    assert.ok(events.some(event=>event.includes('连接恢复后先核对原回执')));
+    assert.equal(await context.takeManualControl(()=>true),false,'a second click cannot bypass the unread receipts');
+    context.host={execution:{...original,status:'paused',delegation_active:false},unknown_operations:0};
+    context.client.connector=async()=>({execution:{...original,status:'paused',delegation_active:false},unknown_operations:0});
+    assert.equal(await context.takeManualControl(()=>true),true);assert.equal(context.manualControlRecoveryPending,false);
+  }
+}
+
 // A native response ending is not evidence that the delegated goal succeeded.
 // Exercise the page's actual renderer with persisted request/task outcomes.
 for(const [execution,label,detail,resume] of [
@@ -114,7 +233,7 @@ for(const [execution,label,detail,resume] of [
     return elements.get(id);
   };
   const context={host:{status:'ready',execution},goalDirty:true,hostCommandBusy:false,executionReclaimBusy:false,
-    actionBusy:false,document:{activeElement:null},client:{pending:()=>null},$:element,
+    actionBusy:false,manualControlRecoveryPending:false,document:{activeElement:null},client:{pending:()=>null},$:element,
     node:()=>({append(){}})};
   vm.createContext(context);
   vm.runInContext(extract('function renderExecution(){','async function reclaimExecution(){'),context);

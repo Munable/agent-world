@@ -5,7 +5,7 @@ from agent_world.simulation.effects import Transfer
 from agent_world.simulation.frame import Frame
 from agent_world.simulation import matter
 from agent_world.simulation.registry import Registry, RuleSpec
-from agent_world.worlds.shared_grove.definitions import REGISTRY, composition_definition
+from agent_world.worlds.shared_grove.definitions import COMBUSTION_CADENCE_TICKS, REGISTRY, composition_definition
 from agent_world.worlds.shared_grove import model
 
 
@@ -84,7 +84,8 @@ class MaterialConsequenceTests(unittest.TestCase):
         lining["burning"] = True
         stone = matter.quantity(vessel, "stone")
         frame = Frame(REGISTRY, {"vessel": vessel})
-        for step in range(8):
+        # Eight fuel settlements, including tick zero, consume the real lining.
+        for step in range(7 * COMBUSTION_CADENCE_TICKS + 1):
             frame = Frame(REGISTRY, frame.objects, tick=step).run()
             self.assertTrue(frame.verify_balance())
         result = frame.objects["vessel"]
@@ -127,7 +128,12 @@ class MaterialConsequenceTests(unittest.TestCase):
         self.assertEqual(first.objects["vessel"]["lifecycle"], "broken")
         remaining = matter.quantity(first.objects["vessel"], "wood")
         self.assertGreater(remaining, 0)
-        second = Frame(REGISTRY, first.objects, tick=1).run()
+        second = first
+        for step in range(1, COMBUSTION_CADENCE_TICKS):
+            second = Frame(REGISTRY, second.objects, tick=step).run()
+            self.assertEqual(matter.quantity(second.objects["vessel"], "wood"), remaining)
+            self.assertTrue(second.verify_balance())
+        second = Frame(REGISTRY, second.objects, tick=COMBUSTION_CADENCE_TICKS).run()
         self.assertLess(matter.quantity(second.objects["vessel"], "wood"), remaining)
         self.assertEqual(set(second.objects), {"vessel"})
         self.assertTrue(first.verify_balance())

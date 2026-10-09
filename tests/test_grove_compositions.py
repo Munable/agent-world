@@ -347,7 +347,8 @@ class ComposableWorldTests(unittest.TestCase):
         before = self.entity(identifier)
         self.walk("A", before["x"], before["y"])
         self.act("A", "ignite", identifier, self.item("A", "打火石")["id"])
-        self.ticks(8)
+        # The 16u lining burns at the unchanged 2u rate every 3 physical steps.
+        self.ticks(24)
         after = self.inspect("A", identifier)["entity"]
         amount = lambda value, material: sum(lot["quantity"] for lot in value["matter"]
                                              if lot["material"] == material)

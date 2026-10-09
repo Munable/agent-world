@@ -53,6 +53,19 @@ def liquid_capacity(entity):
         "liquid_capacity", components.get("collector", {}).get("capacity", 0)))
 
 
+def water_transfer_room(entity, target_slot="contained"):
+    capacity = liquid_capacity(entity) if target_slot == "contained" else sm.component_capacity(entity, "absorbent")
+    if target_slot == "surface":
+        capacity = max(8, capacity)
+    held = liquid_quantity(entity) if target_slot == "contained" else sm.quantity(entity, "water", target_slot)
+    room = max(0, capacity-held)
+    program = entity.get("state", {}).get("program", {})
+    if target_slot == "contained" and "mixture_capacity" in program:
+        # The frame also reserves every contained substance against this room.
+        room = min(room, max(0, program["mixture_capacity"]-sm.quantity(entity, slot="contained")))
+    return room
+
+
 def identifier(prefix):
     return prefix + "_" + uuid.uuid4().hex
 
@@ -1015,14 +1028,16 @@ def transfer_water(ctx, source, target, amount, *, target_slot="contained", reas
     if type(amount) is not int or amount <= 0:
         raise RuleViolation("转水量必须是正整数u。")
     lots = [lot for lot in source["matter"] if lot["material"] == "water" and lot["slot"] == "contained"]
-    if sum(lot["quantity"] for lot in lots) < amount:
-        raise RuleViolation("真实储水余额不足。")
-    capacity = liquid_capacity(target) if target_slot == "contained" else sm.component_capacity(target, "absorbent")
-    if target_slot == "surface":
-        capacity = max(8, capacity)
-    held = (liquid_quantity(target) if target_slot == "contained" else sm.quantity(target, "water", target_slot))
-    if held+amount > capacity:
-        raise RuleViolation("目标真实储水或吸水容量不足。")
+    available = sum(lot["quantity"] for lot in lots)
+    room = water_transfer_room(target, target_slot)
+    current_limits = {"water_transfer": {"source_id": source["id"], "target_id": target["id"],
+        "target_slot": target_slot, "requested": amount, "source_remaining": available,
+        "target_remaining_capacity": room, "maximum": min(available, room), "unit": "u",
+        "meaning": "Current rejection facts only; no amount was changed or water moved."}}
+    if available < amount:
+        raise RuleViolation("真实储水余额不足。", details=current_limits)
+    if amount > room:
+        raise RuleViolation("目标真实储水或吸水容量不足。", details=current_limits)
     effects, remaining = [], amount
     targets = [[bound, available] for bound, available in sm.absorption_targets(target, _tree_objects(ctx, target))] if target_slot == "absorbed" else [[None, amount]]
     if sum(available for _, available in targets) < amount:

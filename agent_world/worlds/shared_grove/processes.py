@@ -11,7 +11,7 @@ from agent_world.simulation.effects import Break, Sink, Source, Transfer
 from agent_world.simulation.frame import Frame
 
 from . import model as m
-from .definitions import REGISTRY, RULES_VERSION, registry_for
+from .definitions import COMBUSTION_CADENCE_TICKS, REGISTRY, RULES_VERSION, registry_for
 
 MAX_WET_ENTITIES = sm.MAX_FRAME_OBJECTS
 MAX_BURNING_ENTITIES = 8
@@ -556,7 +556,7 @@ def tick(ctx, args):
             _save(ctx, process)
         # Spread never advances the newly ignited material's rate in this tick.
         ctx._grove_entities.update(deepcopy(frame.objects))
-        if sequence % 3 == 0:
+        if sequence % COMBUSTION_CADENCE_TICKS == 0:
             spread = SPREAD_BATCH
             for entity in sorted(frame.objects.values(), key=lambda obj:obj["id"]):
                 if not spread or not m.is_ground(entity) or not entity["components"].get("combustion", {}).get("spread") or not any(lot.get("burning") for lot in entity["matter"]):

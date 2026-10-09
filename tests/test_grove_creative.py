@@ -11,6 +11,7 @@ from agent_world import FunctionOutcome, FunctionSpec, WorldRuntime
 from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.worlds.shared_grove import make_world, model as m
 from agent_world.worlds.shared_grove import creative
+from agent_world.worlds.shared_grove.definitions import COMBUSTION_CADENCE_TICKS
 from agent_world.simulation.matter import encoded_size
 from agent_world.simulation.programs import solve_mechanical
 
@@ -434,7 +435,8 @@ class CreativeWorldTests(unittest.TestCase):
         self.action("A", target, "accept", terms_version=terms)
         self.action("B", target, "accept", terms_version=terms)
         self.action("B", target, "deliver", item_id=self.item("B", "打火石")["id"], amount=2)
-        for _ in range(25):
+        # The original 40u wooden body needs twenty ordinary fuel settlements.
+        for _ in range(20 * COMBUSTION_CADENCE_TICKS):
             self.ticks(1)
             if self.entity(target)["lifecycle"] == "broken":
                 break
@@ -926,36 +928,36 @@ class CreativeWorldTests(unittest.TestCase):
             self.assertLessEqual(encoded_size(record), creative.MAX_RECORD_BYTES)
 
     def test_world_upgrade_hands_off_clock_without_advancing_saved_state(self):
-        db = self.db.with_name("upgrade.sqlite3")
-        world = WorldRuntime(db)
-        world.install_world("w", replace(make_world(), version=10, state_version=5, migrations={}))
-        role = world.create_role("returning")["role_id"]
-        world.call_function("w", "grove.join", role, {"name": "returning"}, operation_id="upgrade-join")
-        self.time.return_value += 1
-        self.assertEqual(world.run_due_timers("w")["count"], 1)
-        player = world.get_state("w", m.PLAYERS, role)
-        clock = world.get_state("w", m.META, "clock")["value"]
-        old_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
-        world = WorldRuntime(db)
-        world.install_world("w", make_world())
-        resumed = world.get_state("w", m.META, "clock")["value"]
-        self.assertEqual(resumed["sequence"], clock["sequence"])
-        self.assertEqual(resumed["last_tick_at"], clock["last_tick_at"])
-        self.assertNotEqual(resumed["epoch"], clock["epoch"])
-        self.assertEqual(world.get_state("w", m.PLAYERS, role), player)
-        self.assertEqual(world.get_timer("w", old_id)["status"], "cancelled")
-        next_id = f"grove.tick.{resumed['epoch']}.{resumed['sequence']}"
-        self.assertEqual(world.get_timer("w", next_id)["status"], "pending")
-        world.install_world("w", make_world())
-        self.assertEqual(world.get_state("w", m.META, "clock")["value"], resumed)
-        self.time.return_value += 100  # simulated service outage, not elapsed play
-        result = world.run_due_timers("w")
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"])
-        self.time.return_value += 1
-        self.assertEqual(world.run_due_timers("w")["count"], 1)
-        self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"]+1)
-
+        for old_world_version, old_state_version in ((10, 5), (17, 8), (18, 9), (19, 10)):
+            db = self.db.with_name(f"upgrade-{old_state_version}.sqlite3")
+            world = WorldRuntime(db)
+            world.install_world("w", replace(make_world(), version=old_world_version, state_version=old_state_version, migrations={}))
+            role = world.create_role("returning")["role_id"]
+            world.call_function("w", "grove.join", role, {"name": "returning"}, operation_id="upgrade-join")
+            self.time.return_value += 1
+            self.assertEqual(world.run_due_timers("w")["count"], 1)
+            player = world.get_state("w", m.PLAYERS, role)
+            clock = world.get_state("w", m.META, "clock")["value"]
+            old_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
+            world = WorldRuntime(db)
+            world.install_world("w", make_world())
+            resumed = world.get_state("w", m.META, "clock")["value"]
+            self.assertEqual(resumed["sequence"], clock["sequence"])
+            self.assertEqual(resumed["last_tick_at"], clock["last_tick_at"])
+            self.assertNotEqual(resumed["epoch"], clock["epoch"])
+            self.assertEqual(world.get_state("w", m.PLAYERS, role), player)
+            self.assertEqual(world.get_timer("w", old_id)["status"], "cancelled")
+            next_id = f"grove.tick.{resumed['epoch']}.{resumed['sequence']}"
+            self.assertEqual(world.get_timer("w", next_id)["status"], "pending")
+            world.install_world("w", make_world())
+            self.assertEqual(world.get_state("w", m.META, "clock")["value"], resumed)
+            self.time.return_value += 100  # simulated service outage, not elapsed play
+            result = world.run_due_timers("w")
+            self.assertEqual(result["count"], 1)
+            self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"])
+            self.time.return_value += 1
+            self.assertEqual(world.run_due_timers("w")["count"], 1)
+            self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"]+1)
 
 if __name__ == "__main__":
     unittest.main()

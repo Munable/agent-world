@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 DEFAULT_BINARY = Path("/Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode")
 DEFAULT_WRAPPER = Path("/Users/mubin/.local/bin/opencode-env")
 DEFAULT_STORAGE = Path("/Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/connector")
-DEFAULT_MODEL = "opencode-go/longcat-2.5-preview-free"
+DEFAULT_MODEL = "opencode-go/qwen3.8-flash"
 AGENT = "shared-grove"
 BLUEPRINT_AGENT = "shared-grove-blueprint"
 EXECUTOR_AGENT = "shared-grove-executor"
@@ -41,6 +41,7 @@ AGENT_READ_FUNCTIONS = frozenset({"map.viewport", "grove.inspect", "grove.handbo
     "grove.rule_catalog", "grove.definition_read", "grove.control_status"})
 AGENT_WRITE_FUNCTIONS = frozenset({"grove.move", "grove.interact", "grove.build", "grove.generation_context",
     "grove.content_submit", "grove.content_release", "grove.definition_publish", "grove.rule_action"})
+_AGENT_ACTION_FUNCTIONS = frozenset({"grove.move", "grove.interact", "grove.build", "grove.rule_action"})
 MAX_SECONDS, MAX_WORLD_CALLS = 150, 16
 MAX_EXECUTION_REQUESTS = 8
 HOST_START_SECONDS = 45
@@ -85,8 +86,14 @@ HOST_INSTRUCTIONS = (
     "Do not claim opportunities, submit content or write world state in this "
     "explanation flow. If asked to create, briefly direct the person to the "
     "creation control. Chunk dimensions are exactly 16 by 16; viewport radius is "
-    "not a tile-array width. Do not reconstruct or guess terrain from omitted "
-    "tiles. Public content is not assigned ownership to a named player merely "
+    "not a tile-array width. Each chunk's terrain.rows encodes actual server tiles "
+    "using its legend: rows[y-origin.y][x-origin.x], with row/column 0..15 and "
+    "global origin=(cx*16,cy*16), including negative chunks. Unknown or missing "
+    "cells are '?'; do not guess them or infer that terrain proves an action is legal. "
+    "People and granted Agents use the same move/build APIs and inspected object "
+    "actions. Shallow water is wadeable; filling still requires an actual inspected "
+    "water_source object, not an invented fill action on every water tile. "
+    "Public content is not assigned ownership to a named player merely "
     "by its description. "
     "Use content_history only for the actual visible content_id and its supplied "
     "pagination cursor when provenance is useful. Historical contributions "
@@ -137,6 +144,12 @@ EXECUTION_INSTRUCTIONS = (
     "not complete inspections: omitted conditions or materials are not absent. "
     "Read grove_inspect for the relevant object and grove_rule_catalog when "
     "program shapes, rule actions or constraints are needed. Read "
+    "terrain.rows with each chunk's legend and global origin: row=y-origin.y, "
+    "column=x-origin.x, both 0..15; chunks can cross zero or have negative coordinates. "
+    "'?' is unknown or missing, never guessed terrain. Use the person's same "
+    "declared move/build tools and inspected object actions; terrain alone does "
+    "not establish distance, obstruction, protection or material eligibility. "
+    "Shallow water permits wading; fill requires an actual water_source object. Read "
     "grove_definition_read for a selected immutable definition's material identities "
     "and compiled input/output semantics. When combining several detail reads or "
     "inventory pages, pass the preceding response's observation_id as "
@@ -156,6 +169,20 @@ EXECUTION_INSTRUCTIONS = (
     "confirmed receipt and current readback, not your predicted outcome. "
     "If a write result is unknown, stop writing: only recovery of its original "
     "operation can settle it. Never retry with a new operation or new goal. "
+    "Ordinary action readback is compact: it retains you, your returned inventory "
+    "page and material totals, the selected object, and bounded changed/new nearby "
+    "objects relative to your explicitly referenced observation. Omitted objects "
+    "and terrain are not absent or unchanged. Use map_viewport when current scene "
+    "discovery is needed, and grove_inspect for a current object's action inputs; "
+    "the action summary does not supply or refresh an action preview. "
+    "An entity's pour_target_slot is the world's actual intended water destination, "
+    "not action availability. For pour with an explicit amount, reference the "
+    "observation containing that target's pour_target_slot: the connector supplies "
+    "the observed slot when omitted, and an explicit slot must match it. Do not "
+    "read again merely to refresh fuel or humidity versions for this fixed pour; "
+    "the world rechecks current water, capacity, distance and permissions without "
+    "changing the amount, source, target or slot. If no slot was presented, inspect "
+    "the target first; never derive a slot from its name, state or capabilities. "
     "The connector can continue this same goal in several bounded requests. "
     "The supplied execution_task contains the original goal, cumulative budgets, "
     "confirmed actions and the previous checkpoint. Continue from those actual "
@@ -191,6 +218,9 @@ CURRENT_FACTS_INSTRUCTIONS = (
     "下列现场事实是连接器在本次提问后刚用本人权限读取的。旧地图、旧对话与以前的回答不是当前事实；"
     "当前设施、模式、公共库存、背包与位置只依据这次事实或更新的真实读取。事实仅覆盖所列视野，"
     "省略的地形或物件不等于不存在。关闭的公共容器隐藏内容，空数组不能证明里面为空。"
+    "每块地形terrain.rows按legend解码；原点origin=(cx*16,cy*16)，行是y-origin.y、列是x-origin.x，"
+    "各为0..15，负坐标与跨地块也按全局坐标计算。?明确表示未知或缺失，不能猜测。"
+    "人和获准Agent共用移动、建造与物件动作；浅溪可涉水，取水仍须实际water_source物件。"
     "inventory 只是一页随身物件；inventory_total 是总数，inventory_next 非空时仍有后页，"
     "可按真实分页标识继续读取，不得把本页当全部背包。"
     "容纳格数不等于承载能力；装载与漂浮建议必须依据最新 simulation 的 local、total、supported、limit、"
@@ -339,6 +369,50 @@ def _companion_public_content_index(public):
     return index
 
 
+def _companion_chunk_terrain(chunk):
+    """Encode only actual tiles: at most 16 rows and 256 unknown indexes."""
+    if not isinstance(chunk, dict):
+        return chunk
+    compact = {key: deepcopy(value) for key, value in chunk.items()
+               if key not in {"tiles", "entity_ids", "player_ids", "tile_array_omitted"}}
+    coordinates_known = type(chunk.get("cx")) is int and type(chunk.get("cy")) is int
+    if coordinates_known:
+        origin = {"x": chunk["cx"] * 16, "y": chunk["cy"] * 16}
+        compact["bounds"] = {"min_x": origin["x"], "min_y": origin["y"],
+                             "max_x": origin["x"] + 15, "max_y": origin["y"] + 15}
+    compact["chunk_size"] = 16
+    # Current preflight/readback can pass through this projection twice. The
+    # first pass's authenticated encoding must survive the second unchanged.
+    if "tiles" not in chunk and isinstance(chunk.get("terrain"), dict):
+        return compact
+    tiles = chunk.get("tiles")
+    tiles = tiles if isinstance(tiles, list) else []
+    codes = {"grass": "G", "dirt": "D", "water": "W", "rock": "R"}
+    cells, unknown = [], []
+    for index in range(256):
+        tile = tiles[index] if index < len(tiles) else None
+        code = codes.get(tile, "?") if isinstance(tile, str) else "?"
+        cells.append(code)
+        if index < len(tiles) and code == "?":
+            unknown.append(index)
+    terrain = {"rows": ["".join(cells[start:start+16]) for start in range(0, 256, 16)],
+               "legend": {"G": "grass", "D": "dirt", "W": "water", "R": "rock", "?": "unknown_or_missing"},
+               "complete": coordinates_known and len(tiles) == 256 and not unknown,
+               "source_tile_count": len(tiles)}
+    if coordinates_known:
+        terrain["origin"] = origin
+    else:
+        terrain["coordinates_known"] = False
+    if len(tiles) < 256:
+        terrain["missing_index_range"] = [len(tiles), 255]
+    if len(tiles) > 256:
+        terrain["unprojected_extra_tile_count"] = len(tiles) - 256
+    if unknown:
+        terrain["unknown_indexes"] = unknown
+    compact["terrain"] = terrain
+    return compact
+
+
 def _companion_scene_index(scene):
     """An authorized discovery index; detailed physics remains an explicit read."""
     if not isinstance(scene, dict):
@@ -347,6 +421,16 @@ def _companion_scene_index(scene):
         "player", "players", "nearby_players", "clock", "bounds", "inventory_total",
         "inventory_next", "truncated", "region_entity_count", "selected_inspection", "observed_at",
         "world_results", "selected_inspection_unavailable") if key in scene}
+    if isinstance(scene.get("chunks"), list):
+        index["chunks"] = [_companion_chunk_terrain(chunk) for chunk in scene["chunks"]]
+    construction = scene.get("construction")
+    if isinstance(construction, dict):
+        index["construction"] = {key: deepcopy(construction[key]) for key in
+                                 ("material_totals", "unit", "radius_metric", "limits") if key in construction}
+        if isinstance(construction.get("recipes"), list):
+            index["construction"]["recipes"] = [{key: deepcopy(recipe[key]) for key in
+                ("id", "name", "terrain", "cost", "material_cost_u", "unit", "use") if key in recipe}
+                for recipe in construction["recipes"] if isinstance(recipe, dict)]
     for field in ("entities", "inventory", "nearby_entities", "resource_nodes", "water_sources"):
         if isinstance(scene.get(field), list):
             rows = []
@@ -357,7 +441,8 @@ def _companion_scene_index(scene):
                 row = {key: deepcopy(entity[key]) for key in (
                     "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
                     "entity_ref", "material", "capabilities", "container", "lifecycle", "created_by",
-                    "source", "barrier_active", "contents_visibility", "content_summary", "matter_unit") if key in entity}
+                    "source", "barrier_active", "contents_visibility", "content_summary", "matter_unit",
+                    "pour_target_slot") if key in entity}
                 # Viewport matter is an authorized quantity summary, not a list
                 # of transferable lots. Never manufacture lot IDs from it.
                 if isinstance(entity.get("matter"), list):
@@ -408,7 +493,8 @@ def _companion_selected_state_summary(inspection):
         "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
         "material", "materials", "matter", "matter_unit", "material_quantity", "simulation",
         "state", "mechanical", "creative", "capabilities", "container", "lifecycle",
-        "barrier_active", "contents_visibility", "content_summary", "relations", "created_by", "source")
+        "barrier_active", "contents_visibility", "content_summary", "relations", "created_by", "source",
+        "pour_target_slot")
         if key in entity}
     summary = {"entity": state, "projection": {
         "scope": "selected_object_state",
@@ -537,16 +623,6 @@ def companion_projection(function: str, payload: dict) -> dict:
                         references[field] = "#/" + field
                         entity.pop(field)
         return result
-    def compact_chunk(chunk):
-        if not isinstance(chunk, dict):
-            return chunk
-        compact = {key: val for key, val in chunk.items() if key not in {"tiles", "entity_ids", "player_ids"}}
-        if isinstance(chunk.get("cx"), int) and isinstance(chunk.get("cy"), int):
-            compact["bounds"] = {"min_x": chunk["cx"] * 16, "min_y": chunk["cy"] * 16,
-                                 "max_x": (chunk["cx"] + 1) * 16 - 1, "max_y": (chunk["cy"] + 1) * 16 - 1}
-        compact["chunk_size"] = 16
-        compact["tile_array_omitted"] = "256 row-major cells omitted from this companion projection; do not guess terrain."
-        return compact
     def compact_entity(entity):
         if not isinstance(entity, dict):
             return entity
@@ -573,7 +649,7 @@ def companion_projection(function: str, payload: dict) -> dict:
         if not isinstance(scene, dict):
             return scene
         if isinstance(scene.get("chunks"), list):
-            scene["chunks"] = [compact_chunk(chunk) for chunk in scene["chunks"]]
+            scene["chunks"] = [_companion_chunk_terrain(chunk) for chunk in scene["chunks"]]
         for field in ("entities", "inventory"):
             if isinstance(scene.get(field), list):
                 scene[field] = [compact_entity(entity) for entity in scene[field]]
@@ -653,7 +729,7 @@ def companion_projection(function: str, payload: dict) -> dict:
             facts["entity_projection"] = (
                 "entities is the union of actual region and nearby snapshots. Its first region_entity_count "
                 "entries are the original region scope; nearby_entities references the actual radius-8 scope. "
-                "Same ID with different state/version remains separate. Omitted terrain arrays and "
+                "Same ID with different state/version remains separate. Unknown/missing terrain cells and "
                 "out-of-scope objects are not empty or absent. References are relative to the full tool response.")
         if facts.get("public_content") == value.get("public_content"):
             facts.pop("public_content", None)
@@ -761,6 +837,96 @@ def companion_projection(function: str, payload: dict) -> dict:
     return result
 
 
+def _companion_action_projection(payload, *, base_id=None, versions=None, entity_ids=(), source=None):
+    """Defer repeated discovery; only retained authorized rows reach binding."""
+    readback = payload.get("execution_readback")
+    if not isinstance(readback, dict):
+        return payload
+    result = deepcopy(payload)
+    value = result.get("result", result)
+    if not isinstance(value, dict):
+        return result
+    known = versions.get("entity", {}) if isinstance(versions, dict) else {}
+    relevant = {identity for identity in entity_ids if isinstance(identity, str)}
+    direct = value.get("entities", [])
+    direct = direct if isinstance(direct, list) else []
+    for entity in [value.get("entity"), *direct]:
+        if isinstance(entity, dict) and isinstance(entity.get("id"), str):
+            relevant.add(entity["id"])
+    selected = readback.get("selected_inspection", {})
+    if isinstance(selected, dict) and isinstance(selected.get("entity"), dict):
+        relevant.add(selected["entity"].get("id"))
+
+    compact = {key: deepcopy(readback[key]) for key in (
+        "player", "clock", "bounds", "inventory", "inventory_total", "inventory_next", "truncated",
+        "observed_at", "selected_inspection", "selected_inspection_unavailable", "world_results") if key in readback}
+    construction = readback.get("construction")
+    if isinstance(construction, dict):
+        compact["construction"] = {key: deepcopy(construction[key]) for key in ("material_totals", "unit")
+                                   if key in construction}
+    rows = readback.get("entities", [])
+    rows = rows if isinstance(rows, list) else []
+    changed = [row for row in rows if isinstance(row, dict) and
+               (row.get("id") not in known or known[row["id"]] != row.get("version"))]
+    discovery_limit = 8
+    discovery = [row for row in changed if row.get("id") not in relevant]
+    retained = [row for row in rows if isinstance(row, dict) and
+                (row.get("id") in relevant or row in discovery[:discovery_limit])]
+    compact["entities"] = deepcopy(retained)
+    for field in ("players", "nearby_players"):
+        if isinstance(readback.get(field), list):
+            compact[field] = [deepcopy(row) for row in readback[field]
+                              if isinstance(row, dict) and row.get("id") in relevant]
+
+    # Current nearby history is useful context, not proof of this action's cause.
+    raw = source.get("execution_readback", {}) if isinstance(source, dict) else {}
+    changes = raw.get("changes", []) if isinstance(raw, dict) else []
+    changes = changes if isinstance(changes, list) else []
+    if changes:
+        compact["changes"] = deepcopy(changes[-6:])
+    compact["projection"] = {"scope": "authorized_scene_index", "mode": "action_readback_delta",
+        "base_observation_id": base_id, "complete_scene": False,
+        "scene_entity_count": len(rows), "changed_or_new_entity_count": len(changed),
+        "retained_entity_count": len(retained),
+        "omitted_changed_or_new_entity_count": max(0, len(discovery) - discovery_limit),
+        "omitted_recent_change_count": max(0, len(changes) - 6),
+        "discovery_limit": discovery_limit,
+        "omitted_sections": ["chunk terrain", "unchanged and excess nearby discovery rows",
+                             "other players", "public content/history", "construction recipes"],
+        "meaning": "Current actor, actual returned inventory page/material totals, selected state and "
+                   "bounded changed/new authorized entity summaries relative to the referenced observation. "
+                   "This is not a complete scene or action preview. Omission proves neither absence nor "
+                   "unchanged state; retained summaries are not transferable lot choices. Recent changes "
+                   "are nearby history, not attribution of this operation. Use map_viewport for discovery "
+                   "and grove_inspect for exact current action inputs/previews; chain base_observation_id "
+                   "to this response when extending it."}
+    result["execution_readback"] = compact
+
+    viewport = value.get("viewport")
+    if isinstance(viewport, dict):
+        metadata = {}
+        for field in ("bounds", "clock", "truncated"):
+            if field in viewport:
+                metadata[field] = deepcopy(viewport[field])
+            elif viewport.get("field_references", {}).get(field) == "#/execution_readback/" + field and field in readback:
+                metadata[field] = deepcopy(readback[field])
+        value["viewport"] = metadata | {"projection": {"scope": "operation_viewport_deferred",
+            "meaning": "This operation's direct result and changes remain above. Its expanded viewport "
+                       "is deferred; execution_readback is a later compact read, not this operation's snapshot."}}
+    # Existing exact-equality references must not point at a shifted delta row.
+    public = value.get("public_facts")
+    if isinstance(public, dict) and isinstance(public.get("entities"), list):
+        for index, row in enumerate(public["entities"]):
+            reference = row.get("entity_ref") if isinstance(row, dict) else None
+            if isinstance(reference, str) and reference.startswith("#/execution_readback/entities/"):
+                suffix = reference.rsplit("/", 1)[-1]
+                if suffix.isdigit() and int(suffix) < len(rows):
+                    public["entities"][index] = deepcopy(rows[int(suffix)])
+        public.pop("readback_projection", None)
+    result["read_requests"] = [{"tool": "map_viewport", "arguments": {}}]
+    return result
+
+
 def _agent_tool_text(payload):
     """Lossless JSON without deep indentation or oversized single lines."""
     def render(value, depth=0):
@@ -841,6 +1007,38 @@ def _bounded_agent_projection(function, payload):
         index = _companion_inspection_index(payload)
         if index is not None and _agent_tool_text_fits(_agent_tool_text(index)):
             return index
+    if function == "map.viewport":
+        scene = payload.get("result", payload)
+        if isinstance(scene, dict):
+            index = _companion_scene_index(scene)
+            projected = ({key: deepcopy(payload[key]) for key in
+                ("world_id", "function_id", "function_version", "snapshot_seq") if key in payload}
+                | {"result": index}) if "result" in payload else index
+            index["projection"].update(reason="ToolOutputLimit", complete_scene=False,
+                omitted_rows={}, read_request={"tool": "map_viewport", "arguments": {"radius": 1}},
+                meaning=index["projection"]["meaning"] + " Complete encoded terrain is retained when supplied; "
+                    "any omitted discovery rows are counted below. Use a smaller viewport centered on a "
+                    "nearby coordinate for omitted public objects, or grove_inspect for a retained actual ID.")
+            # A dense scene must not turn four tiny encoded chunks into a
+            # failed read. Bind only rows actually shown; no hidden versions.
+            for field in ("entities", "nearby_entities", "resource_nodes", "water_sources",
+                          "players", "nearby_players", "inventory"):
+                rows = index.get(field)
+                while isinstance(rows, list) and rows and not _agent_tool_text_fits(_agent_tool_text(projected)):
+                    if field == "inventory" and len(rows) == 1:
+                        break
+                    rows.pop()
+                    omitted = index["projection"]["omitted_rows"]
+                    omitted[field] = omitted.get(field, 0) + 1
+                    index["truncated"] = True
+                    if field == "inventory":
+                        # Never advance past a withheld inventory row.
+                        index["inventory_next"] = rows[-1].get("id") if isinstance(rows[-1], dict) else None
+            if _agent_tool_text_fits(_agent_tool_text(projected)):
+                return projected
+        raise ConnectorError("ToolOutputTooLarge", "The current scene exceeds the tool output limit. "
+            "Its omitted state was not provided or bound. Read map_viewport with a smaller radius "
+            "and nearby center, or inspect a known actual object ID; do not guess missing terrain.", 413)
     if function not in AGENT_WRITE_FUNCTIONS:
         raise ConnectorError("ToolOutputTooLarge", "The complete world read exceeds the native tool output limit. "
             "Its expanded content and action previews were not provided. For grove_inspect, specify its optional "
@@ -869,7 +1067,7 @@ def _bounded_agent_projection(function, payload):
         selected = readback.get("selected_inspection", {})
         entity = selected.get("entity") if isinstance(selected, dict) else None
         if isinstance(entity, dict):
-            identity = {key: deepcopy(entity[key]) for key in ("id", "version") if key in entity}
+            identity = {key: deepcopy(entity[key]) for key in ("id", "version", "pour_target_slot") if key in entity}
             compact["selected_inspection"] = {"entity": identity,
                 "projection": {"scope": "selected_identity_only", "state_and_previews_included": False}}
             if isinstance(identity.get("id"), str):
@@ -959,7 +1157,7 @@ def public_world_error_details(value):
         return None
     source = value.get("action_precondition")
     if not isinstance(source, dict):
-        return None
+        source = {}
     safe = {}
     for key in ("subject", "entity_id", "condition", "metric", "reason"):
         if isinstance(source.get(key), str) and len(source[key]) <= 180:
@@ -978,7 +1176,23 @@ def public_world_error_details(value):
                 safe[key] = dict(location)
     else:
         safe.pop("actual_distance", None)
-    return {"action_precondition": safe} if safe else None
+    result = {"action_precondition": safe} if safe else {}
+    transfer = value.get("water_transfer")
+    if isinstance(transfer, dict):
+        water = {}
+        for key in ("source_id", "target_id", "meaning"):
+            if isinstance(transfer.get(key), str) and len(transfer[key]) <= 180:
+                water[key] = transfer[key]
+        if transfer.get("target_slot") in ("contained", "surface", "absorbed"):
+            water["target_slot"] = transfer["target_slot"]
+        for key in ("requested", "source_remaining", "target_remaining_capacity", "maximum"):
+            if type(transfer.get(key)) is int and 0 <= transfer[key] <= 1_000_000:
+                water[key] = transfer[key]
+        if transfer.get("unit") == "u":
+            water["unit"] = "u"
+        if water:
+            result["water_transfer"] = water
+    return result or None
 
 
 class ConnectorError(Exception):
@@ -1049,6 +1263,10 @@ class GroveSession:
         self.worker: asyncio.Task | None = None
         self.event_worker: asyncio.Task | None = None
         self.automatic_worker: asyncio.Task | None = None
+        self.reclaim_task: asyncio.Task | None = None
+        self.reclaim_ready: asyncio.Future | None = None
+        self.disconnecting = False
+        self.disconnect_lock = asyncio.Lock()
         self.observation_lock = asyncio.Lock()
         self.execution_write_lock = asyncio.Lock()
         self.automatic_wakeup = asyncio.Event()
@@ -1235,7 +1453,8 @@ class GroveSession:
             "text": self.text, "messages": self.messages[-30:], "progress": self.progress[-20:],
             "automatic": dict(self.automatic) | {"remaining": max(0, self.automatic["max_count"] - self.automatic["count"]),
                 "pending_changes": len(self.pending_changes)}, "error": self.error, "role_id": self.role_id,
-            "unknown_operations": len(self.unknown), "available_models": self.available_models,
+            "unknown_operations": len(self.unknown), "reclaim_in_progress": self.reclaim_in_progress,
+            "available_models": self.available_models,
             "model_metadata": self.model_metadata,
             "initialization": self.initialization[-8:],
             "session_id": self.session_id, "message_id": self.last_completion.get("message_id"),
@@ -2134,6 +2353,7 @@ class GroveSession:
 
     def schedule(self, text: str, *, coalesce: bool = False, automatic: bool = False,
                  mode: str = "prompt", kind: str | None = None, context_entity_id: str | None = None):
+        self.ensure_not_reclaiming()
         if automatic and (not self.automatic["enabled"] or self.automatic["count"] >= self.automatic["max_count"]):
             return
         if self.worker and not self.worker.done():
@@ -2149,6 +2369,8 @@ class GroveSession:
     async def run_turn(self, text: str, *, automatic: bool = False, mode: str = "prompt", kind: str | None = None,
                        context_entity_id: str | None = None):
         try:
+            if self.reclaim_in_progress:
+                raise asyncio.CancelledError()
             if automatic:
                 if not self.automatic["enabled"] or self.automatic["count"] >= self.automatic["max_count"]:
                     return
@@ -2179,6 +2401,8 @@ class GroveSession:
 
     async def turn(self, text: str, *, initial: bool = False, display_text: str | None = None,
                    context_entity_id: str | None = None, executing: bool = False):
+        if self.reclaim_in_progress:
+            raise asyncio.CancelledError()
         if self.unknown:
             raise ConnectorError("UnknownWrite", "Recover the previous world write first.", 409)
         if executing and self.cancelled:
@@ -2642,6 +2866,8 @@ class GroveSession:
         self.remember()
 
     async def blueprint_request(self, payload: dict, *, correction: bool, timeout: float) -> str:
+        if self.cancelled or self.reclaim_in_progress:
+            raise asyncio.CancelledError()
         if (not self.blueprint_session_id or not self.opportunity or
                 self.blueprint_opportunity_id != self.opportunity["opportunity_id"]):
             raise ConnectorError("BlueprintSessionRequired", "创作会话必须对应本轮原生成机会。", 409)
@@ -2779,6 +3005,8 @@ class GroveSession:
             raise
 
     async def generate(self, text: str, *, kind: str | None = None, explain_unavailable: bool = False):
+        if self.reclaim_in_progress:
+            raise asyncio.CancelledError()
         if self.unknown:
             raise ConnectorError("UnknownWrite", "先核对原世界操作回执，不能生成替代内容。", 409)
         if self.generation.get("status") == "published_readback_pending":
@@ -3173,7 +3401,27 @@ class GroveSession:
                         json.dumps(facts, ensure_ascii=False, separators=(",", ":")),
                         display_text="附近发生材料变化，伙伴开始解释可亲手尝试的选择。")
 
-    async def cancel(self):
+    @property
+    def reclaim_in_progress(self):
+        return self.disconnecting or bool(self.reclaim_task and not self.reclaim_task.done())
+
+    def ensure_not_reclaiming(self):
+        if self.reclaim_in_progress:
+            raise ConnectorError("ReclaimBusy", "原请求正在收尾；世界行动权已按当前状态处理，先等原收尾完成再启动伙伴任务。", 409)
+
+    async def cancel(self, *, background: bool = False):
+        # All callers join the same task. Cancelling an HTTP waiter must not
+        # abandon the original receipt journal or reopen task admission.
+        if self.reclaim_task and not self.reclaim_task.done():
+            task, ready = self.reclaim_task, self.reclaim_ready
+        else:
+            self._close_reclaim_admission()
+            ready = asyncio.get_running_loop().create_future()
+            self.reclaim_ready = ready
+            task = self.reclaim_task = asyncio.create_task(self._finish_reclaim(ready, self.worker))
+        await asyncio.shield(ready if background else task)
+
+    def _close_reclaim_admission(self):
         self.cancelled, self.pending = True, None
         self.active_execution = False
         if self.execution.get("task_id"):
@@ -3183,38 +3431,8 @@ class GroveSession:
         self.automatic["enabled"], self.automatic["next_at"] = False, None
         if self.automatic_worker:
             self.automatic_worker.cancel()
-        # Stop admission first, revoke immediately, then read original receipts.
-        # Reclaim does not replay or invent an operation whose result is unknown.
-        revoke_error = None
-        try:
-            await self.revoke_execution()
-        except ConnectorError as exc:
-            revoke_error = exc
-        if self.unknown:
-            try:
-                await self.recover_receipts(replay=False)
-                # A late original grant receipt can become known during reclaim.
-                await self.revoke_execution()
-                revoke_error = None
-            except ConnectorError as exc:
-                revoke_error = exc
-        if self.host_url:
-            for session_id in {self.session_id, self.blueprint_session_id} - {""}:
-                with contextlib.suppress(Exception):
-                    await self.host("POST", "/session/" + quote(session_id, safe="") + "/abort", {}, timeout=5)
-        if self.worker and not self.worker.done():
-            self.worker.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.worker
-        if self.execution.get("task_id"):
-            await self.settle_execution_request()
-            if self.unknown:
-                with contextlib.suppress(ConnectorError):
-                    await self.recover_receipts(replay=False)
-                    await self.revoke_execution()
-                    revoke_error = None
-        if not self.unknown:
-            await self.release_opportunity()
+
+    def _record_reclaimed_state(self, revoke_error=None, *, finished=False):
         self.status = "paused"
         if self.execution.get("goal") and self.execution.get("status") != "completed":
             self.execution["status"] = "unknown" if self.unknown or revoke_error else "paused"
@@ -3222,19 +3440,86 @@ class GroveSession:
             if revoke_error:
                 self.execution["error"] = {"code": revoke_error.code,
                     "message": "收回或原操作结果尚未确认；后续本机动作已停止，请恢复后核对。"}
-            self.execution["resume_allowed"] = self.execution_can_resume()
-        self.note("cancelled", "伙伴已停止；你的世界位置和物件保持现状")
+            self.execution["resume_allowed"] = finished and self.execution_can_resume()
         self.remember()
 
+    async def _finish_reclaim(self, ready, worker):
+        try:
+            # Close admission, revoke, then read original receipts. This short
+            # stage never waits for the native model's abort or idle status.
+            revoke_error = None
+            try:
+                await self.revoke_execution()
+            except ConnectorError as exc:
+                revoke_error = exc
+            if self.unknown:
+                try:
+                    await self.recover_receipts(replay=False)
+                    # An original grant may have landed after the first revoke.
+                    await self.revoke_execution()
+                    revoke_error = None
+                except ConnectorError as exc:
+                    revoke_error = exc
+            self._record_reclaimed_state(revoke_error)
+            ready.set_result(None)
+
+            if self.host_url:
+                for session_id in {self.session_id, self.blueprint_session_id} - {""}:
+                    with contextlib.suppress(Exception):
+                        await self.host("POST", "/session/" + quote(session_id, safe="") + "/abort", {}, timeout=5)
+            if worker and not worker.done():
+                worker.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await worker
+            if self.execution.get("task_id"):
+                await self.settle_execution_request()
+                if self.unknown:
+                    with contextlib.suppress(ConnectorError):
+                        await self.recover_receipts(replay=False)
+                        await self.revoke_execution()
+                        revoke_error = None
+            if not self.unknown:
+                await self.release_opportunity()
+            self._record_reclaimed_state(revoke_error, finished=True)
+            self.note("cancelled", "伙伴已停止；你的世界位置和物件保持现状")
+        except (Exception, asyncio.CancelledError) as exc:
+            # A detached task always records its failure. World authority and
+            # unknown operations remain truthful even if native cleanup fails.
+            diagnostic = {"code": exc.code if isinstance(exc, ConnectorError) else "ReclaimInterrupted",
+                "message": exc.message if isinstance(exc, ConnectorError) else
+                    "原请求收尾未完成；本机后续动作已停止，先恢复原连接和回执。"}
+            self.status, self.error = "error", diagnostic
+            if self.execution.get("goal"):
+                self.execution.update(status="unknown" if self.unknown or self.delegation or
+                    self.execution.get("delegation_active") else "paused", error=diagnostic,
+                    request_status="unsettled", resume_allowed=False)
+            self.note("reclaim_failed", diagnostic["message"])
+        finally:
+            try:
+                self.remember()
+            except Exception:
+                self.status = "error"
+                self.error = {"code": "ReclaimPersistenceFailed",
+                    "message": "收回状态未能保存；原操作记录仍需核对，请恢复原连接。"}
+                self.execution.update(request_status="unsettled", resume_allowed=False)
+            finally:
+                if not ready.done():
+                    ready.set_result(None)
+
     async def disconnect(self):
-        await self.cancel()
-        if self.event_worker:
-            self.event_worker.cancel()
-        await self.stop_host()
-        self.capability = secrets.token_urlsafe(40)
-        self.bearer = ""
-        self.host_url, self.status = "", "disconnected"
-        self.remember()
+        async with self.disconnect_lock:
+            self.disconnecting = True
+            try:
+                await self.cancel()
+                if self.event_worker:
+                    self.event_worker.cancel()
+                await self.stop_host()
+                self.capability = secrets.token_urlsafe(40)
+                self.bearer = ""
+                self.host_url, self.status = "", "disconnected"
+                self.remember()
+            finally:
+                self.disconnecting = False
 
     async def stop_host(self):
         if self.event_worker:
@@ -3266,21 +3551,24 @@ class GroveSession:
             raise ConnectorError("ObservationRequired", "请先读取世界并引用返回的observation_id；当前观察标识未知或已因服务重启失效。", 409)
         return deepcopy(self._agent_observations[observation_id])
 
-    def present_agent_result(self, function, payload, *, base_id=None, preflight=False):
+    def present_agent_result(self, function, payload, *, base_id=None, preflight=False, action_entity_ids=()):
         """Create a new fixed bundle solely from this presented response.
 
         No invoke/UI/recovery path calls this. Another parallel tool's unseen
         response cannot alter the bundle selected by an already submitted write.
         """
         result = deepcopy(companion_projection(function, payload))
+        bundle = (self.agent_observation(base_id) if base_id is not None else
+                  {"versions": {kind: {} for kind in ("player", "entity", "opportunity", "content")},
+                   "continuation_bases": {}, "pour_target_slots": {}})
         if not preflight:
+            if function in _AGENT_ACTION_FUNCTIONS:
+                result = _companion_action_projection(result, base_id=base_id, versions=bundle["versions"],
+                    entity_ids=action_entity_ids, source=payload)
             # This is the exact object both MCP representations will deliver.
             # User-message preflights are not native tool output; their complete
             # selected previews have a different transport/input boundary.
             result = _bounded_agent_projection(function, result)
-        bundle = (self.agent_observation(base_id) if base_id is not None else
-                  {"versions": {kind: {} for kind in ("player", "entity", "opportunity", "content")},
-                   "continuation_bases": {}})
 
         def remember(kind, value, id_key="id", version_key="version"):
             if isinstance(value, dict) and isinstance(value.get(id_key), str) and type(value.get(version_key)) is int and value[version_key] > 0:
@@ -3321,7 +3609,17 @@ class GroveSession:
 
         def entity(value):
             if isinstance(value, dict):
+                identity, version = value.get("id"), value.get("version")
+                previous_version = bundle["versions"]["entity"].get(identity) if isinstance(identity, str) else None
                 remember("entity", value)
+                if isinstance(identity, str) and type(version) is int and version > 0:
+                    slots = bundle.setdefault("pour_target_slots", {})
+                    if value.get("pour_target_slot") in ("contained", "surface"):
+                        slots[identity] = value["pour_target_slot"]
+                    elif "pour_target_slot" in value or previous_version != version:
+                        # A newer identity-only projection cannot silently
+                        # upgrade an older action basis it did not present.
+                        slots.pop(identity, None)
                 options(value.get("action_options"), target=value.get("id"))
 
         def content(value):
@@ -3386,6 +3684,15 @@ class GroveSession:
         bundle = self.agent_observation(observation_id)
         root = deepcopy(arguments)
         versions = bundle["versions"]
+        if (function == "grove.interact" and root.get("action") == "pour" and
+                ("amount" in root or "target_slot" in root)):
+            slot = bundle.get("pour_target_slots", {}).get(root.get("target_id"))
+            if slot not in ("contained", "surface"):
+                raise ConnectorError("ObservedActionRequired", "此观察未呈现目标的pour_target_slot；请先检查目标并引用返回的observation_id，不能推导倒水去向。", 409)
+            if "target_slot" in root and root["target_slot"] != slot:
+                raise ConnectorError("ObservedActionMismatch", "倒水target_slot与此观察中呈现的原去向不符；不会换槽或重新绑定。", 409)
+            if "amount" in root:
+                root.setdefault("target_slot", slot)
 
         def missing(subject, identity):
             raise ConnectorError("ObservedVersionRequired", f"此观察中没有{subject} {identity or ''}的版本；请先读取该对象，并引用新返回的observation_id。", 409)
@@ -3491,6 +3798,16 @@ class GroveSession:
                 schema["required"].append("observation_id")
                 description += " Snapshot guards are bound from observation_id; terms_version remains explicit. " \
                     "Store/attach requires this observation's complete matching candidate.preview; its exact combination fingerprint is bound and rechecked by the world."
+                if function == "grove.interact":
+                    pour_binding = ("For pour with explicit amount, omitted target_slot is supplied from the "
+                        "target's presented pour_target_slot in the selected observation_id. An explicit pour "
+                        "slot must match that fixed observation. The slot is not availability: the world "
+                        "rechecks current legality without changing the original amount/source/target/slot. "
+                        "Do not reread merely to refresh fuel/humidity versions; inspect only if the slot "
+                        "was not presented. Other actions retain their declared slot semantics.")
+                    description += " " + pour_binding
+                    if "target_slot" in schema.get("properties", {}):
+                        schema["properties"]["target_slot"]["description"] = pour_binding
             else:
                 schema.setdefault("properties", {})["base_observation_id"] = {
                     "type": "string", "minLength": 1, "maxLength": 100,
@@ -3589,7 +3906,8 @@ class GroveSession:
         projection["execution_readback"] = facts
         projection["execution_control"] = {key: self.execution.get(key) for key in
             ("actions_count", "max_actions", "remaining_actions", "delegation_active", "grant_version")}
-        return self.present_agent_result(function, projection, base_id=observation_id)
+        return self.present_agent_result(function, projection, base_id=observation_id,
+            action_entity_ids=[arguments.get(key) for key in ("target_id", "item_id", "other_id")])
 
     def execution_world_results(self, facts: dict | None, *, establish_reference=False):
         """Report the selected world's own verdict, without judging the goal text."""
@@ -3729,6 +4047,7 @@ class ConnectorManager:
                 self.sessions[role] = GroveSession(self, identity, bearer, str(body.get("name", "旅人"))[:40],
                                                  str(body.get("model") or DEFAULT_MODEL))
             session = self.sessions[role]
+            session.ensure_not_reclaiming()
             # Rotate only this user's credential; no identity/session substitution.
             session.bearer, session.identity = bearer, identity
             if body.get("name"):
@@ -3824,6 +4143,7 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
         if not isinstance(body, dict):
             raise ConnectorError("InvalidArguments", "Expected a connector options object.")
         session = await manager.bind(bearer_from(request, body), body)
+        session.ensure_not_reclaiming()
         # Entry UI first attempts recovery, then explicitly starts with its chosen
         # model. A new identity has no prior gate to recover and does no inference.
         if request.url.path.endswith("/recover") and not (session.world_read and session.first_response_success):
@@ -3847,6 +4167,7 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
     async def prompt(request: Request):
         session = manager.authorized(bearer_from(request))
         body = await request.json()
+        session.ensure_not_reclaiming()
         if not isinstance(body, dict) or set(body) - {"text", "intent", "preferences", "context_entity_id"}:
             raise ConnectorError("InvalidArguments", "Expected a companion text message.")
         text = body.get("text", "读取当前可见世界，简短说明值得注意的变化。")
@@ -3869,13 +4190,16 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
         session = manager.authorized(bearer_from(request))
         # This updates only the authenticated user's own profile. An active
         # request retains its existing snapshot; later requests use this value.
-        session.configure_private_context(await request.json())
+        body = await request.json()
+        session.ensure_not_reclaiming()
+        session.configure_private_context(body)
         return session.state()
 
     @app.post("/connector/execute")
     async def execute(request: Request):
         session = manager.authorized(bearer_from(request))
         body = await request.json()
+        session.ensure_not_reclaiming()
         if not isinstance(body, dict) or set(body) - {"goal", "max_actions", "max_requests", "context_entity_id", "compact_history"}:
             raise ConnectorError("InvalidArguments", "Expected an explicit goal and bounded action grant.")
         goal, maximum = body.get("goal"), body.get("max_actions", 32)
@@ -3939,6 +4263,7 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
     async def execute_resume(request: Request):
         session = manager.authorized(bearer_from(request))
         body = await request.json()
+        session.ensure_not_reclaiming()
         if (not isinstance(body, dict) or "task_id" not in body or set(body) - {"task_id", "compact_history", "additional_requests"} or
                 not isinstance(body["task_id"], str) or body["task_id"] != session.execution.get("task_id")):
             raise ConnectorError("InvalidTask", "接续需要当前原任务标识；可明确追加模型请求，不接受替换目标或动作额度。")
@@ -3984,9 +4309,10 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
     async def reclaim(request: Request):
         session = manager.authorized(bearer_from(request))
         body = await request.json()
-        if not isinstance(body, dict) or body:
-            raise ConnectorError("InvalidArguments", "收回控制不接受新的目标或操作。")
-        await session.cancel()
+        if (not isinstance(body, dict) or set(body) - {"background"} or
+                not isinstance(body.get("background", False), bool)):
+            raise ConnectorError("InvalidArguments", "收回控制只接受 background 布尔选项，不接受新的目标或操作。")
+        await session.cancel(background=body.get("background", False))
         return session.state()
 
     @app.post("/connector/trigger")
@@ -4011,6 +4337,7 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
     async def generate(request: Request):
         session = manager.authorized(bearer_from(request))
         body = await request.json()
+        session.ensure_not_reclaiming()
         if not isinstance(body, dict) or set(body) - {"text", "kind", "intent", "preferences"}:
             raise ConnectorError("InvalidArguments", "Expected a natural creation goal and optional kind.")
         text, kind = body.get("text"), body.get("kind")
@@ -4041,8 +4368,10 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
     @app.post("/connector/automatic")
     async def automatic(request: Request):
         session = manager.authorized(bearer_from(request))
+        body = await request.json()
+        session.ensure_not_reclaiming()
         was_running_automatically = session.active_automatic
-        session.configure_automatic(await request.json())
+        session.configure_automatic(body)
         if session.entered and session.automatic["enabled"] and session.needs_observation_baseline:
             # Establish the cursor before the person can act after enabling.
             # The newly scheduled loop must not repeat a stale baseline later.

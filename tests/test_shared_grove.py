@@ -199,6 +199,115 @@ class SharedGroveTests(unittest.TestCase):
         self.act("B", "fill", source, bottle, 7)
         self.assertEqual(self.entity(source)["state"]["water_remaining"], before-7)
 
+    def test_pour_surface_offer_caps_to_remaining_room_and_default_extinguishes(self):
+        wood = self.item("A", "木柴")["id"]
+        bottle = self.item("A", "水壶")["id"]
+        self.walk("A", 5, -2)
+        self.act("A", "drop", item=wood)
+        self.act("A", "ignite", wood, self.item("A", "打火石")["id"])
+        self.ticks(3)  # One ordinary combustion settlement, not 3 burns.
+        result = self.act("A", "pour", wood, bottle, 18)
+        self.assertIn("本次燃烧已熄灭。", result["changes"][0])
+        self.assertFalse(self.entity(wood)["state"]["burning"])
+        seen = self.world.query_function("u", "grove.inspect", self.roles["A"], {"entity_id": wood})["result"]
+        option = next(option for option in seen["action_options"] if option["action"] == "pour")
+        self.assertEqual(option["input"]["quantity"]["max"], 1)
+        before = self.quantity(bottle, "water")
+        with self.assertRaises(RuleViolation):
+            self.act("A", "pour", wood, bottle, 2)
+        self.assertEqual(self.quantity(bottle, "water"), before)
+        result = self.act("A", "pour", wood, bottle)
+        self.assertNotIn("本次燃烧已熄灭。", result["changes"][0])
+        self.assertEqual(self.quantity(bottle, "water"), before-1)
+        self.assertEqual(self.quantity(wood, "water", "surface"), 19)
+        seen = self.world.query_function("u", "grove.inspect", self.roles["A"], {"entity_id": wood})["result"]
+        option = next(option for option in seen["action_options"] if option["action"] == "pour")
+        self.assertFalse(option["available"])
+        self.assertNotIn("quantity", option["input"])
+
+    def test_explicit_pour_revalidates_fixed_intent_after_physics_without_double_debit(self):
+        wood = self.item("A", "木柴")["id"]
+        bottle = self.item("A", "水壶")["id"]
+        cloth = self.item("A", "干布")["id"]
+        self.walk("A", 5, -2)
+        self.act("A", "drop", item=wood)
+        self.act("A", "ignite", wood, self.item("A", "打火石")["id"])
+        original = {"action": "pour", "target_id": wood, "item_id": bottle,
+            "amount": 5, "target_slot": "surface",
+            "expected_target_version": self.entity(wood)["version"],
+            "expected_item_version": self.entity(bottle)["version"]}
+        # A previous water use and a normal fuel settlement change both versions.
+        # The named 5u intent is still legal, and does not need a new target.
+        self.act("A", "pour", cloth, bottle, 1)
+        self.ticks(2)
+        self.assertEqual(self.quantity(wood, "wood"), 40)
+        seen = self.world.query_function("u", "grove.inspect", self.roles["A"], {"entity_id": wood})["result"]
+        self.assertEqual(seen["entity"]["simulation"]["combustion"]["cadence_ticks"], 3)
+        self.assertEqual(seen["entity"]["simulation"]["combustion"]["ticks_until_next_consumption"], 1)
+        self.ticks(1)
+        self.assertEqual(self.quantity(wood, "wood"), 38)
+        original["expected_player_version"] = self.view()["player"]["version"]
+        receipt = self.call("A", "grove.interact", original, "fixed-pour")
+        self.assertFalse(self.entity(wood)["state"]["burning"])
+        self.assertEqual(self.quantity(bottle, "water"), 14)
+        self.assertEqual(self.call("A", "grove.interact", original, "fixed-pour"), receipt)
+        self.assertEqual(self.quantity(bottle, "water"), 14)
+        # No amount adjustment when the source cannot satisfy the original intent.
+        args = {**original, "amount": 15, "expected_player_version": self.view()["player"]["version"]}
+        with self.assertRaises(RuleViolation) as denied:
+            self.call("A", "grove.interact", args)
+        self.assertEqual(denied.exception.details["water_transfer"]["source_remaining"], 14)
+        self.assertEqual(denied.exception.details["water_transfer"]["requested"], 15)
+        self.assertEqual(self.quantity(bottle, "water"), 14)
+        # The ordinary strict version contract remains for whole-object movement.
+        with self.assertRaises(StateConflict):
+            self.call("A", "grove.interact", {**original, "action": "pickup",
+                "expected_player_version": self.view()["player"]["version"]})
+
+    def test_explicit_pour_refuses_changed_slot_capacity_distance_or_ownership(self):
+        bottle = self.item("A", "水壶")["id"]
+        self.walk("A", 4, 5)
+        crate = "seed_0_0_5_5"
+        original = {"action": "pour", "target_id": crate, "item_id": bottle, "amount": 5,
+            "target_slot": "contained", "expected_target_version": self.entity(crate)["version"],
+            "expected_item_version": self.entity(bottle)["version"]}
+        self.act("A", "close", crate)
+        original["expected_player_version"] = self.view()["player"]["version"]
+        with self.assertRaises(StateConflict):
+            self.call("A", "grove.interact", original)
+        self.assertEqual(self.quantity(bottle, "water"), 20)
+        self.act("A", "open", crate)
+        # Full current capacity is enforced even with an older observed version.
+        bowl = "seed_0_0_2_6"
+        self.walk("A", 2, 5)
+        self.act("A", "pour", bowl, bottle, 20)
+        original.update(target_id=bowl, expected_target_version=1,
+            expected_player_version=self.view()["player"]["version"])
+        with self.assertRaises(RuleViolation):
+            self.call("A", "grove.interact", original)
+        self.assertEqual(self.quantity(bowl, "water"), 20)
+        self.walk("A", 7, 1)
+        self.act("A", "fill", "water_0_0", bottle, 10)
+        original.update(target_id=crate, expected_player_version=self.view()["player"]["version"])
+        with self.assertRaises(RuleViolation):
+            self.call("A", "grove.interact", original)
+        self.assertEqual(self.quantity(bottle, "water"), 10)
+        original.update(target_id=self.item("B", "干布")["id"])
+        with self.assertRaises(PermissionDenied):
+            self.call("A", "grove.interact", original)
+        self.assertEqual(self.quantity(bottle, "water"), 10)
+
+    def test_pour_container_default_respects_one_remaining_unit(self):
+        self.walk("B", 2, 5)
+        bowl, bottle = "seed_0_0_2_6", self.item("B", "水壶")["id"]
+        self.act("B", "pour", bowl, bottle, 19)
+        seen = self.world.query_function("u", "grove.inspect", self.roles["B"], {"entity_id": bowl})["result"]
+        option = next(option for option in seen["action_options"] if option["action"] == "pour")
+        self.assertEqual(option["input"]["quantity"]["max"], 1)
+        self.act("B", "pour", bowl, bottle)
+        self.assertEqual(self.quantity(bowl, "water", "contained"), 20)
+        self.assertEqual(self.quantity(bottle, "water", "contained"), 0)
+
     def test_destroy_container_once_and_clear_material_obstacle(self):
         self.walk("A", 4, 5)
         crate, barrier = "seed_0_0_5_5", "seed_0_0_4_4"
@@ -221,15 +330,17 @@ class SharedGroveTests(unittest.TestCase):
         self.assertNotIn("retrieve", burning["available_actions"])
         self.assertIn("pour", burning["available_actions"])
         self.act("B", "ignite", barrier, self.item("B", "打火石")["id"])
-        self.ticks(4)
+        self.ticks(3)
         self.assertTrue(self.entity(cloth)["state"]["burning"])
-        self.ticks(20)
+        # Ordinary fuel and spread settle together every 3 physical steps;
+        # the unchanged 2u rate takes 20 batches to consume the 40u crate.
+        self.ticks(57)
         self.assertTrue(self.entity(crate)["state"]["destroyed"])
         released = self.entity(stone)
         self.assertIsNone(released["container"])
         self.assertEqual((released["x"], released["y"]), (5, 5))
         version = released["version"]
-        self.ticks(4)
+        self.ticks(3)
         self.assertEqual(self.entity(stone)["version"], version)
         # Both containers and obstacles use the same material combustion rules.
         self.assertTrue(self.entity(barrier)["state"]["destroyed"])
@@ -402,20 +513,28 @@ class SharedGroveTests(unittest.TestCase):
                 self.assertEqual(prepared["physical_objects"], processes.MAX_WET_ENTITIES)
                 self.assertEqual(prepared["fires"], processes.MAX_BURNING_ENTITIES)
             samples = []
-            for _ in range(12):
-                self.ticks(1)
+            def sample():
                 rain = self.world.get_state("u", m.PROCESSES, ids["process"])["value"]
                 fire = self.entity(ids["fire"])["state"]
-                samples.append((self.quantity(ids["rain"], "water", "absorbed"),
+                return (self.quantity(ids["rain"], "water", "absorbed"),
                     self.quantity(ids["dry"], "water", "absorbed"), self.quantity(ids["fire"], "wood", "body"),
                     fire["destroyed"], rain["status"], self.entity(ids["rain"])["state"]["wetness"],
-                    self.entity(ids["dry"])["state"]["wetness"], fire["fuel"]))
+                    self.entity(ids["dry"])["state"]["wetness"], fire["fuel"])
+            for _ in range(12):
+                self.ticks(1)
+                samples.append(sample())
+            # Rain and drying advance each physical step, independently of
+            # ordinary combustion's 3-step settlement cadence.
+            self.ticks(18)
+            samples.append(sample())
             return samples
         sparse, dense = simulate(False), simulate(True)
         self.assertEqual(sparse, dense)
-        self.assertEqual(sparse[0], (10, 11, 18, False, "active", 31, 34, 18))
-        self.assertEqual(sparse[3], (32, 5, 12, False, "complete", 100, 15, 12))
-        self.assertEqual(sparse[9][2:4], (0, True))
+        self.assertEqual(sparse[0], (10, 11, 20, False, "active", 31, 34, 20))
+        self.assertEqual(sparse[3], (32, 5, 18, False, "complete", 100, 15, 18))
+        self.assertEqual(sparse[9][2:4], (14, False))
+        self.assertEqual(sparse[-1][2:4], (0, True))
+        self.assertEqual(sparse[-1][7], 0)
 
     def route_to(self, actor, x, y):
         from collections import deque
@@ -625,7 +744,7 @@ class SharedGroveTests(unittest.TestCase):
         with self.assertRaises(RuleViolation):
             self.act("A", "drop", item=cloth)
         self.assertEqual(self.entity(cloth)["owner"], self.roles["A"])
-        self.ticks(1)
+        self.ticks(3)
         self.assertTrue(self.entity(layout["crate"])["state"]["destroyed"])
         self.assertEqual(self.quantity(layout["crate"], "wood"), 0)
         self.assertTrue(all(self.quantity(eid, "stone", "body") == 1 for eid in layout["contents"]))
@@ -634,7 +753,7 @@ class SharedGroveTests(unittest.TestCase):
         self.assertEqual(child["container"], inner["id"])
         self.assertIsNone(stone["container"])
         versions = [self.entity(eid)["version"] for eid in layout["contents"]]
-        self.ticks(1)
+        self.ticks(3)
         self.assertEqual(versions, [self.entity(eid)["version"] for eid in layout["contents"]])
         self.act("A", "drop", item=cloth)
         roots = self.world.get_state("u", m.CHUNKS, "chunk_0_0")["value"]["entity_ids"]
@@ -674,13 +793,13 @@ class SharedGroveTests(unittest.TestCase):
         self.assertFalse(self.entity(wet)["state"]["burning"])
         self.assertFalse(self.entity(air)["state"]["burning"])
         self.assertEqual(self.quantity(hearth["id"], "stone", "body"), 80)
-        self.assertEqual(self.quantity(hearth["id"], "wood", "contained"), 38)
-        self.assertEqual(self.entity(hearth["id"])["state"]["hearth_fuel"], 38)
+        self.assertEqual(self.quantity(hearth["id"], "wood", "contained"), 40)
+        self.assertEqual(self.entity(hearth["id"])["state"]["hearth_fuel"], 40)
         with self.assertRaises(RuleViolation):
             self.act("A", "dismantle", hearth["id"])
         self.act("A", "pour", hearth["id"], self.item("A", "水壶")["id"], 5)
         self.assertFalse(self.entity(hearth["id"])["state"]["lit"])
-        # Quenching does not erase the remaining38u. Unload it through the
+        # Quenching does not erase the remaining40u. Unload it through the
         # same material-transfer action before dismantling the stone shell.
         with self.assertRaises(RuleViolation):
             self.act("A", "dismantle", hearth["id"])
@@ -689,16 +808,16 @@ class SharedGroveTests(unittest.TestCase):
                          if lot["material"] == "wood" and lot["slot"] == "contained")
         self.call("A", "grove.interact", {"action": "transfer", "target_id": pot["id"],
             "expected_target_version": pot["version"], "item_id": hearth["id"],
-            "expected_item_version": self.entity(hearth["id"])["version"], "lot_id": remaining["id"], "amount": 38,
+            "expected_item_version": self.entity(hearth["id"])["version"], "lot_id": remaining["id"], "amount": 40,
             "expected_player_version": self.view()["player"]["version"]})
         self.assertEqual(self.quantity(hearth["id"], "wood"), 0)
-        self.assertEqual(self.quantity(pot["id"], "wood", "contained"), 38)
+        self.assertEqual(self.quantity(pot["id"], "wood", "contained"), 40)
         self.act("A", "dismantle", hearth["id"])
         self.assertEqual([self.quantity(eid, "stone", "body") for eid in stone_ids], [40, 40])
         self.assertTrue(all(self.entity(eid)["owner"] == self.roles["A"] for eid in stone_ids))
         self.assertTrue(set(stone_ids).issubset({e["id"] for e in self.view()["inventory"]}))
         self.assertEqual(self.quantity(hearth["id"], "stone", "body"), 0)
-        self.assertEqual(self.quantity(pot["id"], "wood", "contained"), 38)
+        self.assertEqual(self.quantity(pot["id"], "wood", "contained"), 40)
         self.assertNotIn(fuel, [e["id"] for e in self.view()["inventory"]])
 
 
