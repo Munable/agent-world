@@ -17,7 +17,7 @@ from agent_world.simulation.programs import compile_program, evaluate, plan_reac
 from agent_world.world_streams import StreamEvent
 
 from . import model as m
-from .definitions import REGISTRY, registry_for
+from .definitions import BODY_MATERIALS, MAX_CUSTOM_MATERIALS, REGISTRY, registry_for
 
 DEFINITIONS = "grove.creative.definitions"
 VERSIONS = "grove.creative.versions"
@@ -201,7 +201,8 @@ def definition_publish(ctx, args):
                 reference, symbol, material = _resolve_material(ctx, binding["definition_ref"], binding["symbol"])
                 proposed["material_imports"][alias] = {"definition_ref": reference, "symbol": symbol}
                 resolved[alias] = material
-        definition = compile_program(proposed, imported_materials=resolved)
+        definition = compile_program(proposed, materials=REGISTRY.materials, body_materials=BODY_MATERIALS,
+                                     max_custom_materials=MAX_CUSTOM_MATERIALS, imported_materials=resolved)
     except ValueError as exc:
         raise RuleViolation(str(exc)) from exc
     encoded = json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -209,7 +210,7 @@ def definition_publish(ctx, args):
         raise RuleViolation("规则包超过24KiB，请拆成更小的实际能力包。")
     digest = hashlib.sha256(encoded).hexdigest()
     ref = "program_" + hashlib.sha256((ctx.actor_role_id + ":" + digest).encode()).hexdigest()
-    semantics = program_material_semantics(definition, ref)
+    semantics = program_material_semantics(definition, ref, materials=REGISTRY.materials)
     version_key = hashlib.sha256((ctx.actor_role_id + ":" + definition["key"] + ":" + str(definition["version"])).encode()).hexdigest()
     previous = ctx.get_state(VERSIONS, version_key)
     if previous:
@@ -234,7 +235,7 @@ def definition_read(ctx, args):
     if not value:
         raise RuleViolation("规则版本不存在；先发布并使用返回的definition_ref。")
     return FunctionOutcome({"definition_ref": args["definition_ref"], **value,
-        "material_semantics": program_material_semantics(value["definition"], args["definition_ref"])})
+        "material_semantics": program_material_semantics(value["definition"], args["definition_ref"], materials=REGISTRY.materials)})
 
 
 def _type(ctx, entity):
@@ -654,7 +655,7 @@ def physical_contract_failure(ctx, entity, *, tick=None):
     return state != previous
 
 
-def _contract_update(ctx, entity, spec, event=None):
+def _contract_update(ctx, entity, spec, event=None, *, objects=None):
     state = entity["state"]["program"].get("contract")
     physically_changed = physical_contract_failure(ctx, entity)
     if not state or state["status"] != "active":
@@ -668,11 +669,11 @@ def _contract_update(ctx, entity, spec, event=None):
         if _has_event(condition):
             pending = event if isinstance(event, list) else [event] if event else []
             for fact in pending:
-                if fact["sequence"] > state.get("started_event_sequence", 0) and evaluate(condition, _context(entity, event=fact, ctx=ctx)):
+                if fact["sequence"] > state.get("started_event_sequence", 0) and evaluate(condition, _context(entity, event=fact, ctx=ctx, objects=objects)):
                     state["completion_proof"] = {key: fact[key] for key in ("sequence", "tick", "action", "entity_id", "actor")}
             fulfilled = bool(state.get("completion_proof"))
         else:
-            fulfilled = evaluate(condition, _context(entity, ctx=ctx))
+            fulfilled = evaluate(condition, _context(entity, ctx=ctx, objects=objects))
         state.pop("condition_error", None)
     except ValueError as exc:
         state["condition_error"] = str(exc)[:180]
@@ -785,17 +786,27 @@ def tick(ctx):
             raise RuleViolation("机械求解消耗超过真实能源；本步未提交。")
         if result["speed"]:
             outcomes.append((eid, "mechanical", "传动网络按齿数、方向、负载推进。"))
+    # Every after rule observes the same solved network and prior barriers.
+    # Its candidate writes and failures feed a later step, never another
+    # instance selected only by its id. Literal non-instance bindings also
+    # belong to this read view; a missing binding remains missing throughout.
+    after_objects = deepcopy(objects)
+    for entity in original.values():
+        definition, _ = _type(ctx, entity)
+        for bound_id in sorted(_bound_ids(definition)):
+            if bound_id not in after_objects:
+                after_objects[bound_id] = m.get_entity(ctx, bound_id, required=False)
     for eid, entity in sorted(objects.items()):
         spec = specs[eid]
         if entity["state"]["program"]["process"]["status"] != "error":
             try:
-                phase_snapshot = deepcopy(entity)
+                phase_snapshot = after_objects[eid]
                 channels = set()
                 for rule, fact in _phase_applications(spec, "after", events[eid]):
-                    if evaluate(rule["when"], _context(phase_snapshot, event=fact, ctx=ctx, objects=objects)):
+                    if evaluate(rule["when"], _context(phase_snapshot, event=fact, ctx=ctx, objects=after_objects)):
                         _effects(ctx, entity, spec, rule["effects"], event=fact, channels=channels,
-                                 accounts=pending_accounts[eid], supply=phase_supply[eid], objects=objects)
-                _barrier(entity, spec, events[eid][-1] if events[eid] else None, ctx=ctx, objects=objects)
+                                 accounts=pending_accounts[eid], supply=phase_supply[eid], objects=after_objects)
+                _barrier(entity, spec, events[eid][-1] if events[eid] else None, ctx=ctx, objects=after_objects)
                 m.normalize_entity(entity)
             except (ValueError, RuleViolation) as exc:
                 fail_instance(eid, exc, preserve_mechanical=True)
@@ -804,7 +815,9 @@ def tick(ctx):
         if recorder and recorder["active"] and step(ctx) >= recorder["until_tick"]:
             recorder["active"] = False
         # Deadlines still advance even if this instance's authored rule stopped.
-        if _contract_update(ctx, entity, spec, events[eid]):
+        # Cross-object contract conditions retain the step-start read view;
+        # after/physical feedback does not move contract completion earlier.
+        if _contract_update(ctx, entity, spec, events[eid], objects=original):
             outcomes.append((eid, "contract", "契约依据真实交付和逻辑期限形成结果。"))
     accounts = {}
     for entries in pending_accounts.values():
@@ -1118,7 +1131,8 @@ def projection(ctx, entity, *, detailed=False):
     result.update(program_observation(ctx, entity, detailed=detailed))
     if detailed:
         pack, _ = _type(ctx, entity)
-        result["material_semantics"] = program_material_semantics(pack, binding["definition_ref"], type_id=binding["type_id"])
+        result["material_semantics"] = program_material_semantics(pack, binding["definition_ref"], materials=REGISTRY.materials,
+                                                                 type_id=binding["type_id"])
     return result
 
 

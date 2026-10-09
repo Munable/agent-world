@@ -2,6 +2,7 @@
 from collections import deque
 from copy import deepcopy
 from dataclasses import replace
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -150,6 +151,134 @@ class CreativeWorldTests(unittest.TestCase):
             result = self.world.run_due_timers("w")
             self.assertEqual(result.get("failed", 0), 0, result)
             self.assertEqual(result["count"], 1, result)
+
+    def _assert_after_phase_reads(self, gate_id, observer_id):
+        gate_definition = {"key": "phase_gate", "name": "按步开门", "version": 1, "types": {"gate": {
+            "name": "快照门", "body_material": "wood", "cost": {"wood": 1},
+            "fields": {"closed": {"type": "boolean", "default": True}},
+            "barrier": {"field": "closed"},
+            "rules": [{"id": "open", "phase": "after", "when": True,
+                       "effects": [{"op": "set", "field": "closed", "value": False}]}]}}}
+        gate_fact = {"object": {"id": gate_id, "field": "barrier.active"}}
+        observer_definition = {"key": "phase_observer", "name": "同阶段读门", "version": 1, "types": {"observer": {
+            "name": "跟随门", "body_material": "stone", "cost": {"stone": 1},
+            "fields": {"when_count": {"type": "integer", "default": 0, "min": 0, "max": 10},
+                       "value_seen": {"type": "boolean", "default": False},
+                       "armed": {"type": "boolean", "default": False}},
+            # Instantiation needs no not-yet-created gate fact. The first after
+            # pass activates the external barrier condition after both exist.
+            "barrier": {"op": "all", "args": [{"field": "armed"}, gate_fact]},
+            "rules": [{"id": "condition", "phase": "after", "when": gate_fact,
+                       "effects": [{"op": "set", "field": "when_count", "value": {
+                           "op": "add", "left": {"field": "when_count"}, "right": 1}}]},
+                      {"id": "value", "phase": "after", "when": True,
+                       "effects": [{"op": "set", "field": "value_seen", "value": gate_fact}]},
+                      {"id": "activate", "phase": "after", "when": True,
+                       "effects": [{"op": "set", "field": "armed", "value": True}]}]}}}
+        definition = {**gate_definition, "types": {**gate_definition["types"], **observer_definition["types"]}}
+        original_spawn = m.spawn_entity
+
+        def fixed_ids(ctx, entity):
+            if entity.get("source") == "agent":
+                kind = entity["state"]["program"]["type_id"]
+                entity = {**entity, "id": {"gate": gate_id, "observer": observer_id}[kind]}
+            return original_spawn(ctx, entity)
+
+        with patch.object(m, "spawn_entity", side_effect=fixed_ids):
+            self.publish("A", definition, ["gate", "observer"])
+        self.ticks(1)
+        self.assertFalse(self.entity(gate_id)["components"]["barrier"]["active"])
+        observer = self.entity(observer_id)
+        self.assertEqual(observer["state"]["program"]["fields"]["when_count"], 1)
+        self.assertTrue(observer["state"]["program"]["fields"]["value_seen"])
+        self.assertTrue(observer["components"]["barrier"]["active"])
+        self.ticks(1)
+        observer = self.entity(observer_id)
+        self.assertEqual(observer["state"]["program"]["fields"]["when_count"], 1)
+        self.assertFalse(observer["state"]["program"]["fields"]["value_seen"])
+        self.assertFalse(observer["components"]["barrier"]["active"])
+
+    def test_after_phase_reads_do_not_follow_an_earlier_object_id(self):
+        self._assert_after_phase_reads("object_phase_a", "object_phase_z")
+
+    def test_after_phase_reads_do_not_follow_a_later_object_id(self):
+        self._assert_after_phase_reads("object_phase_z", "object_phase_a")
+
+    def test_after_failure_keeps_solved_motion_and_rolls_back_authored_matter(self):
+        definition = package()
+        definition["key"] = "after_failure"
+        gate = definition["types"]["gate"]
+        gate["container_capacity"] = 20
+        gate["fields"] = {"latched": {"type": "boolean", "default": False},
+                          "bounded": {"type": "integer", "default": 0, "min": 0, "max": 0}}
+        gate["rules"] = [{"id": "fails_after_motion", "phase": "after", "when": True, "effects": [
+            {"op": "set", "field": "latched", "value": True},
+            {"op": "react", "inputs": {"amber": 1}, "outputs": {"resin": 1}, "rate": 1},
+            {"op": "set", "field": "bounded", "value": 1}]}]
+        ref, objects = self.publish("A", definition, ["source", "gear", "gate"])
+        fuel = self.item("A", "木柴")["id"]
+        self.action("A", objects["gate"], "charge", item_id=fuel, material="amber", amount=2)
+        # Two meshes preserve the positive actuator direction from position 0.
+        self.action("A", objects["source"], "connect", other_id=objects["gear"])
+        self.action("A", objects["gear"], "connect", other_id=objects["gate"])
+        self.action("A", objects["source"], "fuel", item_id=fuel, amount=3)
+        self.action("A", objects["source"], "start")
+        matter_before = deepcopy(self.entity(objects["gate"])["matter"])
+        clock = self.view()["clock"]
+        timer_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
+        self.ticks(1)
+        receipt = self.world.get_timer_receipt("w", timer_id)
+        self.assertTrue(receipt["ok"])
+        self.assertTrue(any("bounded" in change for change in receipt["result"]["changes"]))
+        current = self.entity(objects["gate"])
+        program = current["state"]["program"]
+        self.assertEqual(program["mechanical"]["position"], 2)
+        self.assertEqual(program["mechanical"]["speed"], 0)
+        self.assertEqual(program["mechanical"]["status"], "program_error")
+        self.assertFalse(program["mechanical"]["enabled"])
+        self.assertEqual(program["fields"], {"latched": False, "bounded": 0})
+        self.assertEqual(current["matter"], matter_before)
+        self.assertEqual(program["process"]["status"], "error")
+        self.assertIn("bounded", program["process"]["error"])
+        source = self.entity(objects["source"])["state"]["program"]["mechanical"]
+        self.assertEqual(source["energy"], 2)
+        self.assertEqual(source["speed"], 1)
+        for category, material in (("sources", "resin"), ("sinks", "amber")):
+            key = hashlib.sha256("\0".join((category, ref + "#" + material, "creative_reaction")).encode()).hexdigest()
+            self.assertFalse(self.world.get_state("w", m.CREATIVE_ACCOUNTING, key)["exists"])
+
+    def test_tick_contract_conditions_retain_step_start_mechanical_facts(self):
+        definition = package()
+        source_id = "object_contract_source"
+        condition = {"op": "gte", "left": {"object": {"id": source_id, "field": "mechanical.angle"}}, "right": 1}
+        definition["key"] = "delayed_completion"
+        definition["types"] = {"source": definition["types"]["source"],
+            "pact": {"name": "读取上步传动", "body_material": "stone", "cost": {"stone": 1},
+                "contract": {"material": "wood", "quantity": 1, "duration_ticks": 100,
+                             "completion_when": condition}}}
+        original_spawn = m.spawn_entity
+
+        def fixed_source(ctx, entity):
+            if entity.get("source") == "agent" and entity["state"]["program"]["type_id"] == "source":
+                entity = {**entity, "id": source_id}
+            return original_spawn(ctx, entity)
+
+        with patch.object(m, "spawn_entity", side_effect=fixed_source):
+            _, objects = self.publish("A", definition, ["source", "pact"])
+        pact_id = objects["pact"]
+        offered = self.action("A", pact_id, "offer", other_id=self.roles["B"])
+        terms = offered["entity"]["state"]["program"]["contract"]["terms_version"]
+        self.action("A", pact_id, "accept", terms_version=terms)
+        self.action("B", pact_id, "accept", terms_version=terms)
+        self.action("B", pact_id, "deliver", item_id=self.item("B", "木柴")["id"], amount=1)
+        self.assertEqual(self.entity(pact_id)["state"]["program"]["contract"]["status"], "active")
+        self.action("A", source_id, "fuel", item_id=self.item("A", "木柴")["id"], amount=3)
+        self.action("A", source_id, "start")
+        self.ticks(1)
+        self.assertEqual(self.entity(source_id)["state"]["program"]["mechanical"]["angle"], 1)
+        self.assertEqual(self.entity(pact_id)["state"]["program"]["contract"]["status"], "active")
+        self.ticks(1)
+        self.assertEqual(self.entity(pact_id)["state"]["program"]["contract"]["status"], "complete")
 
     def test_own_backpack_contained_matter_is_recoverable_without_exposing_body_or_other_user(self):
         # Represent already-persisted loose matter using a test-only transfer,

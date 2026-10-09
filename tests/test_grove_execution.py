@@ -4,11 +4,12 @@ The native model and world HTTP boundary are deterministic doubles. These do
 not claim a real Agent completed the playable-world acceptance scenario.
 """
 import asyncio
+import json
 from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
@@ -165,6 +166,84 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.execution["request_status"], "unsettled")
         self.assertFalse(self.session.active_execution)
         self.assertFalse(self.session.execution["resume_allowed"])
+
+    async def test_cancel_before_any_native_session_does_not_lock_first_entry(self):
+        self.session.session_id = self.session.host_url = ''
+        self.session.blueprint_session_id = ''
+        self.session.release_opportunity = AsyncMock()
+        await self.session.cancel()
+        self.assertEqual(self.session.execution['request_status'], 'idle')
+        self.session.execution_controller.ensure_native_ready()
+
+    async def test_successful_abort_does_not_confirm_busy_blueprint_session(self):
+        self.session.blueprint_session_id = 'original-blueprint'
+        async def native(method, path, body=None, **kwargs):
+            if path.endswith('/abort'):
+                return True  # Cancellation accepted, without a termination verdict.
+            if path == '/session/test-session':
+                return {'id': 'test-session'}
+            if path == '/session/original-blueprint':
+                return {'id': 'original-blueprint'}
+            if path == '/session/status':
+                return {'original-blueprint': {'type': 'busy'}}
+            self.fail(path)
+        self.session.host = native
+        self.assertFalse(await self.session.settle_execution_request(abort=True))
+        self.assertEqual(self.session.execution['request_status'], 'unsettled')
+        with self.assertRaises(ConnectorError):
+            self.session.execution_controller.ensure_native_ready()
+
+    async def test_cancel_notice_follows_original_native_confirmation_and_keeps_manual_proxy_open(self):
+        await self.session.invoke("grove.control_grant", {"goal": self.session.execution["goal"], "max_actions": 4})
+        self.host_busy = True
+        app = create_connector_app(storage=self.manager.storage, wrapper=None)
+        app.state.connector.authorized = Mock(return_value=self.session)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=self.manager.local_url,
+                headers={"Authorization": "Bearer fixture-bearer"}) as client:
+            cancelled = await client.post("/connector/cancel")
+            self.assertEqual(cancelled.status_code, 200)
+            pending = cancelled.json()
+            self.assertEqual(self.control["status"], "revoked")
+            self.assertEqual(pending["execution"]["request_status"], "unsettled")
+            self.assertEqual(pending["progress"][-1]["kind"], "reclaim_pending")
+            self.assertIn("仍在确认原请求结束", pending["progress"][-1]["message"])
+            self.assertIn("你可以手动操作", pending["progress"][-1]["message"])
+            self.assertNotIn("伙伴已停止", str(pending["progress"]))
+            blocked = await client.post("/connector/prompt", json={"text": "A different request"})
+            self.assertEqual(blocked.status_code, 409)
+            self.assertEqual(blocked.json()["error"], "OriginalRequestUnsettled")
+
+            # Only the upstream HTTP boundary is doubled: the actual human
+            # proxy route must remain independent from native admission.
+            upstream = AsyncMock()
+            upstream.__aenter__.return_value = upstream
+            upstream.request.return_value = httpx.Response(200, json={"result": {"x": 1}})
+            manual = {"operation_id": "manual-after-reclaim", "arguments": {"dx": 1, "dy": 0}}
+            with patch("agent_world.grove_connector.httpx.AsyncClient", return_value=upstream):
+                moved = await client.post("/v1/functions/grove.move/invoke", json=manual)
+            self.assertEqual(moved.status_code, 200)
+            upstream.request.assert_awaited_once()
+            forwarded = upstream.request.await_args
+            self.assertEqual(forwarded.args[:2], ("POST", self.manager.world_url + "/v1/functions/grove.move/invoke"))
+            self.assertEqual(json.loads(forwarded.kwargs["content"]), manual)
+
+        self.host_busy = False
+        self.assertTrue(await self.session.settle_execution_request())
+        confirmed = self.session.state()
+        self.assertEqual(confirmed["execution"]["request_status"], "idle_confirmed")
+        self.assertIsNone(confirmed["execution"]["error"])
+        self.assertEqual(confirmed["progress"][-1]["kind"], "cancelled")
+        self.assertIn("伙伴已停止", confirmed["progress"][-1]["message"])
+        self.session.execution_controller.ensure_native_ready()
+        self.assertEqual((self.requests, self.session.inference_count, self.session.session_id), (0, 0, "test-session"))
+
+    async def test_cancel_with_saved_session_but_unavailable_host_preserves_uncertainty(self):
+        self.session.host_url = ''
+        self.session.release_opportunity = AsyncMock()
+        await self.session.cancel()
+        with self.assertRaises(ConnectorError) as blocked:
+            self.session.execution_controller.ensure_native_ready()
+        self.assertEqual(blocked.exception.code, 'OriginalRequestUnsettled')
 
     async def test_prose_without_checkpoint_or_actions_is_not_goal_completion(self):
         self.model_segment = AsyncMock()

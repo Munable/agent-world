@@ -36,10 +36,12 @@ class Snapshot:
 
 
 class Frame:
-    def __init__(self, registry, objects, tick=0, *, protected=(), inputs=(), heated=(), wet_by_rain=(), moves=(), spills=None):
+    def __init__(self, registry, objects, tick=0, *, protected=(), inputs=(), heated=(), wet_by_rain=(), moves=(), spills=None,
+                 bind_material=None):
         if len(objects) > MAX_FRAME_OBJECTS:
             raise ValueError("活动物理闭包最多64个物件。")
         self.registry, self.tick = registry, tick
+        self.bind_material = bind_material
         self.objects = deepcopy(objects)
         self.before = deepcopy(objects)
         self.protected = frozenset(protected)
@@ -73,42 +75,6 @@ class Frame:
         return max(0, capacity-sum(lot["quantity"] for lot in entity["matter"]
                                   if lot["slot"] == "contained"))
 
-    def _inherit_material(self, entity, material):
-        if material in {"wood", "stone", "cloth", "water"}:
-            return
-        definition = self.registry.materials.get(material)
-        if definition is None:
-            raise ValueError("转移物质未注册。")
-        if (not isinstance(definition.name, str) or not 1 <= len(definition.name) <= 80
-                or not definition.name.strip() or not definition.name.isprintable()
-                or type(definition.piece_quantity) is not int or not 1 <= definition.piece_quantity <= 10000
-                or type(definition.load_per_u) is not int or not 1 <= definition.load_per_u <= 8
-                or type(definition.combustible) is not bool or type(definition.liquid) is not bool):
-            raise ValueError("注册材料名称或份量无效。")
-        snapshot = {"name": definition.name, "load_per_u": definition.load_per_u,
-                    "piece_quantity": definition.piece_quantity,
-                    "combustible": definition.combustible, "liquid": definition.liquid}
-        program = entity.setdefault("state", {}).get("program", {})
-        if not isinstance(program, dict):
-            raise ValueError("接收物件的程序材料快照无效。")
-        materials = program.get("materials", {})
-        if not isinstance(materials, dict) or len(materials) > 4:
-            raise ValueError("接收物件最多携带4种注册材料。")
-        previous = materials.get(material)
-        if previous is not None:
-            if not isinstance(previous, Mapping):
-                raise ValueError("接收物件的材料定义无效。")
-            comparable = dict(previous)
-            comparable.setdefault("piece_quantity", 4)
-            if comparable != snapshot:
-                raise ValueError("相同注册材料标识的物理定义不一致，不能覆盖。")
-            return
-        if len(materials) >= 4:
-            raise ValueError("接收物件的4种注册材料已满。")
-        entity["state"].setdefault("program", program)
-        program.setdefault("materials", materials)
-        materials[material] = snapshot
-
     def _add(self, entity_id, material, amount, slot, *, source_lot=None, bound_to=None):
         if amount == 0:
             return
@@ -121,7 +87,8 @@ class Frame:
             mixture_room = self._mixture_room(entity)
             if mixture_room is not None and amount > mixture_room:
                 raise ValueError("真实混合物总量超过物件共用容量。")
-        self._inherit_material(entity, material)
+        if self.bind_material is not None:
+            self.bind_material(entity, self.registry.materials[material])
         origin_object = (source_lot or {}).get("origin_object")
         origin_lot = (source_lot or {}).get("origin_lot")
         # Body provenance is kept for one-time dismantling. Unrefundable stored

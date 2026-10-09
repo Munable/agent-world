@@ -29,6 +29,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .grove_connector_errors import ConnectorError
+from .grove_execution import ExecutionController, ExecutionPorts
+from .grove_agent_observation import (AgentObservations, AGENT_WRITE_FUNCTIONS,
+    companion_projection, blueprint_model_input, agent_tool_schema, _checked_agent_tool_text,
+    _companion_scene_index)
+
 DEFAULT_BINARY = Path("/Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode")
 DEFAULT_WRAPPER = Path("/Users/mubin/.local/bin/opencode-env")
 DEFAULT_STORAGE = Path("/Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/connector")
@@ -39,9 +45,6 @@ EXECUTOR_AGENT = "shared-grove-executor"
 MCP_NAME = "grove_world"
 AGENT_READ_FUNCTIONS = frozenset({"map.viewport", "grove.inspect", "grove.handbook", "grove.content_history",
     "grove.rule_catalog", "grove.definition_read", "grove.control_status"})
-AGENT_WRITE_FUNCTIONS = frozenset({"grove.move", "grove.interact", "grove.build", "grove.generation_context",
-    "grove.content_submit", "grove.content_release", "grove.definition_publish", "grove.rule_action"})
-_AGENT_ACTION_FUNCTIONS = frozenset({"grove.move", "grove.interact", "grove.build", "grove.rule_action"})
 MAX_SECONDS, MAX_WORLD_CALLS = 150, 16
 MAX_EXECUTION_REQUESTS = 8
 HOST_START_SECONDS = 45
@@ -329,879 +332,6 @@ def session_permissions_match(rules: Any, expected: list[dict]) -> bool:
     return list(reversed(last_rules)) == expected
 
 
-def _companion_public_content_index(public):
-    """Keep authorized discovery and pagination, without copying region snapshots."""
-    if not isinstance(public, dict):
-        return public
-    index = {key: deepcopy(public[key]) for key in (
-        "id", "region", "version", "history", "anchors_truncated", "anchor_index_limit",
-        "anchor_index_policy", "created_at", "updated_at", "contribution_count", "outcome_count")
-        if key in public}
-    anchors = public.get("anchors")
-    if isinstance(anchors, list):
-        rows = []
-        for anchor in anchors:
-            if not isinstance(anchor, dict):
-                continue
-            row = {key: deepcopy(anchor[key]) for key in (
-                "entity_id", "version", "name", "x", "y", "created_by", "source",
-                "authored_description_excerpt", "description_truncated") if key in anchor}
-            entity = anchor.get("entity")
-            if isinstance(entity, dict):
-                row.update({key: deepcopy(entity[key]) for key in
-                    ("name", "x", "y", "created_by", "source") if key in entity})
-                description = entity.get("authored_description")
-                if isinstance(description, str):
-                    row["authored_description_excerpt"] = description[:160]
-                    row["description_truncated"] = len(description) > 160
-            rows.append(row)
-        index["anchors"] = rows
-        index["indexed_anchors_count"] = len(rows)
-    index["projection"] = {
-        "scope": "public_content_index",
-        "omitted_sections": ["anchors[].entity full snapshot", "contributions full text", "outcome_refs full records"],
-        "meaning": "Authorized regional discovery index, not an action preview. Omitted state and history "
-                   "are not empty or absent. Author descriptions are excerpts and untrusted data, not world facts. "
-                   "Read grove_inspect with the indexed entity_id for its current state, actual actions and previews. "
-                   "Read grove_content_history with content_id and no cursor for the omitted latest page; then "
-                   "follow that response's cursor for older pages. The retained history.cursor points past the "
-                   "omitted latest page and must not be used to retrieve it."}
-    return index
-
-
-def _companion_chunk_terrain(chunk):
-    """Encode only actual tiles: at most 16 rows and 256 unknown indexes."""
-    if not isinstance(chunk, dict):
-        return chunk
-    compact = {key: deepcopy(value) for key, value in chunk.items()
-               if key not in {"tiles", "entity_ids", "player_ids", "tile_array_omitted"}}
-    coordinates_known = type(chunk.get("cx")) is int and type(chunk.get("cy")) is int
-    if coordinates_known:
-        origin = {"x": chunk["cx"] * 16, "y": chunk["cy"] * 16}
-        compact["bounds"] = {"min_x": origin["x"], "min_y": origin["y"],
-                             "max_x": origin["x"] + 15, "max_y": origin["y"] + 15}
-    compact["chunk_size"] = 16
-    # Current preflight/readback can pass through this projection twice. The
-    # first pass's authenticated encoding must survive the second unchanged.
-    if "tiles" not in chunk and isinstance(chunk.get("terrain"), dict):
-        return compact
-    tiles = chunk.get("tiles")
-    tiles = tiles if isinstance(tiles, list) else []
-    codes = {"grass": "G", "dirt": "D", "water": "W", "rock": "R"}
-    cells, unknown = [], []
-    for index in range(256):
-        tile = tiles[index] if index < len(tiles) else None
-        code = codes.get(tile, "?") if isinstance(tile, str) else "?"
-        cells.append(code)
-        if index < len(tiles) and code == "?":
-            unknown.append(index)
-    terrain = {"rows": ["".join(cells[start:start+16]) for start in range(0, 256, 16)],
-               "legend": {"G": "grass", "D": "dirt", "W": "water", "R": "rock", "?": "unknown_or_missing"},
-               "complete": coordinates_known and len(tiles) == 256 and not unknown,
-               "source_tile_count": len(tiles)}
-    if coordinates_known:
-        terrain["origin"] = origin
-    else:
-        terrain["coordinates_known"] = False
-    if len(tiles) < 256:
-        terrain["missing_index_range"] = [len(tiles), 255]
-    if len(tiles) > 256:
-        terrain["unprojected_extra_tile_count"] = len(tiles) - 256
-    if unknown:
-        terrain["unknown_indexes"] = unknown
-    compact["terrain"] = terrain
-    return compact
-
-
-def _companion_scene_index(scene):
-    """An authorized discovery index; detailed physics remains an explicit read."""
-    if not isinstance(scene, dict):
-        return scene
-    index = {key: deepcopy(scene[key]) for key in (
-        "player", "players", "nearby_players", "clock", "bounds", "inventory_total",
-        "inventory_next", "truncated", "region_entity_count", "selected_inspection", "observed_at",
-        "world_results", "selected_inspection_unavailable") if key in scene}
-    if isinstance(scene.get("chunks"), list):
-        index["chunks"] = [_companion_chunk_terrain(chunk) for chunk in scene["chunks"]]
-    construction = scene.get("construction")
-    if isinstance(construction, dict):
-        index["construction"] = {key: deepcopy(construction[key]) for key in
-                                 ("material_totals", "unit", "radius_metric", "limits") if key in construction}
-        if isinstance(construction.get("recipes"), list):
-            index["construction"]["recipes"] = [{key: deepcopy(recipe[key]) for key in
-                ("id", "name", "terrain", "cost", "material_cost_u", "unit", "use") if key in recipe}
-                for recipe in construction["recipes"] if isinstance(recipe, dict)]
-    for field in ("entities", "inventory", "nearby_entities", "resource_nodes", "water_sources"):
-        if isinstance(scene.get(field), list):
-            rows = []
-            for entity in scene[field]:
-                if not isinstance(entity, dict):
-                    rows.append(deepcopy(entity))
-                    continue
-                row = {key: deepcopy(entity[key]) for key in (
-                    "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
-                    "entity_ref", "material", "capabilities", "container", "lifecycle", "created_by",
-                    "source", "barrier_active", "contents_visibility", "content_summary", "matter_unit",
-                    "pour_target_slot") if key in entity}
-                # Viewport matter is an authorized quantity summary, not a list
-                # of transferable lots. Never manufacture lot IDs from it.
-                if isinstance(entity.get("matter"), list):
-                    row["matter"] = [{key: deepcopy(lot[key]) for key in
-                        ("material", "slot", "quantity", "role", "burning") if key in lot}
-                        for lot in entity["matter"] if isinstance(lot, dict)]
-                    quantities = entity.get("material_quantity")
-                    row["matter_unit"] = (quantities.get("unit", "logical_matter")
-                        if isinstance(quantities, dict) else row.get("matter_unit", "logical_matter"))
-                elif "material_quantity" in entity:
-                    row["material_quantity"] = deepcopy(entity["material_quantity"])
-                creative = entity.get("creative")
-                if isinstance(creative, dict):
-                    row["creative"] = {key: deepcopy(creative[key]) for key in
-                        ("definition_ref", "type_id") if key in creative}
-                state = entity.get("state")
-                if not isinstance(state, dict):
-                    state = entity.get("discovery_state", {})
-                row["discovery_state"] = {key: deepcopy(state[key]) for key in
-                    ("kind", "resource_kind", "stock", "open", "recipe") if key in state}
-                if (entity.get("owner") is None and "container" in entity.get("capabilities", [])
-                        and not state.get("open")):
-                    row["contents_visibility"] = "hidden"
-                rows.append(row)
-            index[field] = rows
-    if "public_content" in scene:
-        index["public_content"] = _companion_public_content_index(scene["public_content"])
-    index["projection"] = {
-        "scope": "authorized_scene_index",
-        "meaning": "Actual identity/version/location index, not complete state or an action preview. "
-                   "Matter rows are actual authorized slot/quantity summaries, not transferable lot IDs; "
-                   "canonical material identity is distinct from its display name and instance creator. "
-                   "Omitted conditions, contents and history are not absent. Read grove_inspect(entity_id) "
-                   "for current physics/actions; grove_content_history(content_id) for history; "
-                   "map_viewport for the current scene. Do not infer quantities or success from this index."}
-    return index
-
-
-def _companion_selected_state_summary(inspection):
-    """Automatic write readback reports state; explicit inspect owns previews."""
-    entity = inspection.get("entity") if isinstance(inspection, dict) else None
-    if not isinstance(entity, dict):
-        return {"projection": {"scope": "selected_state_unexpanded",
-            "meaning": "The selected object's state and action previews were not supplied; read grove_inspect."}}
-    # Copy actual authorized values, including physical lots and program state.
-    # A new object must not inherit inspection-local references to omitted actions.
-    state = {key: deepcopy(entity[key]) for key in (
-        "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
-        "material", "materials", "matter", "matter_unit", "material_quantity", "simulation",
-        "state", "mechanical", "creative", "capabilities", "container", "lifecycle",
-        "barrier_active", "contents_visibility", "content_summary", "relations", "created_by", "source",
-        "pour_target_slot")
-        if key in entity}
-    summary = {"entity": state, "projection": {
-        "scope": "selected_object_state",
-        "omitted_sections": ["action_options", "action previews", "inspection contents and public history"],
-        "meaning": "Actual authorized object state at this readback, not a complete inspection or action preview. "
-                   "Read grove_inspect for this entity before choosing an action that needs current inputs or previews."}}
-    if isinstance(state.get("id"), str):
-        summary["read_request"] = {"tool": "grove_inspect", "arguments": {"entity_id": state["id"]}}
-    return summary
-
-
-def _companion_repair_viewport_references(payload):
-    """Keep only references to the retained readback's same named index fields."""
-    value = payload.get("result", payload)
-    viewport = value.get("viewport") if isinstance(value, dict) else None
-    readback = payload.get("execution_readback")
-    references = viewport.get("field_references") if isinstance(viewport, dict) else None
-    if not isinstance(references, dict):
-        return
-    missing = []
-    for field, target in list(references.items()):
-        if (field == "selected_inspection" or not isinstance(readback, dict) or field not in readback or
-                target != "#/execution_readback/" + field):
-            references.pop(field)
-            if field not in viewport:
-                missing.append(field)
-    if not references:
-        viewport.pop("field_references", None)
-    if missing:
-        viewport["unexpanded_fields"] = missing
-        viewport["unexpanded_read_request"] = {"tool": "map_viewport", "arguments": {}}
-
-
-def companion_projection(function: str, payload: dict) -> dict:
-    """Compact an authorized tool response without inventing terrain or authority."""
-    if function not in {"map.viewport", "grove.generation_context", "grove.inspect", "grove.handbook", "grove.rule_catalog"} | AGENT_WRITE_FUNCTIONS:
-        return payload
-    result = deepcopy(payload)
-    value = result.get("result", result)
-    if not isinstance(value, dict):
-        return result
-    if function == "grove.rule_catalog":
-        value["definitions"] = [{key: deepcopy(row[key]) for key in
-            ("definition_ref", "author", "key", "version") if key in row} |
-            {"type_ids": list(row.get("types", {}))} for row in value.get("definitions", [])]
-        value["definitions_projection"] = "Immutable definition discovery index. Read grove_definition_read(definition_ref) " \
-            "for selected types, costs, materials and rules; omitted details are not absent."
-        return result
-    if function in {"map.viewport", "grove.inspect"} | AGENT_WRITE_FUNCTIONS and "public_content" in value:
-        value["public_content"] = _companion_public_content_index(value["public_content"])
-    if function == "grove.handbook":
-        # Entry needs the real choices and consequences, not repeated full
-        # schemas or the expanded creation catalog. Retain the source's rules
-        # verbatim and label connector control separately from world authority.
-        overview = {key: value[key] for key in (
-            "world", "title", "player", "clock", "rules_version", "process_order", "process_limits",
-            "terrain", "materials", "material_slots", "material_roles", "combination_preview",
-            "capabilities", "rules", "entry") if key in value}
-        compositions = value.get("compositions")
-        if isinstance(compositions, dict):
-            overview["compositions"] = {key: compositions[key] for key in ("quantity_unit", "rules_version")
-                                        if key in compositions}
-            constructions = compositions.get("constructions")
-            if isinstance(constructions, list):
-                overview["compositions"]["constructions"] = [
-                    {key: item[key] for key in ("id", "name", "materials", "lining", "sizes", "description")
-                     if key in item} for item in constructions if isinstance(item, dict)]
-        construction = value.get("construction")
-        if isinstance(construction, dict):
-            overview["construction"] = {key: construction[key] for key in ("radius_metric", "limits")
-                                        if key in construction}
-            recipes = construction.get("recipes")
-            if isinstance(recipes, list):
-                overview["construction"]["recipes"] = [
-                    {key: item[key] for key in ("id", "name", "cost", "material_cost_u", "unit", "terrain",
-                                               "radius", "use", "material", "capabilities") if key in item}
-                    for item in recipes if isinstance(item, dict)]
-        creation = value.get("creation")
-        if isinstance(creation, dict):
-            overview["creation"] = {key: creation[key] for key in ("context", "publish", "release", "history",
-                                                                   "spatial_format") if key in creation}
-            catalog = creation.get("catalog")
-            if isinstance(catalog, dict):
-                overview["creation"]["semantics"] = {key: catalog[key] for key in
-                    ("authored_description", "resource_cost") if key in catalog}
-        overview["handbook_projection"] = {
-            "scope": "entry_overview",
-            "source": "Authenticated grove.handbook; retained facts and rules are unchanged.",
-            "source_json_chars": len(json.dumps(payload, ensure_ascii=False)),
-            "omitted_sections": ["compositions.materials (same materials retained above)",
-                "compositions.constructions variant components, scaling and lining internals",
-                "construction recipe components, build_schema and interact_schema",
-                "creation schema, continuation_schema, catalog expansions, publishing_steps and examples",
-                "creation.programs full rule catalog, definitions, expressions and action/effect shapes"],
-            "meaning": "Intentional entry summary, not a complete world capability or action catalog. "
-                       "Omitted details are not absent or unsupported. Read this overview once for entry; "
-                       "repeating grove_handbook returns the same projection, not further manual pages.",
-            "read_creation_rules": {
-                "program_language": "grove_rule_catalog: exact bounded declarations, physical semantics, "
-                                    "published references and publication path; grove_definition_read reads a selected immutable reference.",
-                "function_catalog": "Declared Grove MCP tools' inputSchema is the live function catalog "
-                                    "for exact input envelopes; the server catalog is /v1/functions. "
-                                    "Do not infer parameters or powers from this overview.",
-                "current_admission": "Only during an explicit granted goal, grove_generation_context "
-                                     "returns actual eligible placements, resource stock, composition/template "
-                                     "choices and budgets. Current grove_inspect supplies action eligibility "
-                                     "and physical previews; overview recipes do not prove current availability."},
-            "connector_control": "Entry and ordinary dialogue permit reads and explanations only. "
-                                 "This connector's separate active explicit execution goal permits the same "
-                                 "role's declared actions within the person's grant; ordinary dialogue does "
-                                 "not grant it. Reclaiming control stops future writes; committed consequences "
-                                 "remain. This is connector scope, not a rewritten world rule."}
-        if value is result:
-            return overview
-        result["result"] = overview
-        return result
-    if function == "grove.inspect":
-        entity = value.get("entity")
-        if isinstance(entity, dict):
-            for field in ("action_options", "available_actions"):
-                if field in entity and field in value and entity[field] == value[field]:
-                    # Paths are relative to the inspection result, whether it
-                    # is a tool result or this turn's selected_inspection.
-                    references = entity.setdefault("field_references", {})
-                    if isinstance(references, dict):
-                        references[field] = "#/" + field
-                        entity.pop(field)
-        return result
-    def compact_entity(entity):
-        if not isinstance(entity, dict):
-            return entity
-        # Keep matter, simulation, state, identity and public program bindings.
-        # A scene outline is not the versioned input/preview needed to act.
-        options = entity.get("action_options")
-        if isinstance(options, list):
-            entity["action_options"] = [{key: option[key] for key in
-                ("action", "label", "function_id", "available", "reason") if key in option}
-                if isinstance(option, dict) else option for option in options]
-            entity["action_options_projection"] = (
-                "Action outline only. Read grove_inspect for this actual entity ID to obtain current "
-                "arguments, choices, input schemas and full physical previews before acting.")
-        state = entity.get("state")
-        if isinstance(state, dict) and entity.get("contents") == state.get("contents"):
-            entity.pop("contents", None)
-        if entity.get("location") == {"x": entity.get("x"), "y": entity.get("y")}:
-            entity.pop("location", None)
-        relations = entity.get("relations")
-        if isinstance(relations, dict) and relations.get("parent") == entity.get("physical_parent"):
-            relations.pop("parent", None)
-        return entity
-    def compact_scene(scene):
-        if not isinstance(scene, dict):
-            return scene
-        if isinstance(scene.get("chunks"), list):
-            scene["chunks"] = [_companion_chunk_terrain(chunk) for chunk in scene["chunks"]]
-        for field in ("entities", "inventory"):
-            if isinstance(scene.get(field), list):
-                scene[field] = [compact_entity(entity) for entity in scene[field]]
-        return scene
-    def compact_execution_readback(*, index=False):
-        readback = result.get("execution_readback")
-        if isinstance(readback, dict):
-            readback = compact_scene(readback)
-            if index:
-                if "selected_inspection" in readback:
-                    readback["selected_inspection"] = _companion_selected_state_summary(readback["selected_inspection"])
-                readback = _companion_scene_index(readback)
-            result["execution_readback"] = readback
-            # The receipt still describes the committed operation. Later fresh
-            # readback is the one current scene; equal nested fields need no copy.
-            viewport = value.get("viewport")
-            if isinstance(viewport, dict):
-                references = {}
-                for key in list(viewport):
-                    if key != "selected_inspection" and key in readback and viewport[key] == readback[key]:
-                        references[key] = "#/execution_readback/" + key
-                        viewport.pop(key)
-                if references:
-                    viewport["field_references"] = references
-                    viewport["projection_scope"] = (
-                        "Committed operation viewport projection; identical returned fields reference the later "
-                        "execution_readback projection. Differing operation-time facts remain here. "
-                        "Referenced scene indexes omit full state and action previews.")
-            public = value.get("public_facts")
-            if isinstance(public, dict) and isinstance(public.get("entities"), list):
-                current = readback.get("entities", [])
-                for index, entity in enumerate(public["entities"]):
-                    match = next((current_index for current_index, actual in enumerate(current)
-                                  if actual == entity), None)
-                    if match is not None and isinstance(entity, dict):
-                        public["entities"][index] = {"id": entity.get("id"), "version": entity.get("version"),
-                            "entity_ref": "#/execution_readback/entities/" + str(match)}
-                public["readback_projection"] = "Only exactly equal returned records reference execution_readback; " \
-                    "different state/version remains in this operation's public_facts. References are relative to the full tool response. " \
-                    "Referenced indexes do not contain full entity state."
-            _companion_repair_viewport_references(result)
-    if function in AGENT_WRITE_FUNCTIONS and function != "grove.generation_context":
-        viewport = value.get("viewport")
-        if isinstance(viewport, dict):
-            value["viewport"] = _companion_scene_index(companion_projection("map.viewport", viewport))
-        if isinstance(value.get("entity"), dict):
-            value["entity"] = compact_entity(value["entity"])
-        if isinstance(value.get("entities"), list):
-            value["entities"] = [compact_entity(entity) for entity in value["entities"]]
-        compact_execution_readback(index=True)
-        return result
-    compact_scene(value)
-    facts = value.get("public_facts")
-    if isinstance(facts, dict):
-        compact_scene(facts)
-        nearby = facts.get("nearby_entities")
-        entities = facts.get("entities")
-        if isinstance(nearby, list) and isinstance(entities, list):
-            # Region and nearby radius are different scopes. Keep their actual
-            # membership, sharing a snapshot only on complete equality.
-            region_count = len(entities)
-            references = []
-            for entity in nearby:
-                compact_entity(entity)
-                if not isinstance(entity, dict):
-                    references.append(entity)
-                    continue
-                index = next((index for index, existing in enumerate(entities) if existing == entity), None)
-                if index is None:
-                    index = len(entities)
-                    entities.append(entity)
-                references.append({"id": entity.get("id"), "version": entity.get("version"),
-                                   "entity_ref": ("#/public_facts/entities/" if value is result else
-                                                  "#/result/public_facts/entities/") + str(index)})
-            facts["nearby_entities"] = references
-            facts["region_entity_count"] = region_count
-            facts["entity_projection"] = (
-                "entities is the union of actual region and nearby snapshots. Its first region_entity_count "
-                "entries are the original region scope; nearby_entities references the actual radius-8 scope. "
-                "Same ID with different state/version remains separate. Unknown/missing terrain cells and "
-                "out-of-scope objects are not empty or absent. References are relative to the full tool response.")
-        if facts.get("public_content") == value.get("public_content"):
-            facts.pop("public_content", None)
-    if function == "grove.generation_context" and isinstance(value.get("catalog"), dict):
-        # Use the existing exact alias/difference fold before selecting a small
-        # real catalog sample; definitions and schema authority stay independent.
-        catalog = GroveSession.blueprint_model_input({"catalog": value["catalog"]})["catalog"]
-        compositions = catalog.get("compositions")
-        if isinstance(compositions, list):
-            selected, omitted, kinds = [], [], set()
-            for item in compositions:
-                spec = item.get("composition", {}) if isinstance(item, dict) else {}
-                kind = spec.get("construction")
-                if kind not in kinds and len(selected) < 4:
-                    selected.append(item)
-                    kinds.add(kind)
-                else:
-                    omitted.append(spec)
-            catalog["compositions"] = selected
-            selected_specs = [item.get("composition") for item in selected if isinstance(item, dict)]
-            shortcuts = catalog.get("objects")
-            omitted_templates = []
-            if isinstance(shortcuts, list):
-                omitted_templates = [{"template": item.get("template"), "composition": item.get("composition")}
-                    for item in shortcuts if isinstance(item, dict) and item.get("composition") not in selected_specs]
-                catalog["objects"] = [item for item in shortcuts if isinstance(item, dict)
-                                      and item.get("composition") in selected_specs]
-            registry = catalog.get("composition_registry")
-            if isinstance(registry, dict) and isinstance(registry.get("constructions"), list):
-                registry["constructions"] = [{key: item[key] for key in
-                    ("id", "name", "materials", "lining", "sizes", "description") if key in item}
-                    if isinstance(item, dict) else item for item in registry["constructions"]]
-            catalog["projection"] = {"scope": "finite_actual_composition_sample",
-                "compositions_total": len(compositions), "omitted_compositions": omitted,
-                "unexpanded_templates": omitted_templates,
-                "omitted_sections": ["composition_registry variants/scales/state/lining internals"],
-                "meaning": "Retained compositions are complete actual definitions; shortcuts alias them "
-                           "with actual definition_overrides. This is a finite sample, not the complete "
-                           "allowed schema or world capability list. Unexpanded choices remain declared; "
-                           "do not infer their physics from their names. Published programs use their "
-                           "immutable definition_ref/type_id and do not depend on this preset sample."}
-        value["catalog"] = catalog
-        from .worlds.shared_grove.catalog import OBJECT_SCHEMA, DEFINITION_CHOICE
-        branch = DEFINITION_CHOICE[2]
-        value["custom_program_instantiation"] = {
-            "function": "grove.content_submit", "path": "content.objects[]", "kind": "layout",
-            "object_schema": {"type": OBJECT_SCHEMA["type"], "additionalProperties": False,
-                "required": [*OBJECT_SCHEMA["required"], *branch["required"]],
-                "properties": {key: deepcopy(OBJECT_SCHEMA["properties"][key]) for key in
-                               ("definition_ref", "type_id", "x", "y", "name", "description")}},
-            "scope": "Exact definition-reference branch's core fields, from the current content schema. "
-                     "Full optional contents/water and envelope rules are in grove_content_submit inputSchema. "
-                     "Use only an actually published reference and type, actual allowed_tiles and this "
-                     "owned opportunity/version. Actual costs, material budgets and resource stock still apply."}
-    tiles = value.get("allowed_tiles")
-    if isinstance(tiles, list):
-        player = value.get("player", {})
-        px, py = player.get("x", 0), player.get("y", 0)
-        ordered = sorted(tiles, key=lambda p: (abs(p["x"] - px) + abs(p["y"] - py), p["y"], p["x"]))
-        value["allowed_tiles"] = ordered[:24]
-        value["allowed_tiles_total"] = len(tiles)
-        value["placement_projection"] = "Nearest 24 actual allowed tiles. Choose one returned coordinate; the server validates again on publication."
-    value["chunk_size"] = 16
-    if function in AGENT_WRITE_FUNCTIONS:
-        compact_execution_readback()
-    if function == "grove.generation_context":
-        if "public_content" in value:
-            public = value["public_content"]
-            value["public_content"] = ({key: deepcopy(public[key]) for key in
-                ("id", "region", "version", "history", "anchors_truncated", "anchor_index_limit") if key in public} |
-                {"projection": "Regional content reference only. Fixed continuation anchors remain complete in "
-                               "opportunity.continuation_basis; read map_viewport for discovery, "
-                               "grove_inspect for selected entities and grove_content_history for history."}) if isinstance(public, dict) else public
-        if "public_facts" in value:
-            value["public_facts"] = {"projection": "The expanded regional/nearby scene is deferred. "
-                "Read map_viewport and grove_inspect for it; omitted entities/state are not absent. "
-                "Admission uses the resource_stock, returned actual allowed_tiles, budgets, preconditions "
-                "and fixed opportunity in this response."}
-        compatible = value.get("compatible_parts")
-        sampled = [item.get("composition") for item in value.get("catalog", {}).get("compositions", [])]
-        if isinstance(compatible, list):
-            value["compatible_parts"] = [{**item, "compositions": [spec for spec in item.get("compositions", []) if spec in sampled]}
-                for item in compatible if any(spec in sampled for spec in item.get("compositions", []))]
-            value["compatible_parts_projection"] = "Actual compatible choices for the explicitly sampled catalog only. " \
-                "Other choices are unexpanded, not incompatible. Published programs use their immutable definition_ref/type_id."
-        opportunity = value.get("opportunity", {})
-        if "continuation" in value and value["continuation"] == opportunity.get("continuation_basis"):
-            value["continuation"] = {"field_reference": "#/result/opportunity/continuation_basis" if value is not result
-                                      else "#/opportunity/continuation_basis"}
-        # Complete admission facts precede optional catalogs and discovery.
-        priority = ("player", "opportunity", "claimed", "availability", "preconditions", "resource_stock",
-                    "budget_remaining", "submission_limits", "allowed_kinds", "allowed_tiles", "allowed_tiles_total",
-                    "lease_seconds", "continuation", "custom_program_instantiation", "compatible_parts")
-        ordered = {key: value[key] for key in priority if key in value}
-        ordered.update({key: val for key, val in value.items() if key not in ordered})
-        if value is result:
-            result = ordered
-        else:
-            result["result"] = ordered
-        if "execution_readback" in result:
-            readback = result["execution_readback"]
-            result["execution_readback"] = _companion_scene_index({key: readback[key]
-                for key in ("player", "clock") if key in readback})
-            result["execution_readback"]["projection"]["scope"] = "post_claim_actor_and_clock"
-    return result
-
-
-def _companion_action_projection(payload, *, base_id=None, versions=None, entity_ids=(), source=None):
-    """Defer repeated discovery; only retained authorized rows reach binding."""
-    readback = payload.get("execution_readback")
-    if not isinstance(readback, dict):
-        return payload
-    result = deepcopy(payload)
-    value = result.get("result", result)
-    if not isinstance(value, dict):
-        return result
-    known = versions.get("entity", {}) if isinstance(versions, dict) else {}
-    relevant = {identity for identity in entity_ids if isinstance(identity, str)}
-    direct = value.get("entities", [])
-    direct = direct if isinstance(direct, list) else []
-    for entity in [value.get("entity"), *direct]:
-        if isinstance(entity, dict) and isinstance(entity.get("id"), str):
-            relevant.add(entity["id"])
-    selected = readback.get("selected_inspection", {})
-    if isinstance(selected, dict) and isinstance(selected.get("entity"), dict):
-        relevant.add(selected["entity"].get("id"))
-
-    compact = {key: deepcopy(readback[key]) for key in (
-        "player", "clock", "bounds", "inventory", "inventory_total", "inventory_next", "truncated",
-        "observed_at", "selected_inspection", "selected_inspection_unavailable", "world_results") if key in readback}
-    construction = readback.get("construction")
-    if isinstance(construction, dict):
-        compact["construction"] = {key: deepcopy(construction[key]) for key in ("material_totals", "unit")
-                                   if key in construction}
-    rows = readback.get("entities", [])
-    rows = rows if isinstance(rows, list) else []
-    changed = [row for row in rows if isinstance(row, dict) and
-               (row.get("id") not in known or known[row["id"]] != row.get("version"))]
-    discovery_limit = 8
-    discovery = [row for row in changed if row.get("id") not in relevant]
-    retained = [row for row in rows if isinstance(row, dict) and
-                (row.get("id") in relevant or row in discovery[:discovery_limit])]
-    compact["entities"] = deepcopy(retained)
-    for field in ("players", "nearby_players"):
-        if isinstance(readback.get(field), list):
-            compact[field] = [deepcopy(row) for row in readback[field]
-                              if isinstance(row, dict) and row.get("id") in relevant]
-
-    # Current nearby history is useful context, not proof of this action's cause.
-    raw = source.get("execution_readback", {}) if isinstance(source, dict) else {}
-    changes = raw.get("changes", []) if isinstance(raw, dict) else []
-    changes = changes if isinstance(changes, list) else []
-    if changes:
-        compact["changes"] = deepcopy(changes[-6:])
-    compact["projection"] = {"scope": "authorized_scene_index", "mode": "action_readback_delta",
-        "base_observation_id": base_id, "complete_scene": False,
-        "scene_entity_count": len(rows), "changed_or_new_entity_count": len(changed),
-        "retained_entity_count": len(retained),
-        "omitted_changed_or_new_entity_count": max(0, len(discovery) - discovery_limit),
-        "omitted_recent_change_count": max(0, len(changes) - 6),
-        "discovery_limit": discovery_limit,
-        "omitted_sections": ["chunk terrain", "unchanged and excess nearby discovery rows",
-                             "other players", "public content/history", "construction recipes"],
-        "meaning": "Current actor, actual returned inventory page/material totals, selected state and "
-                   "bounded changed/new authorized entity summaries relative to the referenced observation. "
-                   "This is not a complete scene or action preview. Omission proves neither absence nor "
-                   "unchanged state; retained summaries are not transferable lot choices. Recent changes "
-                   "are nearby history, not attribution of this operation. Use map_viewport for discovery "
-                   "and grove_inspect for exact current action inputs/previews; chain base_observation_id "
-                   "to this response when extending it."}
-    result["execution_readback"] = compact
-
-    viewport = value.get("viewport")
-    if isinstance(viewport, dict):
-        metadata = {}
-        for field in ("bounds", "clock", "truncated"):
-            if field in viewport:
-                metadata[field] = deepcopy(viewport[field])
-            elif viewport.get("field_references", {}).get(field) == "#/execution_readback/" + field and field in readback:
-                metadata[field] = deepcopy(readback[field])
-        value["viewport"] = metadata | {"projection": {"scope": "operation_viewport_deferred",
-            "meaning": "This operation's direct result and changes remain above. Its expanded viewport "
-                       "is deferred; execution_readback is a later compact read, not this operation's snapshot."}}
-    # Existing exact-equality references must not point at a shifted delta row.
-    public = value.get("public_facts")
-    if isinstance(public, dict) and isinstance(public.get("entities"), list):
-        for index, row in enumerate(public["entities"]):
-            reference = row.get("entity_ref") if isinstance(row, dict) else None
-            if isinstance(reference, str) and reference.startswith("#/execution_readback/entities/"):
-                suffix = reference.rsplit("/", 1)[-1]
-                if suffix.isdigit() and int(suffix) < len(rows):
-                    public["entities"][index] = deepcopy(rows[int(suffix)])
-        public.pop("readback_projection", None)
-    result["read_requests"] = [{"tool": "map_viewport", "arguments": {}}]
-    return result
-
-
-def _agent_tool_text(payload):
-    """Lossless JSON without deep indentation or oversized single lines."""
-    def render(value, depth=0):
-        compact = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        if not isinstance(value, (dict, list)) or not value or depth >= 2 and len(compact.encode()) <= 4096:
-            return compact
-        if isinstance(value, dict):
-            return "{\n" + ",\n".join(json.dumps(key, ensure_ascii=False) + ":" + render(item, depth+1)
-                                      for key, item in value.items()) + "\n}"
-        return "[\n" + ",\n".join(render(item, depth+1) for item in value) + "\n]"
-    return render(payload)
-
-
-_NATIVE_TOOL_MAX_BYTES = 50 * 1024
-_NATIVE_TOOL_MAX_LINES = 2000
-_AGENT_TOOL_MAX_BYTES = 48 * 1024
-_AGENT_TOOL_MAX_LINES = 1800
-
-
-def _agent_tool_text_fits(text, *, native=False):
-    byte_limit = _NATIVE_TOOL_MAX_BYTES if native else _AGENT_TOOL_MAX_BYTES
-    line_limit = _NATIVE_TOOL_MAX_LINES if native else _AGENT_TOOL_MAX_LINES
-    return len(text.encode("utf-8")) <= byte_limit and text.count("\n") + 1 <= line_limit
-
-
-def _companion_inspection_index(payload):
-    """Keep actual state and discovery when expanded action inputs do not fit."""
-    value = payload.get("result", payload)
-    if not isinstance(value, dict) or not isinstance(value.get("entity"), dict):
-        return None
-    entity = value["entity"]
-    projection = value.get("action_options_projection") or {}
-    if (projection.get("candidate_selection") or {}).get("candidate_id"):
-        return None  # A single complete candidate must never become a fake preview.
-    options = value.get("action_options", entity.get("action_options", []))
-    if not isinstance(options, list):
-        return None
-    state = _companion_selected_state_summary({"entity": entity})["entity"]
-    outlines = []
-    for option in options:
-        if not isinstance(option, dict) or not isinstance(option.get("action"), str):
-            continue
-        outline = {key: deepcopy(option[key]) for key in
-            ("action", "label", "function_id", "available", "reason", "use", "preconditions") if key in option}
-        request = {"tool": "grove_inspect", "arguments": {"entity_id": entity["id"], "action": option["action"]}}
-        outline["read_request"] = request
-        candidates = (option.get("input") or {}).get("candidates", [])
-        choices = option.get("choices") or {}
-        candidates = [*candidates, *choices.get("items", []), *choices.get("others", [])]
-        if candidates:
-            outline["candidates_index"] = [{key: deepcopy(candidate[key]) for key in
-                ("id", "name", "kind") if key in candidate} | {"read_request": {
-                    "tool": "grove_inspect", "arguments": request["arguments"] | {"candidate_id": candidate["id"]}}}
-                for candidate in candidates if isinstance(candidate, dict) and isinstance(candidate.get("id"), str)]
-        outlines.append(outline)
-    index = {"player": deepcopy(value.get("player")), "entity": state,
-        "action_options": outlines, "available_actions": deepcopy(value.get("available_actions", [])),
-        "action_options_projection": {"scope": "authorized_action_index", "expanded_actions": [],
-            "requested_projection": deepcopy(projection),
-            "meaning": "Actual authorized object state and action outlines only. Expanded action arguments, "
-                       "candidate versions, conditions and physical previews were not supplied or bound. "
-                       "Use the declared read_request for an action, or one candidate, before relying on those details."},
-        "projection": {"scope": "object_state_and_action_index", "complete_inspection": False,
-            "omitted_sections": ["expanded action inputs and previews", "child snapshots", "public content history"]}}
-    if "explanation" in value:
-        index["explanation"] = deepcopy(value["explanation"])
-    if "result" not in payload:
-        return index
-    return {key: deepcopy(payload[key]) for key in
-        ("world_id", "function_id", "function_version", "snapshot_seq") if key in payload} | {"result": index}
-
-
-def _bounded_agent_projection(function, payload):
-    """Run before observation binding; oversized reads never imply full inspect."""
-    if _agent_tool_text_fits(_agent_tool_text(payload)):
-        return payload
-    if function == "grove.inspect":
-        index = _companion_inspection_index(payload)
-        if index is not None and _agent_tool_text_fits(_agent_tool_text(index)):
-            return index
-    if function == "map.viewport":
-        scene = payload.get("result", payload)
-        if isinstance(scene, dict):
-            index = _companion_scene_index(scene)
-            projected = ({key: deepcopy(payload[key]) for key in
-                ("world_id", "function_id", "function_version", "snapshot_seq") if key in payload}
-                | {"result": index}) if "result" in payload else index
-            index["projection"].update(reason="ToolOutputLimit", complete_scene=False,
-                omitted_rows={}, read_request={"tool": "map_viewport", "arguments": {"radius": 1}},
-                meaning=index["projection"]["meaning"] + " Complete encoded terrain is retained when supplied; "
-                    "any omitted discovery rows are counted below. Use a smaller viewport centered on a "
-                    "nearby coordinate for omitted public objects, or grove_inspect for a retained actual ID.")
-            # A dense scene must not turn four tiny encoded chunks into a
-            # failed read. Bind only rows actually shown; no hidden versions.
-            for field in ("entities", "nearby_entities", "resource_nodes", "water_sources",
-                          "players", "nearby_players", "inventory"):
-                rows = index.get(field)
-                while isinstance(rows, list) and rows and not _agent_tool_text_fits(_agent_tool_text(projected)):
-                    if field == "inventory" and len(rows) == 1:
-                        break
-                    rows.pop()
-                    omitted = index["projection"]["omitted_rows"]
-                    omitted[field] = omitted.get(field, 0) + 1
-                    index["truncated"] = True
-                    if field == "inventory":
-                        # Never advance past a withheld inventory row.
-                        index["inventory_next"] = rows[-1].get("id") if isinstance(rows[-1], dict) else None
-            if _agent_tool_text_fits(_agent_tool_text(projected)):
-                return projected
-        raise ConnectorError("ToolOutputTooLarge", "The current scene exceeds the tool output limit. "
-            "Its omitted state was not provided or bound. Read map_viewport with a smaller radius "
-            "and nearby center, or inspect a known actual object ID; do not guess missing terrain.", 413)
-    if function not in AGENT_WRITE_FUNCTIONS:
-        raise ConnectorError("ToolOutputTooLarge", "The complete world read exceeds the native tool output limit. "
-            "Its expanded content and action previews were not provided. For grove_inspect, specify its optional "
-            "action to read only that action's complete current inputs and previews; "
-            "do not claim a complete inspection or choose an action from missing previews.", 413)
-
-    # A committed write is never converted into a failed/retryable operation.
-    # This response omits expanded state explicitly and retains the real receipt.
-    result = {key: deepcopy(payload[key]) for key in (
-        "operation_id", "function_id", "ok", "status", "commit_seq", "actor_role_id",
-        "function_version", "replayed", "execution_control") if key in payload}
-    operation_result = payload.get("result")
-    if isinstance(operation_result, dict):
-        receipt_fields = {key: deepcopy(operation_result[key]) for key in
-            ("operation_id", "function_id", "ok", "status", "commit_seq", "function_version", "replayed")
-            if key in operation_result}
-        if receipt_fields:
-            result["result"] = receipt_fields
-    readback = payload.get("execution_readback", {})
-    compact = {}
-    if isinstance(readback, dict):
-        player = readback.get("player")
-        if isinstance(player, dict):
-            compact["player"] = {key: deepcopy(player[key]) for key in
-                ("id", "version", "x", "y", "location") if key in player}
-        selected = readback.get("selected_inspection", {})
-        entity = selected.get("entity") if isinstance(selected, dict) else None
-        if isinstance(entity, dict):
-            identity = {key: deepcopy(entity[key]) for key in ("id", "version", "pour_target_slot") if key in entity}
-            compact["selected_inspection"] = {"entity": identity,
-                "projection": {"scope": "selected_identity_only", "state_and_previews_included": False}}
-            if isinstance(identity.get("id"), str):
-                compact["selected_inspection"]["read_request"] = {
-                    "tool": "grove_inspect", "arguments": {"entity_id": identity["id"]}}
-    result["execution_readback"] = compact
-    result["projection"] = {"scope": "write_receipt_and_read_entries", "expanded_state_included": False,
-        "world_verdict_included": False, "goal_result_included": False,
-        "reason": "NativeToolOutputLimit",
-        "omitted_sections": ["expanded result", "expanded execution_readback", "event sequence lists"],
-        "meaning": "The original operation's receipt and control are preserved; expanded state and action previews "
-                   "are unexpanded, not absent. Do not repeat the write to obtain its output. Read current state "
-                   "through the declared world tools before another consequential action. Receipt ok/commit "
-                   "metadata does not verify physical success or the person's natural-language goal."}
-    result["read_requests"] = [{"tool": "map_viewport", "arguments": {}},
-                               {"tool": "grove_control_status", "arguments": {}}]
-    # Keep each available verdict whole when it fits, or explicitly mark it
-    # unprovided; never turn call success into a goal/contract verdict.
-    omitted_verdicts = set()
-    for source, destination, field, marker, path in (
-        (payload, result, "world_results", "world_verdict_included", "world_results"),
-        (readback, compact, "world_results", "world_verdict_included", "execution_readback.world_results"),
-        (payload, result, "goal_result", "goal_result_included", "goal_result"),
-    ):
-        if not isinstance(source, dict) or field not in source:
-            continue
-        destination[field] = deepcopy(source[field])
-        if _agent_tool_text_fits(_agent_tool_text(result)):
-            result["projection"][marker] = True
-        else:
-            destination.pop(field)
-            omitted_verdicts.add(marker)
-            result["projection"]["omitted_sections"].append(path)
-    for marker in omitted_verdicts:
-        result["projection"][marker] = False
-    if not _agent_tool_text_fits(_agent_tool_text(result)):
-        raise ConnectorError("ToolOutputTooLarge", "The original write receipt itself exceeds the native output limit. "
-            "Its operation remains recorded; recover the original receipt before another write.", 413)
-    return result
-
-
-def _checked_agent_tool_text(payload):
-    """Serialize the final bound object without changing its displayed facts."""
-    text = _agent_tool_text(payload)
-    if not _agent_tool_text_fits(text, native=True):
-        raise ConnectorError("ToolOutputTooLarge", "The final tool response exceeds the native output limit. "
-            "Expanded content was not provided. A completed world operation remains committed; "
-            "recover its original receipt before retrying a write.", 413)
-    return text
-
-
-def _agent_version_field(name):
-    match = re.fullmatch(r"expected_(.+)_version", name)
-    return match.group(1) if match else "anchor" if name == "observed_anchor_version" else None
-
-
-def agent_tool_schema(schema):
-    """Hide only optimistic snapshot guards from this connector's MCP input."""
-    result = deepcopy(schema)
-
-    def visit(value, path=()):
-        if not isinstance(value, dict):
-            return
-        guarded = path in {(), ("continuation",)}
-        properties = value.get("properties", {})
-        for key in list(properties):
-            if guarded and _agent_version_field(key):
-                properties.pop(key)
-            else:
-                visit(properties[key], (*path, key))
-        if guarded and isinstance(value.get("required"), list):
-            value["required"] = [key for key in value["required"] if not _agent_version_field(key)]
-        for branch in ("oneOf", "anyOf", "allOf"):
-            for child in value.get(branch, []):
-                visit(child, path)
-        visit(value.get("items"), (*path, "[]"))
-
-    # Published definitions and author action params are semantic inputs, even
-    # when an author gives a parameter a name resembling a snapshot guard.
-    visit(result)
-    return result
-
-
-def public_world_error_details(value):
-    """Allow only the world's observable action facts, never upstream diagnostics."""
-    if not isinstance(value, dict):
-        return None
-    source = value.get("action_precondition")
-    if not isinstance(source, dict):
-        source = {}
-    safe = {}
-    for key in ("subject", "entity_id", "condition", "metric", "reason"):
-        if isinstance(source.get(key), str) and len(source[key]) <= 180:
-            safe[key] = source[key]
-    for key in ("known", "satisfied"):
-        if type(source.get(key)) is bool:
-            safe[key] = source[key]
-    for key in ("required_max", "actual_distance"):
-        if type(source.get(key)) is int and 0 <= source[key] <= 1_000_000:
-            safe[key] = source[key]
-    if safe.get("known") is True:
-        for key in ("location", "player_location"):
-            location = source.get(key)
-            if (isinstance(location, dict) and set(location) == {"x", "y"} and
-                    all(type(location[axis]) is int and abs(location[axis]) <= 1_000_000 for axis in ("x", "y"))):
-                safe[key] = dict(location)
-    else:
-        safe.pop("actual_distance", None)
-    result = {"action_precondition": safe} if safe else {}
-    transfer = value.get("water_transfer")
-    if isinstance(transfer, dict):
-        water = {}
-        for key in ("source_id", "target_id", "meaning"):
-            if isinstance(transfer.get(key), str) and len(transfer[key]) <= 180:
-                water[key] = transfer[key]
-        if transfer.get("target_slot") in ("contained", "surface", "absorbed"):
-            water["target_slot"] = transfer["target_slot"]
-        for key in ("requested", "source_remaining", "target_remaining_capacity", "maximum"):
-            if type(transfer.get(key)) is int and 0 <= transfer[key] <= 1_000_000:
-                water[key] = transfer[key]
-        if transfer.get("unit") == "u":
-            water["unit"] = "u"
-        if water:
-            result["water_transfer"] = water
-    return result or None
-
-
-class ConnectorError(Exception):
-    def __init__(self, code: str, message: str, status: int = 400, *, world_details=None):
-        self.code, self.message, self.status = code, message, status
-        self.world_details = public_world_error_details(world_details)
-        super().__init__(message)
-
-
 def checked_world_url(value: str) -> str:
     parsed = urlsplit(value)
     local = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
@@ -1245,6 +375,8 @@ class GroveSession:
     def __init__(self, manager: "ConnectorManager", identity: dict, bearer: str, name: str, model: str):
         self.manager, self.identity, self.bearer = manager, identity, bearer
         self.role_id = str(identity["role_id"])
+        self.execution_controller = ExecutionController(self.role_id, max_requests=MAX_EXECUTION_REQUESTS,
+            max_world_calls=MAX_WORLD_CALLS, max_seconds=MAX_SECONDS)
         digest = hashlib.sha256((manager.world_url + "\0" + self.role_id).encode()).hexdigest()[:32]
         self.profile = safe_directory(manager.storage / "profiles" / digest)
         # An explicit override splits small runtime data from this same profile.
@@ -1295,22 +427,6 @@ class GroveSession:
         self.blueprint_active = False
         self.active_execution = False
         self.delegation = ""
-        self.execution_archive = []
-        self.execution = {"status": "idle", "goal": "", "max_actions": 0, "actions_count": 0,
-            "remaining_actions": 0, "control_status": "idle", "delegation_active": False,
-            "grant_version": None, "receipts": [], "readback": None,
-            "readback_actual": False, "error": None,
-            "task_id": "", "context_entity_id": None, "requests_used": 0, "max_requests": 4,
-            "request_status": "idle", "stop_reason": "", "resume_allowed": False,
-            "grant_action_offset": 0, "pending_grant_action_offset": None, "grant_operation_id": None,
-            "readback_actions_count": None, "no_progress_segments": 0,
-            "segment_id": "", "checkpoint": None, "goal_result": None, "segments": [], "phase_timings": [],
-            "context_result_reference": None, "context_reference_attempted": True, "world_results": [],
-            "settlement": None,
-            "history_recovery": {"requested": False, "status": "not_started", "attempts": 0},
-            "budget_extensions": [],
-            "progress": {"summary": "", "next_intent": "", "evidence": []},
-            "budget": {"max_steps": 8, "max_tool_calls": MAX_WORLD_CALLS, "max_seconds": MAX_SECONDS}}
         self.restore_permissions = False
         self.generation = {"status": "idle", "published": False, "attempts": 0,
                            "entities": [], "process": None, "readback": None, "error": None}
@@ -1320,9 +436,7 @@ class GroveSession:
         self.catalog: dict[str, dict] = {}
         # Immutable, opaque model observations are deliberately not persisted.
         # Independent MCP requests have no reliable inference-batch boundary.
-        self._agent_observations = {}
-        self._agent_preflight_observation_id = None
-        self._agent_observation_sequence = 0
+        self.observations = AgentObservations(self.role_id, reserve_sequence=lambda sequence: self.remember())
         self.available_models: list[str] = []
         self.model_metadata: dict = {}
         self._active_request_measurement = None
@@ -1332,6 +446,7 @@ class GroveSession:
         self.cancelled = False
         self.automatic = {"enabled": False, "interval_seconds": 30, "max_count": 4,
                           "count": 0, "next_at": None, "last_observed_seq": 0, "last_handled_seq": 0}
+        execution_restore_changed = False
         if self.memory_file.exists():
             try:
                 saved = json.loads(self.memory_file.read_text())
@@ -1339,7 +454,8 @@ class GroveSession:
                     sequence = saved.get("agent_observation_sequence", 0)
                     if type(sequence) is not int or sequence < 0:
                         raise ValueError("invalid observation sequence")
-                    self._agent_observation_sequence = sequence
+                    self.observations = AgentObservations(self.role_id, sequence=sequence,
+                        reserve_sequence=lambda current: self.remember())
                     self.model = checked_model(saved.get("model") or self.model)
                     self.session_id = saved.get("session_id", "")
                     self.blueprint_session_id = saved.get("blueprint_session_id", "")
@@ -1355,19 +471,10 @@ class GroveSession:
                     self.inference_history = saved.get("inference_history", [])[-30:]
                     self.restore_permissions = bool(saved.get("restore_permissions", False))
                     self.generation = saved.get("generation", self.generation)
-                    if isinstance(saved.get("execution"), dict):
-                        self.execution.update(saved["execution"])
-                    archive = saved.get("execution_archive", [])
-                    self.execution_archive = archive[-8:] if isinstance(archive, list) else []
-                    self.delegation = saved.get("execution_delegation", "")
-                    if not isinstance(self.delegation, str):
-                        raise ValueError("invalid execution delegation")
-                    if self.execution.get("status") in {"starting", "running"}:
-                        self.execution["status"] = "paused"
-                        self.execution.update(request_status="unsettled", resume_allowed=False,
-                            stop_reason="连接器已重启；先恢复原回执和现场，再明确接续。")
-                    if (self.execution.get("history_recovery") or {}).get("status") == "running":
-                        self.execution["history_recovery"]["status"] = "uncertain"
+                    execution_restore_changed = self.execution_controller.restore(saved.get("execution"),
+                        archive=saved.get("execution_archive", []),
+                        delegation=saved.get("execution_delegation", ""),
+                        unknown=saved.get("unknown_operations", []))
                     self.messages = saved.get("messages", [])[-30:]
                     self.unknown = saved.get("unknown_operations", [])
                     self.opportunity = saved.get("opportunity")
@@ -1397,12 +504,71 @@ class GroveSession:
                     self.private_context["last_creation_request"] = last_creation
             except (ValueError, OSError, TypeError, ConnectorError):
                 raise ConnectorError("CorruptMemory", "Local companion memory could not be read; keep it for recovery.", 500)
-        if self.normalize_execution_progress():
+        self.execution_controller.ports = ExecutionPorts(
+            invoke=lambda *args, **kwargs: self.invoke(*args, **kwargs),
+            read=self._execution_read, recover=self._execution_recover,
+            native_segment=self._execution_native_segment,
+            settle=lambda **kwargs: self.settle_execution_request(**kwargs), persist=self.remember)
+        if self.normalize_execution_progress() or execution_restore_changed:
             self.remember()
 
+    @property
+    def execution(self):
+        return self.execution_controller.state
+
+    @property
+    def execution_archive(self):
+        return self.execution_controller.archive
+
+    @property
+    def delegation(self):
+        return self.execution_controller.delegation
+
+    @delegation.setter
+    def delegation(self, value):
+        self.execution_controller.delegation = value
+
+    @property
+    def active_execution(self):
+        return self.execution_controller.active
+
+    @active_execution.setter
+    def active_execution(self, value):
+        self.execution_controller.active = value
+
+    @property
+    def cancelled(self):
+        return self.execution_controller.stopped
+
+    @cancelled.setter
+    def cancelled(self, value):
+        self.execution_controller.stopped = value
+
+    async def _execution_read(self, kind, *, context_entity_id=None, operation_id=None):
+        if kind == "receipt":
+            return await self.world("GET", "/v1/receipts/" + quote(operation_id, safe=""))
+        if kind == "facts":
+            return await self.current_turn_facts(context_entity_id=context_entity_id, optional_selected=True)
+        raise ValueError("Unknown execution read port")
+
+    async def _execution_recover(self, *, replay=False):
+        await self.recover_receipts(replay=replay)
+        self.execution_controller.sync_unknown(self.unknown)
+        return bool(self.unknown)
+
+    async def _execution_native_segment(self, kind, goal, *, context_entity_id=None):
+        if kind == "execute":
+            return await self.turn(goal, executing=True, context_entity_id=context_entity_id)
+        if kind == "compact":
+            return await self.compact_execution_context()
+        if kind == "history":
+            return await self.recover_execution_history()
+        raise ValueError("Unknown native segment port")
+
     def remember(self):
+        self.execution_controller.sync_unknown(self.unknown)
         save_json(self.memory_file, {"role_id": self.role_id, "session_id": self.session_id,
-            "agent_observation_sequence": self._agent_observation_sequence,
+            "agent_observation_sequence": self.observations.sequence,
             "blueprint_session_id": self.blueprint_session_id,
             "blueprint_opportunity_id": self.blueprint_opportunity_id,
             "entered": self.entered, "world_read": self.world_read,
@@ -1510,12 +676,7 @@ class GroveSession:
                 raise ConnectorError("UnknownWrite", "Recover the previous world receipt before another write.", 409)
             envelope["operation_id"] = "grove-local-" + secrets.token_hex(16)
             record = {"function_id": function, "envelope": envelope, "created_at": time.time()}
-            if (function == "grove.control_grant" and self.execution.get("task_id") and
-                    arguments.get("goal") == self.execution["goal"]):
-                record["task_id"] = self.execution["task_id"]
-            if model_write:
-                record["execution_write"] = True
-                record.update(task_id=self.execution.get("task_id"), segment_id=self.execution.get("segment_id"))
+            record.update(self.execution_controller.operation_owner(function, arguments, model_write=model_write))
             if function == "grove.content_submit":
                 self.generation["pending_operation_id"] = envelope["operation_id"]
             self.unknown.append(record)
@@ -1528,17 +689,15 @@ class GroveSession:
                 if record in self.unknown:
                     self.unknown.remove(record)
                 if model_write:
-                    self.execution_receipt(function, envelope["operation_id"], status="rejected")
+                    self.execution_receipt(function, envelope["operation_id"], status="rejected", operation_record=record)
                 self.remember()
             elif model_write:
-                self.execution_receipt(function, envelope["operation_id"], status="unknown")
-                self.execution["status"] = "unknown"
+                self.execution_receipt(function, envelope["operation_id"], status="unknown", operation_record=record)
                 self.remember()
             raise
         except (httpx.HTTPError, asyncio.CancelledError):
             if model_write and record is not None and record in self.unknown:
-                self.execution_receipt(function, envelope["operation_id"], status="unknown")
-                self.execution["status"] = "unknown"
+                self.execution_receipt(function, envelope["operation_id"], status="unknown", operation_record=record)
                 self.remember()
             raise
         if record is not None:
@@ -1547,7 +706,7 @@ class GroveSession:
             # an actual committed publication and replace it with a new one.
             self.observe_outcome(function, payload, operation_record=record)
             if model_write:
-                self.execution_receipt(function, envelope["operation_id"], payload, status="committed")
+                self.execution_receipt(function, envelope["operation_id"], payload, status="committed", operation_record=record)
             if record in self.unknown:
                 self.unknown.remove(record)
             self.remember()
@@ -1562,7 +721,7 @@ class GroveSession:
                 if exc.code != "ReceiptNotFound":
                     raise
                 if not replay:
-                    if record.get("execution_write"):
+                    if record.get("execution_write") and self.execution_controller.owns_operation(record):
                         self.execution["status"] = "unknown"
                     self.remember()
                     continue
@@ -1579,12 +738,12 @@ class GroveSession:
                     if record in self.unknown:
                         self.unknown.remove(record)
                     if record.get("execution_write"):
-                        self.execution_receipt(record["function_id"], operation, status="rejected")
+                        self.execution_receipt(record["function_id"], operation, status="rejected", operation_record=record)
                     self.remember()
                     continue
             self.observe_outcome(record["function_id"], result, operation_record=record)
             if record.get("execution_write"):
-                self.execution_receipt(record["function_id"], operation, result, status="confirmed")
+                self.execution_receipt(record["function_id"], operation, result, status="confirmed", operation_record=record)
             if record in self.unknown:
                 self.unknown.remove(record)
             self.remember()
@@ -1595,57 +754,24 @@ class GroveSession:
                 "message": "已核对原操作并释放机会；没有发表内容，也未调用替代模型。"})
             self.remember()
 
-    def execution_receipt(self, function: str, operation: str, payload: dict | None = None, *, status: str):
-        value = {"function": function, "operation_id": operation, "status": status,
-                 "commit_seq": (payload or {}).get("commit_seq")}
-        receipts = self.execution["receipts"]
-        existing = next((item for item in receipts if item.get("operation_id") == operation), None)
-        if existing is not None:
-            existing.update(value)
-        else:
-            receipts.append(value)
-        # A task can span several requests. Its cumulative ledger must not be
-        # truncated at the per-request tool allowance.
-        self.execution["receipts"] = receipts[-MAX_EXECUTION_REQUESTS * MAX_WORLD_CALLS:]
+    def execution_receipt(self, function, operation, payload=None, *, status, operation_record=None):
+        return self.execution_controller.receipt(function, operation, payload, status=status,
+            operation_record=operation_record)
 
-    def execution_phase(self, phase: str, started: float, *, status: str = "confirmed", error=None):
-        value = {
-            "phase": phase, "request": self.execution.get("requests_used", 0),
-            "elapsed_seconds": round(time.monotonic() - started, 3), "status": status}
-        if error:
-            value["error_type"] = type(error).__name__
-            if isinstance(error, ConnectorError):
-                value["error_code"] = error.code
-        self.execution["phase_timings"] = (self.execution.get("phase_timings", []) + [value])[-32:]
-        self.remember()
+    def execution_phase(self, phase, started, *, status="confirmed", error=None):
+        return self.execution_controller.phase(phase, started, status=status, error=error)
 
     def normalize_execution_progress(self):
-        # Counts belong to this goal's actual execution, not a previous public
-        # control record. Summary requests are not world-action evidence.
-        if (not self.execution.get("task_id") or self.execution.get("grant_operation_id") or
-                self.execution.get("receipts") or self.unknown):
-            return False
-        changed = self.execution.get("actions_count", 0) != 0 or self.execution.get("grant_action_offset", 0) != 0
-        self.execution.update(actions_count=0, grant_action_offset=0, grant_version=None,
-            remaining_actions=self.execution["max_actions"], delegation_active=False)
-        if self.execution.get("readback_actions_count") is not None:
-            self.execution["readback_actions_count"] = 0
-        return changed
+        self.execution_controller.sync_unknown(self.unknown)
+        return self.execution_controller.normalize_progress()
 
-    def execution_can_resume(self, *, additional_requests: int = 0):
-        return bool(self.execution.get("task_id") and self.execution.get("status") in {"paused", "error"} and
-            (self.execution.get("history_recovery") or {}).get("status") not in {"running", "uncertain", "failed"} and
-            not self.unknown and not self.execution.get("delegation_active") and
-            self.execution.get("actions_count", 0) < self.execution.get("max_actions", 0) and
-            self.execution.get("max_requests", 0) + additional_requests <= MAX_EXECUTION_REQUESTS and
-            self.execution.get("requests_used", 0) < self.execution.get("max_requests", 0) + additional_requests and
-            self.execution.get("request_status") == "idle_confirmed")
+    def execution_can_resume(self, *, additional_requests=0):
+        self.execution_controller.sync_unknown(self.unknown)
+        return self.execution_controller.can_resume(additional_requests=additional_requests)
 
-    def pause_execution(self, reason: str, *, error: dict | None = None):
-        self.active_execution = False
-        completed = (self.execution.get("goal_result") or {}).get("status") == "completed"
-        self.execution.update(status="unknown" if self.unknown else "completed" if completed else "paused", stop_reason=reason,
-            error=error, resume_allowed=False)
+    def pause_execution(self, reason, *, error=None):
+        self.execution_controller.sync_unknown(self.unknown)
+        return self.execution_controller.pause(reason, error=error)
 
     async def settle_execution_request(self, *, abort: bool = False):
         """Close this request before opening another; an HTTP timeout is not idle.
@@ -1654,6 +780,8 @@ class GroveSession:
         only after confirming this saved session exists in the same owned host.
         Never reopen write admission on an unsuccessful/malformed status read.
         """
+        reclaimed_request = (self.execution.get("request_status") == "unsettled" and
+            self.execution.get("control_status") == "revoked")
         self.active_execution = False
         self.execution["request_status"] = "settling"
         started = step_started = time.monotonic()
@@ -1665,10 +793,14 @@ class GroveSession:
                 await self.host("POST", "/session/" + quote(self.session_id, safe="") + "/abort", {}, timeout=5)
                 self.execution_phase("settle_abort", step_started)
                 stage, step_started = "session_identity", time.monotonic()
-            session = await asyncio.wait_for(self.host("GET", "/session/" + quote(self.session_id, safe=""),
-                timeout=HOST_METADATA_SECONDS), timeout=HOST_METADATA_SECONDS)
-            if not isinstance(session, dict) or session.get("id") != self.session_id:
-                raise ConnectorError("UnsettledHost", "原模型会话未能确认；不会打开下一段行动。", 409)
+            owned_sessions = {self.session_id}
+            if self.blueprint_session_id:
+                owned_sessions.add(self.blueprint_session_id)
+            for owned_id in sorted(owned_sessions):
+                session = await asyncio.wait_for(self.host("GET", "/session/" + quote(owned_id, safe=""),
+                    timeout=HOST_METADATA_SECONDS), timeout=HOST_METADATA_SECONDS)
+                if not isinstance(session, dict) or session.get("id") != owned_id:
+                    raise ConnectorError("UnsettledHost", "原模型会话未能确认；不会打开下一段行动。", 409)
             self.execution_phase("settle_session_identity", step_started)
             stage, step_started = "session_status", time.monotonic()
             statuses = await asyncio.wait_for(self.host("GET", "/session/status", timeout=HOST_METADATA_SECONDS),
@@ -1676,7 +808,8 @@ class GroveSession:
             if (not isinstance(statuses, dict) or any(not isinstance(key, str) or not isinstance(value, dict) or
                     value.get("type") not in {"idle", "busy", "retry"} for key, value in statuses.items())):
                 raise ConnectorError("UnsettledHost", "原模型执行状态无法确认；不会打开下一段行动。", 409)
-            status = statuses.get(self.session_id, {"type": "idle"})
+            status = next((statuses.get(owned_id, {"type": "idle"}) for owned_id in sorted(owned_sessions)
+                if statuses.get(owned_id, {"type": "idle"}).get("type") != "idle"), {"type": "idle"})
             self.execution["settlement"]["native_status"] = status.get("type")
             if not isinstance(status, dict) or status.get("type") != "idle":
                 raise ConnectorError("NativeSessionBusy", "上一段模型仍在运行；先等原请求停止，再接续。", 409)
@@ -1690,6 +823,10 @@ class GroveSession:
             self.execution["request_status"] = "idle_confirmed"
             self.execution["settlement"].update(stage=stage, status="idle_confirmed",
                 elapsed_seconds=round(time.monotonic() - started, 3))
+            if reclaimed_request and not self.unknown and not self.delegation and not self.execution.get("delegation_active"):
+                if (self.execution.get("error") or {}).get("code") in {"UnsettledHost", "NativeSessionBusy"}:
+                    self.execution["error"] = None
+                self.note("cancelled", "伙伴已停止；你的世界位置和物件保持现状")
             self.remember()
             return True
         except (ConnectorError, httpx.HTTPError, asyncio.TimeoutError, ValueError) as exc:
@@ -1712,201 +849,23 @@ class GroveSession:
             self.remember()
             return False
 
-    def update_execution_control(self, value: dict):
-        # The world status is public; its grant token is kept separately in the
-        # private recovery journal and never copied into UI or model context.
-        self.normalize_execution_progress()
-        task_control = (value.get("goal") == self.execution["goal"] and
-            bool(self.execution.get("grant_operation_id") or self.execution.get("receipts")))
-        if self.execution.get("task_id"):
-            # A user-approved resume grants only the original remainder. World
-            # grant counters restart; the local task's counters never do.
-            if task_control and "actions_count" in value:
-                self.execution["actions_count"] = max(self.execution["actions_count"],
-                    self.execution.get("grant_action_offset", 0) + value["actions_count"])
-        else:
-            self.execution.update({key: value[key] for key in ("goal", "max_actions", "actions_count") if key in value})
-        if not self.execution.get("task_id") or task_control:
-            self.execution["grant_version"] = value.get("version", self.execution.get("grant_version"))
-        self.execution["control_status"] = value.get("status")
-        self.execution["delegation_active"] = value.get("delegation_active", value.get("status") == "active") is True
-        if self.execution.get("task_id") and not task_control:
-            self.execution["delegation_active"] = False
-        self.execution["remaining_actions"] = max(0, self.execution["max_actions"] - self.execution["actions_count"])
+    def update_execution_control(self, value):
+        self.execution_controller.sync_unknown(self.unknown)
+        return self.execution_controller.update_control(value)
 
-    async def execution_readback(self, *, context_entity_id: str | None = None):
-        started = time.monotonic()
-        for item in self.execution["receipts"]:
-            if item.get("status") == "committed":
-                receipt = await self.world("GET", "/v1/receipts/" + quote(item["operation_id"], safe=""))
-                self.execution_receipt(item["function"], item["operation_id"], receipt, status="confirmed")
-        control = await self.invoke("grove.control_status", {})
-        self.update_execution_control(control.get("result", control))
-        selected = context_entity_id if context_entity_id is not None else self.execution.get("context_entity_id")
-        facts = await self.current_turn_facts(context_entity_id=selected, optional_selected=True)
-        unavailable = facts.get("selected_inspection_unavailable", {})
-        if (not self.execution.get("context_reference_attempted", True) and
-                unavailable.get("entity_id") == self.execution.get("context_entity_id") and
-                unavailable.get("code") in {"RuleViolation", "PermissionDenied", "ResourceNotFound"}):
-            # Recovery can see a definite refusal before the first model turn.
-            # That closes the window; a later successful read must not rebind it.
-            self.execution["context_reference_attempted"] = True
-        self.execution["world_results"] = self.execution_world_results(facts)
-        self.execution.update(readback=facts, readback_actual=True,
-            readback_actions_count=self.execution["actions_count"])
-        self.execution_phase("receipt_readback", started)
-        self.remember()
-        return facts
+    async def execution_readback(self, *, context_entity_id=None):
+        return await self.execution_controller.readback(context_entity_id=context_entity_id)
 
     async def revoke_execution(self):
-        if any(record.get("function_id") == "grove.control_revoke" for record in self.unknown):
-            raise ConnectorError("UnknownRevoke", "收回控制的原操作尚待核对；不会发起替代操作。", 409)
-        if not (self.delegation or self.execution.get("delegation_active") or
-                self.execution.get("status") in {"starting", "running"}):
-            return
-        try:
-            await self.invoke("grove.control_revoke", {})
-        except ConnectorError as exc:
-            self.execution.update(status="unknown", error={"code": exc.code,
-                "message": "收回控制的结果尚未确认；已停止本机后续动作，请恢复后核对原回执。"})
-            self.remember()
-            raise
-        self.remember()
+        self.execution_controller.sync_unknown(self.unknown)
+        return await self.execution_controller.revoke()
 
-    async def execute_goal(self, goal: str, *, context_entity_id: str | None = None, resume: bool = False):
-        self.active_execution = False
+    async def execute_goal(self, goal, *, context_entity_id=None, resume=False):
         try:
-            if self.cancelled:
-                raise asyncio.CancelledError()
-            if not resume and not await self.settle_execution_request():
-                state = ("原模型会话仍在运行" if self.execution["settlement"].get("native_status") in {"busy", "retry"}
-                    else "原模型会话状态未确认")
-                self.pause_execution(state + "；没有授予新动作或调用模型。",
-                    error=self.execution.get("error"))
-                return
-            if resume:
-                # Explicit resume is not a replacement goal. Settle originals
-                # and the native host before making a new bounded grant.
-                if not await self.settle_execution_request(abort=True):
-                    state = ("原模型请求仍在运行" if self.execution["settlement"].get("native_status") in {"busy", "retry"}
-                        else "原模型请求状态未确认")
-                    self.pause_execution(state + "；本任务保持暂停。",
-                        error=self.execution.get("error"))
-                    return
-                await self.recover_receipts(replay=False)
-                if self.unknown:
-                    self.pause_execution("原操作结果待核对；没有开始替代执行。")
-                    return
-                await self.execution_readback(context_entity_id=context_entity_id)
-                if self.execution.get("delegation_active"):
-                    await self.revoke_execution()
-                self.execution["pending_grant_action_offset"] = self.execution["actions_count"]
-            recovery = self.execution.get("history_recovery") or {}
-            if recovery.get("requested") and recovery.get("status") != "completed":
-                await self.recover_execution_history()
-                # A summary is memory, never a checkpoint or grant. Re-read the
-                # actual server before establishing this segment's authority.
-                await self.execution_readback(context_entity_id=context_entity_id)
-            if self.cancelled:
-                raise asyncio.CancelledError()
-            remaining = self.execution["max_actions"] - self.execution["actions_count"]
-            if remaining <= 0 or self.execution["requests_used"] >= self.execution["max_requests"]:
-                self.pause_execution("原任务的行动或模型请求额度已用完。")
-                return
-            await self.invoke("grove.control_grant", {"goal": goal, "max_actions": remaining})
-            # Reclaim can race a pending grant response. Never start a model or
-            # write under a grant that arrived after the local stop boundary.
-            if self.cancelled:
-                raise asyncio.CancelledError()
-            if not self.delegation or not self.execution["delegation_active"]:
-                raise ConnectorError("DelegationRequired", "目标执行授权未能确认；没有调用模型。", 409)
-            self.execution["status"] = "running"
-            self.execution.update(stop_reason="", error=None, resume_allowed=False)
-            self.remember()
-
-            while not self.cancelled:
-                if self.execution["requests_used"] >= self.execution["max_requests"]:
-                    self.pause_execution("模型请求额度已用完；目标未宣称完成。")
-                    break
-                if not self.execution["delegation_active"] or self.execution["remaining_actions"] <= 0:
-                    self.pause_execution("行动权已收回或原动作额度已用完。")
-                    break
-                before = self.execution["actions_count"]
-                await self.compact_execution_context()
-                self.execution.update(checkpoint=None, request_status="preparing", resume_allowed=False,
-                    segment_id="grove-segment-" + secrets.token_hex(16))
-                self.active_execution = True
-                failure = None
-                try:
-                    await self.turn(goal, executing=True, context_entity_id=context_entity_id)
-                except ConnectorError as exc:
-                    failure = exc
-                finally:
-                    self.active_execution = False
-                idle = await self.settle_execution_request(abort=failure is not None)
-                if not idle:
-                    self.pause_execution("上一段模型执行未确认停止；保留现场与原回执。",
-                        error=self.execution.get("error"))
-                    break
-                await self.recover_receipts(replay=False)
-                if self.unknown:
-                    self.pause_execution("原行动结果待核对；没有发起新操作。")
-                    break
-                if (self.execution.get("checkpoint") or {}).get("status") != "completed":
-                    await self.execution_readback(context_entity_id=context_entity_id)
-                progress = self.execution["actions_count"] > before
-                checkpoint = self.execution.get("checkpoint") or {}
-                self.execution["no_progress_segments"] = 0 if progress else self.execution["no_progress_segments"] + 1
-                self.execution["segments"] = (self.execution.get("segments", []) + [{
-                    "request": self.execution["requests_used"], "actions_before": before,
-                    "actions_after": self.execution["actions_count"], "progress": progress,
-                    "checkpoint": checkpoint.get("status"), "error": failure.code if failure else None}])[-MAX_EXECUTION_REQUESTS:]
-                self.remember()
-                if self.cancelled:
-                    raise asyncio.CancelledError()
-                if checkpoint.get("status") == "completed":
-                    self.execution.update(status="completed", stop_reason="Agent 已提交完成声明并结束本次委托。",
-                        error=None, resume_allowed=False)
-                    break
-                if checkpoint.get("status") == "blocked":
-                    self.pause_execution(checkpoint.get("summary") or "Agent 根据现场报告无法安全推进。")
-                    break
-                if not self.execution["delegation_active"]:
-                    self.pause_execution("行动权已收回或原动作额度已用完。")
-                    break
-                if failure is not None and not progress:
-                    self.pause_execution("这一段未形成可核对进展；保留原目标，可明确接续。",
-                        error={"code": failure.code, "message": failure.message})
-                    break
-                if failure is not None and failure.code in {"ModelUnavailable", "HostAuthenticationFailed", "SavedSessionMissing"}:
-                    self.pause_execution("模型或原会话不可用；保留已确认进展，先解决连接阻塞。",
-                        error={"code": failure.code, "message": failure.message})
-                    break
-                if self.execution["no_progress_segments"] >= 2:
-                    self.pause_execution("连续两段没有已确认的新行动；停止重复推理。")
-                    break
-                self.execution["status"] = "running"
-                if progress and not checkpoint:
-                    self.execution["progress"] = {"summary": "这一段的实际行动已通过原回执与现场核对。",
-                        "next_intent": "依据最新现场继续原目标。", "evidence": [deepcopy(item) for item in
-                            self.execution["receipts"] if item.get("status") == "confirmed"][-8:]}
-        except asyncio.CancelledError:
-            if self.execution["status"] not in {"unknown", "completed"}:
-                self.pause_execution("你已停止或收回后续行动；已成立结果保留。")
-            raise
-        except ConnectorError as exc:
-            completed = (self.execution.get("goal_result") or {}).get("status") == "completed"
-            self.execution.update(status="unknown" if self.unknown else "completed" if completed else "error",
-                                  error={"code": exc.code, "message": exc.message})
-            raise
+            return await self.execution_controller.execute_goal(goal, context_entity_id=context_entity_id, resume=resume)
         finally:
-            # No new model write can begin while the grant is being closed.
-            self.active_execution = False
-            with contextlib.suppress(ConnectorError):
-                await self.revoke_execution()
             if not self.unknown:
                 await self.release_opportunity()
-            self.execution["resume_allowed"] = self.execution_can_resume()
             if self.execution["status"] in {"completed", "paused"}:
                 self.status = "ready" if self.execution["status"] == "completed" else "paused"
             self.remember()
@@ -1995,17 +954,8 @@ class GroveSession:
 
     def observe_outcome(self, function: str, payload: dict, *, operation_record: dict | None = None):
         value = payload.get("result", payload)
-        if function == "grove.control_grant":
-            self.delegation = value.get("delegation", "")
-            if (operation_record and operation_record.get("task_id") == self.execution.get("task_id") and
-                    self.execution.get("task_id")):
-                self.execution["grant_operation_id"] = operation_record["envelope"]["operation_id"]
-            if self.execution.get("pending_grant_action_offset") is not None:
-                self.execution["grant_action_offset"] = self.execution.pop("pending_grant_action_offset")
-            self.update_execution_control(value)
-        elif function == "grove.control_revoke":
-            self.update_execution_control(value)
-            self.delegation = ""
+        if function in {"grove.control_grant", "grove.control_revoke"}:
+            self.execution_controller.observe_control(function, payload, operation_record=operation_record)
         elif function == "grove.generation_context":
             opportunity = value.get("opportunity")
             if (isinstance(opportunity, dict) and opportunity.get("status") == "claimed" and
@@ -2109,17 +1059,6 @@ class GroveSession:
                     self.execution["status"] = "paused"
                     if self.entered:
                         await self.execution_readback()
-                if self.execution.get("task_id") and not self.unknown:
-                    idle = await self.settle_execution_request(abort=True)
-                    recovery = self.execution.get("history_recovery") or {}
-                    if idle and recovery.get("status") in {"running", "uncertain"}:
-                        try:
-                            await self.verify_history_recovery()
-                        except ConnectorError as exc:
-                            recovery.update(status="failed" if exc.code == "HistoryRecoveryInvalid" else "uncertain",
-                                error={"code": exc.code, "message": exc.message})
-                            self.remember()
-                    self.execution["resume_allowed"] = self.execution_can_resume()
         if self.session_id:
             session_started = time.monotonic()
             try:
@@ -2136,6 +1075,17 @@ class GroveSession:
                 # silently replace the user's conversation and its context.
                 raise
             self.initialization_phase("saved_session", session_started)
+            if not self.unknown:
+                idle = await self.settle_execution_request(abort=self.execution.get("request_status") not in {"idle", "idle_confirmed", "not_started"})
+                recovery = self.execution.get("history_recovery") or {}
+                if idle and recovery.get("status") in {"running", "uncertain"}:
+                    try:
+                        await self.verify_history_recovery()
+                    except ConnectorError as exc:
+                        recovery.update(status="failed" if exc.code == "HistoryRecoveryInvalid" else "uncertain",
+                            error={"code": exc.code, "message": exc.message})
+                        self.remember()
+                self.execution["resume_allowed"] = self.execution_can_resume()
         if not self.session_id:
             session_started = time.monotonic()
             try:
@@ -2157,6 +1107,7 @@ class GroveSession:
                 await self.publication_readback()
             self.status = "ready"
         else:
+            self.execution_controller.ensure_native_ready()
             await self.turn("请先调用 world_bootstrap，再调用一次 grove_handbook 读取真实入场概览。概览有 scope 和 omitted_sections，"
                 "已足够完成入场说明；不要反复索要完整手册或为入场加载创作目录。省略字段不等于没有相应能力，"
                 "后续明确目标涉及创作时再读 grove_rule_catalog 和实际工具的输入字段。现在尚未入场，不要调用 viewport，"
@@ -2362,6 +1313,7 @@ class GroveSession:
                 self.note("queued", "附近变化已合并，当前回应完成后处理")
                 return
             raise ConnectorError("TurnBusy", "The companion is already responding.", 409)
+        self.execution_controller.ensure_native_ready()
         self.worker = asyncio.create_task(self.run_turn(text, automatic=automatic, mode=mode, kind=kind,
                                                        context_entity_id=context_entity_id))
         self.status, self.error = "thinking", None
@@ -2407,6 +1359,8 @@ class GroveSession:
             raise ConnectorError("UnknownWrite", "Recover the previous world write first.", 409)
         if executing and self.cancelled:
             raise asyncio.CancelledError()
+        if not executing:
+            self.execution_controller.ensure_native_ready()
         self.status, self.error = "thinking", None
         if not executing:
             self.cancelled = False
@@ -2529,14 +1483,16 @@ class GroveSession:
             if executing:
                 self.active_execution = False
                 self.execution["request_status"] = "timed_out"
-            else:
-                with contextlib.suppress(Exception):
-                    await self.host("POST", "/session/" + quote(self.session_id, safe="") + "/abort", {}, timeout=5)
             raise ConnectorError("HostUnavailable", "OpenCode is slow or unavailable. Movement remains available after entry; reconnect the companion when ready.", 503)
         finally:
             if inference["status"] == "started":
                 inference.update(status="failed", finished_at=time.time())
                 self.remember()
+            if not executing and not self.cancelled and not self.reclaim_in_progress:
+                if native_returned and self.response_diagnostics.get("validated_final"):
+                    self.execution_controller.request_returned("entry" if initial else "explain")
+                else:
+                    await self.settle_execution_request(abort=True)
             if not self.unknown:
                 await self.release_opportunity()
 
@@ -2652,11 +1608,7 @@ class GroveSession:
         return facts
 
     def inference_started(self, purpose: str, *, session_id: str | None = None) -> dict:
-        if purpose in {"execution", "execution_summary"}:
-            if self.execution["requests_used"] >= self.execution["max_requests"]:
-                raise ConnectorError("ExecutionRequestBudget", "原目标的模型请求额度已用完。", 409)
-            self.execution["requests_used"] += 1
-            self.execution["request_status"] = "summarizing" if purpose == "execution_summary" else "running"
+        execution_fields = self.execution_controller.request_started(purpose)
         if self.active_automatic:
             if self.automatic["count"] >= self.automatic["max_count"]:
                 raise ConnectorError("AutomaticBudget", "自动模型请求预算已用完；生成机会会释放。", 409)
@@ -2669,9 +1621,7 @@ class GroveSession:
         self.inference_count += 1
         entry = {"number": self.inference_count, "purpose": purpose, "status": "started", "started_at": time.time(),
                  "session_id": session_id or self.session_id}
-        if purpose in {"execution", "execution_summary"}:
-            entry.update(task_id=self.execution.get("task_id"), segment_id=self.execution.get("segment_id"),
-                request_number=self.execution["requests_used"])
+        entry.update(execution_fields)
         self.inference_history.append(entry)
         self.inference_history = self.inference_history[-30:]
         self.remember()
@@ -2759,97 +1709,6 @@ class GroveSession:
             "output": ("Return only {content: actual content object, continuation: optional actual continuation}. " if wrapped else "Return only the content object. ") +
                 "No opportunity_id, operation_id, commentary or proposal. Follow the actual local goal and preferences; the example illustrates shape, not authored output."}
 
-    @staticmethod
-    def blueprint_model_input(payload: dict) -> dict:
-        """Remove repeated declarations only from the model's copy of facts."""
-        model_input = deepcopy(payload)
-        if model_input.get("blueprint_schema"):
-            model_input.pop("content_schema", None)
-        model_input.pop("shape_example", None)
-        goal = model_input.get("goal")
-        private = model_input.get("private_context")
-        if isinstance(private, dict):
-            if private.get("last_creation_request") == goal:
-                private.pop("last_creation_request", None)
-            requests = private.get("recent_user_requests")
-            if isinstance(requests, list):
-                private["recent_user_requests"] = [entry for entry in requests
-                    if not (entry == goal or isinstance(entry, dict) and entry.get("text") == goal)]
-
-        catalog = model_input.get("catalog")
-        if isinstance(catalog, dict) and isinstance(catalog.get("compositions"), list):
-            def spec_key(spec):
-                return json.dumps(spec, sort_keys=True, separators=(",", ":"))
-            definitions = {spec_key(item["composition"]): item for item in catalog["compositions"]
-                if isinstance(item, dict) and isinstance(item.get("composition"), dict)}
-            def differences(actual, base):
-                result = {}
-                for key, value in actual.items():
-                    if key not in base:
-                        result[key] = deepcopy(value)
-                    elif isinstance(value, dict) and isinstance(base[key], dict):
-                        delta = differences(value, base[key])
-                        if delta:
-                            result[key] = delta
-                    elif value != base[key]:
-                        result[key] = deepcopy(value)
-                return result
-            shortcuts = catalog.get("objects")
-            if isinstance(shortcuts, list):
-                aliases = []
-                for item in shortcuts:
-                    base = definitions.get(spec_key(item.get("composition"))) if isinstance(item, dict) else None
-                    if base is None or not isinstance(item.get("template"), str):
-                        aliases.append(item)
-                        continue
-                    alias = {"template": item["template"], "composition": deepcopy(item["composition"])}
-                    overrides = differences({key: value for key, value in item.items()
-                        if key not in {"template", "composition"}}, base)
-                    if overrides:
-                        alias["definition_overrides"] = overrides
-                    aliases.append(alias)
-                catalog["objects"] = aliases
-                catalog["shortcut_guidance"] = (
-                    "Each shortcut references its complete compositions entry. "
-                    "definition_overrides contains only actual differing fields; apply those to that entry.")
-            registry = catalog.get("composition_registry")
-            if isinstance(registry, dict) and isinstance(registry.get("constructions"), list):
-                for construction in registry["constructions"]:
-                    if not isinstance(construction, dict):
-                        continue
-                    materials, sizes = construction.get("materials"), construction.get("sizes")
-                    linings = construction.get("lining", [])
-                    if not (isinstance(materials, list) and materials and isinstance(sizes, list) and sizes
-                            and isinstance(linings, list)):
-                        continue
-                    specs = [{"material": material, "construction": construction.get("id"), "size": size}
-                        for material in materials for size in sizes]
-                    specs += [{**spec, "lining": lining} for spec in list(specs) for lining in linings]
-                    if all(spec_key(spec) in definitions for spec in specs):
-                        # Every legal combination keeps its full resolved matter,
-                        # components and cost. Unknown declarations, including
-                        # lining_definition, stay until equivalence is established.
-                        for key in ("variants", "scales", "state"):
-                            construction.pop(key, None)
-
-        public = model_input.get("public_content")
-        anchors = public.get("anchors", []) if isinstance(public, dict) else []
-        entities = model_input.get("public_entities")
-        if isinstance(anchors, list) and isinstance(entities, list):
-            for index, entity in enumerate(entities):
-                if not isinstance(entity, dict) or not entity.get("id"):
-                    continue
-                anchor = next((item for item in anchors if isinstance(item, dict) and
-                    item.get("entity_id") == entity["id"] and item.get("version") == entity.get("version") and
-                    isinstance(item.get("entity"), dict) and item["entity"].get("id") == entity["id"] and
-                    item["entity"].get("version") == entity.get("version") and
-                    all(key in item["entity"] and item["entity"][key] == value
-                        for key, value in entity.items())), None)
-                if anchor is not None:
-                    entities[index] = {"id": entity["id"], "version": entity["version"],
-                        "public_content_anchor": {"content_id": public["id"], "entity_id": entity["id"],
-                                                  "version": entity["version"]}}
-        return model_input
 
     async def new_blueprint_session(self, opportunity_id: str):
         # Agent selection does not isolate history in OpenCode. Use one fresh
@@ -2883,7 +1742,7 @@ class GroveSession:
             response = await asyncio.wait_for(self.host("POST", "/session/" + quote(session_id, safe="") + "/message",
                 {"agent": BLUEPRINT_AGENT, "model": {"providerID": provider, "modelID": model},
                  "tools": {"*": False},
-                 "parts": [{"type": "text", "text": json.dumps(self.blueprint_model_input(payload),
+                 "parts": [{"type": "text", "text": json.dumps(blueprint_model_input(payload),
                     ensure_ascii=False, separators=(",", ":"))}]},
                 timeout=timeout), timeout=timeout)
             self.inference_finished(inference, response)
@@ -2891,6 +1750,8 @@ class GroveSession:
                 raise asyncio.CancelledError()
             return self.complete_model_answer(response, session_id=session_id)
         except (asyncio.TimeoutError, httpx.TimeoutException, httpx.NetworkError):
+            self.execution["request_status"] = "unsettled"
+            self.remember()
             with contextlib.suppress(Exception):
                 await self.host("POST", "/session/" + quote(session_id, safe="") + "/abort", {}, timeout=5)
             raise ConnectorError("HostUnavailable", "本机模型未及时完成内容；不会发布未完成的正文。", 503)
@@ -3422,11 +2283,8 @@ class GroveSession:
         await asyncio.shield(ready if background else task)
 
     def _close_reclaim_admission(self):
-        self.cancelled, self.pending = True, None
-        self.active_execution = False
-        if self.execution.get("task_id"):
-            self.execution.update(request_status="settling", resume_allowed=False)
-            self.remember()
+        self.execution_controller.begin_reclaim()
+        self.pending = None
         self.pending_changes = []
         self.automatic["enabled"], self.automatic["next_at"] = False, None
         if self.automatic_worker:
@@ -3434,16 +2292,11 @@ class GroveSession:
 
     def _record_reclaimed_state(self, revoke_error=None, *, finished=False):
         self.status = "paused"
-        if self.execution.get("goal") and self.execution.get("status") != "completed":
-            self.execution["status"] = "unknown" if self.unknown or revoke_error else "paused"
-            self.execution["stop_reason"] = "你已收回后续行动；已成立结果保留。"
-            if revoke_error:
-                self.execution["error"] = {"code": revoke_error.code,
-                    "message": "收回或原操作结果尚未确认；后续本机动作已停止，请恢复后核对。"}
-            self.execution["resume_allowed"] = finished and self.execution_can_resume()
-        self.remember()
+        self.execution_controller.sync_unknown(self.unknown)
+        self.execution_controller.record_reclaimed(revoke_error, finished=finished)
 
     async def _finish_reclaim(self, ready, worker):
+        diagnostic = None
         try:
             # Close admission, revoke, then read original receipts. This short
             # stage never waits for the native model's abort or idle status.
@@ -3471,17 +2324,24 @@ class GroveSession:
                 worker.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await worker
-            if self.execution.get("task_id"):
+            if self.session_id and self.host_url:
                 await self.settle_execution_request()
                 if self.unknown:
                     with contextlib.suppress(ConnectorError):
                         await self.recover_receipts(replay=False)
                         await self.revoke_execution()
                         revoke_error = None
+            elif not self.session_id and not self.blueprint_session_id:
+                self.execution_controller.confirm_no_native_request()
             if not self.unknown:
                 await self.release_opportunity()
             self._record_reclaimed_state(revoke_error, finished=True)
-            self.note("cancelled", "伙伴已停止；你的世界位置和物件保持现状")
+            if revoke_error or self.unknown or self.delegation or self.execution.get("delegation_active"):
+                self.note("reclaim_pending", "仍在核对原请求和世界行动权；暂不能启动新推理。")
+            elif self.execution.get("request_status") in {"idle", "idle_confirmed"}:
+                self.note("cancelled", "伙伴已停止；你的世界位置和物件保持现状")
+            else:
+                self.note("reclaim_pending", "仍在确认原请求结束；你可以手动操作，暂不能启动新推理。")
         except (Exception, asyncio.CancelledError) as exc:
             # A detached task always records its failure. World authority and
             # unknown operations remain truthful even if native cleanup fails.
@@ -3503,8 +2363,12 @@ class GroveSession:
                     "message": "收回状态未能保存；原操作记录仍需核对，请恢复原连接。"}
                 self.execution.update(request_status="unsettled", resume_allowed=False)
             finally:
-                if not ready.done():
-                    ready.set_result(None)
+                try:
+                    self.execution_controller.finish_reclaim(error=diagnostic or (
+                        self.error if self.error and self.error.get("code") == "ReclaimPersistenceFailed" else None))
+                finally:
+                    if not ready.done():
+                        ready.set_result(None)
 
     async def disconnect(self):
         async with self.disconnect_lock:
@@ -3547,212 +2411,14 @@ class GroveSession:
                 await self.process.wait()
 
     def agent_observation(self, observation_id):
-        if not isinstance(observation_id, str) or observation_id not in self._agent_observations:
-            raise ConnectorError("ObservationRequired", "请先读取世界并引用返回的observation_id；当前观察标识未知或已因服务重启失效。", 409)
-        return deepcopy(self._agent_observations[observation_id])
+        return self.observations.get(observation_id)
 
     def present_agent_result(self, function, payload, *, base_id=None, preflight=False, action_entity_ids=()):
-        """Create a new fixed bundle solely from this presented response.
-
-        No invoke/UI/recovery path calls this. Another parallel tool's unseen
-        response cannot alter the bundle selected by an already submitted write.
-        """
-        result = deepcopy(companion_projection(function, payload))
-        bundle = (self.agent_observation(base_id) if base_id is not None else
-                  {"versions": {kind: {} for kind in ("player", "entity", "opportunity", "content")},
-                   "continuation_bases": {}, "pour_target_slots": {}})
-        if not preflight:
-            if function in _AGENT_ACTION_FUNCTIONS:
-                result = _companion_action_projection(result, base_id=base_id, versions=bundle["versions"],
-                    entity_ids=action_entity_ids, source=payload)
-            # This is the exact object both MCP representations will deliver.
-            # User-message preflights are not native tool output; their complete
-            # selected previews have a different transport/input boundary.
-            result = _bounded_agent_projection(function, result)
-
-        def remember(kind, value, id_key="id", version_key="version"):
-            if isinstance(value, dict) and isinstance(value.get(id_key), str) and type(value.get(version_key)) is int and value[version_key] > 0:
-                bundle["versions"][kind][value[id_key]] = value[version_key]
-
-        def rows(value):
-            return value if isinstance(value, list) else []
-
-        def options(values, *, target=None):
-            for option in values if isinstance(values, list) else []:
-                if not isinstance(option, dict):
-                    continue
-                # These are current server-generated choices, not authored
-                # descriptions, program fields, schemas or historical receipts.
-                inputs = option.get("input", {})
-                candidates = rows(inputs.get("candidates")) if isinstance(inputs, dict) else []
-                choices = option.get("choices", {})
-                if isinstance(choices, dict):
-                    candidates = [*candidates, *rows(choices.get("items")), *rows(choices.get("others"))]
-                for candidate in candidates:
-                    if isinstance(candidate, dict):
-                        remember("player" if candidate.get("kind") == "role" else "entity", candidate)
-                        preview = candidate.get("preview")
-                        if (option.get("action") in {"store", "attach"} and isinstance(target, str) and
-                                isinstance(candidate.get("id"), str) and isinstance(preview, dict) and
-                                re.fullmatch(r"[0-9a-f]{64}", str(preview.get("version_fingerprint", "")))):
-                            key = json.dumps([target, candidate["id"], option["action"]])
-                            bundle.setdefault("combination_previews", {})[key] = {
-                                "fingerprint": preview["version_fingerprint"],
-                                "player_version": bundle["versions"]["player"].get(self.role_id),
-                                "target_version": bundle["versions"]["entity"].get(target),
-                                "item_version": bundle["versions"]["entity"].get(candidate["id"])}
-                if isinstance(option.get("input_schema"), dict):
-                    option["input_schema"] = agent_tool_schema(option["input_schema"])
-                if isinstance(option.get("arguments"), dict):
-                    option["arguments"] = {key: value for key, value in option["arguments"].items()
-                                           if not _agent_version_field(key)}
-
-        def entity(value):
-            if isinstance(value, dict):
-                identity, version = value.get("id"), value.get("version")
-                previous_version = bundle["versions"]["entity"].get(identity) if isinstance(identity, str) else None
-                remember("entity", value)
-                if isinstance(identity, str) and type(version) is int and version > 0:
-                    slots = bundle.setdefault("pour_target_slots", {})
-                    if value.get("pour_target_slot") in ("contained", "surface"):
-                        slots[identity] = value["pour_target_slot"]
-                    elif "pour_target_slot" in value or previous_version != version:
-                        # A newer identity-only projection cannot silently
-                        # upgrade an older action basis it did not present.
-                        slots.pop(identity, None)
-                options(value.get("action_options"), target=value.get("id"))
-
-        def content(value):
-            if isinstance(value, list):
-                for item in value:
-                    content(item)
-            elif isinstance(value, dict):
-                remember("content", value)
-                for anchor in rows(value.get("anchors")):
-                    remember("entity", anchor, "entity_id")
-                    if isinstance(anchor, dict):
-                        entity(anchor.get("entity"))
-
-        def scene(value):
-            if not isinstance(value, dict):
-                return
-            # Regional indexes precede direct snapshots; operation snapshots
-            # precede viewport, selected inspection and final execution readback.
-            # This ordering uses their actual sources, never the largest number.
-            content(value.get("public_content"))
-            content(value.get("public_contents"))
-            scene(value.get("public_facts"))
-            remember("player", value.get("player"))
-            for key in ("players", "nearby_players"):
-                for item in rows(value.get(key)):
-                    remember("player", item)
-            for key in ("entities", "inventory", "contents", "nearby_entities", "resource_nodes", "water_sources"):
-                for item in rows(value.get(key)):
-                    entity(item)
-            entity(value.get("entity"))
-            selected = value.get("entity")
-            options(value.get("action_options"), target=selected.get("id") if isinstance(selected, dict) else None)
-            opportunities = list(rows(value.get("opportunities")))
-            if isinstance(value.get("opportunity"), dict):
-                opportunities.append(value["opportunity"])
-            for opportunity in opportunities:
-                remember("opportunity", opportunity)
-                if isinstance(opportunity, dict) and isinstance(opportunity.get("id"), str) and "continuation_basis" in opportunity:
-                    # The claimed opportunity's basis is immutable admission
-                    # evidence. Later live anchor reads cannot replace it.
-                    bundle["continuation_bases"][opportunity["id"]] = deepcopy(opportunity["continuation_basis"])
-            scene(value.get("viewport"))
-            scene(value.get("selected_inspection"))
-
-        scene(result.get("result", result))
-        scene(result.get("execution_readback"))
-        # Reserve before publication. The random tail keeps a parallel reader's
-        # next handle unpredictable; the durable sequence prevents restart reuse.
-        self._agent_observation_sequence += 1
-        self.remember()
-        observation_id = f"obs{self._agent_observation_sequence}-{secrets.token_hex(4)}"
-        self._agent_observations[observation_id] = bundle
-        result = {"observation_id": observation_id,
-                  **{key: result[key] for key in ("operation_id", "function_id", "ok", "commit_seq") if key in result},
-                  **result}
-        if preflight:
-            self._agent_preflight_observation_id = observation_id
-        return result
+        return self.observations.present(function, payload, base_id=base_id,
+            preflight=preflight, action_entity_ids=action_entity_ids)
 
     def bind_agent_versions(self, function, arguments, observation_id):
-        """Use an explicitly selected immutable observation; never query state."""
-        bundle = self.agent_observation(observation_id)
-        root = deepcopy(arguments)
-        versions = bundle["versions"]
-        if (function == "grove.interact" and root.get("action") == "pour" and
-                ("amount" in root or "target_slot" in root)):
-            slot = bundle.get("pour_target_slots", {}).get(root.get("target_id"))
-            if slot not in ("contained", "surface"):
-                raise ConnectorError("ObservedActionRequired", "此观察未呈现目标的pour_target_slot；请先检查目标并引用返回的observation_id，不能推导倒水去向。", 409)
-            if "target_slot" in root and root["target_slot"] != slot:
-                raise ConnectorError("ObservedActionMismatch", "倒水target_slot与此观察中呈现的原去向不符；不会换槽或重新绑定。", 409)
-            if "amount" in root:
-                root.setdefault("target_slot", slot)
-
-        def missing(subject, identity):
-            raise ConnectorError("ObservedVersionRequired", f"此观察中没有{subject} {identity or ''}的版本；请先读取该对象，并引用新返回的observation_id。", 409)
-
-        def fixed_basis(node, subject):
-            basis = bundle["continuation_bases"].get(root.get("opportunity_id"))
-            if not isinstance(basis, dict) or basis.get("content_id") != node.get("content_id"):
-                missing("创作机会固定的内容接续依据", root.get("opportunity_id"))
-            if subject == "content":
-                return basis.get("expected_content_version")
-            anchor = next((item for item in basis.get("anchors", [])
-                           if item.get("entity_id") == node.get("anchor_entity_id")), None)
-            if anchor is None:
-                missing("创作机会固定的锚点", node.get("anchor_entity_id"))
-            return anchor.get("observed_anchor_version")
-
-        def bind(schema, node, path=()):
-            if not isinstance(schema, dict) or not isinstance(node, dict):
-                return node
-            props = schema.get("properties", {})
-            for key, field in props.items():
-                subject = _agent_version_field(key) if path in {(), ("continuation",)} else None
-                if subject is None:
-                    if key in node and isinstance(node[key], dict):
-                        node[key] = bind(field, node[key], (*path, key))
-                    continue
-                node.pop(key, None)  # A copied model number is never authority.
-                if path == ("continuation",) and subject in {"content", "anchor"}:
-                    version = fixed_basis(node, subject)
-                else:
-                    identity = self.role_id if subject == "player" else node.get(subject + "_id")
-                    kind = subject if subject in {"player", "opportunity", "content"} else "entity"
-                    if function == "grove.interact":
-                        if subject == "target" or (subject == "item" and root.get("action") == "drop"):
-                            identity = root.get("target_id") or root.get("item_id")
-                    if function == "grove.rule_action" and subject == "other" and root.get("action") == "offer":
-                        kind = "player"
-                    if identity is None and key not in schema.get("required", []):
-                        continue
-                    version = versions[kind].get(identity) if isinstance(identity, str) else None
-                if type(version) is not int or version < 1:
-                    missing(subject, identity if path != ("continuation",) else node.get("anchor_entity_id", node.get("content_id")))
-                node[key] = version
-            return node
-
-        bound = bind(self.catalog[function]["input_schema"], root)
-        if function == "grove.interact" and bound.get("action") in {"store", "attach"}:
-            key = json.dumps([bound.get("target_id"), bound.get("item_id"), bound["action"]])
-            preview = bundle.get("combination_previews", {}).get(key)
-            if (not preview or preview.get("player_version") != bound.get("expected_player_version") or
-                    preview.get("target_version") != bound.get("expected_target_version") or
-                    preview.get("item_version") != bound.get("expected_item_version")):
-                raise ConnectorError("ObservedPreviewRequired", "装入或附着前，请读取目标物件的完整当前候选预览，并引用该读取的observation_id。", 409)
-            explicit = bound.get("expected_combination_fingerprint")
-            if explicit is not None and explicit != preview["fingerprint"]:
-                raise ConnectorError("ObservedPreviewMismatch", "组合指纹不是此观察中该行动的候选预览；请重新读取目标物件。", 409)
-            # The world rechecks this fingerprint's affected structures. A
-            # compact write readback cannot upgrade an older loading preview.
-            bound["expected_combination_fingerprint"] = preview["fingerprint"]
-        return bound
+        return self.observations.bind(function, arguments, observation_id, self.catalog[function]["input_schema"])
 
     def tools(self):
         result = [{"name": "world_bootstrap", "description": "Read authenticated entry facts of this world.",
@@ -3831,7 +2497,7 @@ class GroveSession:
             return await self.execution_checkpoint(arguments)
         if name == "world_bootstrap":
             clean = deepcopy(arguments)
-            base_id = clean.pop("base_observation_id", self._agent_preflight_observation_id)
+            base_id = clean.pop("base_observation_id", self.observations.preflight_id)
             if base_id is not None:
                 self.agent_observation(base_id)
             if clean:
@@ -3865,7 +2531,7 @@ class GroveSession:
         elif self.catalog[function].get("access") != "read":
             raise ConnectorError("ToolDenied", "The declared read tool is not read-only.", 403)
         clean = deepcopy(arguments)
-        base_id = clean.pop("base_observation_id", self._agent_preflight_observation_id)
+        base_id = clean.pop("base_observation_id", self.observations.preflight_id)
         if base_id is not None:
             self.agent_observation(base_id)
         result = await self.invoke(function, clean)
@@ -3876,138 +2542,23 @@ class GroveSession:
         self.remember()
         return self.present_agent_result(function, result, base_id=base_id)
 
-    async def execution_tool_write(self, function: str, arguments: dict, *, segment_id: str | None = None):
-        if (self.cancelled or not self.active_execution or not self.delegation or
-                self.execution.get("status") != "running" or not self.execution.get("delegation_active")):
-            raise ConnectorError("DelegationRequired", "The person reclaimed control; stop writing.", 403)
-        if not segment_id or segment_id != self.execution.get("segment_id"):
-            raise ConnectorError("StaleExecutionSegment", "原请求已结束；迟到工具调用没有执行。", 409)
+    async def execution_tool_write(self, function, arguments, *, segment_id=None):
+        self.execution_controller.admit_write(segment_id)
         arguments = deepcopy(arguments)
         observation_id = arguments.pop("observation_id", None)
-        arguments = self.bind_agent_versions(function, arguments, observation_id) | {"delegation": self.delegation}
-        started = time.monotonic()
-        try:
-            result = await self.invoke(function, arguments, model_write=True)
-        except BaseException:
-            self.execution_phase("mcp_write", started, status="failed_or_unknown")
-            raise
-        self.execution_phase("mcp_write", started)
-        try:
-            facts = await self.execution_readback()
-        except ConnectorError as exc:
-            # The committed write stays committed. Missing current readback
-            # blocks further model writes; recovery reads its original ID.
-            self.execution.update(status="error", readback_actual=False,
-                error={"code": exc.code, "message": "动作已提交，但当前结果未能核对；请恢复后查看。"})
-            self.remember()
-            raise
+        arguments = self.bind_agent_versions(function, arguments, observation_id)
+        projection = await self.execution_controller.write(function, arguments, segment_id=segment_id)
         self.request_milestone("first_confirmed_action_seconds", source="receipt_and_world_readback")
-        projection = deepcopy(result)
-        projection["execution_readback"] = facts
-        projection["execution_control"] = {key: self.execution.get(key) for key in
-            ("actions_count", "max_actions", "remaining_actions", "delegation_active", "grant_version")}
         return self.present_agent_result(function, projection, base_id=observation_id,
             action_entity_ids=[arguments.get(key) for key in ("target_id", "item_id", "other_id")])
 
-    def execution_world_results(self, facts: dict | None, *, establish_reference=False):
-        """Report the selected world's own verdict, without judging the goal text."""
-        # New tasks opt in once. Older saved tasks have no trustworthy initial
-        # binding attempt, so they must remain unbound rather than adopt later terms.
-        may_establish = establish_reference and self.execution.get("context_reference_attempted", True) is False
-        if may_establish:
-            self.execution["context_reference_attempted"] = True
-            self.remember()
-        if not isinstance(facts, dict):
-            return []
-        selected = facts.get("selected_inspection")
-        entity = selected.get("entity") if isinstance(selected, dict) else None
-        identity = self.execution.get("context_entity_id")
-        if (not identity or not isinstance(entity, dict) or entity.get("id") != identity or
-                type(entity.get("version")) is not int or entity["version"] < 1):
-            return []
-        binding = entity.get("creative")
-        contract = binding.get("contract") if isinstance(binding, dict) else None
-        if (not isinstance(contract, dict) or not isinstance(binding.get("definition_ref"), str) or
-                not isinstance(binding.get("type_id"), str) or not isinstance(contract.get("material"), str) or
-                type(contract.get("terms_version")) is not int or contract["terms_version"] < 0 or
-                type(contract.get("quantity")) is not int or contract["quantity"] < 1 or
-                type(contract.get("delivered")) is not int or contract["delivered"] < 0):
-            return []
-        current_reference = {"entity_id": identity, "definition_ref": binding["definition_ref"],
-            "type_id": binding["type_id"], "terms_version": contract["terms_version"],
-            "material_id": contract["material"], "quantity_u": contract["quantity"]}
-        reference = self.execution.get("context_result_reference")
-        # Only the execution preflight can establish this object reference.
-        # A checkpoint or later readback cannot choose new acceptance terms.
-        if reference is None and may_establish:
-            reference = deepcopy(current_reference)
-            self.execution["context_result_reference"] = reference
-            self.remember()
-        mismatches = ([key for key, value in current_reference.items() if reference.get(key) != value]
-                      if isinstance(reference, dict) else [])
-        verification = ("unbound" if not isinstance(reference, dict) else "reference_mismatch" if mismatches else
-                        "verified_complete" if contract.get("status") == "complete" else "not_complete")
-        # The world owns this verdict. Complete describes the fixed contract's
-        # settlement at finished_tick, not current conditions or extra goals
-        # such as reclaiming proceeds. Canonical identity is not lot provenance.
-        result = {"kind": "world_contract", "entity_id": identity, "entity_version": entity["version"],
-            "entity_name": entity.get("name"), "definition_ref": binding["definition_ref"],
-            "type_id": binding["type_id"], "terms_version": contract["terms_version"],
-            "material_id": contract["material"], "quantity_u": contract["quantity"],
-            "delivered_u": contract["delivered"], "server_status": contract.get("status"),
-            "verification": {"status": verification,
-                "scope": "bound_world_contract", "source": "authenticated_selected_inspection"},
-            "reference": deepcopy(reference), "reference_mismatches": mismatches,
-            "world_tick": binding.get("world_tick"), "observed_at": facts.get("observed_at")}
-        for key in ("parties", "accepted", "beneficiary", "deadline_tick", "finished_tick", "completion_proof",
-                    "released", "lost", "escrow_remaining", "physical_failure_tick", "failure_reason", "condition_error"):
-            if key in contract:
-                result[key] = deepcopy(contract[key])
-        return [result]
+    def execution_world_results(self, facts, *, establish_reference=False):
+        return self.execution_controller.world_results(facts, establish_reference=establish_reference)
 
-    async def execution_checkpoint(self, arguments: dict):
-        schema = next(item["inputSchema"] for item in self.tools() if item["name"] == "execution_checkpoint")
-        if not Draft202012Validator(schema).is_valid(arguments):
-            raise ConnectorError("InvalidCheckpoint", "执行检查点需要本任务标识、状态、真实发现及原回执引用。")
-        if (not self.active_execution or self.cancelled or self.execution.get("status") != "running" or
-                arguments["task_id"] != self.execution.get("task_id") or
-                arguments["execution_segment_id"] != self.execution.get("segment_id")):
-            raise ConnectorError("NoActiveExecution", "这个检查点不属于当前正在执行的目标。", 409)
-        if self.execution_write_lock.locked() or self.unknown:
-            raise ConnectorError("UnconfirmedAction", "先核对原行动结果，再报告这一段结果。", 409)
-        confirmed = {item["operation_id"]: item for item in self.execution["receipts"]
-                     if item.get("status") == "confirmed"}
-        evidence = arguments["evidence_operation_ids"]
-        if any(operation not in confirmed for operation in evidence):
-            raise ConnectorError("UnconfirmedEvidence", "报告引用必须属于本任务实际已确认的原操作。", 409)
-        if arguments["status"] == "completed":
-            if not evidence or not self.execution.get("readback_actual"):
-                raise ConnectorError("ReadbackRequired", "真实行动和结果尚未核对，不能提交完成声明。", 409)
-            await self.execution_readback(context_entity_id=self.execution.get("context_entity_id"))
-            if (self.cancelled or self.execution.get("readback_actions_count") != self.execution["actions_count"] or
-                    self.execution.get("control_status") not in {"active", "exhausted"}):
-                raise ConnectorError("ReadbackRequired", "最新行动结果尚未核对，不能提交完成声明。", 409)
-        world_results = self.execution_world_results(self.execution.get("readback"))
-        self.execution["world_results"] = world_results
-        checkpoint = deepcopy(arguments)
-        self.execution["checkpoint"] = checkpoint
-        self.execution["progress"] = {"summary": arguments["summary"], "next_intent": arguments["next_intent"],
-            "evidence": [deepcopy(confirmed[operation]) for operation in evidence]}
-        if arguments["status"] == "completed":
-            self.execution["goal_result"] = {"status": "completed", "summary": arguments["summary"],
-                "completion_source": "agent_claim", "verification": {"status": "unverified", "scope": "natural_language_goal"},
-                "evidence_operation_ids": evidence, "actions_count": self.execution["actions_count"],
-                "readback_actual": True, "world_results": deepcopy(world_results),
-                "source": "Agent completion claim after confirmed operations and world readback; no natural-language adjudication"}
-            self.execution["status"] = "completed"
-        # No further write from this segment can begin after its checkpoint.
-        self.active_execution = False
-        self.remember()
-        result = {"task_id": self.execution["task_id"], "status": arguments["status"],
-                  "segment_finished": True, "world_facts_changed": False, "world_results": deepcopy(world_results)}
-        if arguments["status"] == "completed":
-            result["goal_result"] = deepcopy(self.execution["goal_result"])
-        return result
+    async def execution_checkpoint(self, arguments):
+        schema = next(tool["inputSchema"] for tool in self.tools() if tool["name"] == "execution_checkpoint")
+        return await self.execution_controller.checkpoint(arguments, schema=schema,
+            write_busy=self.execution_write_lock.locked())
 
 
 class ConnectorManager:
@@ -4200,63 +2751,17 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
         session = manager.authorized(bearer_from(request))
         body = await request.json()
         session.ensure_not_reclaiming()
-        if not isinstance(body, dict) or set(body) - {"goal", "max_actions", "max_requests", "context_entity_id", "compact_history"}:
-            raise ConnectorError("InvalidArguments", "Expected an explicit goal and bounded action grant.")
-        goal, maximum = body.get("goal"), body.get("max_actions", 32)
-        if not isinstance(goal, str) or not 1 <= len(goal.strip()) <= 4000:
-            raise ConnectorError("InvalidGoal", "执行目标需要 1–4000 字。")
-        if not isinstance(maximum, int) or isinstance(maximum, bool) or not 1 <= maximum <= 64:
-            raise ConnectorError("InvalidActionBudget", "每次目标最多授权 1–64 个世界动作。")
-        max_requests = body.get("max_requests", 4)
-        if (not isinstance(max_requests, int) or isinstance(max_requests, bool) or
-                not 1 <= max_requests <= MAX_EXECUTION_REQUESTS):
-            raise ConnectorError("InvalidRequestBudget", "每个目标最多授权 1–8 次模型请求。")
-        compact_history = body.get("compact_history", False)
-        if not isinstance(compact_history, bool):
-            raise ConnectorError("InvalidArguments", "compact_history 需要布尔值。")
-        if compact_history and max_requests < 2:
-            raise ConnectorError("HistoryRecoveryBudget", "历史整理和接续执行共需至少两次模型请求。")
-        selected = body.get("context_entity_id")
-        if selected is not None and (not isinstance(selected, str) or not 1 <= len(selected) <= 256 or not selected.strip()):
-            raise ConnectorError("InvalidArguments", "context_entity_id 需要真实已选物件的标识。")
-        if not session.entered or not session.session_id or not session.host_url:
-            raise ConnectorError("EntryRequired", "请先连接伙伴并进入现场。", 409)
-        if session.unknown:
-            raise ConnectorError("UnknownWrite", "请先恢复并核对原操作，不能授予替代目标。", 409)
-        if session.worker and not session.worker.done():
-            raise ConnectorError("TurnBusy", "伙伴正在回应；请先收回或等待当前回应。", 409)
-        if session.delegation or session.execution.get("delegation_active"):
-            raise ConnectorError("ReclaimRequired", "请先收回原目标的控制，再授予新目标。", 409)
-        if (session.execution.get("history_recovery") or {}).get("status") in {"running", "uncertain", "failed"}:
-            raise ConnectorError("HistoryRecoveryUnconfirmed", "先恢复并核对原摘要结果，不能替换原目标。", 409)
-        if not {"grove.control_grant", "grove.control_revoke", "grove.control_status"} <= session.catalog.keys():
-            raise ConnectorError("ExecutionUnavailable", "这个世界尚未提供目标执行。", 409)
-        grant_schema = session.catalog["grove.control_grant"]["input_schema"]
-        if not Draft202012Validator(grant_schema).is_valid({"goal": goal.strip(), "max_actions": maximum}):
-            raise ConnectorError("InvalidGoal", "执行目标或动作额度不符合这个世界当前的授权规则。")
+        command = session.execution_controller.start(body, entered=session.entered,
+            native_connected=bool(session.session_id and session.host_url), unknown=bool(session.unknown),
+            worker_busy=bool(session.worker and not session.worker.done()), catalog=session.catalog)
         session.automatic.update(enabled=False, next_at=None)
         session.pending_changes = []
         if session.automatic_worker:
             session.automatic_worker.cancel()
         session.cancelled = False
-        if session.execution.get("task_id"):
-            session.execution_archive = (session.execution_archive + [deepcopy(session.execution)])[-8:]
-        session.execution.update(status="starting", goal=goal.strip(), max_actions=maximum, actions_count=0,
-            remaining_actions=maximum, delegation_active=False, grant_version=None, control_status=None,
-            receipts=[], readback=None, readback_actual=False, error=None,
-            task_id="grove-task-" + secrets.token_hex(16), context_entity_id=selected,
-            requests_used=0, max_requests=max_requests, request_status="idle", stop_reason="", resume_allowed=False,
-            grant_action_offset=0, pending_grant_action_offset=None, grant_operation_id=None,
-            readback_actions_count=None, no_progress_segments=0,
-            segment_id="", checkpoint=None, goal_result=None, segments=[], phase_timings=[], settlement=None,
-            context_result_reference=None, context_reference_attempted=False, world_results=[],
-            history_recovery={"requested": compact_history, "status": "not_started", "attempts": 0},
-            budget_extensions=[],
-            progress={"summary": "", "next_intent": "", "evidence": []})
-        session.remember()
-        session.remember_user_request(goal.strip())
-        session.messages.append({"role": "user", "text": goal.strip(), "time": time.time()})
-        session.schedule(goal.strip(), mode="execute", context_entity_id=selected)
+        session.remember_user_request(command["goal"])
+        session.messages.append({"role": "user", "text": command["goal"], "time": time.time()})
+        session.schedule(command["goal"], mode=command["mode"], context_entity_id=command["context_entity_id"])
         return session.state()
 
     @app.post("/connector/execute-resume")
@@ -4264,45 +2769,10 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
         session = manager.authorized(bearer_from(request))
         body = await request.json()
         session.ensure_not_reclaiming()
-        if (not isinstance(body, dict) or "task_id" not in body or set(body) - {"task_id", "compact_history", "additional_requests"} or
-                not isinstance(body["task_id"], str) or body["task_id"] != session.execution.get("task_id")):
-            raise ConnectorError("InvalidTask", "接续需要当前原任务标识；可明确追加模型请求，不接受替换目标或动作额度。")
-        compact_history = body.get("compact_history", False)
-        if not isinstance(compact_history, bool):
-            raise ConnectorError("InvalidArguments", "compact_history 需要布尔值。")
-        additional = body.get("additional_requests", 0)
-        if (not isinstance(additional, int) or isinstance(additional, bool) or additional < 0 or
-                session.execution.get("max_requests", 0) + additional > MAX_EXECUTION_REQUESTS):
-            raise ConnectorError("InvalidRequestBudget", "追加后的原目标模型请求总额度不能超过 8 次。")
-        if not session.entered or not session.session_id or not session.host_url:
-            raise ConnectorError("EntryRequired", "请先恢复原连接和现场。", 409)
-        if session.unknown:
-            raise ConnectorError("UnknownWrite", "先核对原操作结果，再接续原目标。", 409)
-        if session.worker and not session.worker.done():
-            raise ConnectorError("TurnBusy", "原请求仍在处理；不会并行启动另一个执行。", 409)
-        if (session.execution.get("status") == "completed" or
-                (not additional and not session.execution.get("resume_allowed")) or
-                not session.execution_can_resume(additional_requests=additional)):
-            raise ConnectorError("ResumeUnavailable", "这个任务已经完成、额度用完或原请求尚未安全停止。", 409)
-        recovery = session.execution["history_recovery"]
-        if compact_history and recovery.get("status") != "completed":
-            if recovery.get("attempts", 0):
-                raise ConnectorError("HistoryRecoveryUnavailable", "原目标已尝试历史整理，不会重复调用。", 409)
-            if session.execution["max_requests"] + additional - session.execution["requests_used"] < 2:
-                raise ConnectorError("HistoryRecoveryBudget", "历史整理和接续执行共需至少两次剩余模型请求。", 409)
-            recovery["requested"] = True
-        if additional:
-            previous = session.execution["max_requests"]
-            session.execution["max_requests"] += additional
-            session.execution["budget_extensions"] = (session.execution.get("budget_extensions", []) + [{
-                "additional_requests": additional, "previous_max_requests": previous,
-                "max_requests": session.execution["max_requests"], "requests_used": session.execution["requests_used"],
-                "actions_count": session.execution["actions_count"]}])[-MAX_EXECUTION_REQUESTS:]
-        session.cancelled = False
-        session.execution.update(status="starting", error=None, stop_reason="", resume_allowed=False)
-        session.remember()
-        session.schedule(session.execution["goal"], mode="execute-resume",
-            context_entity_id=session.execution.get("context_entity_id"))
+        command = session.execution_controller.resume(body, entered=session.entered,
+            native_connected=bool(session.session_id and session.host_url), unknown=bool(session.unknown),
+            worker_busy=bool(session.worker and not session.worker.done()))
+        session.schedule(command["goal"], mode=command["mode"], context_entity_id=command["context_entity_id"])
         return session.state()
 
     @app.post("/connector/reclaim")

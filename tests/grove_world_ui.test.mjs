@@ -126,6 +126,37 @@ function formNode(tag,text,className){
   assert.equal(writes[0][2].item_id,'new-item');assert.equal(writes[0][2].params.amount,2);
 }
 
+// Rule fuel/charge quantities live at the top level. The preview must describe
+// the actual edited values, including after the server refreshes the choices.
+for(const action of ['fuel','charge']){
+  const target={id:'source',name:'十二齿有限动力'},actions=formNode('section'),writes=[];
+  const choices={items:[{id:'wood',name:'木料'},{id:'cloth',name:'布料'}]};
+  if(action==='charge')choices.materials=[{id:'resin',name:'木合料',feedstock:'wood'},{id:'binder',name:'布合料',feedstock:'cloth'}];
+  const initial={function_id:'grove.rule_action',action,label:action==='fuel'?'消耗木料储能':'制备已声明材料',available:true,
+    arguments:{amount:1},choices,input_schema:{properties:{amount:{type:'integer',minimum:1,maximum:10}},required:['amount']}};
+  const context={inspection:{entity:target,action_options:[initial]},actionBusy:false,node:formNode,$:()=>actions,
+    actionKey:option=>option.action,descriptorLabel:ui.descriptorLabel,actionDescriptors:ui.actionDescriptors,
+    conditionObservationLines:()=>[],ruleChoices:ui.ruleChoices,candidateLabel:ui.candidateLabel,
+    readableCandidate:value=>value,factLabel:ui.factLabel,operationIntentLabel:ui.operationIntentLabel,
+    restoreActionDraft:()=>{},run:fn=>fn(),ruleAction:(...args)=>writes.push(args)};
+  vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('function renderRuleAction(','async function ruleAction('),context);
+  context.renderRuleAction(initial,target,false);
+  const form=actions.children[0],[items,materials]=form.querySelectorAll('select'),amount=form.querySelectorAll('input')[0];
+  const intent=form.querySelectorAll('p').find(element=>element.className==='interaction-preview');
+  items.value='wood';if(materials)materials.value='resin';amount.value='2';form.dispatchEvent({type:'input'});
+  assert.ok(intent.textContent.includes('木料 的 2 份木'));assert.ok(!intent.textContent.includes('1 份'));
+  context.inspection={entity:target,action_options:[{...initial,arguments:{amount:1},choices:{...choices,
+    items:[{id:'wood',name:'留下的木料'},{id:'cloth',name:'布料'}]}}]};
+  form.dispatchEvent({type:'refresh-candidate-preview'});
+  assert.equal(amount.value,'2');assert.ok(intent.textContent.includes('留下的木料 的 2 份木'));
+  items.value='cloth';if(materials)materials.value='binder';amount.value='3';form.dispatchEvent({type:'change'});
+  assert.ok(intent.textContent.includes('布料 的 3 份'+(materials?'布':'木')));
+  if(materials)assert.ok(intent.textContent.includes('3 份布合料'));
+  form.dispatchEvent({type:'submit',preventDefault(){}});
+  assert.equal(writes[0][2].item_id,'cloth');assert.equal(writes[0][2].amount,3);
+  if(materials)assert.equal(writes[0][2].material,'binder');
+}
+
 for(const status of [403,404,401])for(const kind of ['combination-target','ordinary-target','item']){
   const target={id:'target',version:1},feedback={textContent:''},errorBox={hidden:true};
   const controls=[{disabled:false}],form={isConnected:true,reset(){this.resets=(this.resets||0)+1;},

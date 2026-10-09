@@ -1,6 +1,7 @@
 """Trusted world-owned definitions; this is not a plugin sandbox or a DSL."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -14,6 +15,35 @@ class MaterialDef:
     combustible: bool = False
     absorption_per_piece: int = 0
     liquid: bool = False
+
+    @classmethod
+    def from_snapshot(cls, material_id, snapshot):
+        """Read finite physical facts; identity and binding budgets belong to the world."""
+        if (not isinstance(snapshot, Mapping)
+                or set(snapshot) - {"name", "load_per_u", "piece_quantity", "combustible", "liquid"}
+                or not {"name", "load_per_u", "combustible", "liquid"}.issubset(snapshot)):
+            raise ValueError("注册材料只能携带可信的有限物理参数。")
+        name = snapshot["name"]
+        load, piece = snapshot["load_per_u"], snapshot.get("piece_quantity", 4)
+        if (not isinstance(name, str) or not 1 <= len(name) <= 80 or not name.strip()
+                or not name.isprintable()):
+            raise ValueError("注册材料名称须为1至80字且不含控制字符。")
+        if (type(load) is not int or not 1 <= load <= 8
+                or type(piece) is not int or not 1 <= piece <= 10000
+                or type(snapshot["combustible"]) is not bool or type(snapshot["liquid"]) is not bool):
+            raise ValueError("注册材料的载荷、份量和物理标志无效。")
+        return cls(material_id, name, load, piece, snapshot["combustible"], 0, snapshot["liquid"])
+
+    def snapshot(self):
+        """Serialize the same bounded facts accepted by ``from_snapshot``."""
+        value = {"name": self.name, "load_per_u": self.load_per_u,
+                 "piece_quantity": self.piece_quantity,
+                 "combustible": self.combustible, "liquid": self.liquid}
+        self.from_snapshot(self.id, value)
+        return value
+
+    def matches_snapshot(self, snapshot):
+        return self.snapshot() == self.from_snapshot(self.id, snapshot).snapshot()
 
 
 @dataclass(frozen=True)

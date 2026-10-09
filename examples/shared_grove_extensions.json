@@ -1,0 +1,142 @@
+{
+  "material_processing": {
+    "definition": {
+      "key": "water_fraction_processing",
+      "name": "按实际水浓度加工",
+      "version": 1,
+      "materials": {
+        "binder": {
+          "name": "湿合料",
+          "feedstock": "wood",
+          "load_per_u": 1,
+          "combustible": false,
+          "liquid": true
+        }
+      },
+      "types": {
+        "vat": {
+          "name": "浓度加工器皿",
+          "body_material": "stone",
+          "cost": {"stone": 1},
+          "container_capacity": 8,
+          "fields": {
+            "mixing": {"type": "boolean", "default": false}
+          },
+          "rules": [
+            {
+              "id": "wet_blend",
+              "phase": "reaction",
+              "when": {
+                "op": "all",
+                "args": [
+                  {"field": "mixing"},
+                  {"op": "gte", "left": {"concentration": "water"}, "right": 25}
+                ]
+              },
+              "effects": [
+                {
+                  "op": "react",
+                  "inputs": {"wood": 1, "cloth": 1, "water": 1},
+                  "outputs": {"binder": 4},
+                  "rate": 1,
+                  "heat": 0,
+                  "channel": "wet_blend",
+                  "mode": "exclusive"
+                }
+              ]
+            }
+          ],
+          "actions": [
+            {
+              "id": "enable_mixing",
+              "label": "允许按当前水浓度加工",
+              "effects": [{"op": "set", "field": "mixing", "value": true}]
+            },
+            {
+              "id": "pause_mixing",
+              "label": "暂停加工并保留实际余料",
+              "effects": [{"op": "set", "field": "mixing", "value": false}]
+            }
+          ]
+        }
+      }
+    },
+    "use": {
+      "placement_type_ids": ["vat"],
+      "body_cost_pieces": {"stone": 1},
+      "input_cost_u": {"wood": 2, "cloth": 2, "water": 2},
+      "placement": "读取当前generation_context，在允许的公开地面通过content_submit放置vat；实际区域库存与机会预算不足时拒绝，不注入物资。",
+      "loading": "从本人真实来源按inspect的item_id、lot_id和amount，各transfer 2u wood、cloth、water到contained槽；mixing默认false，装料不会提前反应。store只放整件，不作投料。",
+      "first_actor": "inspect后通过通用rule_action选择enable_mixing。首个合法物理步消费wood1u、cloth1u、water1u并产生原definition_ref#binder 4u。",
+      "second_actor": "第一批已稳定后，另一身份从菜单选择pause_mixing，使用普通transfer把4u binder转入本人打开且有实际容量的器皿，再选择enable_mixing；原vat、原定义、余料和公共后果接续。",
+      "evidence_boundary": "charge仍是合法的wood到binder制备，但不能充当本例反应证据；核对原输入损耗、process.steps及原definition_ref#binder的实际增加。"
+    },
+    "expected": {
+      "mass_per_extent": "wood1×load1 + cloth1×load1 + water1×load2 = binder4×load1 = 4逻辑载荷。",
+      "before_enable_contained_u": {"wood": 2, "cloth": 2, "water": 2, "binder": 0},
+      "after_first_extent_contained_u": {"wood": 1, "cloth": 1, "water": 1, "binder": 4},
+      "after_first_extent": "总含量7u，水浓度floor(100/7)=14%，低于25%；下一物理步保留余料与4u产物，process.steps不继续增加。",
+      "after_second_actor_withdrawal": "取出4u产物后总含量3u，水浓度floor(100/3)=33%；mixing=false期间仍不反应。",
+      "after_second_extent_contained_u": {"wood": 0, "cloth": 0, "water": 0, "binder": 4},
+      "shared_consequence": "两笔真实反应累计消耗wood2u、cloth2u、water2u并生成8u同一不可变材料；第二人接收4u，原vat保留4u。每笔反应都受8u总容量约束。"
+    }
+  },
+  "mechanical_drive": {
+    "definition": {
+      "key": "quarter_speed_drive",
+      "name": "有限四分之一速传动",
+      "version": 1,
+      "types": {
+        "source": {
+          "name": "十二齿有限动力",
+          "body_material": "wood",
+          "cost": {"wood": 1},
+          "mechanical": {
+            "role": "source",
+            "teeth": 12,
+            "torque": 10,
+            "speed": 4,
+            "energy_per_step": 2
+          }
+        },
+        "gear": {
+          "name": "二十四齿传动轮",
+          "body_material": "wood",
+          "cost": {"wood": 1},
+          "mechanical": {"role": "gear", "teeth": 24}
+        },
+        "actuator": {
+          "name": "七单位行程执行器",
+          "body_material": "wood",
+          "cost": {"wood": 1},
+          "mechanical": {
+            "role": "actuator",
+            "teeth": 48,
+            "pitch": 3,
+            "load": 8,
+            "travel": 7
+          }
+        }
+      }
+    },
+    "use": {
+      "placement_type_ids": ["source", "gear", "actuator"],
+      "body_cost_pieces": {"wood": 3},
+      "fuel_cost_u": {"wood": 6},
+      "placement": "通过当前generation_context和content_submit创建三件公开物件；source到gear、gear到actuator各相距至多2格，选择实际允许地面，不替换旧设备或定义。",
+      "connections": "按各物件inspect的通用connect菜单连source↔gear、gear↔actuator；不加source↔actuator直连，以免三次齿合形成方向矛盾环。每次使用当前物件版本。",
+      "first_actor": "本人真实木料经fuel投入2u，再start；仅足够一次合法机械结算，执行器从0到3，下一步能源不足而保留3。",
+      "second_actor": "另一身份就近inspect原source，先stop确认当前位置保留，使用自己的真实木料fuel 4u，然后start。两次合法机械结算沿原网络从3到6到7，再stop；所有菜单、身份与来源校验沿通用接口。",
+      "evidence_boundary": "按实际sequence和回执关联位置、角度、速度、能源及两个actor；等待时长和重复读取不算新的操作或接续。start/stop本身不证明已完成物理结算。"
+    },
+    "expected": {
+      "ratios_from_source": {"source": 1, "gear": -0.5, "actuator": 0.25},
+      "running_speeds": {"source": 4, "gear": -2, "actuator": 1},
+      "reflected_load": "actuator load8 × |ratio1/4| × pitch3 = 6，小于source torque10；净输出同向，每次未抵边结算推进3单位。",
+      "position_after_each_successful_step": [3, 6, 7],
+      "source_energy_after_each_successful_step": [0, 2, 0],
+      "handoff_energy": "首人投入2u并用尽后，第二人新增4u；总计消耗6u真实wood，每次网络结算只扣source 2单位能源。",
+      "travel_and_stop": "第三次结算拟从6到9，按travel7钳至7，actuator状态travel_limit；燃料不足或明确stop后的下一物理步速度为0，位置7保持。达到行程端点仍可能消耗后续燃料，本例不再加料。"
+    }
+  }
+}

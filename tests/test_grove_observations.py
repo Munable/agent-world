@@ -11,7 +11,8 @@ import httpx
 
 from agent_world import WorldRuntime
 from agent_world.errors import WorldRuntimeError
-from agent_world.grove_connector import ConnectorError, ConnectorManager, GroveSession, create_connector_app, _agent_tool_text, _checked_agent_tool_text
+from agent_world.grove_connector import ConnectorError, ConnectorManager, GroveSession, create_connector_app
+from agent_world.grove_agent_observation import _agent_tool_text, _checked_agent_tool_text
 from agent_world.worlds.shared_grove import make_world
 
 
@@ -142,9 +143,8 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(previews[key]["fingerprint"], candidate["preview"]["version_fingerprint"])
 
         candidate = store["input"]["candidates"][0]
-        self.session._agent_preflight_observation_id = None
         narrow = await self.session.tool_call("grove_inspect", {"entity_id": item["id"],
-            "action": "store", "candidate_id": candidate["id"]})
+            "action": "store", "candidate_id": candidate["id"], "base_observation_id": None})
         selected = narrow["result"]["action_options"][0]["input"]["candidates"]
         self.assertEqual(selected, [candidate])
         narrow_bundle = self.session.agent_observation(narrow["observation_id"])
@@ -155,13 +155,13 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_inspection_action_is_rejected_without_observation_binding(self):
         item = self.scene()["result"]["inventory"][0]
-        before = deepcopy(self.session._agent_observations)
+        before = self.session.observations.sequence
         for args in ({"action": "imaginary_action"}, {"candidate_id": "imaginary_item"},
                 {"action": "store", "candidate_id": "imaginary_item"}):
             with self.assertRaises(ConnectorError) as rejected:
                 await self.session.tool_call("grove_inspect", {"entity_id": item["id"]} | args)
             self.assertEqual(rejected.exception.code, "RuleViolation")
-            self.assertEqual(self.session._agent_observations, before)
+            self.assertEqual(self.session.observations.sequence, before)
 
     async def test_missing_or_restarted_observation_does_not_submit_a_world_write(self):
         before = len(self.calls)
@@ -362,12 +362,12 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(_checked_agent_tool_text(delivered).encode()), 51200)
 
     def test_oversized_inspection_delivers_state_and_real_re_read_paths_without_binding_unshown_preview(self):
-        initial_sequence = self.session._agent_observation_sequence
+        initial_sequence = self.session.observations.sequence
         inspection = {"entity": {"id": "target", "version": 77}, "action_options": [
             {"action": "store", "input": {"candidates": [{"id": "item", "version": 88,
                 "preview": {"version_fingerprint": "a"*64, "physics": {"large": "x"*80000}}}]}}]}
         supplied = self.session.present_agent_result("grove.inspect", inspection)
-        self.assertEqual(self.session._agent_observation_sequence, initial_sequence + 1)
+        self.assertEqual(self.session.observations.sequence, initial_sequence + 1)
         self.assertFalse(supplied["projection"]["complete_inspection"])
         self.assertEqual(supplied["action_options"][0]["read_request"]["arguments"],
             {"entity_id": "target", "action": "store"})
@@ -379,11 +379,11 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(_checked_agent_tool_text(supplied)), supplied)
         single = deepcopy(inspection)
         single["action_options_projection"] = {"candidate_selection": {"candidate_id": "item"}}
-        before_rejected = deepcopy(self.session._agent_observations)
+        before_rejected = self.session.observations.sequence
         with self.assertRaises(ConnectorError) as rejected:
             self.session.present_agent_result("grove.inspect", single)
         self.assertEqual(rejected.exception.code, "ToolOutputTooLarge")
-        self.assertEqual(self.session._agent_observations, before_rejected)
+        self.assertEqual(self.session.observations.sequence, before_rejected)
         # A preflight is a full user-message input, not a native tool response.
         supplied = self.session.present_agent_result("map.viewport", {"selected_inspection": inspection}, preflight=True)
         self.assertEqual(supplied["selected_inspection"]["action_options"], inspection["action_options"])

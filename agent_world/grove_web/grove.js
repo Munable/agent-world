@@ -700,7 +700,7 @@ function renderRuleAction(descriptor,entity,disabled){
     }
     const values=live?readValues(live):{errors:[]};submit.disabled=disabled||actionBusy||reading||live?.available===false||unsupported.length>0||values.errors.length>0;
     const result=values.result||{},item=ruleChoices(live||descriptor,'items').find(candidate=>candidate.id===result.item_id);
-    intent.textContent=operationIntentLabel(live||descriptor,entity,{item:item?readableCandidate(item):null,amount:result.params?.amount,choice:result.material});
+    intent.textContent=operationIntentLabel(live||descriptor,entity,{item:item?readableCandidate(item):null,amount:result.amount??result.params?.amount,choice:result.material});
     note.textContent=reading?'正在核对当前行动条件。取得当前状态后再提交。':live.available===false?live.reason||'当前条件不满足。':unsupported.length?'此参数结构尚未接入网页：'+unsupported.join('、')+'。可明确委托 Agent 通过正式接口操作。':values.errors[0]||'普通操作直接由规则结算，不调用模型；提交前重新读取版本和资格。';
   }
   form.addEventListener('input',update);form.addEventListener('change',update);form.addEventListener('refresh-candidate-preview',update);

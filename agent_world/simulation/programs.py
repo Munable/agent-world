@@ -11,13 +11,8 @@ from fractions import Fraction
 import math
 import re
 
+from .registry import MaterialDef
 
-BASE_MATERIALS = {
-    "wood": {"load_per_u": 1, "combustible": True, "liquid": False},
-    "stone": {"load_per_u": 3, "combustible": False, "liquid": False},
-    "cloth": {"load_per_u": 1, "combustible": True, "liquid": False},
-    "water": {"load_per_u": 2, "combustible": False, "liquid": True},
-}
 MAX_EXPRESSION_DEPTH = 8
 MAX_EXPRESSION_NODES = 64
 MAX_FIELDS = 16
@@ -258,7 +253,22 @@ def _effects(effects, fields, params, materials, path, object_ids):
     return result
 
 
-def compile_program(definition, *, imported_materials=None):
+def _material_catalog(materials):
+    """Read the caller's complete built-in physics, never a second material table."""
+    result = {}
+    for key, definition in _mapping(materials, "materials").items():
+        raw = definition.snapshot() if isinstance(definition, MaterialDef) else _mapping(definition, "materials." + key)
+        result[key] = {"load_per_u": _integer(raw.get("load_per_u"), "materials." + key + ".load_per_u", 1, 8),
+                       "combustible": _boolean(raw.get("combustible"), "materials." + key + ".combustible"),
+                       "liquid": _boolean(raw.get("liquid"), "materials." + key + ".liquid")}
+    return result
+
+
+def _choices(values):
+    return ", ".join(values[:-1]) + " or " + values[-1] if len(values) > 1 else values[0]
+
+
+def compile_program(definition, *, materials, body_materials, max_custom_materials, imported_materials=None):
     """Return a validated canonical deep copy; invalid declarations raise ValueError."""
     _mapping(definition, "program", {"key", "name", "version", "materials", "material_imports", "types"}, {"key", "name", "version", "types"})
     result = {"key": _text(definition["key"], "program.key", 80, _KEY),
@@ -268,17 +278,25 @@ def compile_program(definition, *, imported_materials=None):
     object_ids = set()
     declared = _mapping(definition.get("materials", {}), "program.materials")
     imports = _mapping(definition.get("material_imports", {}), "program.material_imports")
-    if len(declared) + len(imports) > 4:
-        _fail("program.materials", "at most 4 local and imported materials combined are allowed")
-    materials = deepcopy(BASE_MATERIALS)
+    limit = _integer(max_custom_materials, "max_custom_materials", 0, MAX_INTEGER)
+    if len(declared) + len(imports) > limit:
+        _fail("program.materials", f"at most {limit} local and imported materials combined are allowed")
+    builtin_materials = _material_catalog(materials)
+    if not builtin_materials:
+        _fail("materials", "at least one built-in material is required")
+    if (not isinstance(body_materials, (list, tuple)) or not body_materials
+            or any(not isinstance(key, str) or key not in builtin_materials for key in body_materials)
+            or len(set(body_materials)) != len(body_materials)):
+        _fail("body_materials", "must name distinct built-in body feedstocks")
+    materials = deepcopy(builtin_materials)
     for symbol, spec in declared.items():
         at = "program.materials." + symbol
         _text(symbol, at, 48, _SYMBOL)
-        if symbol in BASE_MATERIALS:
+        if symbol in builtin_materials:
             _fail(at, "built-in materials cannot be redefined; choose a new symbol")
         _mapping(spec, at, {"name", "feedstock", "load_per_u", "combustible", "liquid"}, {"name", "feedstock", "load_per_u", "combustible", "liquid"})
-        if not isinstance(spec["feedstock"], str) or spec["feedstock"] not in BASE_MATERIALS:
-            _fail(at + ".feedstock", "must be wood, stone, cloth or water")
+        if not isinstance(spec["feedstock"], str) or spec["feedstock"] not in builtin_materials:
+            _fail(at + ".feedstock", "must be " + _choices(list(builtin_materials)))
         name = _text(spec["name"], at + ".name", 80)
         if not name.isprintable():
             _fail(at + ".name", "material names cannot contain control characters")
@@ -286,7 +304,7 @@ def compile_program(definition, *, imported_materials=None):
                      "load_per_u": _integer(spec["load_per_u"], at + ".load_per_u", 1, 8),
                      "combustible": _boolean(spec["combustible"], at + ".combustible"),
                      "liquid": _boolean(spec["liquid"], at + ".liquid")}
-        if canonical["load_per_u"] != BASE_MATERIALS[canonical["feedstock"]]["load_per_u"]:
+        if canonical["load_per_u"] != builtin_materials[canonical["feedstock"]]["load_per_u"]:
             _fail(at + ".load_per_u", "must equal feedstock load_per_u for a mass-conserving one-to-one conversion")
         result["materials"][symbol] = canonical
         materials[symbol] = canonical
@@ -323,11 +341,11 @@ def compile_program(definition, *, imported_materials=None):
         at = "program.types." + symbol
         _text(symbol, at, 48, _SYMBOL)
         _mapping(spec, at, {"name", "body_material", "cost", "fields", "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions"}, {"name", "body_material", "cost"})
-        if not isinstance(spec["body_material"], str) or spec["body_material"] not in {"wood", "stone", "cloth"}:
-            _fail(at + ".body_material", "must be wood, stone or cloth")
-        cost = _mapping(spec["cost"], at + ".cost", {"wood", "stone", "cloth"})
+        if not isinstance(spec["body_material"], str) or spec["body_material"] not in body_materials:
+            _fail(at + ".body_material", "must be " + _choices(body_materials))
+        cost = _mapping(spec["cost"], at + ".cost", body_materials)
         canonical = {"name": _text(spec["name"], at + ".name"), "body_material": spec["body_material"],
-                     "cost": {key: _integer(cost.get(key, 0), at + ".cost." + key, 0, 4) for key in ("wood", "stone", "cloth")},
+                     "cost": {key: _integer(cost.get(key, 0), at + ".cost." + key, 0, 4) for key in body_materials},
                      "fields": _fields(spec.get("fields", {}), at + ".fields"), "rules": [], "actions": []}
         # Every body must consume real feedstock. The world converts pieces to lots.
         if canonical["cost"][spec["body_material"]] < 1:
@@ -398,7 +416,7 @@ def compile_program(definition, *, imported_materials=None):
     return result
 
 
-def program_material_semantics(definition, definition_ref, *, type_id=None):
+def program_material_semantics(definition, definition_ref, *, materials, type_id=None):
     """Project compiled material bindings and coefficients without executing them.
 
     The world has already resolved imports to their original immutable reference.
@@ -406,6 +424,7 @@ def program_material_semantics(definition, definition_ref, *, type_id=None):
     Names and author descriptions play no part in material identity resolution.
     """
     types = definition["types"] if type_id is None else {type_id: definition["types"][type_id]}
+    builtin_materials = _mapping(materials, "materials")
     symbols = set(definition["materials"]) | set(definition.get("material_imports", {}))
     projected_types = {}
     for symbol, kind in types.items():
@@ -437,7 +456,7 @@ def program_material_semantics(definition, definition_ref, *, type_id=None):
                                 "outputs_per_unit": {symbol: 1}}
     bindings = {}
     for symbol in sorted(symbols):
-        if symbol in BASE_MATERIALS:
+        if symbol in builtin_materials:
             bindings[symbol] = {"kind": "builtin", "material_id": symbol}
         else:
             source = definition.get("material_imports", {}).get(symbol)
@@ -585,9 +604,9 @@ def plan_reaction(effect, quantities, material_defs, capacity):
     atomically, and pass its updated allocation to the next independent channel.
     """
     _mapping(material_defs, "material_defs")
-    materials = deepcopy(BASE_MATERIALS)
+    materials = {}
     for key, spec in material_defs.items():
-        load = spec.get("load_per_u") if isinstance(spec, dict) else getattr(spec, "load_per_u", None)
+        load = spec.get("load_per_u") if isinstance(spec, dict) else spec.load_per_u if isinstance(spec, MaterialDef) else None
         materials[key] = {"load_per_u": _integer(load, "material_defs." + key + ".load_per_u", 1, 8)}
     canonical = _reaction(effect, materials, "reaction")
     _mapping(quantities, "quantities")

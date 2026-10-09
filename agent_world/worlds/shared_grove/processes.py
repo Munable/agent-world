@@ -11,7 +11,7 @@ from agent_world.simulation.effects import Break, Sink, Source, Transfer
 from agent_world.simulation.frame import Frame
 
 from . import model as m
-from .definitions import COMBUSTION_CADENCE_TICKS, REGISTRY, RULES_VERSION, registry_for
+from .definitions import COMBUSTION_CADENCE_TICKS, REGISTRY, RULES_VERSION, registry_for, bind_material
 
 MAX_WET_ENTITIES = sm.MAX_FRAME_OBJECTS
 MAX_BURNING_ENTITIES = 8
@@ -337,7 +337,7 @@ def destroy_entity(ctx, entity):
         spills = chunk.get("water_reservoirs", {})
         extra.extend(m.public_entities_near(ctx, x, y, radius=0, limit=m.MAX_CHUNK_ENTITIES))
     objects, _ = _physical_closure(ctx, extra)
-    frame = Frame(registry_for(objects), objects, spills=spills)
+    frame = Frame(registry_for(objects), objects, spills=spills, bind_material=bind_material)
     frame.apply([Break(entity["id"])], allowed_sinks={"drain"})
     frame.apply(spill_rule(frame.snapshot()), allowed_sinks={"drain"}, allocate=True)
     frame.verify_balance()
@@ -436,7 +436,7 @@ def tick(ctx, args):
         for cid in chunks:
             _, cx, cy = cid.split("_")
             spills.update(m.get_chunk(ctx, int(cx), int(cy)).get("water_reservoirs", {}))
-        frame = Frame(registry_for(objects), objects, sequence, protected=protected, spills=spills)
+        frame = Frame(registry_for(objects), objects, sequence, protected=protected, spills=spills, bind_material=bind_material)
         # Finite water contact spends one source lot with a deterministic budget.
         contact_effects, source_available, wet_by_rain = [], {}, set()
         for eid, entity in sorted(frame.objects.items()):

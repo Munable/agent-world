@@ -14,8 +14,9 @@ from starlette.testclient import TestClient
 
 from agent_world.grove_connector import (
     ConnectorError, ConnectorManager, GroveSession, create_connector_app, session_permissions_match,
-    companion_projection, _companion_chunk_terrain, _companion_scene_index,
 )
+from agent_world.grove_agent_observation import (
+    companion_projection, _companion_chunk_terrain, _companion_scene_index, blueprint_model_input)
 from agent_world.worlds.shared_grove.catalog import CONTENT_SCHEMA
 from agent_world.worlds.shared_grove.world import INTERACT_ARGS
 
@@ -114,14 +115,26 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ordinary.exception.code, "IncompleteResponse")
         response["info"]["error"]["data"]["message"] = "Upstream request failed: Model is unavailable."
         self.session.current_turn_facts = AsyncMock(return_value={"scene": "current"})
-        self.session.host = AsyncMock(return_value=response)
+        async def unavailable_native(method, path, body=None, **kwargs):
+            if path.endswith('/message'):
+                return response
+            if path.endswith('/abort'):
+                return {}
+            if path == '/session/test-session':
+                return {'id': 'test-session'}
+            if path == '/session/status':
+                return {}
+            self.fail(path)
+        self.session.host = AsyncMock(side_effect=unavailable_native)
+        self.assertTrue(await self.session.settle_execution_request(abort=True))
         with self.assertRaises(ConnectorError) as ordinary_turn:
             await self.session.turn("现在还能怎样利用现场这些东西？")
         self.assertEqual(ordinary_turn.exception.code, "ModelUnavailable")
         self.assertEqual(self.session.inference_count, 2)
         self.assertEqual(self.session.session_id, "test-session")
         self.assertEqual(self.session.last_completion, original)
-        self.session.host.assert_awaited_once()
+        self.assertEqual(sum(call.args[1].endswith('/message') for call in self.session.host.await_args_list), 1)
+        self.assertEqual(self.session.execution['request_status'], 'idle_confirmed')
 
     async def test_unscoped_automatic_requires_explicit_goal_without_inference(self):
         self.session.entered = True
@@ -223,6 +236,8 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
                 return {'providers': [{'id': 'provider', 'models': {'model': {}}}]}
             if path == '/session/test-session':
                 return {'id': 'test-session', 'permission': self.session.permissions()}
+            if path == '/session/status':
+                return {}
             if path == '/session/test-session/message?limit=4':
                 return []
             self.fail('Unexpected host operation: ' + method + ' ' + path)
@@ -339,6 +354,39 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.host.assert_awaited_once()
         self.assertEqual(self.session.inference_count, 1)
 
+    async def test_completed_ordinary_questions_allow_next_request_without_goal_charge(self):
+        self.session.current_turn_facts = AsyncMock(return_value={'player': {'id': 'test-user'}, 'entities': []})
+        self.session.host = AsyncMock(return_value={'info': {'role': 'assistant', 'finish': 'stop',
+            'time': {'completed': 1}}, 'parts': [{'type': 'text', 'text': 'Look at the actual objects.'}]})
+        await self.session.turn('What is here?')
+        self.assertEqual(self.session.execution['request_status'], 'idle')
+        await self.session.turn('What changed?')
+        self.assertEqual(self.session.inference_count, 2)
+        self.assertEqual(self.session.execution['requests_used'], 0)
+        self.assertEqual(self.session.host.await_count, 2)
+
+    async def test_timed_out_ordinary_question_keeps_original_native_gate_closed(self):
+        self.session.current_turn_facts = AsyncMock(return_value={'player': {'id': 'test-user'}, 'entities': []})
+        async def native(method, path, body=None, **kwargs):
+            if path.endswith('/message'):
+                raise httpx.ReadTimeout('lost native response')
+            if path.endswith('/abort'):
+                return {}
+            if path == '/session/test-session':
+                return {'id': 'test-session'}
+            if path == '/session/status':
+                return {'test-session': {'type': 'busy'}}
+            self.fail(path)
+        self.session.host = native
+        with self.assertRaises(ConnectorError) as failure:
+            await self.session.turn('What is here?')
+        self.assertEqual(failure.exception.code, 'HostUnavailable')
+        self.assertEqual(self.session.execution['request_status'], 'unsettled')
+        with self.assertRaises(ConnectorError) as blocked:
+            await self.session.turn('A different question')
+        self.assertEqual(blocked.exception.code, 'OriginalRequestUnsettled')
+        self.assertEqual(self.session.inference_count, 1)
+
     async def test_failed_current_read_does_not_spend_model_request(self):
         self.session.entered = True
         self.session.catalog = {'map.viewport': {'access': 'read'}}
@@ -390,7 +438,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("contributions",index)
         self.assertIn("no cursor",index["projection"]["meaning"])
         self.assertEqual(original["result"]["public_content"],public)
-        folded = self.session.blueprint_model_input({"public_content":index,"public_entities":[entity]})
+        folded = blueprint_model_input({"public_content":index,"public_entities":[entity]})
         self.assertEqual(folded["public_entities"],[entity])
 
     async def test_selected_inspection_is_authorized_before_model_request(self):
@@ -661,7 +709,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["details"], {"water_transfer": transfer})
         self.assertEqual(json.loads(result["content"][0]["text"]), error)
         self.assertNotIn("private-diagnostic", json.dumps(result))
-        self.assertEqual(self.session._agent_observations, {})
+        self.assertEqual(self.session.observations.sequence, 0)
 
     def test_pour_slot_is_retained_in_final_indexes_but_never_bound_from_omitted_payload(self):
         visible = {"id": "selected", "version": 5, "pour_target_slot": "surface"}
@@ -757,8 +805,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.host.return_value = {}
         self.session.release_opportunity = AsyncMock()
         await self.session.cancel()
-        self.assertEqual({call.args[1] for call in self.session.host.await_args_list[-2:]},
-                         {"/session/test-session/abort", "/session/blueprint-two/abort"})
+        aborts = {call.args[1] for call in self.session.host.await_args_list if call.args[1].endswith('/abort')}
+        self.assertEqual(aborts, {"/session/test-session/abort", "/session/blueprint-two/abort"})
+        self.assertEqual(self.session.execution['request_status'], 'unsettled')
 
     def test_opencode_duplicate_denials_do_not_mask_changed_permissions(self):
         expected = self.session.permissions()

@@ -1231,14 +1231,14 @@ def make_world():
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=2,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=20,state_version=11,
+        *generation_specs(), *creative.specs()),version=21,state_version=12,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
-        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: resume_clock},
+        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: resume_clock},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),

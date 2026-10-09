@@ -1,11 +1,14 @@
 """Trusted rule-registration contracts; execution evidence is a separate stage."""
+from copy import deepcopy
 import unittest
 
 from agent_world.simulation.effects import Transfer
 from agent_world.simulation.frame import Frame
 from agent_world.simulation import matter
-from agent_world.simulation.registry import Registry, RuleSpec
-from agent_world.worlds.shared_grove.definitions import COMBUSTION_CADENCE_TICKS, REGISTRY, composition_definition
+from agent_world.simulation.programs import compile_program, plan_reaction, program_material_semantics
+from agent_world.simulation.registry import MaterialDef, Registry, RuleSpec
+from agent_world.worlds.shared_grove.definitions import (COMBUSTION_CADENCE_TICKS, REGISTRY,
+    bind_material, composition_definition, registry_for)
 from agent_world.worlds.shared_grove import model
 
 
@@ -46,6 +49,109 @@ class RuleRegistrationTests(unittest.TestCase):
             registry.register_rule(self.rule(name, "damage", writes=frozenset({"integrity"}),
                 reducers={"integrity": "sum"}))
         self.assertEqual(len(registry.ordered_rules()), 2)
+
+
+class MaterialAuthorityTests(unittest.TestCase):
+    def material(self, symbol="mix", load=1):
+        return MaterialDef("program_test#" + symbol, "混合料", load, 4, True)
+
+    def vessel(self, identifier):
+        return model.normalize_entity({**composition_definition({"material": "stone", "construction": "vessel"}),
+                                       "id": identifier, "x": 4, "y": 5})
+
+    def test_transfer_carries_facts_to_an_ordinary_vessel_and_preserves_identity(self):
+        definition = self.material()
+        source, target = self.vessel("source"), self.vessel("target")
+        bind_material(source, definition)
+        source["matter"].append({"id": "source:mix", "material": definition.id, "quantity": 4,
+                                "slot": "contained", "role": "substance", "burning": False})
+        registry = registry_for([source, target])
+        frame = Frame(registry, {"source": source, "target": target}, bind_material=bind_material)
+        frame.apply([Transfer("source", "source:mix", "target", 2)])
+        received = frame.objects["target"]
+        self.assertEqual(received["state"]["program"]["materials"], {definition.id: definition.snapshot()})
+        self.assertEqual(registry_for(received).materials[definition.id], definition)
+        self.assertEqual(matter.quantity(received, definition.id), 2)
+        self.assertEqual(matter.quantity(frame.objects["source"], definition.id), 2)
+        self.assertTrue(frame.verify_balance())
+        self.assertNotIn("program", target["state"])
+
+    def test_snapshot_defaults_and_conflicts_match_on_loading_and_binding(self):
+        definition = self.material()
+        target = self.vessel("target")
+        old_snapshot = definition.snapshot()
+        old_snapshot.pop("piece_quantity")
+        target["state"]["program"] = {"materials": {definition.id: old_snapshot}}
+        self.assertEqual(registry_for(target).materials[definition.id], definition)
+        bind_material(target, definition)
+        self.assertEqual(target["state"]["program"]["materials"][definition.id], old_snapshot)
+        conflict = self.material(load=2)
+        before = deepcopy(target)
+        with self.assertRaises(ValueError):
+            bind_material(target, conflict)
+        self.assertEqual(target, before)
+        other = self.vessel("other")
+        bind_material(other, conflict)
+        with self.assertRaises(ValueError):
+            registry_for([target, other])
+
+    def test_snapshot_codec_rejects_unbounded_or_executable_metadata(self):
+        definition = self.material()
+        for change in ({"name": "材料\n"}, {"load_per_u": True}, {"piece_quantity": 10001},
+                       {"combustible": 1}, {"liquid": "yes"}, {"rules": []}):
+            with self.subTest(change=change):
+                snapshot = {**definition.snapshot(), **change}
+                with self.assertRaises(ValueError):
+                    MaterialDef.from_snapshot(definition.id, snapshot)
+
+    def test_grove_budget_and_identity_reject_before_binding_new_metadata(self):
+        target = self.vessel("target")
+        for index in range(4):
+            bind_material(target, self.material("mix_" + str(index)))
+        before = deepcopy(target)
+        with self.assertRaises(ValueError):
+            bind_material(target, self.material("fifth"))
+        self.assertEqual(target, before)
+        bind_material(target, self.material("mix_0"))
+        self.assertEqual(target, before)
+        ordinary = self.vessel("ordinary")
+        with self.assertRaises(ValueError):
+            bind_material(ordinary, MaterialDef("iron", "铁", 3, 4))
+        self.assertNotIn("program", ordinary["state"])
+
+    def test_frame_uses_its_material_table_without_grove_metadata(self):
+        registry = Registry("other-world", ())
+        definition = MaterialDef("metal", "金属", 3, 4)
+        registry.register_material(definition)
+        source = {"id": "source", "state": {}, "components": {}, "matter": [
+            {"id": "source:metal", "material": "metal", "quantity": 4, "slot": "surface", "role": "substance", "burning": False}]}
+        target = {"id": "target", "state": {}, "components": {}, "matter": []}
+        frame = Frame(registry, {"source": source, "target": target})
+        frame.apply([Transfer("source", "source:metal", "target", 2, "surface")])
+        self.assertNotIn("program", frame.objects["target"]["state"])
+        self.assertEqual(matter.quantity(frame.objects["target"], "metal"), 2)
+        self.assertTrue(frame.verify_balance())
+
+    def test_compilation_projection_and_planning_share_the_explicit_material_catalog(self):
+        materials = {"metal": MaterialDef("metal", "金属", 3, 40)}
+        raw = {"key": "metal_process", "name": "金属加工", "version": 1,
+               "materials": {"product": {"name": "产物", "feedstock": "metal", "load_per_u": 3,
+                                          "combustible": False, "liquid": False}},
+               "types": {"vessel": {"name": "加工器皿", "body_material": "metal", "cost": {"metal": 1}}}}
+        compiled = compile_program(raw, materials=materials, body_materials=("metal",), max_custom_materials=1)
+        semantics = program_material_semantics(compiled, "program_metal", materials=materials)
+        self.assertEqual(semantics["materials"]["metal"], {"kind": "builtin", "material_id": "metal"})
+        self.assertEqual(semantics["materials"]["product"]["material_id"], "program_metal#product")
+        physics = {**materials, **compiled["materials"]}
+        reaction = {"op": "react", "inputs": {"metal": 1}, "outputs": {"product": 1}}
+        self.assertEqual(plan_reaction(reaction, {"metal": 2}, physics, 4)["produce"], {"product": 1})
+        with self.assertRaises(ValueError):
+            plan_reaction({"op": "react", "inputs": {"wood": 1}, "outputs": {"product": 1}},
+                          {"wood": 1}, physics, 4)
+        changed = deepcopy(raw)
+        changed["materials"]["product"]["load_per_u"] = 1
+        with self.assertRaises(ValueError):
+            compile_program(changed, materials=materials, body_materials=("metal",), max_custom_materials=1)
 
 
 class MaterialConsequenceTests(unittest.TestCase):

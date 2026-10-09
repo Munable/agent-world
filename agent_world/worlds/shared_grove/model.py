@@ -13,7 +13,7 @@ from copy import deepcopy
 from agent_world.simulation import matter as sm
 from agent_world.simulation.effects import Sink, Source, Transfer
 from agent_world.simulation.frame import Frame
-from .definitions import REGISTRY, RULES_VERSION, PIECE_QUANTITIES, registry_for
+from .definitions import REGISTRY, RULES_VERSION, PIECE_QUANTITIES, registry_for, bind_material
 
 from agent_world.errors import RuleViolation, StateConflict
 
@@ -986,7 +986,7 @@ def eligible_drift(ctx, entity):
 
 def _apply_matter(ctx, objects, effects, *, sources=(), sinks=()):
     try:
-        frame = Frame(registry_for(objects), {obj["id"]: obj for obj in objects})
+        frame = Frame(registry_for(objects), {obj["id"]: obj for obj in objects}, bind_material=bind_material)
         frame.apply(effects, allowed_sources=sources, allowed_sinks=sinks)
         frame.verify_balance()
     except ValueError as exc:

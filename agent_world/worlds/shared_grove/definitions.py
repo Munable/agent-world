@@ -18,8 +18,45 @@ for material in (MaterialDef("wood", "木", 1, 40, True, 20),
                  MaterialDef("water", "水", 2, 1, False, 0, True)):
     REGISTRY.register_material(material)
 PIECE_QUANTITIES = {key: value.piece_quantity for key, value in REGISTRY.materials.items()}
+BODY_MATERIALS = ("wood", "stone", "cloth")
 MAX_CUSTOM_MATERIALS = 4
 _MATERIAL_SYMBOL = re.compile(r"[a-z][a-z0-9_]{0,47}\Z")
+
+
+def _custom_material_id(material_id):
+    if (not isinstance(material_id, str) or not 3 <= len(material_id) <= 180
+            or material_id.count("#") != 1):
+        raise ValueError("注册材料标识须为定义引用#材料符号。")
+    prefix, symbol = material_id.split("#")
+    if (not prefix or any(not char.isprintable() or char.isspace() for char in prefix)
+            or not _MATERIAL_SYMBOL.fullmatch(symbol)):
+        raise ValueError("注册材料标识须为定义引用#材料符号。")
+    if material_id in REGISTRY.materials:
+        raise ValueError("不能覆盖内置材料定义。")
+
+
+def bind_material(entity, definition):
+    """Carry a transferred material's facts using Grove's identity and budget policy."""
+    if definition.id in REGISTRY.materials:
+        return
+    _custom_material_id(definition.id)
+    snapshot = definition.snapshot()
+    program = entity.setdefault("state", {}).get("program", {})
+    if not isinstance(program, dict):
+        raise ValueError("接收物件的程序材料快照无效。")
+    materials = program.get("materials", {})
+    if not isinstance(materials, dict) or len(materials) > MAX_CUSTOM_MATERIALS:
+        raise ValueError("接收物件最多携带4种注册材料。")
+    previous = materials.get(definition.id)
+    if previous is not None:
+        if not definition.matches_snapshot(previous):
+            raise ValueError("相同注册材料标识的物理定义不一致，不能覆盖。")
+        return
+    if len(materials) >= MAX_CUSTOM_MATERIALS:
+        raise ValueError("接收物件的4种注册材料已满。")
+    entity["state"].setdefault("program", program)
+    program.setdefault("materials", materials)
+    materials[definition.id] = snapshot
 
 
 def registry_for(entity_or_list):
@@ -52,29 +89,8 @@ def registry_for(entity_or_list):
         if not isinstance(materials, Mapping) or len(materials) > MAX_CUSTOM_MATERIALS:
             raise ValueError("每个物件最多携带4种注册材料。")
         for material_id, snapshot in materials.items():
-            if (not isinstance(material_id, str) or not 3 <= len(material_id) <= 180
-                    or material_id.count("#") != 1):
-                raise ValueError("注册材料标识须为定义引用#材料符号。")
-            prefix, symbol = material_id.split("#")
-            if (not prefix or any(not char.isprintable() or char.isspace() for char in prefix)
-                    or not _MATERIAL_SYMBOL.fullmatch(symbol)):
-                raise ValueError("注册材料标识须为定义引用#材料符号。")
-            if material_id in REGISTRY.materials:
-                raise ValueError("不能覆盖内置材料定义。")
-            if (not isinstance(snapshot, Mapping)
-                    or set(snapshot) - {"name", "load_per_u", "piece_quantity", "combustible", "liquid"}
-                    or not {"name", "load_per_u", "combustible", "liquid"}.issubset(snapshot)):
-                raise ValueError("注册材料只能携带可信的有限物理参数。")
-            name = snapshot["name"]
-            load, piece = snapshot["load_per_u"], snapshot.get("piece_quantity", 4)
-            if (not isinstance(name, str) or not 1 <= len(name) <= 80 or not name.strip()
-                    or not all(char.isprintable() for char in name)):
-                raise ValueError("注册材料名称须为1至80字且不含控制字符。")
-            if (type(load) is not int or not 1 <= load <= 8
-                    or type(piece) is not int or not 1 <= piece <= 10000
-                    or type(snapshot["combustible"]) is not bool or type(snapshot["liquid"]) is not bool):
-                raise ValueError("注册材料的载荷、份量和物理标志无效。")
-            definition = MaterialDef(material_id, name, load, piece, snapshot["combustible"], 0, snapshot["liquid"])
+            _custom_material_id(material_id)
+            definition = MaterialDef.from_snapshot(material_id, snapshot)
             previous = registry.materials.get(material_id)
             if previous is not None and previous != definition:
                 raise ValueError("相同注册材料标识的物理定义不一致。")
