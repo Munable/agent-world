@@ -425,8 +425,6 @@ class GroveSession:
         self.inference_history: list[dict] = []
         self.active_automatic = False
         self.blueprint_active = False
-        self.active_execution = False
-        self.delegation = ""
         self.restore_permissions = False
         self.generation = {"status": "idle", "published": False, "attempts": 0,
                            "entities": [], "process": None, "readback": None, "error": None}
@@ -443,7 +441,6 @@ class GroveSession:
         self.unknown: list[dict] = []
         self.opportunity: dict | None = None
         self.claim_count = self.submit_count = self.world_call_count = 0
-        self.cancelled = False
         self.automatic = {"enabled": False, "interval_seconds": 30, "max_count": 4,
                           "count": 0, "next_at": None, "last_observed_seq": 0, "last_handled_seq": 0}
         execution_restore_changed = False
@@ -514,35 +511,23 @@ class GroveSession:
 
     @property
     def execution(self):
-        return self.execution_controller.state
+        return self.execution_controller.snapshot()
 
     @property
     def execution_archive(self):
-        return self.execution_controller.archive
+        return self.execution_controller.archived_snapshots()
 
     @property
     def delegation(self):
         return self.execution_controller.delegation
 
-    @delegation.setter
-    def delegation(self, value):
-        self.execution_controller.delegation = value
-
     @property
     def active_execution(self):
         return self.execution_controller.active
 
-    @active_execution.setter
-    def active_execution(self, value):
-        self.execution_controller.active = value
-
     @property
     def cancelled(self):
         return self.execution_controller.stopped
-
-    @cancelled.setter
-    def cancelled(self, value):
-        self.execution_controller.stopped = value
 
     async def _execution_read(self, kind, *, context_entity_id=None, operation_id=None):
         if kind == "receipt":
@@ -612,7 +597,19 @@ class GroveSession:
         self.progress.append({"kind": kind, "message": message, "time": time.time()})
         self.progress = self.progress[-30:]
 
+    def admission_facts(self) -> dict:
+        """Transport facts only; Controller derives all inference eligibility."""
+        return {"entered": self.entered, "native_connected": bool(self.session_id and self.host_url),
+            "unknown": bool(self.unknown), "worker_busy": bool(self.worker and not self.worker.done()),
+            "catalog": self.catalog, "publication_pending": self.generation.get("status") == "published_readback_pending",
+            "reclaiming": self.reclaim_in_progress}
+
+    def require_inference_admission(self, kind: str):
+        self.execution_controller.sync_unknown(self.unknown)
+        self.execution_controller.require_admission(kind, **self.admission_facts())
+
     def state(self):
+        self.execution_controller.sync_unknown(self.unknown)
         return {"status": self.status, "entered": self.entered, "world_read": self.world_read,
             "first_response_success": self.first_response_success, "completion_count": self.completion_count,
             "host_url": self.host_url, "default_host_url": "", "model": self.model,
@@ -631,8 +628,9 @@ class GroveSession:
             "cost": self.response_diagnostics.get("cost", self.last_completion.get("cost")),
             "response_diagnostics": self.response_diagnostics,
             "generation": self.generation, "inference_count": self.inference_count,
-            "execution": deepcopy(self.execution) | {"extension_allowed": self.execution_can_resume(additional_requests=1)},
-            "execution_archive": deepcopy(self.execution_archive),
+            "execution": self.execution | {"extension_allowed": self.execution_can_resume(additional_requests=1)},
+            "admission": self.execution_controller.admission(**self.admission_facts()),
+            "execution_archive": self.execution_archive,
             "private_context": deepcopy(self.private_context),
             "context": {key: deepcopy(self.private_context[key]) for key in ("intent", "preferences")},
             "inference_history": self.inference_history[-30:],
@@ -721,8 +719,7 @@ class GroveSession:
                 if exc.code != "ReceiptNotFound":
                     raise
                 if not replay:
-                    if record.get("execution_write") and self.execution_controller.owns_operation(record):
-                        self.execution["status"] = "unknown"
+                    self.execution_controller.operation_unresolved(record)
                     self.remember()
                     continue
                 # Exact replay, never a new operation ID after a missing receipt.
@@ -780,14 +777,9 @@ class GroveSession:
         only after confirming this saved session exists in the same owned host.
         Never reopen write admission on an unsuccessful/malformed status read.
         """
-        reclaimed_request = (self.execution.get("request_status") == "unsettled" and
-            self.execution.get("control_status") == "revoked")
-        self.active_execution = False
-        self.execution["request_status"] = "settling"
         started = step_started = time.monotonic()
         stage = "abort" if abort else "session_identity"
-        self.execution["settlement"] = {"stage": stage, "status": "checking", "elapsed_seconds": 0}
-        self.remember()
+        owner = self.execution_controller.settlement_started(stage)
         try:
             if abort:
                 await self.host("POST", "/session/" + quote(self.session_id, safe="") + "/abort", {}, timeout=5)
@@ -810,7 +802,7 @@ class GroveSession:
                 raise ConnectorError("UnsettledHost", "原模型执行状态无法确认；不会打开下一段行动。", 409)
             status = next((statuses.get(owned_id, {"type": "idle"}) for owned_id in sorted(owned_sessions)
                 if statuses.get(owned_id, {"type": "idle"}).get("type") != "idle"), {"type": "idle"})
-            self.execution["settlement"]["native_status"] = status.get("type")
+            self.execution_controller.native_status_observed(status.get("type"), owner=owner)
             if not isinstance(status, dict) or status.get("type") != "idle":
                 raise ConnectorError("NativeSessionBusy", "上一段模型仍在运行；先等原请求停止，再接续。", 409)
             self.execution_phase("settle_session_status", step_started)
@@ -820,33 +812,18 @@ class GroveSession:
             await asyncio.wait_for(self.execution_write_lock.acquire(), timeout=16)
             self.execution_write_lock.release()
             self.execution_phase("settle_write_drain", step_started)
-            self.execution["request_status"] = "idle_confirmed"
-            self.execution["settlement"].update(stage=stage, status="idle_confirmed",
-                elapsed_seconds=round(time.monotonic() - started, 3))
-            if reclaimed_request and not self.unknown and not self.delegation and not self.execution.get("delegation_active"):
-                if (self.execution.get("error") or {}).get("code") in {"UnsettledHost", "NativeSessionBusy"}:
-                    self.execution["error"] = None
+            self.execution_controller.sync_unknown(self.unknown)
+            settled = self.execution_controller.settlement_finished(stage=stage,
+                elapsed_seconds=round(time.monotonic() - started, 3), owner=owner)
+            if settled is None:
+                return False
+            if settled["reclaimed"]:
                 self.note("cancelled", "伙伴已停止；你的世界位置和物件保持现状")
-            self.remember()
             return True
         except (ConnectorError, httpx.HTTPError, asyncio.TimeoutError, ValueError) as exc:
             self.execution_phase("settle_" + stage, step_started, status="unconfirmed", error=exc)
-            diagnostic = {"stage": stage, "status": "unconfirmed",
-                "elapsed_seconds": round(time.monotonic() - started, 3), "error_type": type(exc).__name__}
-            if isinstance(exc, ConnectorError):
-                diagnostic["error_code"] = exc.code
-            native_status = (self.execution.get("settlement") or {}).get("native_status")
-            if native_status:
-                diagnostic["native_status"] = native_status
-            self.execution["settlement"] = diagnostic
-            labels = {"abort": "停止原请求", "session_identity": "读取原会话",
-                "session_status": "读取执行状态", "write_drain": "核对已接纳行动"}
-            message = ("原会话仍在运行；没有打开后续动作。" if native_status in {"busy", "retry"} else
-                labels[stage] + "时状态未确认（" + type(exc).__name__ + "）；没有打开后续动作。")
-            self.execution["error"] = {"code": exc.code if isinstance(exc, ConnectorError) else "UnsettledHost",
-                "message": message}
-            self.execution.update(request_status="unsettled", resume_allowed=False)
-            self.remember()
+            self.execution_controller.settlement_failed(stage=stage,
+                elapsed_seconds=round(time.monotonic() - started, 3), error=exc, owner=owner)
             return False
 
     def update_execution_control(self, value):
@@ -866,13 +843,13 @@ class GroveSession:
         finally:
             if not self.unknown:
                 await self.release_opportunity()
-            if self.execution["status"] in {"completed", "paused"}:
-                self.status = "ready" if self.execution["status"] == "completed" else "paused"
+            if self.execution_controller.value("status") in {"completed", "paused"}:
+                self.status = "ready" if self.execution_controller.value("status") == "completed" else "paused"
             self.remember()
 
     async def verify_history_recovery(self):
         """Read only the original summary attempt; never issue a replacement."""
-        recovery = self.execution["history_recovery"]
+        recovery = self.execution_controller.value("history_recovery")
         messages = await self.host("GET", "/session/" + quote(self.session_id, safe="") + "/message?limit=100")
         prior = set(recovery.get("before_message_ids", []))
         markers = [message for message in messages if message.get("info", {}).get("id") not in prior
@@ -896,21 +873,16 @@ class GroveSession:
                 info.get("finish") != "stop" or not info.get("time", {}).get("completed") or not text.strip() or
                 any(part.get("type") == "tool" for part in parts)):
             raise ConnectorError("HistoryRecoveryInvalid", "原摘要未正常完整结束；没有继续执行。", 409)
-        recovery.update(status="completed", compaction_user_id=marker_id, message_id=info["id"],
-            summary_sha256=hashlib.sha256(text.encode()).hexdigest(), summary_characters=len(text), error=None)
+        self.execution_controller.history_recovery_verified(compaction_user_id=marker_id, message_id=info["id"],
+            summary_sha256=hashlib.sha256(text.encode()).hexdigest(), summary_characters=len(text))
         inference = next((item for item in self.inference_history if item.get("number") == recovery.get("inference_number")), None)
         if inference is not None:
             self.inference_finished(inference, response)
         self.remember()
 
     async def recover_execution_history(self):
-        recovery = self.execution["history_recovery"]
-        if recovery.get("attempts", 0):
-            raise ConnectorError("HistoryRecoveryUnavailable", "本目标已使用一次历史整理；不会自动重复调用。", 409)
-        if self.unknown or self.delegation or self.execution.get("delegation_active") or self.active_execution:
-            raise ConnectorError("HistoryRecoveryUnsafe", "先停止原授权并核对原操作，再整理历史。", 409)
-        if self.execution["max_requests"] - self.execution["requests_used"] < 2:
-            raise ConnectorError("HistoryRecoveryBudget", "历史整理和接续执行共需至少两次剩余模型请求。", 409)
+        self.execution_controller.sync_unknown(self.unknown)
+        self.execution_controller.ensure_history_recovery()
         config = await self.host("GET", "/config")
         compact = config.get("compaction", {})
         agent = config.get("agent", {}).get("compaction", {})
@@ -923,11 +895,10 @@ class GroveSession:
         messages = await self.host("GET", "/session/" + quote(self.session_id, safe="") + "/message?limit=100")
         if self.cancelled:
             raise asyncio.CancelledError()
-        recovery.update(status="running", attempts=1, session_id=self.session_id,
+        self.execution_controller.history_recovery_started(session_id=self.session_id,
             before_message_ids=[message["info"]["id"] for message in messages])
         # The attempt and request counter are persisted together before POST.
         inference = self.inference_started("execution_summary")
-        recovery["inference_number"] = inference["number"]
         self.status = "thinking"
         self.remember()
         provider, model = self.model.split("/", 1)
@@ -940,13 +911,12 @@ class GroveSession:
                 raise ConnectorError("HistoryRecoveryUnconfirmed", "原摘要调用尚未确认停止。", 409)
             await self.verify_history_recovery()
         except (asyncio.TimeoutError, httpx.HTTPError, ConnectorError, asyncio.CancelledError) as exc:
-            recovery.update(status="uncertain", error={"code": getattr(exc, "code", "HistoryRecoveryInterrupted"),
-                "message": "历史整理未确认完整成功；原记录保留，没有开始执行。"})
-            inference.update(status="interrupted", finished_at=time.time(), error=recovery["error"])
+            diagnostic = self.execution_controller.history_recovery_interrupted(exc)
+            inference.update(status="interrupted", finished_at=time.time(), error=diagnostic)
             self.remember()
             idle = await self.settle_execution_request(abort=True)
             if idle and isinstance(exc, ConnectorError) and exc.code == "HistoryRecoveryInvalid":
-                recovery["status"] = "failed"
+                self.execution_controller.history_recovery_unconfirmed(exc, original_request_idle=idle)
             self.remember()
             if isinstance(exc, asyncio.CancelledError):
                 raise
@@ -986,7 +956,7 @@ class GroveSession:
     async def release_opportunity(self):
         # A claimed contribution may span execution segments. Releasing it
         # here is a manual write, which would reclaim the still-active grant.
-        if self.execution.get("task_id") and self.execution.get("status") in {"starting", "running"}:
+        if self.execution_controller.value("task_id") and self.execution_controller.value("status") in {"starting", "running"}:
             return
         if self.opportunity and "grove.content_release" in self.catalog and not self.unknown:
             args = {key: self.opportunity[key] for key in ("opportunity_id", "expected_opportunity_version")
@@ -1045,20 +1015,15 @@ class GroveSession:
         self.model_metadata = {"variants": sorted(selected.get("variants", {})),
             "context_limit": selected.get("limit", {}).get("context"), "output_limit": selected.get("limit", {}).get("output"),
             "cost": {key: selected.get("cost", {}).get(key) for key in ("input", "output", "cache_read", "cache_write")}}
-        await self.recover_receipts(replay=False if self.execution.get("task_id") else True)
+        await self.recover_receipts(replay=False if self.execution_controller.value("task_id") else True)
         # Recovery settles original operations, never resumes an old goal.
         if self.entered and "grove.control_status" in self.catalog:
-            terminal = self.execution.get("status") == "completed"
             control = await self.invoke("grove.control_status", {})
             self.update_execution_control(control.get("result", control))
             await self.revoke_execution()
-            if self.execution.get("goal") and not terminal:
-                if self.unknown:
-                    self.execution["status"] = "unknown"
-                else:
-                    self.execution["status"] = "paused"
-                    if self.entered:
-                        await self.execution_readback()
+            self.execution_controller.sync_unknown(self.unknown)
+            if self.execution_controller.recovered_world_authority():
+                await self.execution_readback()
         if self.session_id:
             session_started = time.monotonic()
             try:
@@ -1076,16 +1041,14 @@ class GroveSession:
                 raise
             self.initialization_phase("saved_session", session_started)
             if not self.unknown:
-                idle = await self.settle_execution_request(abort=self.execution.get("request_status") not in {"idle", "idle_confirmed", "not_started"})
-                recovery = self.execution.get("history_recovery") or {}
+                idle = await self.settle_execution_request(abort=self.execution_controller.value("request_status") not in {"idle", "idle_confirmed", "not_started"})
+                recovery = self.execution_controller.value("history_recovery") or {}
                 if idle and recovery.get("status") in {"running", "uncertain"}:
                     try:
                         await self.verify_history_recovery()
                     except ConnectorError as exc:
-                        recovery.update(status="failed" if exc.code == "HistoryRecoveryInvalid" else "uncertain",
-                            error={"code": exc.code, "message": exc.message})
-                        self.remember()
-                self.execution["resume_allowed"] = self.execution_can_resume()
+                        self.execution_controller.history_recovery_unconfirmed(exc, original_request_idle=idle)
+                self.execution_controller.recovery_finished()
         if not self.session_id:
             session_started = time.monotonic()
             try:
@@ -1313,7 +1276,7 @@ class GroveSession:
                 self.note("queued", "附近变化已合并，当前回应完成后处理")
                 return
             raise ConnectorError("TurnBusy", "The companion is already responding.", 409)
-        self.execution_controller.ensure_native_ready()
+        self.require_inference_admission("creation" if mode == "generate" else "conversation")
         self.worker = asyncio.create_task(self.run_turn(text, automatic=automatic, mode=mode, kind=kind,
                                                        context_entity_id=context_entity_id))
         self.status, self.error = "thinking", None
@@ -1360,17 +1323,15 @@ class GroveSession:
         if executing and self.cancelled:
             raise asyncio.CancelledError()
         if not executing:
-            self.execution_controller.ensure_native_ready()
+            self.execution_controller.begin_native_work()
         self.status, self.error = "thinking", None
-        if not executing:
-            self.cancelled = False
         self.claim_count = self.submit_count = self.world_call_count = 0
         self.text = ""
         self.response_diagnostics = {"completed": False, "validated_final": False}
         if not initial and not self.active_automatic and not executing:
             self.remember_user_request(text)
         self.messages.append({"role": "event" if self.active_automatic or executing else "user",
-            "text": ("Agent 继续原目标（第 " + str(self.execution["requests_used"] + 1) + " 段）") if executing else
+            "text": ("Agent 继续原目标（第 " + str(self.execution_controller.value("requests_used") + 1) + " 段）") if executing else
                     "连接世界伙伴" if initial else display_text or text, "time": time.time()})
         self.note("thinking", "伙伴正在读取世界并回应")
         parts = [{"type": "text", "text": text}]
@@ -1384,16 +1345,13 @@ class GroveSession:
             try:
                 facts = (await self.current_turn_facts() if context_entity_id is None else
                          await self.current_turn_facts(context_entity_id=context_entity_id,
-                             optional_selected=executing and self.execution.get("context_reference_attempted", True)))
+                             optional_selected=executing and self.execution_controller.value("context_reference_attempted", True)))
             except ConnectorError as exc:
-                if (executing and context_entity_id is not None and
-                        not self.execution.get("context_reference_attempted", True) and
-                        exc.code in {"RuleViolation", "PermissionDenied", "ResourceNotFound"}):
+                if executing:
                     # A definite refusal at the original selection cannot be
                     # replaced by later readable terms. A network outage before
                     # any inference/action still permits the first valid read.
-                    self.execution["context_reference_attempted"] = True
-                    self.remember()
+                    self.execution_controller.selection_unavailable(context_entity_id, exc.code)
                 raise
             if executing:
                 facts["detail_reads"] = {
@@ -1401,14 +1359,13 @@ class GroveSession:
                     "tools": ["grove_inspect", "grove_rule_catalog", "grove_definition_read", "map_viewport"],
                     "meaning": "Read relevant details as needed. Omission does not mean absence. "
                                "Chain detail reads/pages with base_observation_id from the preceding read."}
-                facts["execution_control"] = {key: self.execution.get(key) for key in
+                facts["execution_control"] = {key: self.execution_controller.value(key) for key in
                     ("goal", "max_actions", "actions_count", "remaining_actions", "delegation_active", "grant_version")}
-                facts["execution_task"] = {key: deepcopy(self.execution.get(key)) for key in
+                facts["execution_task"] = {key: deepcopy(self.execution_controller.value(key)) for key in
                     ("task_id", "segment_id", "goal", "requests_used", "max_requests", "remaining_actions", "progress")}
                 facts["execution_task"]["confirmed_receipts"] = [deepcopy(item) for item in
-                    self.execution["receipts"] if item.get("status") == "confirmed"][-8:]
-                self.execution["world_results"] = self.execution_world_results(facts, establish_reference=True)
-                self.execution.update(readback=deepcopy(facts), readback_actual=True)
+                    self.execution_controller.value("receipts") if item.get("status") == "confirmed"][-8:]
+                self.execution_controller.preflight_observed(facts)
             facts = self.present_agent_result("map.viewport", facts, preflight=True)
             parts.append({"type": "text", "text": CURRENT_FACTS_INSTRUCTIONS + "\n" +
                           json.dumps(facts, ensure_ascii=False, separators=(",", ":"))})
@@ -1448,7 +1405,7 @@ class GroveSession:
                 return
             self.inference_finished(inference, response)
             if executing:
-                self.execution["request_status"] = "returned"
+                self.execution_controller.native_response_observed("execution", owner=inference)
             info = response.get("info", {}) if isinstance(response, dict) else {}
             parts = response.get("parts", []) if isinstance(response, dict) else []
             if not isinstance(info, dict) or not isinstance(parts, list):
@@ -1481,8 +1438,7 @@ class GroveSession:
             # Close local admission before waiting for the upstream abort.
             # An in-flight operation still keeps its original receipt identity.
             if executing:
-                self.active_execution = False
-                self.execution["request_status"] = "timed_out"
+                self.execution_controller.native_interrupted("execution", owner=inference)
             raise ConnectorError("HostUnavailable", "OpenCode is slow or unavailable. Movement remains available after entry; reconnect the companion when ready.", 503)
         finally:
             if inference["status"] == "started":
@@ -1498,8 +1454,8 @@ class GroveSession:
 
     async def compact_execution_context(self):
         """Retain the native audit trail, omit superseded snapshots from inference."""
-        if self.unknown or self.execution.get("request_status") != "idle_confirmed":
-            raise ConnectorError("ExecutionContextBusy", "先核对原请求与回执，才能整理旧现场上下文。", 409)
+        self.execution_controller.sync_unknown(self.unknown)
+        self.execution_controller.ensure_context_pruning()
         base = "/session/" + quote(self.session_id, safe="")
         records = await self.host("GET", base + "/message?limit=100")
         if not isinstance(records, list):
@@ -1543,9 +1499,8 @@ class GroveSession:
             for _, part_id, expected in (row for row in changed if row[0] == message_id):
                 if actual.get(part_id) != expected:
                     raise ConnectorError("ExecutionContextMismatch", "原会话片段整理未读回一致；没有调用模型。", 409)
-        self.execution["context_pruning"] = {"parts": len(changed), "superseded_snapshot_chars": snapshot_chars,
-            "superseded_tool_output_chars": tool_chars, "scope": "Native original text/output retained; user goals, definitions, writes and receipts unchanged."}
-        self.remember()
+        self.execution_controller.context_pruned(parts=len(changed),
+            snapshot_characters=snapshot_chars, tool_characters=tool_chars)
 
     async def current_turn_facts(self, *, context_entity_id: str | None = None,
                                  optional_selected: bool = False) -> dict:
@@ -1622,6 +1577,8 @@ class GroveSession:
         entry = {"number": self.inference_count, "purpose": purpose, "status": "started", "started_at": time.time(),
                  "session_id": session_id or self.session_id}
         entry.update(execution_fields)
+        if purpose == "execution_summary":
+            self.execution_controller.summary_request_recorded(entry["number"])
         self.inference_history.append(entry)
         self.inference_history = self.inference_history[-30:]
         self.remember()
@@ -1750,8 +1707,7 @@ class GroveSession:
                 raise asyncio.CancelledError()
             return self.complete_model_answer(response, session_id=session_id)
         except (asyncio.TimeoutError, httpx.TimeoutException, httpx.NetworkError):
-            self.execution["request_status"] = "unsettled"
-            self.remember()
+            self.execution_controller.native_interrupted("generation")
             with contextlib.suppress(Exception):
                 await self.host("POST", "/session/" + quote(session_id, safe="") + "/abort", {}, timeout=5)
             raise ConnectorError("HostUnavailable", "本机模型未及时完成内容；不会发布未完成的正文。", 503)
@@ -1868,11 +1824,12 @@ class GroveSession:
     async def generate(self, text: str, *, kind: str | None = None, explain_unavailable: bool = False):
         if self.reclaim_in_progress:
             raise asyncio.CancelledError()
-        if self.unknown:
-            raise ConnectorError("UnknownWrite", "先核对原世界操作回执，不能生成替代内容。", 409)
-        if self.generation.get("status") == "published_readback_pending":
-            raise ConnectorError("RecoverPublication", "先核对已发表内容的原回执与地图，不能生成替代内容。", 409)
-        self.status, self.error, self.cancelled, self.text = "thinking", None, False, ""
+        self.execution_controller.sync_unknown(self.unknown)
+        # This is the already scheduled worker, so its own transport occupancy
+        # is not a competing request. All other admission facts are rechecked.
+        self.execution_controller.require_admission("creation", **(self.admission_facts() | {"worker_busy": False}))
+        self.execution_controller.begin_native_work()
+        self.status, self.error, self.text = "thinking", None, ""
         self.world_call_count = self.claim_count = self.submit_count = 0
         self.response_diagnostics = {"completed": False, "validated_final": False}
         if not self.active_automatic:
@@ -2267,8 +2224,7 @@ class GroveSession:
         return self.disconnecting or bool(self.reclaim_task and not self.reclaim_task.done())
 
     def ensure_not_reclaiming(self):
-        if self.reclaim_in_progress:
-            raise ConnectorError("ReclaimBusy", "原请求正在收尾；世界行动权已按当前状态处理，先等原收尾完成再启动伙伴任务。", 409)
+        self.execution_controller.ensure_admission(reclaiming=self.reclaim_in_progress)
 
     async def cancel(self, *, background: bool = False):
         # All callers join the same task. Cancelling an HTTP waiter must not
@@ -2336,9 +2292,9 @@ class GroveSession:
             if not self.unknown:
                 await self.release_opportunity()
             self._record_reclaimed_state(revoke_error, finished=True)
-            if revoke_error or self.unknown or self.delegation or self.execution.get("delegation_active"):
+            if revoke_error or self.unknown or self.delegation or self.execution_controller.value("delegation_active"):
                 self.note("reclaim_pending", "仍在核对原请求和世界行动权；暂不能启动新推理。")
-            elif self.execution.get("request_status") in {"idle", "idle_confirmed"}:
+            elif self.execution_controller.value("request_status") in {"idle", "idle_confirmed"}:
                 self.note("cancelled", "伙伴已停止；你的世界位置和物件保持现状")
             else:
                 self.note("reclaim_pending", "仍在确认原请求结束；你可以手动操作，暂不能启动新推理。")
@@ -2349,10 +2305,8 @@ class GroveSession:
                 "message": exc.message if isinstance(exc, ConnectorError) else
                     "原请求收尾未完成；本机后续动作已停止，先恢复原连接和回执。"}
             self.status, self.error = "error", diagnostic
-            if self.execution.get("goal"):
-                self.execution.update(status="unknown" if self.unknown or self.delegation or
-                    self.execution.get("delegation_active") else "paused", error=diagnostic,
-                    request_status="unsettled", resume_allowed=False)
+            self.execution_controller.sync_unknown(self.unknown)
+            self.execution_controller.reclaim_interrupted(diagnostic)
             self.note("reclaim_failed", diagnostic["message"])
         finally:
             try:
@@ -2361,7 +2315,7 @@ class GroveSession:
                 self.status = "error"
                 self.error = {"code": "ReclaimPersistenceFailed",
                     "message": "收回状态未能保存；原操作记录仍需核对，请恢复原连接。"}
-                self.execution.update(request_status="unsettled", resume_allowed=False)
+                self.execution_controller.reclaim_interrupted(self.error, persistence_failed=True)
             finally:
                 try:
                     self.execution_controller.finish_reclaim(error=diagnostic or (
@@ -2516,12 +2470,8 @@ class GroveSession:
             raise ConnectorError("DelegationDenied", "The model cannot choose an execution grant.", 403)
         write = function in AGENT_WRITE_FUNCTIONS
         if write:
-            if (not self.active_execution or not self.delegation or
-                    self.execution.get("status") != "running" or not self.execution.get("delegation_active")):
-                raise ConnectorError("DelegationRequired", "This write requires the person's active explicit goal.", 403)
             segment_id = arguments.get("execution_segment_id")
-            if not segment_id or segment_id != self.execution.get("segment_id"):
-                raise ConnectorError("StaleExecutionSegment", "这是已结束或不属于当前段的工具调用；没有执行世界动作。", 409)
+            self.execution_controller.admit_write(segment_id)
             if self.execution_write_lock.locked():
                 raise ConnectorError("ExecutionWriteBusy", "Wait for the current write and its readback before another action.", 409)
             async with self.execution_write_lock:
@@ -2728,10 +2678,7 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
         if context_entity_id is not None and (not isinstance(context_entity_id, str) or
                 not 1 <= len(context_entity_id) <= 256 or not context_entity_id.strip()):
             raise ConnectorError("InvalidArguments", "context_entity_id 需要真实已选物件的标识。")
-        if not session.entered or not session.session_id or not session.host_url:
-            raise ConnectorError("EntryRequired", "Connect the local companion and complete entry first.", 409)
-        if session.worker and not session.worker.done():
-            raise ConnectorError("TurnBusy", "The private host is already responding.", 409)
+        session.require_inference_admission("conversation")
         session.configure_private_context({key: body[key] for key in ("intent", "preferences") if key in body})
         session.schedule(text, context_entity_id=context_entity_id)
         return session.state()
@@ -2758,7 +2705,6 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
         session.pending_changes = []
         if session.automatic_worker:
             session.automatic_worker.cancel()
-        session.cancelled = False
         session.remember_user_request(command["goal"])
         session.messages.append({"role": "user", "text": command["goal"], "time": time.time()})
         session.schedule(command["goal"], mode=command["mode"], context_entity_id=command["context_entity_id"])
@@ -2815,12 +2761,7 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
             raise ConnectorError("InvalidPrompt", "Creation goals need 1–4000 characters.")
         if kind is not None and kind not in {"layout", "rain", "drift"}:
             raise ConnectorError("InvalidKind", "Creation kind must be layout, rain or drift.")
-        if not session.entered or not session.session_id or not session.host_url:
-            raise ConnectorError("EntryRequired", "Complete the real companion entry first.", 409)
-        if session.unknown or session.generation.get("status") == "published_readback_pending":
-            raise ConnectorError("RecoverPublication", "先恢复连接核对原发表结果，不能重新生成替代内容。", 409)
-        if session.worker and not session.worker.done():
-            raise ConnectorError("TurnBusy", "The private host is already responding.", 409)
+        session.require_inference_admission("creation")
         session.configure_private_context({key: body[key] for key in ("intent", "preferences") if key in body})
         session.schedule(text, mode="generate", kind=kind)
         return session.state()

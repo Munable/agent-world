@@ -260,18 +260,36 @@ for(const [execution,label,detail,resume] of [
   [{status:'paused',task_id:'original-task',goal:'运来补给',resume_allowed:true},'目标已暂停','继续原目标与剩余额度',true]
 ]){
   const elements=new Map(),element=id=>{
-    if(!elements.has(id))elements.set(id,{textContent:'',dataset:{},hidden:false,disabled:false,replaceChildren(){},append(){}});
+    if(!elements.has(id))elements.set(id,{textContent:'',value:'0',dataset:{},hidden:false,disabled:false,replaceChildren(){},append(){},setAttribute(){},removeAttribute(){}});
     return elements.get(id);
   };
-  const context={host:{status:'ready',execution},goalDirty:true,hostCommandBusy:false,executionReclaimBusy:false,
+  const context={host:{status:'ready',execution,admission:{goal:{allowed:true},resume:{allowed:!!execution.resume_allowed},extend:{allowed:false,reason:'额度不可追加'}}},playing:true,current:()=>true,goalDirty:true,hostCommandBusy:false,executionReclaimBusy:false,
     actionBusy:false,manualControlRecoveryPending:false,document:{activeElement:null},client:{pending:()=>null},$:element,
     node:()=>({append(){}})};
   vm.createContext(context);
+  vm.runInContext(extract('function agentAdmission(','const point='),context);
   vm.runInContext(extract('function renderExecution(){','async function reclaimExecution(){'),context);
   context.renderExecution();
   assert.equal(element('execution-status').textContent,label);
   assert.ok(element('execution-detail').textContent.includes(detail));
   assert.equal(element('execution-resume').hidden,!resume);
+}
+
+// The actual page consumes the server's refusal even when older host/task
+// fields look ready; a fresh server projection is required to re-enable it.
+{
+  const reasons=Object.fromEntries(['conversation','creation','goal','resume','extend'].map(kind=>
+    [kind,{allowed:false,reason:'原请求尚未确认停止'}]));
+  const context={host:{status:'paused',unknown_operations:0,reclaim_in_progress:false,
+    execution:{status:'paused',request_status:'unsettled'},admission:reasons},playing:true,current:()=>true,
+    hostCommandBusy:false,executionReclaimBusy:false,manualControlRecoveryPending:false,actionBusy:false,
+    client:{pending:()=>null}};
+  vm.createContext(context);vm.runInContext(extract('function agentAdmission(','function continuationAdmission('),context);
+  for(const kind of Object.keys(reasons))assert.equal(context.agentAdmission(kind).allowed,false);
+  context.host.admission.conversation={allowed:true,reason:''};
+  assert.equal(context.agentAdmission('conversation').allowed,true);
+  context.host.admission=null;
+  assert.equal(context.agentAdmission('conversation').allowed,false);
 }
 
 console.log('Grove presentation: quantities, relationship/action boundaries and truthful goal/resume outcomes passed');

@@ -11,7 +11,7 @@ from agent_world import FunctionOutcome, FunctionSpec, WorldRuntime
 from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.worlds.shared_grove import WORLD
 from agent_world.worlds.shared_grove import model as m
-from agent_world.worlds.shared_grove import processes
+from agent_world.worlds.shared_grove import activity, commit, processes
 from agent_world.worlds.shared_grove.catalog import template
 from agent_world.worlds.shared_grove.generation import COOLDOWN_SECONDS
 
@@ -426,14 +426,14 @@ class SharedGroveTests(unittest.TestCase):
         ids = []
         def prepare(ctx, args):
             positions = ((2, 0), (3, 0), (2, 1), (3, 1))
-            chunks = [m.ensure_chunk(ctx, cx, cy)["id"] for cx, cy in positions]
+            chunks = [commit.ensure_chunk(ctx, cx, cy)["id"] for cx, cy in positions]
             seeded = sum(len(m.get_chunk(ctx, cx, cy)["entity_ids"]) for cx, cy in positions)
             count, extra = divmod(processes.MAX_WET_ENTITIES-seeded+bool(args.get("exceed")), len(positions))
             for index, (cx, cy) in enumerate(positions):
                 land = [(cx*16+x, cy*16+y) for y in range(16) for x in range(16)
                         if m.tile_at(ctx, cx*16+x, cy*16+y) in {"grass", "dirt"}]
                 for x, y in land[:count+(index < extra)]:
-                    entity = m.spawn_entity(ctx, {"name": "雨中布料", "material": "cloth",
+                    entity = commit.spawn_entity(ctx, {"name": "雨中布料", "material": "cloth",
                         "capabilities": ["transport", "wettable"], "x": x, "y": y, "source": "terrain"})
                     ids.append(entity["id"])
             processes.start_rain(ctx, chunks, ticks=4, intensity=20, start_delay=0)
@@ -461,7 +461,7 @@ class SharedGroveTests(unittest.TestCase):
             ids = {}
             def prepare(ctx, args):
                 for cx, cy in ((2, 0), (3, 0), (2, 1)):
-                    m.ensure_chunk(ctx, cx, cy)
+                    commit.ensure_chunk(ctx, cx, cy)
                 def land(cx, cy):
                     return [(cx*16+x, cy*16+y) for y in range(16) for x in range(16)
                             if m.tile_at(ctx, cx*16+x, cy*16+y) in {"grass", "dirt"}]
@@ -471,11 +471,11 @@ class SharedGroveTests(unittest.TestCase):
                     if water:
                         matter.append({"id": "wet", "material": "water", "quantity": water,
                             "slot": "absorbed", "role": "substance", "bound_to": "body", "burning": False})
-                    return m.spawn_entity(ctx, {"name": name, "material": "cloth", "capabilities": ["wettable"],
+                    return commit.spawn_entity(ctx, {"name": name, "material": "cloth", "capabilities": ["wettable"],
                         "matter": matter, "components": {"absorbent": {"capacity": 32, "rate": 2,
                             "supports": {"body": {"quantity": 16, "capacity": 32}}}}, "x": position[0], "y": position[1]})["id"]
                 def fire(name, position):
-                    return m.spawn_entity(ctx, {"name": name, "material": "wood", "capabilities": ["flammable"],
+                    return commit.spawn_entity(ctx, {"name": name, "material": "wood", "capabilities": ["flammable"],
                         "matter": [{"id": "body", "material": "wood", "quantity": 20,
                             "slot": "body", "role": "structural", "burning": True}],
                         "components": {"combustion": {"rate": 2, "spread": False}, "absorbent": {"capacity": 10, "rate": 2,
@@ -499,7 +499,7 @@ class SharedGroveTests(unittest.TestCase):
                         fire("隔开的额外火", position)
                 ids["process"] = processes.start_rain(ctx, [m.chunk_id(2, 0)],
                     ticks=4, intensity=10, start_delay=0)["id"]
-                objects, _ = processes._physical_closure(ctx)
+                objects, _ = activity.physical_closure(ctx)
                 return FunctionOutcome({"prepared": True, "physical_objects": len(objects),
                     "fires": sum(any(lot["burning"] for lot in entity["matter"]) for entity in objects.values())})
             self.clock.return_value = 1000.0
@@ -677,13 +677,13 @@ class SharedGroveTests(unittest.TestCase):
             # Keep the seeded40u rather than overwrite a derived fuel field.
             # The density fixture declares its own real2u combustible shell.
             original = m.get_entity(ctx, "seed_0_0_5_5")
-            saved = m.spawn_entity(ctx, {"name": "保留原箱木料", "material": "wood", "capabilities": ["transport"],
+            saved = commit.spawn_entity(ctx, {"name": "保留原箱木料", "material": "wood", "capabilities": ["transport"],
                 "matter": [], "x": 14, "y": 14, "state": {"kind": "raw_material"}})
             for lot in list(original["matter"]):
-                m.transfer_material(ctx, m.get_entity(ctx, original["id"]), m.get_entity(ctx, saved["id"]),
+                commit.transfer_material(ctx, m.get_entity(ctx, original["id"]), m.get_entity(ctx, saved["id"]),
                     lot["id"], lot["quantity"], target_slot="body", reason="fixture_material_relocation")
-            m.retire_material(ctx, m.get_entity(ctx, original["id"]), saved["id"])
-            crate = m.spawn_entity(ctx, {"name": "剩2u木的测试容器", "material": "wood", "capabilities": ["transport", "container"],
+            commit.retire_material(ctx, m.get_entity(ctx, original["id"]), saved["id"])
+            crate = commit.spawn_entity(ctx, {"name": "剩2u木的测试容器", "material": "wood", "capabilities": ["transport", "container"],
                 "x": 5, "y": 5, "matter": [{"id": "body", "material": "wood", "quantity": 2,
                     "slot": "body", "role": "structural", "burning": False}],
                 "components": {"container": {"slots": 8, "liquid_capacity": 12, "open": True},
@@ -694,7 +694,7 @@ class SharedGroveTests(unittest.TestCase):
             contents = []
             for number in range(2 if nested else 3):
                 inner = nested and number == 0
-                item = m.spawn_entity(ctx, {"name": "留存石料", "material": "stone",
+                item = commit.spawn_entity(ctx, {"name": "留存石料", "material": "stone",
                     "capabilities": ["transport", "container"] if inner else ["transport"], "container": crate["id"],
                     "matter": [{"id": "body", "material": "stone", "quantity": 1,
                         "slot": "body", "role": "structural", "burning": False}],
@@ -702,13 +702,13 @@ class SharedGroveTests(unittest.TestCase):
                         "structure": {"max_integrity": 100, "integrity": 100, "support_limit": 48, "overload_rate": 1}} if inner else {}})
                 contents.append(item["id"])
                 if inner:
-                    child = m.spawn_entity(ctx, {"name": "内层石料", "material": "stone",
+                    child = commit.spawn_entity(ctx, {"name": "内层石料", "material": "stone",
                         "capabilities": ["transport"], "container": item["id"],
                         "matter": [{"id": "body", "material": "stone", "quantity": 1,
                             "slot": "body", "role": "structural", "burning": False}]})
                     contents.append(child["id"])
             while len(m.get_chunk(ctx, 0, 0)["entity_ids"]) < count:
-                m.spawn_entity(ctx, {"name": "地面石料", "material": "stone",
+                commit.spawn_entity(ctx, {"name": "地面石料", "material": "stone",
                     "capabilities": ["transport"], "x": 14, "y": 14})
             return FunctionOutcome({"crate": crate["id"], "contents": contents, "saved_material": saved["id"]})
         self.world = WorldRuntime(self.base / "dense-container.sqlite3")

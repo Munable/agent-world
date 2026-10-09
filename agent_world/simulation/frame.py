@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from .effects import Break, Damage, Move, SetBurning, Sink, Source, SpillSink, SpillTransfer, Transfer
-from .matter import (MAX_FRAME_OBJECTS, MAX_LOTS, MAX_QUANTITY, children, lot_identifier,
-                     normalize_lots, project)
+from .matter import (MAX_FRAME_OBJECTS, MAX_QUANTITY, absorption_room, accumulate_quantity, add_lot,
+                     children, contained_room, liquid_room, mixture_room, project, withdraw_lot)
 
 
 def _freeze(value):
@@ -37,11 +36,12 @@ class Snapshot:
 
 class Frame:
     def __init__(self, registry, objects, tick=0, *, protected=(), inputs=(), heated=(), wet_by_rain=(), moves=(), spills=None,
-                 bind_material=None):
+                 bind_material=None, mixture_capacity=None):
         if len(objects) > MAX_FRAME_OBJECTS:
             raise ValueError("活动物理闭包最多64个物件。")
         self.registry, self.tick = registry, tick
         self.bind_material = bind_material
+        self.mixture_capacity = mixture_capacity
         self.objects = deepcopy(objects)
         self.before = deepcopy(objects)
         self.protected = frozenset(protected)
@@ -59,21 +59,9 @@ class Frame:
     def _lot(self, entity_id, lot_id):
         return next((lot for lot in self.objects[entity_id]["matter"] if lot["id"] == lot_id), None)
 
-    def _liquid_quantity(self, entity):
-        return sum(lot["quantity"] for lot in entity["matter"]
-                   if lot["slot"] == "contained" and self.registry.materials[lot["material"]].liquid)
-
     def _mixture_room(self, entity):
-        program = entity.get("state", {}).get("program", {})
-        if not isinstance(program, Mapping):
-            raise ValueError("物件的程序绑定无效。")
-        if "mixture_capacity" not in program:
-            return None
-        capacity = program["mixture_capacity"]
-        if type(capacity) is not int or not 1 <= capacity <= 200:
-            raise ValueError("混合物容量须为1至200的整数逻辑u。")
-        return max(0, capacity-sum(lot["quantity"] for lot in entity["matter"]
-                                  if lot["slot"] == "contained"))
+        capacity = self.mixture_capacity(entity) if self.mixture_capacity is not None else None
+        return mixture_room(entity, capacity)
 
     def _add(self, entity_id, material, amount, slot, *, source_lot=None, bound_to=None):
         if amount == 0:
@@ -89,29 +77,7 @@ class Frame:
                 raise ValueError("真实混合物总量超过物件共用容量。")
         if self.bind_material is not None:
             self.bind_material(entity, self.registry.materials[material])
-        origin_object = (source_lot or {}).get("origin_object")
-        origin_lot = (source_lot or {}).get("origin_lot")
-        # Body provenance is kept for one-time dismantling. Unrefundable stored
-        # substances can merge, bounding repeated refuelling without a growing log.
-        if slot != "body":
-            origin_object = origin_lot = None
-        match = next((lot for lot in entity["matter"] if (lot["material"], lot["slot"], lot.get("bound_to"), lot.get("origin_object"), lot.get("origin_lot"))
-                      == (material, slot, bound_to, origin_object, origin_lot)), None)
-        if match:
-            if match["quantity"]+amount > MAX_QUANTITY:
-                raise ValueError("物质数量达到上限。")
-            match["quantity"] += amount
-        else:
-            if len(entity["matter"]) >= MAX_LOTS:
-                raise ValueError("物件的8个物质批次已满。")
-            key = (material, slot, bound_to, origin_object, origin_lot)
-            lot = {"id": lot_identifier(entity_id, key), "material": material, "quantity": amount, "slot": slot,
-                   "role": (source_lot or {}).get("role", "structural") if slot == "body" else "substance", "burning": False}
-            if bound_to:
-                lot["bound_to"] = bound_to
-            if origin_object:
-                lot.update(origin_object=origin_object, origin_lot=origin_lot or (source_lot or {})["id"])
-            entity["matter"].append(lot)
+        add_lot(entity, material, amount, slot, source_lot=source_lot, bound_to=bound_to)
         self.dirty.add(entity_id)
 
     def apply(self, effects, *, allowed_sources=(), allowed_sinks=(), allocate=False):
@@ -135,15 +101,9 @@ class Frame:
             if key not in rooms:
                 slot, bound = key[2:]
                 if material == "water" and slot == "absorbed":
-                    portion = target["components"].get("absorbent", {}).get("supports", {}).get(bound)
-                    support = self._lot(key[0], bound)
-                    capacity = portion["capacity"]*support["quantity"]//portion["quantity"] if portion and support else 0
-                    held = sum(lot["quantity"] for lot in target["matter"] if lot["material"] == material and lot["slot"] == slot and lot.get("bound_to") == bound)
-                    rooms[key] = max(0, capacity-held)
+                    rooms[key] = absorption_room(target, bound)
                 elif liquid:
-                    components = target["components"]
-                    capacity = components.get("water_source", {}).get("capacity", components.get("container", {}).get("liquid_capacity", components.get("collector", {}).get("capacity", 0)))
-                    rooms[key] = max(0, capacity-self._liquid_quantity(target))
+                    rooms[key] = liquid_room(self.registry, target)
                 else:
                     rooms[key] = MAX_QUANTITY-sum(lot["quantity"] for lot in target["matter"] if (lot["material"], lot["slot"], lot.get("bound_to")) == (material, slot, bound))
             keys = [key]
@@ -187,8 +147,8 @@ class Frame:
                     if rejected:
                         if effect.reason not in allowed_sources or "drain" not in allowed_sinks:
                             raise ValueError("自动source目的容量不足且未声明余量sink。")
-                        self.sources[(effect.material, effect.reason)] += rejected
-                        self.sinks[(effect.material, "drain")] += rejected
+                        accumulate_quantity(self.sources, (effect.material, effect.reason), rejected)
+                        accumulate_quantity(self.sinks, (effect.material, "drain"), rejected)
                     if amount:
                         planned.append(replace(effect, quantity=amount))
                 elif isinstance(effect, (SpillTransfer, SpillSink)):
@@ -249,19 +209,19 @@ class Frame:
                 copy = deepcopy(source)
                 copy.setdefault("origin_object", effect.source)
                 copy.setdefault("origin_lot", source["id"])
-                source["quantity"] -= effect.quantity
+                withdraw_lot(source, effect.quantity)
                 self._add(effect.target, source["material"], effect.quantity, effect.slot, source_lot=copy, bound_to=effect.bound_to)
                 self.dirty.add(effect.source)
             elif isinstance(effect, Sink):
                 if effect.reason not in allowed_sinks:
                     raise ValueError("未授权的物质sink。")
                 source = self._lot(effect.source, effect.lot_id)
-                source["quantity"] -= effect.quantity
-                self.sinks[(source["material"], effect.reason)] += effect.quantity
+                withdraw_lot(source, effect.quantity)
+                accumulate_quantity(self.sinks, (source["material"], effect.reason), effect.quantity)
                 self.dirty.add(effect.source)
             elif isinstance(effect, Source):
                 self._add(effect.target, effect.material, effect.quantity, effect.slot, bound_to=effect.bound_to)
-                self.sources[(effect.material, effect.reason)] += effect.quantity
+                accumulate_quantity(self.sources, (effect.material, effect.reason), effect.quantity)
             elif isinstance(effect, Move):
                 entity = self.objects[effect.target]
                 entity.update(x=effect.x, y=effect.y)
@@ -271,7 +231,7 @@ class Frame:
                 self._add(effect.target, "water", effect.quantity, effect.slot, bound_to=effect.bound_to)
             elif isinstance(effect, SpillSink):
                 self.spills[effect.reservoir] -= effect.quantity
-                self.sinks[("water", effect.reason)] += effect.quantity
+                accumulate_quantity(self.sinks, ("water", effect.reason), effect.quantity)
         for (entity_id, lot_id), burning in setters.items():
             lot = self._lot(entity_id, lot_id)
             if lot and lot["quantity"]:
@@ -353,13 +313,11 @@ class Frame:
         for lot in entity["matter"]:
             if lot["slot"] == "contained":
                 if recipient and self.registry.materials[lot["material"]].liquid:
-                    free = recipient["components"]["container"]["liquid_capacity"]-self._liquid_quantity(recipient)
-                    mixture_room = self._mixture_room(recipient)
-                    if mixture_room is not None:
-                        free = min(free, mixture_room)
+                    capacity = self.mixture_capacity(recipient) if self.mixture_capacity is not None else None
+                    free = contained_room(self.registry, recipient, lot["material"], mixture_capacity=capacity)
                     amount = min(max(0, free), lot["quantity"])
                     self._add(recipient["id"], lot["material"], amount, "contained")
-                    lot["quantity"] -= amount
+                    withdraw_lot(lot, amount)
                     lot["slot"] = "surface"
                 elif owner:
                     # Private breakage cannot publish protected substances.
@@ -369,8 +327,8 @@ class Frame:
                     available = MAX_QUANTITY-self.spills.get(key, 0)
                     held = min(available, lot["quantity"])
                     self.spills[key] = self.spills.get(key, 0)+held
-                    self.sinks[("water", "drain")] += lot["quantity"]-held
-                    lot["quantity"] = 0
+                    accumulate_quantity(self.sinks, ("water", "drain"), lot["quantity"]-held)
+                    withdraw_lot(lot, lot["quantity"])
                 else:
                     # Solid/fuel substances remain on the broken body, with
                     # their own material and quantity; no material is erased.

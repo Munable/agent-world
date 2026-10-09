@@ -13,25 +13,22 @@ import secrets
 from agent_world import FunctionOutcome, FunctionSpec, StateRule
 from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.simulation import matter as sm
+from agent_world.simulation.declarations import declaration_semantics, has_event, phase_applications
 from agent_world.simulation.programs import compile_program, evaluate, plan_reaction, program_material_semantics, solve_mechanical
 from agent_world.world_streams import StreamEvent
 
-from . import model as m
-from .definitions import BODY_MATERIALS, MAX_CUSTOM_MATERIALS, REGISTRY, registry_for
+from . import model as m, commit, activity
+from .model import public_location as _public_location
+from .commit import public_event, physical_contract_failure
+from .events import bounded_record, RECORDS, MAX_RECORDS, MAX_EVENTS, MAX_RECORD_BYTES, MAX_EVENT_BYTES, MAX_EVENT_JOURNAL_BYTES
+from .definitions import BODY_MATERIALS, MAX_CUSTOM_MATERIALS, REGISTRY, registry_for, DEFINITIONS, instance_definition as _type, material_identity as _material, contained_quantities as _quantities, reaction_available_quantities
 
-DEFINITIONS = "grove.creative.definitions"
 VERSIONS = "grove.creative.versions"
 CONTROL = "grove.creative.control"
-RECORDS = "grove.creative.records"
 ACCOUNTING = "grove.creative.accounting"
 MAX_DEFINITIONS = 32
 MAX_INSTANCES = 32
 MAX_LINKS = 8
-MAX_RECORDS = 32
-MAX_EVENTS = 256
-MAX_RECORD_BYTES = 1536
-MAX_EVENT_BYTES = 512
-MAX_EVENT_JOURNAL_BYTES = 65536
 MAX_COMMIT_BYTES = 2 * 1024 * 1024
 MAX_COMMIT_CHANGES = 512
 ACCOUNT_HISTORY_BYTES = 512
@@ -55,19 +52,6 @@ def _save(ctx, scope, key, value):
     return ctx.set_state(scope, key, value, expected_version=rec["version"])
 
 
-def _bounded_record(value):
-    """Retain recent public facts and reads within one reserved record size."""
-    record = {"history": deepcopy(value.get("history", [])[-MAX_RECORDS:]),
-              "reads": deepcopy(value.get("reads", [])[-16:])}
-    while sm.encoded_size(record) > MAX_RECORD_BYTES:
-        history, reads = record["history"], record["reads"]
-        history_age = (history[0]["recorded_tick"], history[0]["sequence"], 0) if history else None
-        read_age = (reads[0]["read_tick"], reads[0]["sequence"], 1) if reads else None
-        if history and (not reads or history_age <= read_age):
-            history.pop(0)
-        else:
-            reads.pop(0)
-    return record
 
 
 def _check_instance_capacity(ctx, ids):
@@ -77,7 +61,7 @@ def _check_instance_capacity(ctx, ids):
     results, distinct material accounts and bounded observer histories add to
     the existing physical reservation; sharing a material account counts once.
     """
-    from . import processes as physical
+    from . import activity as physical
     from .definitions import MAX_CUSTOM_MATERIALS
     from .generation import MAX_CONTENT_BYTES, MAX_OUTCOME_BYTES
 
@@ -217,7 +201,7 @@ def definition_publish(ctx, args):
         if previous["definition_ref"] != ref:
             raise StateConflict("已发布的同作者／名称／版本不能覆盖；请递增version。旧物件仍引用原版本。")
         return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": True,
-                                "material_semantics": semantics})
+                                "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition)})
     index = ctx.get_state(m.META, "creative_definitions", [])
     if len(index) >= MAX_DEFINITIONS:
         raise RuleViolation("世界当前规则包容量为32；发布版本也占一份，不以覆盖旧版本释放。")
@@ -226,7 +210,7 @@ def definition_publish(ctx, args):
     _save(ctx, VERSIONS, version_key, {"definition_ref": ref})
     _save(ctx, m.META, "creative_definitions", [*index, ref])
     return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": False,
-                            "material_semantics": semantics,
+                            "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition),
                             "instantiate": "grove.content_submit: content.objects[].definition_ref and type_id; existing opportunity and real costs apply"})
 
 
@@ -235,23 +219,10 @@ def definition_read(ctx, args):
     if not value:
         raise RuleViolation("规则版本不存在；先发布并使用返回的definition_ref。")
     return FunctionOutcome({"definition_ref": args["definition_ref"], **value,
-        "material_semantics": program_material_semantics(value["definition"], args["definition_ref"], materials=REGISTRY.materials)})
+        "material_semantics": program_material_semantics(value["definition"], args["definition_ref"], materials=REGISTRY.materials),
+        "declaration_semantics": declaration_semantics(value["definition"])})
 
 
-def _type(ctx, entity):
-    binding = entity["state"].get("program", {})
-    if not binding.get("definition_ref"):
-        return None, None
-    pack = ctx.get_state(DEFINITIONS, binding["definition_ref"])
-    if not pack or binding["type_id"] not in pack["definition"]["types"]:
-        raise RuleViolation("物件引用的已发布规则版本缺失。")
-    return pack["definition"], pack["definition"]["types"][binding["type_id"]]
-
-
-def _material(entity, symbol):
-    program = entity["state"]["program"]
-    return symbol if symbol in REGISTRY.materials else program.get("material_aliases", {}).get(
-        symbol, program["definition_ref"] + "#" + symbol)
 
 
 def _resolve_material(ctx, reference, symbol):
@@ -326,29 +297,14 @@ def object_definition(ctx, spec):
 def register_instance(ctx, entity):
     if not entity["state"].get("program", {}).get("definition_ref"):
         return
-    ids = ctx.get_state(m.META, "creative_instances", [])
+    ids = activity.meta_get(ctx, "creative_instances", [])
     if entity["id"] not in ids:
         if len(ids) >= MAX_INSTANCES:
             raise RuleViolation("同时最多32个声明程序物件；已耗尽／退役物件会在下一步释放执行位。")
         proposed = [*ids, entity["id"]]
         _check_instance_capacity(ctx, proposed)
-        _save(ctx, m.META, "creative_instances", proposed)
-        from .processes import _physical_closure
-        _physical_closure(ctx)
-
-
-def _quantities(entity, *, symbolic=True):
-    values = {}
-    prefix = entity["state"].get("program", {}).get("definition_ref", "") + "#"
-    aliases = {identity: alias for alias, identity in entity["state"].get("program", {}).get("material_aliases", {}).items()}
-    for lot in entity["matter"]:
-        if lot["slot"] != "contained":
-            continue
-        key = lot["material"]
-        if symbolic:
-            key = aliases.get(key, key[len(prefix):] if key.startswith(prefix) else key)
-        values[key] = values.get(key, 0) + lot["quantity"]
-    return values
+        activity.meta_set(ctx, "creative_instances", proposed)
+        activity.physical_closure(ctx)
 
 
 def _bound_ids(value):
@@ -393,45 +349,29 @@ def _context(entity, params=None, event=None, *, ctx=None, objects=None, definit
 
 
 def _take(entity, material, amount, *, slots=("contained",)):
-    lots = [lot for lot in entity["matter"] if lot["material"] == material and lot["slot"] in slots and not lot["burning"]]
-    if sum(lot["quantity"] for lot in lots) < amount:
-        raise RuleViolation("实际可用材料不足；没有生成或扣除任何产物。")
-    left = amount
-    for lot in sorted(lots, key=lambda lot: lot["id"]):
-        take = min(left, lot["quantity"])
-        lot["quantity"] -= take
-        left -= take
-    entity["matter"] = [lot for lot in entity["matter"] if lot["quantity"]]
+    try:
+        sm.take_material(entity, material, amount, slots=slots, include_burning=False)
+    except ValueError as exc:
+        raise RuleViolation("实际可用材料不足；没有生成或扣除任何产物。") from exc
 
 
 def _put(entity, material, amount):
-    if not amount:
-        return
-    lot = next((lot for lot in entity["matter"] if lot["material"] == material and lot["slot"] == "contained" and not lot["burning"]), None)
-    if lot:
-        lot["quantity"] += amount
-    else:
-        if len(entity["matter"]) >= sm.MAX_LOTS:
-            raise RuleViolation("产物将超过每物件8批次容量；该原子反应未执行。")
-        entity["matter"].append({"id": m.identifier("matter"), "material": material, "quantity": amount,
-                                "slot": "contained", "role": "substance", "burning": False})
+    try:
+        sm.add_lot(entity, material, amount, "contained", merge_burning=False,
+                   merge_bindings=False, id_factory=lambda: m.identifier("matter"))
+    except ValueError as exc:
+        raise RuleViolation("产物批次数量或容量越界；该原子反应未执行。") from exc
 
 
 def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=None, accounts=None, supply=None, objects=None):
     changed, reactions = False, []
     channels = set() if channels is None else channels
     supply = deepcopy(_quantities(entity)) if supply is None else supply
-    contract = entity["state"]["program"].get("contract")
-    reserved = {}
-    if contract and contract["delivered"] > contract.get("released", 0):
-        symbol = next((alias for alias, identity in entity["state"]["program"].get("material_aliases", {}).items()
-                       if identity == contract["material"]), contract["material"].split("#", 1)[-1])
-        reserved[symbol] = contract["delivered"] - contract.get("released", 0)
     def account(category, material, amount):
         if accounts is None:
-            m._record_account(ctx, category, material, amount, "creative_reaction")
+            commit.record_account(ctx, category, material, amount, "creative_reaction")
         else:
-            accounts.append((category, material, amount, "creative_reaction"))
+            sm.accumulate_quantity(accounts, (category, material, "creative_reaction"), amount)
     for effect in effects:
         context = _context(entity, params, event, ctx=ctx, objects=objects)
         if effect["op"] == "set":
@@ -456,15 +396,12 @@ def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=No
                 identity = symbol if "#" in symbol else _material(entity, symbol)
                 if identity in registry.materials:
                     materials[symbol] = {"load_per_u": registry.materials[identity].load_per_u}
-            usable = deepcopy(entity)
-            usable["matter"] = [lot for lot in entity["matter"] if not lot["burning"]]
-            usable_quantities = _quantities(usable)
-            available = {key: max(0, min(amount, usable_quantities.get(key, 0)) - reserved.get(key, 0)) for key, amount in supply.items()}
-            actual_capacity = entity["components"].get("container", {}).get("liquid_capacity", 0)
+            available = reaction_available_quantities(entity, supply=supply)
+            actual_capacity = sm.liquid_capacity(entity)
             # Planner supply excludes this phase's products and escrow, while
             # those real lots still occupy volume.
-            capacity = actual_capacity - sum(context["quantities"].values()) + sum(available.values())
-            planned = plan_reaction(effect, available, materials, max(0, capacity))
+            capacity = sm.reaction_capacity(actual_capacity, sum(context["quantities"].values()), sum(available.values()))
+            planned = plan_reaction(effect, available, materials, capacity)
             if not planned["extent"]:
                 continue
             for symbol, amount in planned["consume"].items():
@@ -493,109 +430,8 @@ def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=No
     return changed, reactions
 
 
-def _public_location(ctx, entity):
-    current, seen = entity, set()
-    for _ in range(9):
-        if current["id"] in seen or current.get("owner"):
-            return None
-        seen.add(current["id"])
-        parent = current.get("physical_parent")
-        if not parent:
-            return m.entity_location(ctx, entity) if m.is_ground(current) else None
-        current = m.get_entity(ctx, parent["id"])
-        if parent["relation"] == "contained" and not current["state"]["open"]:
-            return None
-    return None
 
 
-def public_event(ctx, *, action, entity_id=None, x=None, y=None, kind="action", actor=None):
-    """Append only minimal server-observed public facts, never private arguments."""
-    if entity_id:
-        entity = m.get_entity(ctx, entity_id, required=False)
-        location = _public_location(ctx, entity) if entity else None
-        if location is None:
-            return
-        x, y = location
-    if x is None or y is None:
-        return
-    journal = getattr(ctx, "_grove_event_batch", None)
-    if journal is None:
-        journal = ctx.get_state(m.META, "creative_events", {"sequence": 0, "events": []})
-    sequence = journal["sequence"] + 1
-    event = {"sequence": sequence, "tick": step(ctx), "occurred_at": ctx.now, "kind": kind,
-             "action": action or "", "entity_id": entity_id or "", "actor": actor or ctx.actor_role_id,
-             "x": x, "y": y, "mechanical_position": 0, "passable": False}
-    if entity_id and entity:
-        binding = entity["state"].get("program", {})
-        if "mechanical" in binding:
-            event["mechanical_position"] = int(binding["mechanical"]["position"])
-        if "barrier" in entity["components"]:
-            event["passable"] = entity["lifecycle"] == "intact" and not entity["components"]["barrier"]["active"]
-        if binding.pop("barrier_open_pending", False):
-            binding["barrier_opened_sequence"] = sequence
-            m.save_entity(ctx, entity)
-    if sm.encoded_size(event) > MAX_EVENT_BYTES:
-        raise RuleViolation("公开事件超过单条事实容量；本次行动未提交。")
-    cursors = []
-    for eid in ctx.get_state(m.META, "creative_instances", []):
-        consumer = m.get_entity(ctx, eid, required=False)
-        if not consumer or consumer["lifecycle"] != "intact" or consumer["state"]["program"]["process"]["status"] == "error":
-            continue
-        _, spec = _type(ctx, consumer)
-        if _has_event(spec):
-            cursors.append(consumer["state"]["program"].get("event_cursor", 0))
-    consumed = min(cursors, default=journal["sequence"])
-    pending = [old for old in journal["events"] if old["sequence"] > consumed]
-    limit = MAX_EVENTS if kind == "process" else MAX_EVENTS - 164
-    journal = {"sequence": sequence, "events": [*pending, event], "consumed_through": consumed}
-    if len(pending) >= limit or sm.encoded_size(journal) > MAX_EVENT_JOURNAL_BYTES:
-        raise StateConflict("本逻辑步公开事件处理预算已满，请待下一世界步读取结果再继续；本次行动未提交。")
-    if hasattr(ctx, "_grove_event_batch"):
-        ctx._grove_event_batch = journal
-    else:
-        _save(ctx, m.META, "creative_events", journal)
-    for eid in ctx.get_state(m.META, "creative_instances", []):
-        recorder = m.get_entity(ctx, eid, required=False)
-        if not recorder or recorder["lifecycle"] != "intact":
-            continue
-        pack, spec = _type(ctx, recorder)
-        state = recorder["state"]["program"].get("recorder")
-        location = _public_location(ctx, recorder)
-        if not state or not state["active"] or location is None or step(ctx) > state["until_tick"]:
-            continue
-        if max(abs(x-location[0]), abs(y-location[1])) > spec["recorder"]["radius"]:
-            continue
-        batch = getattr(ctx, "_grove_record_batch", None)
-        record = batch.get(eid) if batch is not None else None
-        if record is None:
-            record = ctx.get_state(RECORDS, eid, {"history": [], "reads": []})
-        record["history"] = [*record["history"], {**event, "recorded_tick": step(ctx)}][-MAX_RECORDS:]
-        record = _bounded_record(record)
-        if batch is not None:
-            batch[eid] = record
-        else:
-            _save(ctx, RECORDS, eid, record)
-        state["recorded_count"] += 1
-        m.save_entity(ctx, recorder)
-
-
-def _has_event(value):
-    if isinstance(value, dict):
-        return (set(value) == {"event"}) or any(_has_event(child) for child in value.values())
-    return isinstance(value, list) and any(_has_event(child) for child in value)
-
-
-def _phase_applications(spec, phase, events):
-    rules = sorted((rule for rule in spec["rules"] if rule["phase"] == phase), key=lambda rule: rule["id"])
-    # Ordinary phase rules run once; event reactions preserve causal journal
-    # order across definitions, with rule id breaking ties within one event.
-    for rule in rules:
-        if not _has_event(rule):
-            yield rule, None
-    for fact in events:
-        for rule in rules:
-            if _has_event(rule):
-                yield rule, fact
 
 
 def _relevant_events(ctx, entity, since):
@@ -629,30 +465,6 @@ def _delivery_reason(ctx, entity, spec):
     return None
 
 
-def physical_contract_failure(ctx, entity, *, tick=None):
-    """Reconcile a real broken body's surviving escrow in its physical commit.
-
-    Loss records an unavailable contract claim, not a new material sink. Existing
-    physical rules already account for burnt, spilled or otherwise moved lots.
-    Completion preserves beneficiary rights; unfinished terms cannot complete
-    after the supporting object has failed. Surface lots remain recoverable.
-    """
-    state = entity.get("state", {}).get("program", {}).get("contract")
-    if not state or entity.get("lifecycle") not in {"broken", "consumed"}:
-        return False
-    previous = deepcopy(state)
-    current_tick = step(ctx) if tick is None else tick
-    state.setdefault("physical_failure_tick", current_tick)
-    if state["status"] != "complete":
-        state["status"] = "failed"
-        state.setdefault("finished_tick", current_tick)
-        state["failure_reason"] = "physical_damage"
-    outstanding = max(0, state["delivered"] - state.get("released", 0) - state.get("lost", 0))
-    surviving = sum(lot["quantity"] for lot in entity.get("matter", [])
-                    if lot["material"] == state["material"] and lot["slot"] in {"contained", "surface"})
-    state["lost"] = state.get("lost", 0) + max(0, outstanding - surviving)
-    state["escrow_remaining"] = min(outstanding, surviving)
-    return state != previous
 
 
 def _contract_update(ctx, entity, spec, event=None, *, objects=None):
@@ -666,7 +478,7 @@ def _contract_update(ctx, entity, spec, event=None, *, objects=None):
         return True
     condition = spec["contract"].get("completion_when", True)
     try:
-        if _has_event(condition):
+        if has_event(condition):
             pending = event if isinstance(event, list) else [event] if event else []
             for fact in pending:
                 if fact["sequence"] > state.get("started_event_sequence", 0) and evaluate(condition, _context(entity, event=fact, ctx=ctx, objects=objects)):
@@ -691,7 +503,7 @@ def tick(ctx):
     No wall-clock catch-up. New products feed later logical steps, not an
     unbounded same-step chain; independent reactions share one updated balance.
     """
-    ids = ctx.get_state(m.META, "creative_instances", [])
+    ids = activity.meta_get(ctx, "creative_instances", [])
     # Logical-step facts and recorder histories are one commit, not one state
     # write per event/observer pair. Instance admission reserves their complete
     # combination with physics; history growth cannot exceed that reservation.
@@ -700,7 +512,7 @@ def tick(ctx):
     objects = {eid: entity for eid in ids if (entity := m.get_entity(ctx, eid, required=False))
                and entity["lifecycle"] == "intact" and not entity["state"].get("retired")}
     if list(objects) != ids:
-        _save(ctx, m.META, "creative_instances", list(objects))
+        activity.meta_set(ctx, "creative_instances", list(objects))
     specs = {eid: _type(ctx, entity)[1] for eid, entity in objects.items()}
     original = deepcopy(objects)
     journal_sequence = ctx.get_state(m.META, "creative_events", {"sequence": 0})["sequence"]
@@ -718,7 +530,7 @@ def tick(ctx):
             program["mechanical"] = mechanical_result
         if "mechanical" in program:
             program["mechanical"].update(speed=0, status="program_error", enabled=False)
-        pending_accounts[eid] = []
+        pending_accounts[eid] = {}
         outcomes[:] = [item for item in outcomes if item[0] != eid]
         outcomes.append((eid, "program_error", "该物件规则暂停：" + str(error)[:120]))
 
@@ -727,13 +539,13 @@ def tick(ctx):
         relevant = _relevant_events(ctx, entity, state.get("event_cursor", 0))
         event = relevant[-1] if relevant else None
         events[eid] = relevant
-        pending_accounts[eid] = []
+        pending_accounts[eid] = {}
         phase_supply[eid] = deepcopy(_quantities(entity))
         if state["process"]["status"] == "error":
             continue
         try:
             channels, reactions = set(), []
-            for rule, fact in _phase_applications(specs[eid], "reaction", relevant):
+            for rule, fact in phase_applications(specs[eid], "reaction", relevant):
                 if evaluate(rule["when"], _context(original[eid], event=fact, ctx=ctx, objects=original)):
                     _, produced = _effects(ctx, entity, specs[eid], rule["effects"], event=fact, channels=channels,
                                            accounts=pending_accounts[eid], supply=phase_supply[eid], objects=original)
@@ -749,7 +561,7 @@ def tick(ctx):
             # recording alone nor reading live object facts consumes this log.
             # Advancing unused cursors would invalidate otherwise unchanged
             # action targets whenever another object is moving or speaking.
-            if _has_event(specs[eid]):
+            if has_event(specs[eid]):
                 state["event_cursor"] = journal_sequence
             m.normalize_entity(entity)
         except (ValueError, RuleViolation) as exc:
@@ -802,7 +614,7 @@ def tick(ctx):
             try:
                 phase_snapshot = after_objects[eid]
                 channels = set()
-                for rule, fact in _phase_applications(spec, "after", events[eid]):
+                for rule, fact in phase_applications(spec, "after", events[eid]):
                     if evaluate(rule["when"], _context(phase_snapshot, event=fact, ctx=ctx, objects=after_objects)):
                         _effects(ctx, entity, spec, rule["effects"], event=fact, channels=channels,
                                  accounts=pending_accounts[eid], supply=phase_supply[eid], objects=after_objects)
@@ -821,14 +633,10 @@ def tick(ctx):
             outcomes.append((eid, "contract", "契约依据真实交付和逻辑期限形成结果。"))
     accounts = {}
     for entries in pending_accounts.values():
-        for category, material, amount, reason in entries:
-            key = category, material, reason
-            accounts[key] = accounts.get(key, 0) + amount
-    for (category, material, reason), amount in sorted(accounts.items()):
-        m._record_account(ctx, category, material, amount, reason)
-    for eid, entity in sorted(objects.items()):
-        if entity != original[eid]:
-            m.save_entity(ctx, entity)
+        for key, amount in entries.items():
+            sm.accumulate_quantity(accounts, key, amount)
+    changed = {eid for eid, entity in objects.items() if entity != original[eid]}
+    commit.commit_results(ctx, objects, changed, accounts=accounts, tick=step(ctx))
     for eid, action, summary in outcomes:
         public_event(ctx, action=action, entity_id=eid, kind="process", actor="system:rules")
     if ctx._grove_event_batch is not None:
@@ -867,9 +675,9 @@ def _item(ctx, player, args, *, allow_container=True):
 
 def _finish_item(ctx, item, target):
     if not sm.quantity(item) and not item["state"]["contents"] and not item["state"].get("attachments"):
-        m.retire_material(ctx, item, target["id"])
+        commit.retire_material(ctx, item, target["id"])
     else:
-        m.save_entity(ctx, item)
+        commit.save_entity(ctx, item)
 
 
 def rule_action(ctx, args):
@@ -904,13 +712,13 @@ def rule_action(ctx, args):
         if item["id"] == entity["id"]:
             raise RuleViolation("请选择独立来源，不能用反应物自身的承重结构无限配料。")
         definition = pack["materials"][args["material"]]
-        if sum(_quantities(entity).values()) + amount > entity["components"]["container"]["liquid_capacity"]:
+        if amount > sm.mixture_room(entity, sm.liquid_capacity(entity)):
             raise RuleViolation("实际混合物超过定义容积；来源没有消耗。")
         _take(item, definition["feedstock"], amount, slots=("body", "contained", "surface"))
         material = _material(entity, args["material"])
         _put(entity, material, amount)
-        m._record_account(ctx, "sinks", definition["feedstock"], amount, "creative_charge")
-        m._record_account(ctx, "sources", material, amount, "creative_charge")
+        commit.record_account(ctx, "sinks", definition["feedstock"], amount, "creative_charge")
+        commit.record_account(ctx, "sources", material, amount, "creative_charge")
         _finish_item(ctx, item, entity)
         summary = f"消耗{amount}u {definition['feedstock']}，制备{amount}u {args['material']}；来源余量保留。这不是反应产物证据。"
     elif action in {"fuel", "start", "stop"}:
@@ -926,7 +734,7 @@ def rule_action(ctx, args):
                 raise RuleViolation("动力源不能消耗自己的结构冒充外部燃料。")
             _take(item, "wood", amount, slots=("body", "contained", "surface"))
             state["energy"] += amount
-            m._record_account(ctx, "sinks", "wood", amount, "mechanical_fuel")
+            commit.record_account(ctx, "sinks", "wood", amount, "mechanical_fuel")
             _finish_item(ctx, item, entity)
             summary = f"燃料已消耗，储存了{amount}单位有限能源。"
         else:
@@ -957,7 +765,7 @@ def rule_action(ctx, args):
                 links.sort(key=lambda link: link["other_id"])
             elif action == "disconnect":
                 left["state"]["program"]["connections"] = [link for link in links if link["other_id"] != right["id"]]
-        m.save_entity(ctx, other)
+        commit.save_entity(ctx, other)
         summary = "已连接实际传动接口，下一逻辑步参与求解。" if action == "connect" else "已断开传动连接，下一步不再传力。"
     elif action in {"start_recording", "stop_recording", "read_records"}:
         if "recorder" not in spec:
@@ -976,9 +784,9 @@ def rule_action(ctx, args):
             if _public_location(ctx, entity) is not None:
                 record["reads"] = [*record["reads"], {"actor": player["id"], "read_tick": step(ctx),
                                    "sequence": record["history"][-1]["sequence"] if record["history"] else 0}][-16:]
-                record = _bounded_record(record)
+                record = bounded_record(record)
                 _save(ctx, RECORDS, entity["id"], record)
-            result_extra["records"] = _bounded_record(record)
+            result_extra["records"] = bounded_record(record)
             summary = "读取了真实记录，阅读身份另行记录，不补写过去。"
     elif action in {"offer", "accept", "deliver", "release"}:
         if "contract" not in spec:
@@ -1030,7 +838,7 @@ def rule_action(ctx, args):
                     continue
                 take = min(left, lot["quantity"])
                 if take:
-                    m.transfer_material(ctx, item, entity, lot["id"], take, reason="contract_delivery")
+                    commit.transfer_material(ctx, item, entity, lot["id"], take, reason="contract_delivery")
                     left -= take
                 if not left:
                     break
@@ -1067,7 +875,7 @@ def rule_action(ctx, args):
                 if lot["material"] == state["material"] and lot["slot"] in slots:
                     take = min(left, lot["quantity"])
                     if take:
-                        m.transfer_material(ctx, entity, item, lot["id"], take, reason="contract_release")
+                        commit.transfer_material(ctx, entity, item, lot["id"], take, reason="contract_release")
                         left -= take
                     if not left:
                         break
@@ -1102,11 +910,11 @@ def rule_action(ctx, args):
         summary = "已执行已发布动作：" + declared["label"] + "。"
     if entity["lifecycle"] == "intact":
         _barrier(entity, spec, ctx=ctx)
-    m.save_entity(ctx, entity)
+    commit.save_entity(ctx, entity)
     location = _public_location(ctx, entity)
     events = ()
     if location is not None:
-        m.record_change(ctx, summary, x=location[0], y=location[1], entity_id=entity["id"], action=action)
+        commit.record_change(ctx, summary, x=location[0], y=location[1], entity_id=entity["id"], action=action)
         from .generation import record_content_outcome
         record_content_outcome(ctx, entity["id"], action, summary)
         events = (StreamEvent("grove.changes", "rule_action", {"entity_id": entity["id"], "action": action, "summary": summary}, key="rule-action"),)
@@ -1124,7 +932,7 @@ def projection(ctx, entity, *, detailed=False):
     result.pop("materials", None)
     result["world_tick"] = step(ctx)
     if "recorder" in binding:
-        record = _bounded_record(ctx.get_state(RECORDS, entity["id"], {"history": [], "reads": []}))
+        record = bounded_record(ctx.get_state(RECORDS, entity["id"], {"history": [], "reads": []}))
         result["history"] = record["history"]
         result["reads"] = record["reads"]
     from .observations import program_observation
@@ -1133,6 +941,7 @@ def projection(ctx, entity, *, detailed=False):
         pack, _ = _type(ctx, entity)
         result["material_semantics"] = program_material_semantics(pack, binding["definition_ref"], materials=REGISTRY.materials,
                                                                  type_id=binding["type_id"])
+        result["declaration_semantics"] = declaration_semantics(pack, type_id=binding["type_id"])
     return result
 
 
@@ -1240,6 +1049,7 @@ def rule_catalog(ctx, args):
         definitions.append({"definition_ref": ref, "author": pack["author"], "key": pack["definition"]["key"],
                             "version": pack["definition"]["version"], "types": {key: {"name": kind["name"], "cost": kind["cost"]} for key, kind in pack["definition"]["types"].items()}})
     return FunctionOutcome({"language_version": 1, "definitions": definitions, "world_tick": step(ctx),
+        "phase_policy": declaration_semantics({"types": {}})["phase_policy"],
         "limits": {"packages": MAX_DEFINITIONS, "instances": MAX_INSTANCES, "types_per_package": 8, "materials_per_package": 4, "rules_per_type": 8,
                    "effects_per_rule": 8, "expression_depth": 8, "expression_nodes": 64, "links_per_object": MAX_LINKS, "records_per_object": MAX_RECORDS,
                    "record_bytes_per_object": MAX_RECORD_BYTES, "event_bytes": MAX_EVENT_BYTES,

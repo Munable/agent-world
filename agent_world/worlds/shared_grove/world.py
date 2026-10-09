@@ -11,6 +11,8 @@ from agent_world.world_streams import StreamEvent, StreamSpec
 from agent_world.world_timers import TimerNotFound
 
 from . import model as m
+from . import commit
+from . import activity
 from . import processes
 from . import building
 from .definitions import COMBUSTION_CADENCE_TICKS, COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for
@@ -174,8 +176,8 @@ def initialize(ctx):
     ctx.set_state(m.META, "active_hearths", [])
     ctx.set_state(m.META, "join_count", 0)
     ctx.set_state(m.META, "changes", [])
-    m.ensure_chunk(ctx, 0, 0)
-    m.ensure_chunk(ctx, -1, 0)
+    commit.ensure_chunk(ctx, 0, 0)
+    commit.ensure_chunk(ctx, -1, 0)
     ctx.schedule_timer(f"grove.tick.{epoch}.0", "grove.tick", {"epoch": epoch, "sequence": 0}, due_at=ctx.now+1)
 
 
@@ -306,7 +308,7 @@ def join(ctx,args):
         offsets = [(0,0)] if distance == 0 else [(distance,0),(-distance,0),(0,distance),(0,-distance)]
         for dx,dy in offsets:
             x,y = preferred[0]+dx,preferred[1]+dy
-            m.ensure_chunk(ctx,*m.chunk_for(x,y))
+            commit.ensure_chunk(ctx,*m.chunk_for(x,y))
             footprint = [(x+ox,y+oy) for oy in (-1,0,1) for ox in (-1,0,1)]
             if (m.tile_at(ctx,x,y) in {"grass","dirt"}
                 and all(not m.is_safe(ctx,px,py) and m.tile_at(ctx,px,py)!="rock" and not m.blocking_at(ctx,px,py)
@@ -328,7 +330,7 @@ def join(ctx,args):
     chunk = m.get_chunk(ctx,*m.chunk_for(x,y))
     chunk["safe_zones"].append({"owner":player["id"],"x":x,"y":y,"radius":1})
     m.save_chunk(ctx,chunk)
-    backpack = m.spawn_entity(ctx,{"id":backpack_id,"name":"随身背包","material":"cloth",
+    backpack = commit.spawn_entity(ctx,{"id":backpack_id,"name":"随身背包","material":"cloth",
         "capabilities":["container","wettable","personal"],"state":{},
         "components":{"container":{"slots":16,"liquid_capacity":0,"open":True},
                       "absorbent":{"capacity":32,"rate":2},"personal":{"protected":True}},
@@ -347,21 +349,22 @@ def join(ctx,args):
                                  "absorbent":{"capacity":0,"rate":2}}
             value["matter"]=[{"id":m.identifier("lot"),"material":"stone","quantity":40,"slot":"body","role":"structural","burning":False},
                              {"id":m.identifier("lot"),"material":"water","quantity":20,"slot":"contained","role":"substance","burning":False}]
-        item = m.spawn_entity(ctx,value)
+        item = commit.spawn_entity(ctx,value)
         player["inventory"].append(item["id"])
     m.save_player(ctx,player)
     ctx.set_state(m.META,"join_count",slot+1)
     for cid in m.chunk_ids_around(x,y,8):
         _,cx,cy=cid.split("_")
-        m.ensure_chunk(ctx,int(cx),int(cy))
+        commit.ensure_chunk(ctx,int(cx),int(cy))
     offer_generation(ctx,x,y,trigger="first_enter")
-    m.record_change(ctx,f"{name}进入溪源。",x=x,y=y,action="join")
+    commit.record_change(ctx,f"{name}进入溪源。",x=x,y=y,action="join")
     return FunctionOutcome({"resumed":False,"player":_public_self(player),"viewport":viewport(ctx,{})},
             events=(StreamEvent("grove.changes","join",{"summary":f"{name}进入溪源。","x":x,"y":y},key="join"),))
 
 
 def move(ctx,args):
-    from .creative import check_delegation, public_event
+    from .creative import check_delegation
+    from .commit import public_event
     check_delegation(ctx, args)
     from .generation import offer_generation
     player=m.get_player(ctx)
@@ -372,7 +375,7 @@ def move(ctx,args):
     x,y=player["x"]+dx,player["y"]+dy
     if max(abs(x),abs(y))>m.WORLD_LIMIT:
         raise RuleViolation("这里是世界边界。")
-    m.ensure_chunk(ctx,*m.chunk_for(x,y))
+    commit.ensure_chunk(ctx,*m.chunk_for(x,y))
     if m.tile_at(ctx,x,y)=="rock" or m.blocking_at(ctx,x,y):
         raise RuleViolation("这一格被岩壁或未毁坏的物件挡住。")
     previous_chunk=m.chunk_for(player["x"],player["y"])
@@ -390,14 +393,14 @@ def move(ctx,args):
             except (PermissionDenied, RuleViolation):
                 continue
             if "absorbent" in entity.get("components", {}) and entity.get("lifecycle") != "consumed":
-                contacted += m.contact_water(ctx, entity, 2, reason="wading")["transferred"]
+                contacted += commit.contact_water(ctx, entity, 2, reason="wading")["transferred"]
         changes.append(f"涉过浅溪，从当地有限水源实际接触了{contacted}u水。")
     if previous_chunk!=m.chunk_for(x,y):
         _add_player_index(ctx,player,add=True)
         offer_generation(ctx,x,y,trigger="first_enter")
     for cid in m.chunk_ids_around(x,y,8):
         _,cx,cy=cid.split("_")
-        m.ensure_chunk(ctx,int(cx),int(cy))
+        commit.ensure_chunk(ctx,int(cx),int(cy))
     public_event(ctx, action="move", x=x, y=y, kind="movement")
     return FunctionOutcome({"player":_public_self(player),"changes":changes,"viewport":viewport(ctx,{})},
         events=(StreamEvent("grove.changes","move",{"summary":f"{player['name']}走了一格。","x":x,"y":y},key="move"),))
@@ -654,7 +657,7 @@ def _action_options(ctx, player, entity):
         reason = reason or ("目标太湿。" if state["wetness"] >= 35 else None)
         reason = reason or ("目标已经燃烧。" if state["burning"] else None)
         reason = reason or ("没有可用点火工具。" if not tools else None)
-        reason = reason or ("火或内容释放容量不足。" if not processes.can_ignite(ctx, entity) else None)
+        reason = reason or ("火或内容释放容量不足。" if not activity.can_ignite(ctx, entity) else None)
         add("ignite", reason, "只燃烧物件中真实可燃批次；石壳本身不会变成燃料。", _input(tools))
     if "structure" in components and entity.get("lifecycle") == "intact":
         parts = [e for e in own if _movable(ctx, player, e) and "attachment" in e.get("components", {}) and not _attach_reason(ctx, e, entity)]
@@ -818,7 +821,7 @@ def _store(ctx, player, item, target):
         raise RuleViolation("容纳或绑定关系不能循环。")
     if len(target["state"]["contents"]) >= target["state"]["capacity"]:
         raise RuleViolation("容器物件格已满。")
-    m.contain(ctx, target, item)
+    commit.contain(ctx, target, item)
 
 
 def interact(ctx, args):
@@ -859,11 +862,11 @@ def interact(ctx, args):
             raise RuleViolation("安全区或已有障碍的位置不能放障碍。")
         if "blocking" in item["capabilities"] and len(m.public_players_near(ctx, player["x"], player["y"], radius=0)) > 1:
             raise RuleViolation("不能把障碍放在其他人的位置。")
-        m.detach(ctx, item, owner=None, x=player["x"], y=player["y"])
+        commit.detach(ctx, item, owner=None, x=player["x"], y=player["y"])
         summary = f"{'解除附着并' if action == 'detach' else ''}放下了{item['name']}，现在公开可用。"
     elif action in {"open", "close"}:
         target["components"]["container"]["open"] = action == "open"
-        m.save_entity(ctx, target)
+        commit.save_entity(ctx, target)
         summary = f"{'打开' if action == 'open' else '关闭'}了{target['name']}。"
     elif action == "store":
         item = _own_item(ctx, player, args, "transport")
@@ -879,7 +882,7 @@ def interact(ctx, args):
         if not _movable(ctx, player, item):
             raise RuleViolation("所选内容不能取出。")
         if target["id"] == player["backpack_id"]:
-            m.detach(ctx, item, owner=player["id"])
+            commit.detach(ctx, item, owner=player["id"])
         else:
             _store(ctx, player, item, m.get_entity(ctx, player["backpack_id"]))
         summary = f"取出了{item['name']}。"
@@ -888,7 +891,7 @@ def interact(ctx, args):
         reason = _attach_reason(ctx, part, target)
         if reason:
             raise RuleViolation(reason)
-        m.attach(ctx, target, part)
+        commit.attach(ctx, target, part)
         summary = f"将{part['name']}唯一附着到{target['name']}，实际载荷已改变。"
     elif action == "launch":
         route = _launch_route(ctx, target)
@@ -902,7 +905,7 @@ def interact(ctx, args):
         if "water_source" not in target["capabilities"]:
             _container(ctx, player, target)
         amount = args.get("amount", min(item["state"]["water_capacity"]-item["state"]["water"], target["state"]["water_remaining"] if 'water_source' in target['capabilities'] else target['state']['water']))
-        result = m.transfer_water(ctx, target, item, amount, reason="fill")
+        result = commit.transfer_water(ctx, target, item, amount, reason="fill")
         summary = f"向{item['name']}转入{result['transferred']}u真实水。"
     elif action == "pour":
         item = _own_item(ctx, player, args, "container", revalidate=revalidate_pour)
@@ -912,7 +915,7 @@ def interact(ctx, args):
             raise StateConflict("倒水作用位置已变化，请重新选择浇表面或灌入容器；没有自动改去向或数量。")
         amount = args.get("amount", min(5, item["state"]["water"], m.water_transfer_room(target, slot)))
         was_burning = target["state"]["burning"]
-        result = m.transfer_water(ctx, item, target, amount, target_slot=slot, reason="pour")
+        result = commit.transfer_water(ctx, item, target, amount, target_slot=slot, reason="pour")
         summary = f"向{target['name']}转移{result['transferred']}u水，{'装入容器' if slot == 'contained' else '只接触外表面'}。"
         if was_burning and not target["state"]["burning"]:
             summary += "本次燃烧已熄灭。"
@@ -927,15 +930,15 @@ def interact(ctx, args):
         lot = next((lot for lot in _transfer_lots(ctx, player, item) if lot["id"] == args.get("lot_id")), None)
         if not lot or not args.get("amount"):
             raise RuleViolation("请选择可转移的真实材料批次和数量。")
-        result = m.transfer_material(ctx, item, target, lot["id"], args["amount"], target_slot=args.get("target_slot", "contained"), reason="human_transfer")
+        result = commit.transfer_material(ctx, item, target, lot["id"], args["amount"], target_slot=args.get("target_slot", "contained"), reason="human_transfer")
         summary = f"向{target['name']}转入{result['transferred']}u{lot['material']}，源余量保留。"
     elif action == "ignite":
         tool = _own_item(ctx, player, args, "ignition")
         if tool["state"].get("uses", 0) <= 0:
             raise RuleViolation("点火工具已经耗尽。")
-        m.start_burning(ctx, target, args.get("lot_id"))
+        commit.start_burning(ctx, target, args.get("lot_id"))
         tool["state"]["uses"] -= 1
-        m.save_entity(ctx, tool)
+        commit.save_entity(ctx, tool)
         summary = f"点燃了{target['name']}中真实可燃材料。"
     else:
         raise RuleViolation("未知行动。")
@@ -943,7 +946,7 @@ def interact(ctx, args):
     m.save_player(ctx, player)
     target = m.get_entity(ctx, target["id"])
     x, y = m.entity_location(ctx, target)
-    m.record_change(ctx, summary, x=x, y=y, entity_id=target["id"], action=action)
+    commit.record_change(ctx, summary, x=x, y=y, entity_id=target["id"], action=action)
     for affected_id in sorted(affected_ids):
         record_content_outcome(ctx, affected_id, action, summary)
     return FunctionOutcome({"player": _public_self(player), "entity": _project_entity(ctx, player, target),
@@ -952,10 +955,10 @@ def interact(ctx, args):
 
 
 def _process_refs(ctx, entity):
-    active = tuple(processes.active_process_ids(ctx))
+    active = tuple(activity.active_process_ids(ctx))
     cached = getattr(ctx, "_grove_projection_processes", None)
     if cached is None or cached[0] != active:
-        rows = [processes.get_process(ctx, pid) for pid in active]
+        rows = [activity.get_process(ctx, pid) for pid in active]
         cached = (active, [row for row in rows if row and row["status"] == "active"])
         ctx._grove_projection_processes = cached
     roots, cursor = {entity["id"]}, entity
@@ -1121,7 +1124,7 @@ def build_function(ctx,args):
     entity,summary=building.build(ctx,player,args)
     player=m.get_player(ctx)
     m.save_player(ctx,player)
-    m.record_change(ctx,summary,x=entity["x"],y=entity["y"],entity_id=entity["id"],action="build")
+    commit.record_change(ctx,summary,x=entity["x"],y=entity["y"],entity_id=entity["id"],action="build")
     record_content_outcome(ctx,entity["id"],"build",summary)
     return FunctionOutcome({"player":_public_self(player),"entity":_project_entity(ctx,player,entity),
         "changes":[summary],"viewport":viewport(ctx,{})},events=(StreamEvent("grove.changes","build",

@@ -9,7 +9,7 @@ import unittest
 from dataclasses import replace
 
 import test_shared_grove as fixtures
-from agent_world.worlds.shared_grove import model as m
+from agent_world.worlds.shared_grove import commit, model as m
 from agent_world.runtime_errors import RuleViolation, StateConflict
 from agent_world import FunctionOutcome, FunctionSpec, WorldRuntime
 from agent_world.worlds.shared_grove import WORLD
@@ -482,7 +482,7 @@ class ComposableWorldTests(unittest.TestCase):
                 def background(ctx, args):
                     while len(m.get_chunk(ctx, 0, 0)["entity_ids"]) < 95:
                         count = len(m.get_chunk(ctx, 0, 0)["entity_ids"])
-                        m.spawn_entity(ctx, {"name": "静态背景石料", "material": "stone",
+                        commit.spawn_entity(ctx, {"name": "静态背景石料", "material": "stone",
                             "capabilities": ["transport"], "x": 12 + count % 4,
                             "y": 10 + (count // 4) % 6})
                     return FunctionOutcome({"roots": 95})

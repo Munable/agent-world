@@ -32,13 +32,13 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         self.session.catalog = {f["function_id"]: f for f in self.runtime.list_functions("w")}
         self.session.world = self.world
         self.session.status = "thinking"
-        self.session.entered = self.session.active_execution = True
-        self.session.execution.update(task_id="task", segment_id="segment", status="running", max_actions=8,
+        self.session.entered = self.session.execution_controller.active = True
+        self.session.execution_controller.state.update(task_id="task", segment_id="segment", status="running", max_actions=8,
             remaining_actions=8, delegation_active=True, context_entity_id=None, goal="Explore", grant_operation_id="grant")
         self.session.current_turn_facts = AsyncMock(side_effect=lambda **kw: self.scene()["result"])
         grant = self.runtime.call_function("w", "grove.control_grant", self.role,
             {"goal": "Explore", "max_actions": 8}, operation_id="grant")["result"]
-        self.session.delegation = grant["delegation"]
+        self.session.execution_controller.delegation = grant["delegation"]
         self.calls = []
         self.read_seen = asyncio.Event()
         self.lose_before_commit = self.lose_after_commit = False

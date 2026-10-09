@@ -6,6 +6,8 @@ from copy import deepcopy
 from agent_world.errors import RuleViolation, StateConflict
 
 from . import model as m
+from . import commit
+from . import activity
 from .definitions import PIECE_QUANTITIES, REGISTRY
 
 
@@ -185,7 +187,7 @@ def build(ctx, player, args):
     x, y = args["x"], args["y"]
     if abs(x-player["x"])+abs(y-player["y"]) > 1:
         raise RuleViolation("只能在自己所在或相邻一格建设。")
-    m.ensure_chunk(ctx, *m.chunk_for(x, y))
+    commit.ensure_chunk(ctx, *m.chunk_for(x, y))
     if m.tile_at(ctx, x, y) not in recipe["terrain"]:
         raise RuleViolation("这一格地形不适合所选配方。")
     ground = m.public_entities_near(ctx, x, y, radius=0, limit=m.MAX_CHUNK_ENTITIES)
@@ -203,7 +205,7 @@ def build(ctx, player, args):
     content_region = next((m.get_entity(ctx,source_id)["state"].get("generation_region")
                            for source_id,_,_ in materials if m.get_entity(ctx,source_id)["state"].get("generation_region") == region),None)
     bid = m.identifier("building")
-    entity = m.spawn_entity(ctx, {"id": bid, "name": recipe["name"], "material": recipe["material"],
+    entity = commit.spawn_entity(ctx, {"id": bid, "name": recipe["name"], "material": recipe["material"],
         "capabilities": recipe["capabilities"], "components": deepcopy(recipe["components"]), "matter": [],
         "x": x, "y": y, "created_by": player["id"], "source": "construction",
         "state": {"recipe": args["recipe"], "invested_materials": []}})
@@ -212,7 +214,7 @@ def build(ctx, player, args):
         source = m.get_entity(ctx, source_id)
         target = m.get_entity(ctx, bid)
         before = {lot["id"]: lot["quantity"] for lot in target["matter"]}
-        m.transfer_material(ctx, source, target, lot_id, quantity, target_slot="body", reason="construction")
+        commit.transfer_material(ctx, source, target, lot_id, quantity, target_slot="body", reason="construction")
         target = m.get_entity(ctx, bid)
         transferred = [lot["id"] for lot in target["matter"] if lot["quantity"] > before.get(lot["id"], 0)]
         entry = investments.setdefault(source_id, {"id": source_id, "material": source["material"], "quantity": 0, "lot_ids": []})
@@ -221,14 +223,14 @@ def build(ctx, player, args):
     for source_id in investments:
         source = m.get_entity(ctx, source_id)
         if not any(lot["quantity"] for lot in source["matter"]):
-            m.retire_material(ctx, source, bid)
+            commit.retire_material(ctx, source, bid)
     entity = m.get_entity(ctx, bid)
     entity["state"]["invested_materials"] = list(investments.values())
     entity["state"]["initial_structural_quantity"] = sum(lot["quantity"] for lot in entity["matter"] if lot["role"] == "structural")
     if content_region:
         entity["state"]["generation_region"] = content_region
     _bind_absorption(entity)
-    m.save_entity(ctx, entity)
+    commit.save_entity(ctx, entity)
     if m.load_summary(ctx, entity)["overload"]:
         raise RuleViolation("所选原材料超过建筑的支撑载荷。")
     if "heater" in recipe["components"]:
@@ -320,7 +322,7 @@ def action_options(ctx, player, target):
         if not reason:
             from . import processes
             growing = sum(bool(process and process["kind"] == "growth") for process in
-                          (processes.get_process(ctx, pid) for pid in processes.active_process_ids(ctx)))
+                          (activity.get_process(ctx, pid) for pid in activity.active_process_ids(ctx)))
             if growing >= processes.MAX_GROWTH:
                 reason = f"最多同时养护{processes.MAX_GROWTH}个资源节点。"
         options.append(_option("tend", reason, "消耗5u真实水养护，6个物理逻辑步后库存加1。", {"water": 5}, duration_ticks=6))
@@ -370,7 +372,7 @@ def interact_structure(ctx, player, args, target):
             components["combustion"] = {"rate": 2, "spread": True}
         if REGISTRY.materials[material].absorption_per_piece:
             components["absorbent"] = {"capacity": REGISTRY.materials[material].absorption_per_piece, "rate": 2}
-        item = m.spawn_entity(ctx, {"name": names[material], "material": material, "capabilities": caps,
+        item = commit.spawn_entity(ctx, {"name": names[material], "material": material, "capabilities": caps,
             "matter": [], "components": components,
             "owner": player["id"], "container": player["backpack_id"], "created_by": player["id"], "source": "harvest",
             "state": {"kind": "raw_material"}})
@@ -379,7 +381,7 @@ def interact_structure(ctx, player, args, target):
             if lot["slot"] != "contained" or lot["material"] != material or not remaining:
                 continue
             quantity = min(remaining, lot["quantity"])
-            m.transfer_material(ctx, m.get_entity(ctx, target["id"]), m.get_entity(ctx, item["id"]),
+            commit.transfer_material(ctx, m.get_entity(ctx, target["id"]), m.get_entity(ctx, item["id"]),
                                 lot["id"], quantity, target_slot="body", reason="harvest")
             remaining -= quantity
         if remaining:
@@ -390,7 +392,7 @@ def interact_structure(ctx, player, args, target):
                 lot["role"] = "structural"
         item["state"]["initial_structural_quantity"] = MATERIAL_UNITS[material]
         _bind_absorption(item,raw=True)
-        m.save_entity(ctx, item)
+        commit.save_entity(ctx, item)
         player = m.get_player(ctx)
         if item["id"] not in player["inventory"]:
             player["inventory"].append(item["id"])
@@ -403,7 +405,7 @@ def interact_structure(ctx, player, args, target):
             raise RuleViolation("养护需要自己打开的容器里至少5u水。")
         from . import processes
         processes.start_growth(ctx, target["id"], ticks=6)
-        m.consume_water(ctx, item, 5, reason="growth")
+        commit.consume_water(ctx, item, 5, reason="growth")
         return f"消耗5u水养护了{target['name']}，6个物理逻辑步后增加一份资源。"
     if action == "fuel":
         item = _require_own(ctx, player, args)
@@ -416,10 +418,10 @@ def interact_structure(ctx, player, args, target):
         quantity = args.get("amount", min(40, lot["quantity"], option["maximum"]))
         if quantity > lot["quantity"] or quantity > option["maximum"]:
             raise RuleViolation("木料不足或炉中容量不足，未转移任何材料。")
-        m.transfer_material(ctx, item, target, lot["id"], quantity, reason="fuel")
+        commit.transfer_material(ctx, item, target, lot["id"], quantity, reason="fuel")
         item = m.get_entity(ctx, item["id"])
         if not any(lot["quantity"] for lot in item["matter"]):
-            m.retire_material(ctx, item, target["id"])
+            commit.retire_material(ctx, item, target["id"])
         return f"向{target['name']}投入{quantity}u木料，原物件的剩余材料保留。"
     if action == "switch_mode":
         mode = args.get("mode")
@@ -427,7 +429,7 @@ def interact_structure(ctx, player, args, target):
         if mode not in {"shelter", "collect"} or mode == collector["mode"]:
             raise RuleViolation("请选择另一种遮雨或集雨模式。")
         collector["mode"] = mode
-        m.save_entity(ctx, target)
+        commit.save_entity(ctx, target)
         return f"把{target['name']}切换为{'遮雨' if mode == 'shelter' else '集雨'}模式。"
     if action == "dismantle":
         refunds = _refund_materials(ctx, target)
@@ -440,7 +442,7 @@ def interact_structure(ctx, player, args, target):
                     components["combustion"] = {"rate": 2, "spread": True}
                 if definition.absorption_per_piece:
                     components["absorbent"] = {"capacity": definition.absorption_per_piece, "rate": 2}
-                source = m.spawn_entity(ctx, {"name": "拆回的"+definition.name+"料", "material": material,
+                source = commit.spawn_entity(ctx, {"name": "拆回的"+definition.name+"料", "material": material,
                     "capabilities": ["transport"], "components": components, "matter": [],
                     "state": {"kind": "raw_material"}, "owner": player["id"], "container": player["backpack_id"], "source": "dismantle"})
                 player = m.get_player(ctx)
@@ -448,20 +450,20 @@ def interact_structure(ctx, player, args, target):
                     player["inventory"].append(source["id"])
                     m.save_player(ctx, player)
             for lot in lots:
-                m.transfer_material(ctx, m.get_entity(ctx, target["id"]), m.get_entity(ctx, source["id"]),
+                commit.transfer_material(ctx, m.get_entity(ctx, target["id"]), m.get_entity(ctx, source["id"]),
                                     lot["id"], lot["quantity"], target_slot="body", reason="dismantle")
             source = m.get_entity(ctx, source["id"])
             _bind_absorption(source,raw=True)
-            m.save_entity(ctx,source)
+            commit.save_entity(ctx,source)
             if source["state"].get("retired"):
-                m.restore_material(ctx, source, owner=player["id"], container=player["backpack_id"])
+                commit.restore_material(ctx, source, owner=player["id"], container=player["backpack_id"])
             elif not source["state"].get("initial_structural_quantity"):
                 source["state"]["initial_structural_quantity"] = sum(lot["quantity"] for lot in source["matter"] if lot["role"] == "structural")
-                m.save_entity(ctx, source)
+                commit.save_entity(ctx, source)
         target = m.get_entity(ctx, target["id"])
         target["state"].update(invested_materials=[], dismantled=True)
         target["lifecycle"] = "consumed" if not target["matter"] else "broken"
-        m.save_entity(ctx, target)
+        commit.save_entity(ctx, target)
         _set_hearths(ctx, [eid for eid in _hearth_ids(ctx) if eid != target["id"]])
         return f"拆除了{target['name']}，取回{sum(lot['quantity'] for _, lots in refunds for lot in lots)}u仍存在的材料。"
     raise RuleViolation("未知设施行动。")

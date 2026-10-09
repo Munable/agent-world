@@ -2,7 +2,7 @@
 from functools import partial
 
 from .effects import Break, Damage, Move, SetBurning, Sink, Source, SpillSink, SpillTransfer, Transfer
-from .matter import absorption_targets, component_capacity, exposed, load_summary, lot_moisture, quantity
+from .matter import absorption_capacity, absorption_targets, ignitable_lot, load_summary, quantity
 from .registry import RuleSpec
 
 
@@ -52,7 +52,7 @@ def damage_rule(snapshot, *, combustion_cadence=1):
         for lot in entity["matter"]:
             if not lot.get("burning"):
                 continue
-            if entity_id in snapshot.protected or lot_moisture(entity, lot) >= 35 or quantity(entity, "water", "surface") or not exposed(entity, lot, snapshot.objects):
+            if entity_id in snapshot.protected or not ignitable_lot(snapshot.registry, entity, lot, snapshot.objects):
                 effects.append(SetBurning(entity_id, lot["id"], False))
                 continue
             # Protection and water contact still quench on every physical step.
@@ -75,8 +75,7 @@ def failure_rule(snapshot):
             continue
         structure = entity["components"].get("structure")
         supports = entity["components"].get("absorbent", {}).get("supports", {})
-        body = {lot["id"]: lot for lot in entity["matter"]}
-        remaining = {key: portion["capacity"]*body[key]["quantity"]//portion["quantity"] if key in body else 0 for key, portion in supports.items()}
+        remaining = {key: absorption_capacity(entity, key) for key in supports}
         for lot in entity["matter"]:
             if lot["material"] == "water" and lot["slot"] == "absorbed":
                 bound = lot.get("bound_to")

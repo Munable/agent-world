@@ -73,6 +73,17 @@ class ExecutionController:
         if self.ports is not None:
             self.ports.persist()
 
+    def snapshot(self) -> dict:
+        """Adapters observe owned task state; nested records are never write ports."""
+        return deepcopy(self.state)
+
+    def value(self, field: str, default=None):
+        """Read one current fact without copying the whole saved world readback."""
+        return deepcopy(self.state.get(field, default))
+
+    def archived_snapshots(self) -> list[dict]:
+        return deepcopy(self.archive)
+
     def restore(self, saved: dict | None, *, archive=None, delegation="", unknown=()):
         """Restore the same task/session authority, without reopening a goal."""
         if isinstance(saved, dict):
@@ -95,17 +106,71 @@ class ExecutionController:
         self.unresolved = bool(records)
         self._unknown_revoke = any(item.get("function_id") == "grove.control_revoke" for item in records)
 
-    def ensure_admission(self):
+    def ensure_admission(self, *, reclaiming=False):
         # World revocation may be ready before native abort finishes. That
         # short-stage result permits manual control, never a new partner task.
-        if self.reclaiming:
+        if reclaiming or self.reclaiming:
             raise ConnectorError("ReclaimBusy", "原请求正在收尾；世界行动权已按当前状态处理，先等原收尾完成再启动伙伴任务。", 409)
 
     def ensure_native_ready(self):
         self.ensure_admission()
-        never_started = self.state.get("request_status") == "not_started" and not self.state.get("requests_used")
-        if not never_started and self.state.get("request_status") not in {"idle", "idle_confirmed"}:
+        if not self.native_ready():
             raise ConnectorError("OriginalRequestUnsettled", "原请求尚未确认停止；先恢复原会话和回执，再启动伙伴请求。", 409)
+
+    def native_ready(self) -> bool:
+        never_started = self.state.get("request_status") == "not_started" and not self.state.get("requests_used")
+        return bool(never_started or self.state.get("request_status") in {"idle", "idle_confirmed"})
+
+    def admission(self, *, entered: bool, native_connected: bool, unknown: bool,
+                  worker_busy: bool, catalog: dict, publication_pending=False,
+                  reclaiming=False) -> dict:
+        """One inference admission policy used by HTTP entry points and the UI.
+
+        Transport reports connection/worker/publication facts. Task authority,
+        original-request settlement and continuation eligibility remain here.
+        Human world operations do not consume this projection.
+        """
+        def decision(code="", reason=""):
+            return {"allowed": not code, "code": code, "reason": reason}
+
+        if reclaiming or self.reclaiming:
+            common = decision("ReclaimBusy", "原请求正在收尾；先等原收尾完成再启动伙伴任务。")
+        elif unknown or self.unresolved:
+            common = decision("UnknownWrite", "先核对原操作结果，再启动伙伴请求。")
+        elif not entered or not native_connected:
+            common = decision("EntryRequired", "请先连接伙伴并进入现场。")
+        elif worker_busy:
+            common = decision("TurnBusy", "伙伴正在回应；请先收回或等待当前回应。")
+        elif not self.native_ready():
+            common = decision("OriginalRequestUnsettled", "原请求尚未确认停止；先恢复原会话和回执。")
+        else:
+            common = decision()
+        result = {kind: dict(common) for kind in ("conversation", "creation", "goal", "resume", "extend")}
+        if not common["allowed"]:
+            return result
+        if publication_pending:
+            result["creation"] = decision("RecoverPublication", "先核对已发表内容的原回执与地图，不能生成替代内容。")
+        if self.delegation or self.state.get("delegation_active"):
+            result["goal"] = decision("ReclaimRequired", "请先收回原目标的控制，再授予新目标。")
+        elif (self.state.get("history_recovery") or {}).get("status") in {"running", "uncertain", "failed"}:
+            result["goal"] = decision("HistoryRecoveryUnconfirmed", "先恢复并核对原摘要结果，不能替换原目标。")
+        elif not {"grove.control_grant", "grove.control_revoke", "grove.control_status"} <= catalog.keys():
+            result["goal"] = decision("ExecutionUnavailable", "这个世界尚未提供目标执行。")
+        if not self.state.get("resume_allowed") or not self.can_resume():
+            result["resume"] = decision("ResumeUnavailable", "这个任务已经完成、额度用完或原请求尚未安全停止。")
+        if not self.can_resume(additional_requests=1):
+            result["extend"] = decision("ResumeUnavailable", "这个原任务不能追加请求后接续。")
+        return result
+
+    def require_admission(self, kind: str, **facts):
+        result = self.admission(**facts)[kind]
+        if not result["allowed"]:
+            raise ConnectorError(result["code"], result["reason"], 409)
+
+    def begin_native_work(self):
+        """A newly admitted ordinary turn clears a previous local stop boundary."""
+        self.ensure_native_ready()
+        self.stopped = False
 
     def confirm_no_native_request(self):
         """Adapter confirmed there is no saved native session after worker drain."""
@@ -113,15 +178,8 @@ class ExecutionController:
         self._persist()
 
     def _connected_admission(self, *, entered, native_connected, unknown, worker_busy, resume=False):
-        self.ensure_admission()
-        if not entered or not native_connected:
-            raise ConnectorError("EntryRequired", "请先恢复原连接和现场。" if resume else "请先连接伙伴并进入现场。", 409)
-        if unknown:
-            raise ConnectorError("UnknownWrite", "先核对原操作结果，再接续原目标。" if resume else
-                "请先恢复并核对原操作，不能授予替代目标。", 409)
-        if worker_busy:
-            raise ConnectorError("TurnBusy", "原请求仍在处理；不会并行启动另一个执行。" if resume else
-                "伙伴正在回应；请先收回或等待当前回应。", 409)
+        self.require_admission("conversation", entered=entered, native_connected=native_connected,
+            unknown=unknown, worker_busy=worker_busy, catalog={})
         self.unresolved = False
         self._unknown_revoke = False
 
@@ -148,12 +206,8 @@ class ExecutionController:
             raise ConnectorError("InvalidArguments", "context_entity_id 需要真实已选物件的标识。")
         self._connected_admission(entered=entered, native_connected=native_connected,
             unknown=unknown, worker_busy=worker_busy)
-        if self.delegation or self.state.get("delegation_active"):
-            raise ConnectorError("ReclaimRequired", "请先收回原目标的控制，再授予新目标。", 409)
-        if (self.state.get("history_recovery") or {}).get("status") in {"running", "uncertain", "failed"}:
-            raise ConnectorError("HistoryRecoveryUnconfirmed", "先恢复并核对原摘要结果，不能替换原目标。", 409)
-        if not {"grove.control_grant", "grove.control_revoke", "grove.control_status"} <= catalog.keys():
-            raise ConnectorError("ExecutionUnavailable", "这个世界尚未提供目标执行。", 409)
+        self.require_admission("goal", entered=entered, native_connected=native_connected,
+            unknown=unknown, worker_busy=worker_busy, catalog=catalog)
         if not Draft202012Validator(catalog["grove.control_grant"]["input_schema"]).is_valid(
                 {"goal": goal.strip(), "max_actions": maximum}):
             raise ConnectorError("InvalidGoal", "执行目标或动作额度不符合这个世界当前的授权规则。")
@@ -314,6 +368,158 @@ class ExecutionController:
         self._persist()
         return True
 
+    def operation_unresolved(self, record: dict):
+        """The transport could not find the receipt for this exact admitted write."""
+        if record.get("execution_write") and self.owns_operation(record):
+            self.state.update(status="unknown", resume_allowed=False)
+
+    def settlement_started(self, stage: str) -> dict:
+        owner = {"task_id": self.state.get("task_id"), "segment_id": self.state.get("segment_id"),
+            "reclaimed_request": self.state.get("request_status") == "unsettled" and
+                self.state.get("control_status") == "revoked"}
+        self.active = False
+        self.state.update(request_status="settling", resume_allowed=False,
+            settlement={"stage": stage, "status": "checking", "elapsed_seconds": 0})
+        self._persist()
+        return owner
+
+    def _current_event(self, owner: dict | None) -> bool:
+        return owner is None or (owner.get("task_id") == self.state.get("task_id") and
+            owner.get("segment_id") == self.state.get("segment_id"))
+
+    def native_status_observed(self, native_status: str, *, owner: dict):
+        if self._current_event(owner):
+            self.state["settlement"]["native_status"] = native_status
+
+    def settlement_finished(self, *, stage: str, elapsed_seconds: float, owner: dict) -> dict | None:
+        """Adapter verified original session identity, native idle and write drain."""
+        if not self._current_event(owner):
+            return None
+        self.state["request_status"] = "idle_confirmed"
+        self.state["settlement"].update(stage=stage, status="idle_confirmed", elapsed_seconds=elapsed_seconds)
+        reclaimed = bool(owner.get("reclaimed_request") and not self.unresolved and
+            not self.delegation and not self.state.get("delegation_active"))
+        if reclaimed and (self.state.get("error") or {}).get("code") in {"UnsettledHost", "NativeSessionBusy"}:
+            self.state["error"] = None
+        self._persist()
+        return {"reclaimed": reclaimed}
+
+    def settlement_failed(self, *, stage: str, elapsed_seconds: float, error: BaseException,
+                          owner: dict) -> dict | None:
+        if not self._current_event(owner):
+            return None
+        native_status = (self.state.get("settlement") or {}).get("native_status")
+        diagnostic = {"stage": stage, "status": "unconfirmed", "elapsed_seconds": elapsed_seconds,
+            "error_type": type(error).__name__}
+        if isinstance(error, ConnectorError):
+            diagnostic["error_code"] = error.code
+        if native_status:
+            diagnostic["native_status"] = native_status
+        labels = {"abort": "停止原请求", "session_identity": "读取原会话",
+            "session_status": "读取执行状态", "write_drain": "核对已接纳行动"}
+        message = ("原会话仍在运行；没有打开后续动作。" if native_status in {"busy", "retry"} else
+            labels[stage] + "时状态未确认（" + type(error).__name__ + "）；没有打开后续动作。")
+        self.active = False
+        self.state.update(settlement=diagnostic, request_status="unsettled", resume_allowed=False,
+            error={"code": error.code if isinstance(error, ConnectorError) else "UnsettledHost", "message": message})
+        self._persist()
+        return deepcopy(self.state["error"])
+
+    def native_response_observed(self, purpose: str, *, owner: dict | None = None):
+        if purpose == "execution" and self._current_event(owner) and not self.stopped and not self.reclaiming:
+            self.state["request_status"] = "returned"
+            self._persist()
+
+    def native_interrupted(self, purpose: str, *, owner: dict | None = None):
+        if not self._current_event(owner):
+            return
+        self.active = False
+        self.state.update(request_status="timed_out" if purpose == "execution" else "unsettled",
+            resume_allowed=False)
+        self._persist()
+
+    def recovered_world_authority(self) -> bool:
+        """Reconnection recovers originals, never starts inference or an old goal."""
+        terminal = self.state.get("status") == "completed"
+        if self.state.get("goal") and not terminal:
+            self.state.update(status="unknown" if self.unresolved else "paused", resume_allowed=False)
+        return bool(self.state.get("goal") and not terminal and not self.unresolved)
+
+    def recovery_finished(self):
+        self.state["resume_allowed"] = self.can_resume()
+        self._persist()
+
+    def ensure_history_recovery(self):
+        recovery = self.state["history_recovery"]
+        if recovery.get("attempts", 0):
+            raise ConnectorError("HistoryRecoveryUnavailable", "本目标已使用一次历史整理；不会自动重复调用。", 409)
+        if self.unresolved or self.delegation or self.state.get("delegation_active") or self.active:
+            raise ConnectorError("HistoryRecoveryUnsafe", "先停止原授权并核对原操作，再整理历史。", 409)
+        if self.state["max_requests"] - self.state["requests_used"] < 2:
+            raise ConnectorError("HistoryRecoveryBudget", "历史整理和接续执行共需至少两次剩余模型请求。", 409)
+
+    def history_recovery_started(self, *, session_id: str, before_message_ids: list[str]):
+        self.ensure_history_recovery()
+        if self.stopped or self.reclaiming:
+            raise asyncio.CancelledError()
+        self.state["history_recovery"].update(status="running", attempts=1, session_id=session_id,
+            before_message_ids=list(before_message_ids))
+
+    def summary_request_recorded(self, inference_number: int):
+        # Persisted by the adapter with the exact native inference journal.
+        self.state["history_recovery"]["inference_number"] = inference_number
+
+    def history_recovery_verified(self, *, compaction_user_id: str, message_id: str,
+                                  summary_sha256: str, summary_characters: int):
+        self.state["history_recovery"].update(status="completed", compaction_user_id=compaction_user_id,
+            message_id=message_id, summary_sha256=summary_sha256, summary_characters=summary_characters, error=None)
+        # The adapter saves this verdict with the corresponding verified native
+        # inference response, rather than splitting the original audit record.
+
+    def history_recovery_interrupted(self, error: BaseException) -> dict:
+        diagnostic = {"code": getattr(error, "code", "HistoryRecoveryInterrupted"),
+            "message": "历史整理未确认完整成功；原记录保留，没有开始执行。"}
+        self.state["history_recovery"].update(status="uncertain", error=diagnostic)
+        self.state["resume_allowed"] = False
+        return deepcopy(diagnostic)
+
+    def history_recovery_unconfirmed(self, error: ConnectorError, *, original_request_idle: bool):
+        self.state["history_recovery"].update(
+            status="failed" if original_request_idle and error.code == "HistoryRecoveryInvalid" else "uncertain",
+            error={"code": error.code, "message": error.message})
+        self.state["resume_allowed"] = False
+        self._persist()
+
+    def selection_unavailable(self, context_entity_id: str | None, code: str):
+        if (context_entity_id is not None and context_entity_id == self.state.get("context_entity_id") and
+                not self.state.get("context_reference_attempted", True) and
+                code in {"RuleViolation", "PermissionDenied", "ResourceNotFound"}):
+            self.state["context_reference_attempted"] = True
+            self._persist()
+
+    def preflight_observed(self, facts: dict):
+        self.state["world_results"] = self.world_results(facts, establish_reference=True)
+        self.state.update(readback=deepcopy(facts), readback_actual=True)
+        self._persist()
+
+    def ensure_context_pruning(self):
+        if self.unresolved or self.state.get("request_status") != "idle_confirmed":
+            raise ConnectorError("ExecutionContextBusy", "先核对原请求与回执，才能整理旧现场上下文。", 409)
+
+    def context_pruned(self, *, parts: int, snapshot_characters: int, tool_characters: int):
+        self.state["context_pruning"] = {"parts": parts, "superseded_snapshot_chars": snapshot_characters,
+            "superseded_tool_output_chars": tool_characters,
+            "scope": "Native original text/output retained; user goals, definitions, writes and receipts unchanged."}
+        self._persist()
+
+    def reclaim_interrupted(self, error: dict, *, persistence_failed=False):
+        self.active = False
+        if self.state.get("goal") or persistence_failed:
+            self.state.update(request_status="unsettled", resume_allowed=False)
+        if self.state.get("goal"):
+            self.state.update(status="unknown" if self.unresolved or self.delegation or self.state.get("delegation_active") else "paused",
+                error=deepcopy(error))
+
     def update_control(self, value: dict):
         self.normalize_progress()
         task_control = value.get("goal") == self.state["goal"] and bool(self.state.get("grant_operation_id") or self.state.get("receipts"))
@@ -401,9 +607,7 @@ class ExecutionController:
         selected = context_entity_id if context_entity_id is not None else self.state.get("context_entity_id")
         facts = await self.ports.read("facts", context_entity_id=selected)
         unavailable = facts.get("selected_inspection_unavailable", {})
-        if (not self.state.get("context_reference_attempted", True) and unavailable.get("entity_id") == self.state.get("context_entity_id") and
-                unavailable.get("code") in {"RuleViolation", "PermissionDenied", "ResourceNotFound"}):
-            self.state["context_reference_attempted"] = True
+        self.selection_unavailable(unavailable.get("entity_id"), unavailable.get("code"))
         self.state["world_results"] = self.world_results(facts)
         self.state.update(readback=facts, readback_actual=True, readback_actions_count=self.state["actions_count"])
         self.phase("receipt_readback", started)

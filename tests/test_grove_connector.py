@@ -499,7 +499,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.current_turn_facts = AsyncMock(return_value={"scene": {"player": "actual"}})
         self.session.invoke = AsyncMock(return_value={"result": {"limits": {"bound_object_ids": 8}}})
         self.session.release_opportunity = AsyncMock()
-        self.session.active_execution = True
+        self.session.execution_controller.active = True
         requests = []
 
         async def host(method, path, body=None, timeout=15):

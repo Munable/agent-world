@@ -5,9 +5,10 @@ from copy import deepcopy
 
 from agent_world.errors import PermissionDenied, RuleViolation
 from agent_world.simulation.programs import evaluate, plan_reaction
+from agent_world.simulation import matter as sm
 
 from . import model as m
-from .definitions import REGISTRY, registry_for
+from .definitions import REGISTRY, registry_for, instance_definition as _type, material_identity as _material, contained_quantities as _quantities, reaction_available_quantities
 
 MAX_REACTION_OBSERVATIONS = 8
 
@@ -95,7 +96,6 @@ def condition_observation(expression, context):
 
 def action_condition_observations(ctx, player, entity):
     """Default-input predicates are observations, not submitted-input admission."""
-    from .creative import _type
 
     pack, spec = _type(ctx, entity)
     if not spec:
@@ -115,7 +115,6 @@ def action_condition_observations(ctx, player, entity):
 
 def program_observation(ctx, entity, *, detailed=False, player=None):
     """Return replacement public fields for creative.projection's binding copy."""
-    from .creative import _material, _quantities, _type, step
 
     pack, spec = _type(ctx, entity)
     if not spec:
@@ -129,21 +128,13 @@ def program_observation(ctx, entity, *, detailed=False, player=None):
             "source_last_tick": process.get("last_tick"), "reactions": historical,
             "historical": True, "current_production": False,
             "meaning": "保存的上次反应结果；last_tick是保存的过程字段，不证明当前生产或当前仍有产物。"}
-    process["observed_tick"] = step(ctx)
+    process["observed_tick"] = ctx.get_state(m.META, "clock", {}).get("sequence", 0)
     process["steps_meaning"] = "累计发生反应的逻辑步数，不是本次目标进度。"
 
     quantities = _quantities(entity)
-    usable_entity = deepcopy(entity)
-    usable_entity["matter"] = [lot for lot in entity["matter"] if not lot.get("burning")]
-    available = _quantities(usable_entity)
-    contract = binding.get("contract", {})
-    reserved_quantity = max(0, contract.get("delivered", 0) - contract.get("released", 0))
-    if reserved_quantity:
-        for symbol in available:
-            if _material(entity, symbol) == contract.get("material"):
-                available[symbol] = max(0, available[symbol] - reserved_quantity)
-    capacity = entity.get("components", {}).get("container", {}).get("liquid_capacity", 0)
-    actual_total = sum(lot["quantity"] for lot in entity["matter"] if lot["slot"] == "contained")
+    available = reaction_available_quantities(entity)
+    capacity = sm.liquid_capacity(entity)
+    actual_total = sm.quantity(entity, slot="contained")
     result = {"material_definitions": deepcopy(binding.get("materials", {})), "process": process,
         "reaction_inputs": {"scope": "this_entity_contained_lots_only", "unit": "logical_matter",
             "quantities": quantities, "available_quantities": available,
@@ -171,7 +162,7 @@ def program_observation(ctx, entity, *, detailed=False, player=None):
             material_defs[symbol] = {"load_per_u": registry.materials[material_id].load_per_u}
     # The planner receives the same occupancy allowance: unusable lots still
     # occupy the vessel. Each observation is isolated, not a multi-rule solver.
-    planning_capacity = max(0, capacity - actual_total + sum(available.values()))
+    planning_capacity = sm.reaction_capacity(capacity, actual_total, sum(available.values()))
     observations = []
     for rule, index, effect in reactions[:MAX_REACTION_OBSERVATIONS]:
         condition = condition_observation(rule["when"], context)

@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 import re
 
+from agent_world.errors import RuleViolation
 from agent_world.simulation.registry import ComponentDef, MaterialDef, Registry
 from agent_world.simulation.compiler import compile_composition
 
@@ -203,3 +204,67 @@ def composition_catalog():
 
 from agent_world.simulation.rules import register_material_rules
 register_material_rules(REGISTRY, combustion_cadence=COMBUSTION_CADENCE_TICKS)
+
+
+DEFINITIONS = "grove.creative.definitions"
+
+
+def instance_definition(ctx, entity):
+    binding = entity["state"].get("program", {})
+    if not binding.get("definition_ref"):
+        return None, None
+    pack = ctx.get_state(DEFINITIONS, binding["definition_ref"])
+    if not pack or binding["type_id"] not in pack["definition"]["types"]:
+        raise RuleViolation("物件引用的已发布规则版本缺失。")
+    return pack["definition"], pack["definition"]["types"][binding["type_id"]]
+
+
+def mixture_capacity(entity):
+    """Grove's optional contained-mixture policy, shared by preview and reducers."""
+    program = entity.get("state", {}).get("program", {})
+    if "mixture_capacity" not in program:
+        return None
+    capacity = program["mixture_capacity"]
+    if type(capacity) is not int or not 1 <= capacity <= 200:
+        raise ValueError("混合物容量须为1至200的整数逻辑u。")
+    return capacity
+
+
+def material_identity(entity, symbol):
+    program = entity["state"]["program"]
+    return symbol if symbol in REGISTRY.materials else program.get("material_aliases", {}).get(
+        symbol, program["definition_ref"] + "#" + symbol)
+
+
+def contained_quantities(entity, *, symbolic=True):
+    values = {}
+    prefix = entity["state"].get("program", {}).get("definition_ref", "") + "#"
+    aliases = {identity: alias for alias, identity in entity["state"].get("program", {}).get("material_aliases", {}).items()}
+    for lot in entity["matter"]:
+        if lot["slot"] != "contained":
+            continue
+        key = lot["material"]
+        if symbolic:
+            key = aliases.get(key, key[len(prefix):] if key.startswith(prefix) else key)
+        values[key] = values.get(key, 0) + lot["quantity"]
+    return values
+
+
+
+def reaction_available_quantities(entity, *, supply=None):
+    """Actual non-burning contents minus escrow, optionally limited to phase input.
+
+    A phase supplies its frozen input balance, excluding same-step products.
+    An observation omits it to describe current inputs without granting execution.
+    """
+    usable = {**entity, "matter": [lot for lot in entity["matter"] if not lot.get("burning", False)]}
+    actual = contained_quantities(usable)
+    offered = actual if supply is None else supply
+    available = {key: min(amount, actual.get(key, 0)) for key, amount in offered.items()}
+    contract = entity["state"].get("program", {}).get("contract", {})
+    reserved = max(0, contract.get("delivered", 0)-contract.get("released", 0))
+    if reserved:
+        for symbol in available:
+            if material_identity(entity, symbol) == contract.get("material"):
+                available[symbol] = max(0, available[symbol]-reserved)
+    return available

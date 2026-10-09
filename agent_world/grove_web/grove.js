@@ -74,6 +74,26 @@ function announce(text,error=false){const el=$(error?'error':'notice');el.textCo
 function fail(error){if(error.cancelled)return;const message=['Failed to fetch','Load failed','NetworkError when attempting to fetch resource.'].includes(error.message)?(client.pending()?'连接中断。重连后先核对原操作结果。':'连接中断，请检查连接后重试。'):error.message||String(error);announce(message,true);if(error.status===401||error.status===403){client.token=null;held=null;walkPath=[];$('reconnect-world').hidden=false;$('world-status').textContent='网页需要重连';$('movement-feedback').textContent='授权失效：同钥重连后继续。';}renderPending();}
 function run(fn){return Promise.resolve().then(fn).catch(fail);}
 const current=()=>identity&&client.token;
+// The connector owns model-start eligibility; this layer only adds in-flight
+// browser guards and validates the person's continuation input.
+function agentAdmission(kind){
+  const admission=host?.admission?.[kind];
+  if(!playing||!current())return {allowed:false,reason:'进入世界并恢复连接后再使用 Agent。'};
+  if(hostCommandBusy||executionReclaimBusy)return {allowed:false,reason:'先等待当前 Agent 请求或收回操作完成。'};
+  if(manualControlRecoveryPending)return {allowed:false,reason:'原行动结果尚未核对；恢复连接后先核对原回执。'};
+  if(['goal','resume','extend'].includes(kind)&&(actionBusy||client.pending()))return {allowed:false,reason:'先完成或核对当前世界操作，再授权 Agent 行动。'};
+  if(typeof admission?.allowed!=='boolean')return {allowed:false,reason:'Agent 资格尚未读取；恢复连接后再提问、创作或委托。'};
+  return {allowed:admission.allowed,reason:admission.allowed?'':admission.reason||'当前不能开始这项 Agent 请求，请恢复连接后核对状态。'};
+}
+function continuationAdmission(){
+  const execution=host?.execution||{},additional=Number($('execution-additional-requests').value),limit=Math.max(0,8-(execution.max_requests||0));
+  if(!Number.isInteger(additional)||additional<0||additional>limit)return {allowed:false,reason:'追加后的原目标模型请求总额度不能超过 8 次，追加数须为非负整数。'};
+  return agentAdmission(additional>0?'extend':'resume');
+}
+function applyAdmission(id,admission){
+  const control=$(id);control.disabled=!admission.allowed;control.title=admission.reason;
+  if(admission.reason)control.setAttribute('aria-description',admission.reason);else control.removeAttribute('aria-description');
+}
 const point=()=>world?.player;
 const entityLocation=entity=>entity?.location||{x:entity?.x,y:entity?.y};
 const distance=(entity)=>entity?.owner===client.roleId?0:Math.abs((entityLocation(entity).x??Infinity)-(point()?.x??0))+Math.abs((entityLocation(entity).y??Infinity)-(point()?.y??0));
@@ -151,7 +171,7 @@ async function pollHost(){
   try{const value=await client.connector('state');if(epoch!==session||reading!==hostReadEpoch)return;host=value;renderHost();
     if(entering&&host.entered&&host.world_read&&host.first_response_success)await showGame(epoch);
     if(entering&&['error','disconnected','paused'].includes(host.status)){entering=false;$('enter').disabled=false;$('entry-cancel').hidden=true;}
-  }catch(error){if(epoch===session){$('agent-status').textContent='宿主暂不可达';$('agent-detail').textContent=manualControlRecoveryPending?'原行动结果尚未核对；恢复宿主后先核对原回执，再继续行动。':'你的世界操作仍可继续。恢复宿主后再提问或共创。';if(entering){entering=false;$('enter').disabled=false;fail(error);}}}
+  }catch(error){if(epoch===session){if(host){host={...host,admission:null};renderHost();}$('agent-status').textContent='宿主暂不可达';$('agent-detail').textContent=manualControlRecoveryPending?'原行动结果尚未核对；恢复宿主后先核对原回执，再继续行动。':'你的世界操作仍可继续。恢复宿主后再提问或共创。';if(entering){entering=false;$('enter').disabled=false;fail(error);}}}
   finally{scheduleHost();}
 }
 function scheduleHost(delay=1200){clearTimeout(hostTimer);if(current()&&(entering||playing)&&host?.status!=='disconnected')hostTimer=setTimeout(pollHost,delay);}
@@ -160,19 +180,20 @@ function renderHost(){
   const execution=host.execution;
   // Recovery is asynchronous: clear the local gate only from settled receipts
   // and a closed world grant, never from the /recover acknowledgement alone.
-  if(manualControlRecoveryPending&&['ready','paused'].includes(host.status)&&host.reclaim_in_progress===false&&host.unknown_operations===0&&
+  if(manualControlRecoveryPending&&host.admission&&['ready','paused'].includes(host.status)&&host.reclaim_in_progress===false&&host.unknown_operations===0&&
     execution?.delegation_active===false&&['idle','revoked','reclaimed','exhausted'].includes(execution.control_status)&&
     !['starting','running','unknown'].includes(execution.status)&&execution.request_status==='idle_confirmed'&&execution.settlement?.status==='idle_confirmed'&&
     execution.readback_actual===true&&Number.isInteger(execution.actions_count)&&execution.readback_actions_count===execution.actions_count&&
     Array.isArray(execution.receipts)&&execution.receipts.every(receipt=>['confirmed','rejected'].includes(receipt.status)))manualControlRecoveryPending=false;
+  const conversation=agentAdmission('conversation'),creation=agentAdmission('creation');
   renderModelChoices();$('game-host').value=host.host_url||'';
   $('agent-status').textContent=hostNames[host.status]||host.status||'状态待核对';$('agent-status').dataset.status=host.status;
-  $('agent-detail').textContent=manualControlRecoveryPending?'收回或原行动结果尚未核对，连接恢复后先核对原回执，再继续行动。':host.error?.message||(host.reclaim_in_progress?'行动权已收回，原模型请求正在收尾。已确认的后果保留，可以亲手继续。':busy?'你的 Agent 正在读取、解释、创作或执行已授权目标。你可以继续亲手操作世界。':host.entered?'你的 Agent 已读取世界。普通提问只解释现场；明确委托目标后，它可以用同一角色行动。':'完成首次真实回应与现场读取后，即可进入。');
+  $('agent-detail').textContent=manualControlRecoveryPending?'收回或原行动结果尚未核对，连接恢复后先核对原回执，再继续行动。':host.error?.message||(host.reclaim_in_progress?'行动权已收回，原模型请求正在收尾。已确认的后果保留，可以亲手继续。':busy?'你的 Agent 正在读取、解释、创作或执行已授权目标。你可以继续亲手操作世界。':playing&&!conversation.allowed?conversation.reason:host.entered?'你的 Agent 已读取世界。普通提问只解释现场；明确委托目标后，它可以用同一角色行动。':'完成首次真实回应与现场读取后，即可进入。');
   if(!intentDirty&&typeof host.context?.intent==='string'&&document.activeElement!==$('host-intent'))$('host-intent').value=host.context.intent;
   $('intent-save').disabled=hostCommandBusy;
-  $('chat-send').disabled=busy||!['ready','paused'].includes(host.status);$('agent-cancel').hidden=!busy;$('agent-reconnect').hidden=!['disconnected','error','paused'].includes(host.status);$('agent-disconnect').disabled=host.status==='disconnected';
+  applyAdmission('chat-send',conversation);applyAdmission('ask-selection',conversation);$('agent-cancel').hidden=!busy;$('agent-reconnect').hidden=!['disconnected','error','paused'].includes(host.status);$('agent-disconnect').disabled=host.status==='disconnected';
   const generationPending=['unknown','published_readback_pending'].includes(host.generation?.status);
-  $('generation-send').disabled=busy||generationPending||!['ready','paused'].includes(host.status);$('generation-recover').hidden=!generationPending;$('generation-recover').disabled=busy;renderGeneration();
+  applyAdmission('generation-send',creation);$('generation-recover').hidden=!generationPending;$('generation-recover').disabled=busy;renderGeneration();
   $('generation-cancel').hidden=!busy||!['claiming','generating','correcting','publishing'].includes(host.generation?.status);
   const messages=host.messages||[];
   const lastReply=[...messages].reverse().find(m=>!['user','event'].includes(m.role)&&m.text);
@@ -189,13 +210,16 @@ function renderHost(){
 }
 async function hostCommand(path,body,{refresh=false,interrupt=false}={}){
   if(hostCommandBusy&&!interrupt||!playing||!current())return false;
+  const kind={prompt:'conversation',generate:'creation',execute:'goal'}[path]||(path==='execute-resume'?(Number(body?.additional_requests)>0?'extend':'resume'):null);
+  if(kind){const admission=agentAdmission(kind);if(!admission.allowed){announce(admission.reason,true);return false;}}
   const epoch=session,command=++hostCommandEpoch;++hostReadEpoch;hostCommandBusy=true;hostCommandKind=path;renderHost();
   try{hostCommandFlight=client.connector(path,body);const value=await hostCommandFlight;if(epoch!==session||command!==hostCommandEpoch||!playing)return false;host=value;renderHost();if(refresh)await refreshWorld(true);return epoch===session&&playing;}
-  catch(error){if(epoch!==session||command!==hostCommandEpoch||!playing)return false;throw error;}
+  catch(error){if(epoch!==session||command!==hostCommandEpoch||!playing)return false;host={...host,admission:null};renderHost();throw error;}
   finally{if(epoch===session&&command===hostCommandEpoch){hostCommandBusy=false;hostCommandKind=null;hostCommandFlight=null;renderHost();scheduleHost(250);}}
 }
 function renderExecution(){
   const execution=host?.execution||{},status=execution.status||'idle',active=execution.delegation_active===true,busy=['starting','running'].includes(status),unknown=manualControlRecoveryPending||status==='unknown'||Number(host?.unknown_operations)>0||(execution.receipts||[]).some(receipt=>receipt.status==='unknown');
+  const goalAdmission=agentAdmission('goal'),resumeAdmission=agentAdmission('resume'),extendAdmission=agentAdmission('extend');
   const goalResult=execution.goal_result||{},goalClaimed=status==='completed'&&!!execution.task_id&&goalResult.status==='completed'&&goalResult.completion_source==='agent_claim';
   const labels={idle:'尚未委托',starting:'正在授权',running:'正在执行目标',completed:'Agent报告完成',result_unconfirmed:'目标结果未确认',paused:'目标已暂停',blocked:'目标受阻',error:'执行受阻',unknown:'结果待核对',budget_exhausted:'目标额度已用完'};
   const displayedStatus=unknown?'unknown':status==='completed'&&!goalClaimed?'result_unconfirmed':status,requestLabels={idle:'尚未开始',preparing:'正在读取现场',summarizing:'正在整理会话历史',summary_failed:'会话历史整理失败',running:'推理与行动中',returned:'这一段请求已返回',timed_out:'这一段请求超时',settling:'正在核对原结果',idle_confirmed:'原请求已停止并核对',unsettled:'原请求状态待核对'};
@@ -209,8 +233,8 @@ function renderExecution(){
   const recovery=execution.history_recovery||{},recoveryLabels={not_started:recovery.requested?'尚未开始整理会话历史':'未请求整理会话历史',running:'正在整理会话历史',completed:'会话历史整理完成；目标仍以行动与核对结果判断',failed:'会话历史整理失败；本目标不会自动重试整理',uncertain:'会话历史整理结果待核对；本目标不会自动重试整理'};
   $('execution-history-recovery').hidden=!execution.task_id||!recovery.status;
   $('execution-history-recovery').textContent=[recoveryLabels[recovery.status]||recovery.status,recovery.attempts>0?'摘要请求已计入这个目标的模型请求总额度，原记录保留。':'',recovery.error?.message].filter(value=>typeof value==='string'&&value).join('\n');
-  const detail=unknown?'原行动结果未确认。先核对原回执，才可接续或开始新目标；核对不会自动继续行动。':goalClaimed?'Agent已结束本次委托。这是它对目标的判断；程序确认的具体世界结果另列。':status==='completed'?'原执行记录已结束，目标结果未确认。已经保存的行动保留；旧完成记录没有验证来源，不能将请求结束视为成功。':active?'行动授权仍有效。Agent 可在总额度内继续；收回或亲手行动会停止后续行动，已保存的结果保留。':execution.resume_allowed===true?'当前没有行动授权。点击“接续这个目标”才再次授权；它会读取最新现场，继续原目标与剩余额度。':execution.goal?'当前没有行动授权。已保存的行动保留；请求结束或额度用完不代表目标完成。':'人可以直接玩，也可以在这里明确授权 Agent 帮你实现目标。';
-  $('execution-detail').textContent=[execution.stop_reason,execution.error?.message,detail].filter((value,index,values)=>typeof value==='string'&&value&&values.indexOf(value)===index).join('\n');
+  const detail=unknown?'原行动结果未确认。先核对原回执，才可接续或开始新目标；核对不会自动继续行动。':goalClaimed?'Agent已结束本次委托。这是它对目标的判断；程序确认的具体世界结果另列。':status==='completed'?'原执行记录已结束，目标结果未确认。已经保存的行动保留；旧完成记录没有验证来源，不能将请求结束视为成功。':active?'行动授权仍有效。Agent 可在总额度内继续；收回或亲手行动会停止后续行动，已保存的结果保留。':resumeAdmission.allowed?'当前没有行动授权。点击“接续这个目标”才再次授权；它会读取最新现场，继续原目标与剩余额度。':execution.goal?'当前没有行动授权。已保存的行动保留；请求结束或额度用完不代表目标完成。':'人可以直接玩，也可以在这里明确授权 Agent 帮你实现目标。';
+  $('execution-detail').textContent=[execution.stop_reason,execution.error?.message,detail,goalAdmission.reason].filter((value,index,values)=>typeof value==='string'&&value&&values.indexOf(value)===index).join('\n');
   const progress=execution.progress||{},progressNodes=[];
   if(goalClaimed&&typeof goalResult.summary==='string'&&goalResult.summary)progressNodes.push(node('p','Agent完成声明：'+goalResult.summary,'small'));
   else if(typeof progress.summary==='string'&&progress.summary)progressNodes.push(node('p','最近发现与行动：'+progress.summary,'small'));
@@ -235,13 +259,12 @@ function renderExecution(){
   $('execution-actions').replaceChildren(...receipts.slice(-8).map(receipt=>{const row=node('div',undefined,'execution-receipt');row.append(node('strong',(functionLabels[receipt.function]||'世界行动')+' · '+(receiptLabels[receipt.status]||receipt.status||'状态未读')));return row;}));
   if(receipts.length>8)$('execution-actions').append(node('p','显示最近 8 个回执，共 '+receipts.length+' 个；它们记录行动，不替代当前现场。','small'));
   if(execution.readback_actual===true)$('execution-actions').append(node('p','这个目标已有实际世界读回。物件的最新状态仍以地图与详情为准。','small'));
-  $('execution-start').disabled=hostCommandBusy||host.reclaim_in_progress===true||busy||active||unknown||!['ready','paused'].includes(host?.status)||actionBusy||!!client.pending();
+  applyAdmission('execution-start',goalAdmission);
   const additionalControl=$('execution-additional-requests'),additionalLimit=Math.max(0,8-(execution.max_requests||0));
-  additionalControl.max=String(additionalLimit);additionalControl.disabled=execution.extension_allowed!==true;
+  additionalControl.max=String(additionalLimit);applyAdmission('execution-additional-requests',extendAdmission);
   if(Number(additionalControl.value)>additionalLimit)additionalControl.value=String(additionalLimit);
-  const additional=Number(additionalControl.value),canResume=execution.resume_allowed===true||(execution.extension_allowed===true&&Number.isInteger(additional)&&additional>0&&additional<=additionalLimit);
   $('execution-resume').hidden=(execution.resume_allowed!==true&&execution.extension_allowed!==true)||!execution.task_id||unknown;
-  $('execution-resume').disabled=!canResume||hostCommandBusy||host.reclaim_in_progress===true||executionReclaimBusy||busy||active||unknown||['connecting','thinking','disconnected'].includes(host?.status)||actionBusy||!!client.pending();
+  applyAdmission('execution-resume',continuationAdmission());
   $('execution-reclaim').disabled=executionReclaimBusy||!(active||busy||unknown);
   $('execution-reclaim').textContent=executionReclaimBusy?'正在收回…':'收回行动权';
   $('execution-recover').hidden=!unknown;$('execution-recover').disabled=hostCommandBusy||executionReclaimBusy;
@@ -250,9 +273,9 @@ function renderExecution(){
 }
 async function reclaimExecution(){
   if(executionReclaimBusy||!playing||!current())return;
-  const epoch=session;stopWalking();executionReclaimBusy=true;renderExecution();
+  const epoch=session;stopWalking();executionReclaimBusy=true;renderHost();
   try{if(await takeManualControl(()=>epoch===session&&playing&&current()))announce('行动权已收回。已保存的行动保留，你可以亲手接着玩。');}
-  finally{if(epoch===session){executionReclaimBusy=false;if(playing)renderExecution();}}
+  finally{if(epoch===session){executionReclaimBusy=false;if(playing)renderHost();}}
 }
 async function restartHost(){
   return hostCommand('start',{token:client.token,public_key:key.public_key,name:point()?.name||prefs().name,...($('game-model').value.trim()?{model:$('game-model').value.trim()}:{})});
@@ -265,15 +288,16 @@ function renderModelChoices(){
   }
 }
 function renderGeneration(){
-  const generation=host?.generation,signature=JSON.stringify([generation||null,(world?.processes||[]).map(p=>[p.id,p.status,p.start_tick<=finite(world?.clock?.sequence)])]);if(signature===lastGenerationSignature)return;lastGenerationSignature=signature;
+  const admission=agentAdmission('creation'),generation=host?.generation,signature=JSON.stringify([generation||null,admission,(world?.processes||[]).map(p=>[p.id,p.status,p.start_tick<=finite(world?.clock?.sequence)])]);if(signature===lastGenerationSignature)return;lastGenerationSignature=signature;
+  const detail=text=>{$('generation-detail').textContent=[text,admission.reason].filter((value,index,values)=>value&&values.indexOf(value)===index).join('\n');};
   const status=generation?.status||'idle';$('generation-status').dataset.status=status;$('generation-result').replaceChildren();
-  if(!generation){$('generation-status').textContent='尚未开始';$('generation-detail').textContent='使用你自己的模型连接；完成后直接公开。';return;}
+  if(!generation){$('generation-status').textContent='尚未开始';detail('使用你自己的模型连接；完成后直接公开。');return;}
   if(!generation.published){
     const phases={idle:['尚未开始','使用你自己的模型连接；完成后直接公开。'],claiming:['读取附近','正在读取这片地方能创作的机会。'],generating:['正在创作','你的 Agent 正在创作；你仍可以亲手走动与操作。'],correcting:['正在调整','正在按世界规则调整内容；你仍可以亲手操作。'],publishing:['正在发表','正在交给共同世界保存，等待实际结果。'],unavailable:['暂时没有机会','附近暂时没有可用的创作机会。继续走动、探索，之后再试。'],error:['创作受阻',generation.error?.message||host.error?.message||'这一轮没有确认发表。可以调整想法后再试。'],unknown:['结果待核对','发表回应中断，原操作保留。请先核对发表结果，避免重复发表。'],cancelled:['已中止','这一轮没有发表内容，已中止。可以继续亲手操作世界。']};
-    const phase=phases[status]||['状态待核对','请重新连接，读取这轮创作的实际状态。'];$('generation-status').textContent=phase[0];$('generation-detail').textContent=phase[1];return;
+    const phase=phases[status]||['状态待核对','请重新连接，读取这轮创作的实际状态。'];$('generation-status').textContent=phase[0];detail(phase[1]);return;
   }
   const confirmed=generation.readback?.receipt_confirmed&&generation.readback?.viewport_read;
-  $('generation-status').textContent=confirmed?'已发表并核对':'已发表 · 待读回';$('generation-detail').textContent=confirmed?'已从共同世界读取发表结果。这里保留发表记录；当前内容物、数量与状态以地图物件详情为准。':'世界已确认发表，现场读回暂未完成。请核对原发表结果，已保存的内容不会重复发表。';
+  $('generation-status').textContent=confirmed?'已发表并核对':'已发表 · 待读回';detail(confirmed?'已从共同世界读取发表结果。这里保留发表记录；当前内容物、数量与状态以地图物件详情为准。':'世界已确认发表，现场读回暂未完成。请核对原发表结果，已保存的内容不会重复发表。');
   const entities=Array.isArray(generation.entities)?generation.entities:[];
   for(const entity of entities){if(typeof entity!=='object')continue;const location=Number.isFinite(entity.x)&&Number.isFinite(entity.y)?' · '+entity.x+'，'+entity.y:'';$('generation-result').append(node('p',(entity.name||'共同物件')+location+' · 发表时状态：'+stateLine(entity)));if(entity.authored_description)$('generation-result').append(node('p','发表时的说明：'+entity.authored_description,'small'));}
   const processes=Array.isArray(generation.process)?generation.process:generation.process?[generation.process]:[];
@@ -323,6 +347,7 @@ function renderPending(){
   $('pending').hidden=!pending;
   $('recover-operation').disabled=operationRecoveryBusy||actionBusy;$('release-operation').disabled=operationRecoveryBusy||actionBusy;
   if(pending){$('pending-detail').textContent=pending.rejection?'服务器拒绝了原操作：'+pending.rejection.message:'回应中断，结果尚未核对。操作 '+pending.body.operation_id.slice(0,8)+' 保留；不会自动发出替代操作。';$('release-operation').hidden=!pending.rejection;$('recover-operation').hidden=!!pending.rejection;}
+  if(playing&&host)renderExecution();
 }
 async function recoverWorldOperation(release=false){
   if(operationRecoveryBusy||actionBusy||!playing||!client.pending())return;
@@ -344,7 +369,7 @@ async function takeManualControl(isCurrent){
     return true;
   }
   $('movement-feedback').textContent='接回你的角色，已保存的后果保留…';
-  const epoch=session,command=++hostCommandEpoch;++hostReadEpoch;hostCommandBusy=true;
+  const epoch=session,command=++hostCommandEpoch;++hostReadEpoch;hostCommandBusy=true;renderHost();
   try{
     let state,receiptsChecked=false;
     try{state=await client.connector('reclaim',{background:true});receiptsChecked=true;}
@@ -353,7 +378,7 @@ async function takeManualControl(isCurrent){
       manualControlRecoveryPending=true;
       if(error.status===409)throw error;
       if(execution?.delegation_active===true||['starting','running'].includes(execution?.status))await client.mutate('grove.control_revoke',{}, {},isCurrent);
-      state={...host,execution:{...execution,delegation_active:false,stop_reason:'后续行动权已收回；原行动结果尚未核对，连接恢复后先核对原回执。'}};
+      state={...host,admission:null,execution:{...execution,delegation_active:false,stop_reason:'后续行动权已收回；原行动结果尚未核对，连接恢复后先核对原回执。'}};
     }
     if(!isCurrent()||command!==hostCommandEpoch)return false;
     if(receiptsChecked)manualControlRecoveryPending=false;
@@ -1017,8 +1042,8 @@ $('release-operation').addEventListener('click',()=>run(()=>recoverWorldOperatio
 $('reconnect-world').addEventListener('click',()=>run(async()=>{const epoch=session;await authenticate(key);if(epoch!==session)return;if(await hostCommand('recover',{token:client.token,public_key:key.public_key,name:point()?.name||prefs().name},{refresh:true})){scheduleWorld();scheduleHost();}}));
 $('chat-form').addEventListener('submit',event=>{event.preventDefault();run(async()=>{const text=$('chat-text').value.trim();if(!text)return;const entity=selectedEntity();if(await hostCommand('prompt',{text,intent:$('host-intent').value.trim(),...(entity?{context_entity_id:entity.id}:{})})){$('chat-text').value='';client.saveDraft('grove-chat','');intentDirty=false;}});});
 $('execution-form').addEventListener('submit',event=>{event.preventDefault();run(async()=>{
-  const goal=$('execution-goal').value.trim(),maxActions=Number($('execution-max-actions').value),maxRequests=Number($('execution-max-requests').value),execution=host?.execution||{};
-  if(!goal||hostCommandBusy||actionBusy||client.pending()||execution.delegation_active||['starting','running','unknown'].includes(execution.status)||(execution.receipts||[]).some(receipt=>receipt.status==='unknown'))return;
+  const goal=$('execution-goal').value.trim(),maxActions=Number($('execution-max-actions').value),maxRequests=Number($('execution-max-requests').value);
+  if(!goal)return;
   if(goal.length>2000)throw new Error('委托目标最多 2000 字。');
   if(!Number.isInteger(maxActions)||maxActions<1||maxActions>64)throw new Error('目标动作上限须为 1 至 64 的整数。');
   if(!Number.isInteger(maxRequests)||maxRequests<1||maxRequests>8)throw new Error('目标模型请求上限须为 1 至 8 的整数。');
@@ -1028,9 +1053,8 @@ $('execution-form').addEventListener('submit',event=>{event.preventDefault();run
 $('execution-goal').addEventListener('input',()=>{goalDirty=true;if(current())try{client.storage.setItem(client.draftKey('grove-goal'),$('execution-goal').value);}catch{}});
 $('execution-resume').addEventListener('click',()=>run(async()=>{
   const execution=host?.execution||{};
-  const additional=Number($('execution-additional-requests').value),canResume=execution.resume_allowed===true||(execution.extension_allowed===true&&additional>0);
-  if(hostCommandBusy||executionReclaimBusy||actionBusy||client.pending()||execution.delegation_active||['starting','running','unknown'].includes(execution.status)||['connecting','thinking','disconnected'].includes(host?.status)||(execution.receipts||[]).some(receipt=>receipt.status==='unknown')||!canResume||!execution.task_id)return;
-  if(!Number.isInteger(additional)||additional<0||(execution.max_requests||0)+additional>8)throw new Error('追加后的原目标模型请求总额度不能超过 8 次。');
+  const additional=Number($('execution-additional-requests').value),admission=continuationAdmission();
+  if(!admission.allowed){announce(admission.reason,true);return;}
   stopWalking();
   if(await hostCommand('execute-resume',{task_id:execution.task_id,compact_history:$('execution-compact-history').checked,additional_requests:additional})){$('execution-compact-history').checked=false;$('execution-additional-requests').value='0';announce('已再次授权接续原目标；保留原行动记录与已用额度，先读取最新现场。');}
 }));

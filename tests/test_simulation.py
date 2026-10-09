@@ -257,5 +257,47 @@ class MaterialConsequenceTests(unittest.TestCase):
         self.assertTrue(frame.verify_balance())
 
 
+class SharedMatterBoundaryTests(unittest.TestCase):
+    def vessel(self, identifier):
+        return model.normalize_entity({**composition_definition({"material": "stone", "construction": "vessel"}),
+                                       "id": identifier, "x": 4, "y": 5})
+
+    def test_preview_allocation_and_final_validation_share_mixture_room(self):
+        from agent_world.errors import RuleViolation
+        from agent_world.worlds.shared_grove.definitions import mixture_capacity
+        source, target = self.vessel("source"), self.vessel("target")
+        target["state"]["program"] = {"mixture_capacity": 5}
+        matter.add_lot(target, "wood", 3, "contained")
+        water = matter.add_lot(source, "water", 4, "contained")
+        registry = registry_for([source, target])
+        self.assertEqual(model.water_transfer_room(target), 2)
+        frame = Frame(registry, {"source": source, "target": target}, mixture_capacity=mixture_capacity)
+        with self.assertRaises(ValueError):
+            frame.apply([Transfer("source", water["id"], "target", 3)])
+        self.assertEqual(frame.objects["target"]["matter"], target["matter"])
+        frame.apply([Transfer("source", water["id"], "target", 3)], allocate=True)
+        self.assertEqual(matter.quantity(frame.objects["target"], slot="contained"), 5)
+        self.assertTrue(frame.verify_balance())
+        overfull = deepcopy(frame.objects["target"])
+        matter.add_lot(overfull, "wood", 1, "contained")
+        with self.assertRaises(RuleViolation):
+            model.normalize_entity(overfull)
+
+    def test_reaction_inputs_exclude_burning_escrow_and_same_phase_products(self):
+        from agent_world.worlds.shared_grove.definitions import reaction_available_quantities
+        entity = self.vessel("reactor")
+        entity["state"]["program"] = {"definition_ref": "program_x", "contract": {
+            "material": "wood", "delivered": 2, "released": 0}}
+        matter.add_lot(entity, "wood", 5, "contained")
+        matter.add_lot(entity, "cloth", 4, "contained")["burning"] = True
+        self.assertEqual(reaction_available_quantities(entity), {"wood": 3})
+        self.assertEqual(reaction_available_quantities(entity, supply={"wood": 4, "cloth": 4}),
+                         {"wood": 2, "cloth": 0})
+        before = deepcopy(entity)
+        with self.assertRaises(ValueError):
+            matter.take_material(entity, "cloth", 1)
+        self.assertEqual(entity, before)
+
+
 if __name__ == "__main__":
     unittest.main()

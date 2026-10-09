@@ -13,7 +13,7 @@ from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.simulation.matter import encoded_size
 from agent_world.world_streams import StreamEvent
 
-from . import model
+from . import model, commit, activity
 from .catalog import CATALOG, CONTENT_SCHEMA, content_schema, content_catalog, composition_options, object_definition
 
 
@@ -483,7 +483,7 @@ def _remaining(region):
 
 
 def _chunk(ctx, cx, cy):
-    return model.ensure_chunk(ctx, cx, cy)
+    return commit.ensure_chunk(ctx, cx, cy)
 
 
 def _scene(ctx, cx, cy):
@@ -513,7 +513,7 @@ def _active_events(ctx):
     entries = deepcopy(record["value"]["entries"]) if record["exists"] else []
     active = []
     for entry in entries:
-        value = processes.get_process(ctx, entry["id"])
+        value = activity.get_process(ctx, entry["id"])
         if value is not None and value["status"] == "active":
             active.append(entry)
     return record, active
@@ -786,7 +786,7 @@ def _initial_water(ctx, entity, amount, region):
         source = model.get_entity(ctx, source["id"])
         take = min(remaining, source["state"]["water_remaining"])
         if take:
-            changes.append(model.add_water_from_source(ctx, entity, take, source))
+            changes.append(commit.add_water_from_source(ctx, entity, take, source))
             remaining -= take
         if not remaining:
             break
@@ -800,7 +800,7 @@ def _spawn(ctx, obj, x, y, opportunity, resources_consumed):
     state = deepcopy(entry["state"])
     state.update(generation_region=opportunity["region"],
                  generation_cost={"material_units": entry["material_units"], "water_units": obj.get("water", 0)})
-    entity = model.spawn_entity(ctx, {
+    entity = commit.spawn_entity(ctx, {
         "name": obj.get("name", entry["name"]), "x": x, "y": y,
         "material": entry["material"], "capabilities": entry["capabilities"], "state": state,
         "owner": None, "container": None, "authored_description": obj.get("description", ""),
@@ -814,7 +814,7 @@ def _spawn(ctx, obj, x, y, opportunity, resources_consumed):
         child_entry = object_definition(child, ctx)
         child_entry["state"].update(generation_region=opportunity["region"],
                                     generation_cost={"material_units": child_entry["material_units"], "water_units": child.get("water", 0)})
-        child_entity = model.spawn_entity(ctx, {
+        child_entity = commit.spawn_entity(ctx, {
             "name": child.get("name", child_entry["name"]), "x": x, "y": y,
             "material": child_entry["material"], "capabilities": child_entry["capabilities"],
             "state": child_entry["state"], "owner": None, "container": entity["id"],
@@ -871,10 +871,10 @@ def content_submit(ctx, args):
         _check_budget(region, cost)
         material_cost = _resource_cost(objects, ctx)
         material_cost["water"] = 0
-        resources_consumed = model.consume_resources(ctx, cx, cy, material_cost)
+        resources_consumed = commit.consume_resources(ctx, cx, cy, material_cost)
         for obj in objects:
             entities.extend(_spawn(ctx, obj, obj["x"], obj["y"], opportunity, resources_consumed))
-        model.finish_resource_allocation(ctx)
+        commit.finish_resource_allocation(ctx)
         if anchor and not any(model.can_attach(ctx, entity, anchor)["allowed"]
                               for entity in entities if model.is_ground(entity)):
             raise RuleViolation("a layout continuation must create a real compatible part; attachment is a human action")
@@ -907,9 +907,9 @@ def content_submit(ctx, args):
             raise RuleViolation("a drift continuation must actually deliver near its referenced public anchor")
         material_cost = _resource_cost([drift], ctx)
         material_cost["water"] = 0
-        resources_consumed = model.consume_resources(ctx, cx, cy, material_cost)
+        resources_consumed = commit.consume_resources(ctx, cx, cy, material_cost)
         entities = _spawn(ctx, drift, route[0]["x"], route[0]["y"], opportunity, resources_consumed)
-        model.finish_resource_allocation(ctx)
+        commit.finish_resource_allocation(ctx)
         process = processes.start_drift(ctx, entities[0]["id"], ticks=drift["duration_ticks"], route=route,
                                         start_delay=drift["start_delay_ticks"])
         entities[0] = model.get_entity(ctx, entities[0]["id"])
@@ -927,7 +927,7 @@ def content_submit(ctx, args):
                        created_entity_ids=[entity["id"] for entity in entities],
                        process_id=process["id"] if process is not None else None,
                        authored_description=authored_description)
-    from .creative import public_event
+    from .commit import public_event
     for entity in entities:
         public_event(ctx, action="content_published", entity_id=entity["id"], kind="publication")
     if process is not None:

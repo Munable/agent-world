@@ -1,10 +1,44 @@
 # Shared Grove（溪源）：当前官方世界
 
-复核：2026-10-09。当前官方世界采用地图首屏，人可以亲手探索或明确委托自己的 Agent。**本轮两份新定义在原持久世界中正式发表：Agent 实际生成湿合料，另一人通过网页暂停器皿并取走4u；另一作者的齿轮网络经两人接力达到行程7并停止。** Agent 未按原目标留下原料，又在机械目标中多投燃料，不能称作自然目标稳定完成。整体产品与真人趣味性尚未完成，历史最佳仍为0.24。Runtime、跨世界身份与提交语义不因此改成游戏专用。
+复核：2026-10-09。当前官方世界采用地图首屏，人可以亲手探索或明确委托自己的 Agent。**前一轮 `e1d4af1` 部分交付中，两份新定义在原持久世界正式发表：Agent 生成湿合料，另一人通过网页暂停器皿并取走4u；另一作者的齿轮网络经两人接力达到行程7并停止。** Agent 未按原目标留下原料，又在机械目标中多投燃料，原失败保留。本轮三条内核结构主线已补齐；整体产品、真人趣味性及自然目标稳定完成仍未通过，历史最佳保持0.24。Runtime、跨世界身份与提交语义不因此改成游戏专用。
 
 ## 当前研发记录
 
-**当前内核工作轮：**L5／L6收敛，保留原世界、三名原身份、原生会话、库存、损耗与回执。材料事实归世界 `definitions.REGISTRY`，实体保存不可变材料快照；编译／反应显式接收材料表，燃烧直接读该材料的 `combustible`，删除另一套内建材料及燃料白名单。`after` 统一读取机械结算后的冻结快照，候选写入与下一步材料供给分别处理；规则失败回滚自身候选，但保留机械后果和具体 `program_error`。`AgentObservations` 实际持有呈现事实和动作绑定，`ExecutionController` 持有任务、授权、额度、收回和原操作归属；适配层保留身份、HTTP／MCP、原未知操作日志与本机宿主，不增加Runtime游戏模型。world21／state12沿正式迁移交接唯一兼容计时任务，不补停机墙钟。
+**内核补齐工作轮（结构补齐完成）：**L5／L6，起点为部分交付 `e1d4af1`；规则／状态、世界推进／行动、连接器／前端三条主线已消除下表结构缺口，A／B／C独立静态审查无阻塞，根任务完成最终统一验收。原世界、三名身份、原生会话、库存、损耗和回执未重置。结论来自实际责任收敛及受影响链的回归，测试数与扩展示例不单独证明结构完成。源码与证据沿用唯一账本 `implementation.json.kernel_completion_round`。
+
+| 原问题与源码证据 | 维护影响 | 实际唯一维护位置 | 保留判据 | 消除证据 |
+| --- | --- | --- | --- | --- |
+| `model`、`Frame`、`creative` 分别计算液体及混合物空间 | 预览、分配、最终校验可能分叉 | `simulation.matter` 的容量／可用空间原语；世界政策在 `definitions.mixture_capacity/reaction_available_quantities` | 检查时机保留，真实过满仍拒绝 | 三条路径复用；规范化使用 `validate_contents` 返回的已验证液体量，可用量统一排除burning／escrow，执行另传冻结供给 |
+| `Frame.apply/_add` 与 `creative._take/_put` 重复批次量变及账目 | 材料修改牵动两条路径 | `matter.withdraw_lot/take_material/add_lot/accumulate_quantity` | 严格拒绝、自动限量、原子extent和错误隔离不变 | 调用者显式保留燃烧合并、provenance和供给政策，物量边界与记账共用原语 |
+| 点火与tick传播重复可燃／湿度／暴露判断 | 物理燃点分叉 | `matter.ignitable_lot`；世界资格在 `activity.can_ignite` | 手动权限、安全区和传播预算保留 | `commit.start_burning`、活动资格、材料传播及过程选择复用同一物理条件 |
+| 声明阶段字段写靠循环ID次序 | 优先级及竞争难以诊断 | `simulation.declarations.PHASE_POLICY/phase_applications/declaration_semantics` | 保持已发表程序合法结果 | 显式保留rule-ID／事件顺序、冻结条件视图及顺序末写；发表、读取、inspect与目录提供竞争诊断 |
+| `model` 反向依赖processes／creative，destroy与tick重复物理后果 | 保存、生命周期、索引、spill、合同及账目交叉维护 | `commit.commit_results/commit_frame`；活动索引在 `activity`，事件在 `events`，model仅存取／规范化 | Runtime事务、版本、回执和计时不变 | 行动Frame、物理tick及创作tick走同一候选提交；共同处理合同失效、耗尽背包、spill及账目，model移除反向调用 |
+| Controller和Session重复任务状态与写许可 | 收尾、恢复或迟到结果跨两处维护 | `ExecutionController` 的生命周期事件及 `admit_write`；Session只报告原生／传输事实 | 原task／segment、原请求结束语义保留 | Session不再直接裁定任务状态；外层与锁内调用同一写许可，收回和迟到原操作仍归原任务 |
+| 网页自行重算启动资格 | 页面可点击而服务端拒绝 | `ExecutionController.admission`；Session投影 `admission`，网页 `agentAdmission` 消费 | 人的世界操作独立 | 提问／创作／目标／接续共用权威门禁；网页只加本地进行中保护与输入检查，缺失资格时禁用 |
+
+**最终源码与回归：**209个交付实现、测试和打包输入SHA256 `0d05cbc6d78f71b1a22b7c3fa85f7f46b7a8b41e62cc78068b485bf5462ce83c`（文档除外）；697项Python通过（210.576秒），两份Node与实际wheel安装probe通过。检查源码为 `4c83527f9404a45aa36d284d5d7c47cc5e9e84b305929a354cc3cd2b9539568a`；收尾只删除 `activity.py` 文件末尾一处空行，AST逐值一致，暂存差异格式检查通过，未重复调用模型或全检。曾有1项失败：`UnknownWrite` 被 `EntryRequired` 掩盖；保留原断言和失败证据，修正门禁优先级后完成全检，没有弱化未知写入保护。
+
+**扩展与真实接续：**隔离世界通过正式 `content_submit` 验证两份扩展，跨人接走4u、机械行程3→7及重开通过；27个正常逻辑tick属于既有冷却，不能计作体验轮次或跨日。原A／Qwen3.8 Flash沿同一身份、原native会话新增2次请求（22→24）：一次读回执行器7／速度0／动力off／能量0，一次完成有限动力开／关的两笔 `rule_action`（commit60954／60964），没有补料。Go实测位于小修前源码摘要 `9f296…`；之后仅修门禁优先级及相邻重复计算，最终全检和恢复覆盖小修，不声称Go在最终 `4c835…` 逐字节重测。账本所录完整native所有步骤的报告费用合计0.171981726美元，不是账单。
+
+**恢复与原事实：**人代理断开Agent后从(-7,-7)移至(-8,-7)；最终服务升级、网页恢复仍为同一身份、位置和回执，没有新增推理。独立备份沿原 `private/shared-grove/interoperable-rules/on-demand/kernel-convergence/world-completion-release-backup.sqlite3`，270417920字节，SHA256 `3f6d37c80992323c8a62ca2afd631885d764ce24ce42e394f7c229f4c4244e10`。独立恢复的313条状态、61674条完整回执摘要一致；3角色／3keys／53tokens／3presence，原A／B凭据经API恢复同一身份、16笔原回执逐值一致。远处器皿仍拒绝409，未扩大视野；有效timer为1，恢复检查禁timer固定快照，不冒充自然持续运行。原模型记忆仍在本机native会话，不属于世界SQLite备份。
+
+**性能、入口与收尾：**相同78实体、同一种子初态的ABBA对照，baseline／current CPU中位数：读取9.655／10.430ms、移动14.476／14.011ms、tick17.087／17.151ms；wall有波动，外置临时目录fsync样本472／841，不作加速结论。可体验[阿岚8961](http://127.0.0.1:8961/)、[林舟8962](http://127.0.0.1:8962/)与[渡叶8963](http://127.0.0.1:8963/)，沿原世界8960、profiles及启动参数。实际[桌面截图](/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/interoperable-rules/on-demand/kernel-convergence/completion-ui-desktop.jpg)与[390×844截图](/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/interoperable-rules/on-demand/kernel-convergence/completion-ui-mobile.jpg)已保存，窄屏scrollWidth390，临时视口已恢复。清理自有过渡备份及诊断文件265133300文件字节，并移除此前分配占用4612KiB的临时源码副本和空测试目录；不将APFS并发变化当作精确释放量。活动世界、原profiles、当前已验恢复点及被历史记录固定引用的旧恢复点保留。原repo差异摘要复核不变；唯一账本记录实际路径与清理范围。按有效意图、发现、选择、行动和共同后果关联轮次，不以天数、时长或测试数宣布游戏完成；真人趣味性、跨机器、多CLI、任意自然目标稳定完成及真实迟到模型写入仍未验证。本轮不推送、部署或触碰生产。
+
+**当前版本启动：**服务现已运行。需要重新启动时，确认本轮对应端口已空闲，在两个终端分别执行；沿用原数据库和私人会话，不重新初始化。其他两人入口的固定参数沿唯一账本。
+
+```sh
+# 终端一：当前世界。
+cd /Users/mubin/Developer/agent-world/grove-composable-rules
+/Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python -m agent_world.grove_app --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/interoperable-rules/on-demand/new/world.sqlite3 --port 8960
+
+# 终端二：林舟的原网页与Agent会话。
+cd /Users/mubin/Developer/agent-world/grove-composable-rules
+/Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python -m agent_world.grove_connector --world-url http://127.0.0.1:8960 --port 8962 --storage /Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/interoperable-rules/on-demand/connector-new-a --runtime-storage /Users/mubin/Developer/agent-world/work/on-demand-runtime/new-a --opencode /Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode --credential-wrapper /Users/mubin/.local/bin/opencode-env
+```
+
+### 前序内核部分交付（e1d4af1，非本轮结构完成证据）
+
+**前次部分交付的准确归因：**材料事实归世界 `definitions.REGISTRY`，编译／反应显式接收材料表；删除的是重复内建材料表及Frame材料继承中的内建身份豁免列表，**不是燃料白名单**。`after` 新增机械结算后跨对象冻结读取与合同读视图。燃烧使用材料 `combustible`、规则失败回滚自身候选而保留机械后果和 `program_error`，均为基线已有且保留，不计为该轮新增。`AgentObservations` 封装呈现事实和动作绑定，`ExecutionController` 集中部分任务／授权／额度／原操作归属，但Session仍直接决定任务语义，三条主线均只部分完成。world21／state12沿正式迁移交接唯一计时任务，不补停机墙钟。下面691项、扩展及恢复记录仅为 `e1d4af1` 部分交付的行为证据，不替代本轮结构验收。
 
 **可被否定的扩展验收：**`examples/shared_grove_extensions.json` 两份定义均通过公开 `content_submit` 正式发表，没有新演示服务、库存注入或按实例名称加逻辑。材料器皿按真实水浓度与容量，将1u木、1u布、1u水变为4u湿合料；机械使用12／24／48齿、能量成本2、负载8、行程7。B在默认网页连接两段、合法采集并投入2u燃料，执行器实际到3；A的原会话继续投料并到7，然后停止。定义引用、原物件和数量变化均在唯一账本。B随后在网页暂停A的新器皿，并把其中4u同身份湿合料转入自己的原水壶。第二次反应先于B接管发生，不能写成B促成了第二次反应。
 

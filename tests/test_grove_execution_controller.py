@@ -26,6 +26,27 @@ CHECKPOINT_SCHEMA = {"type": "object", "required": ["task_id", "execution_segmen
 
 
 class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    def test_snapshot_and_unsettled_admission_keep_task_authority(self):
+        self.start()
+        self.controller.state.update(status="paused", request_status="unsettled", readback={"nested": {"x": 1}})
+        snapshot = self.controller.snapshot()
+        snapshot["readback"]["nested"]["x"] = 99
+        snapshot["request_status"] = "idle_confirmed"
+        self.assertEqual(self.controller.state["readback"]["nested"]["x"], 1)
+        decisions = self.controller.admission(entered=True, native_connected=True,
+            unknown=False, worker_busy=False, catalog=CATALOG)
+        self.assertTrue(all(not item["allowed"] for item in decisions.values()))
+        self.assertEqual(decisions["conversation"]["code"], "OriginalRequestUnsettled")
+
+    def test_late_settlement_cannot_release_replacement_task(self):
+        self.start()
+        owner = self.controller.settlement_started("session_identity")
+        self.controller.state.update(status="paused", request_status="idle_confirmed")
+        self.start(goal="Replacement goal")
+        before = deepcopy(self.controller.state)
+        self.assertIsNone(self.controller.settlement_finished(stage="session_status", elapsed_seconds=0, owner=owner))
+        self.assertEqual(self.controller.state, before)
+
     def setUp(self):
         self.persist = Mock()
         self.calls, self.receipts, self.replays = [], {}, []

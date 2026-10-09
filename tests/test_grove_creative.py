@@ -3,6 +3,7 @@ from collections import deque
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from unittest.mock import patch
 from agent_world import FunctionOutcome, FunctionSpec, WorldRuntime
 from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.worlds.shared_grove import make_world, model as m
-from agent_world.worlds.shared_grove import creative
+from agent_world.worlds.shared_grove import commit, creative
 from agent_world.worlds.shared_grove.definitions import COMBUSTION_CADENCE_TICKS
 from agent_world.simulation.matter import encoded_size
 from agent_world.simulation.programs import solve_mechanical
@@ -145,6 +146,78 @@ class CreativeWorldTests(unittest.TestCase):
             args["expected_item_version"] = self.entity(extra["item_id"])["version"]
         return self.call(actor, "grove.interact", args)
 
+    def test_competing_field_writes_keep_published_order_and_expose_policy(self):
+        definition = {"key": "field_priority", "name": "显式字段竞争", "version": 1,
+            "types": {"counter": {"name": "计数器", "body_material": "stone", "cost": {"stone": 1},
+                "fields": {"value": {"type": "integer", "default": 0, "min": 0, "max": 10}},
+                "rules": [{"id": rid, "phase": "after", "when": True,
+                    "effects": [{"op": "set", "field": "value", "value": value}]}
+                    for rid, value in (("z_last", 2), ("a_first", 1))]}}}
+        reference, objects = self.publish("A", definition, ["counter"])
+        read = self.read("B", "grove.definition_read", {"definition_ref": reference})
+        semantics = read["declaration_semantics"]
+        self.assertEqual(semantics["phase_policy"]["field_conflict"], "sequential_last_write")
+        self.assertEqual(semantics["potential_field_conflicts"]["counter"][0]["rule_ids"], ["a_first", "z_last"])
+        self.ticks(1)
+        self.assertEqual(self.entity(objects["counter"])["state"]["program"]["fields"]["value"], 2)
+        again = self.call("A", "grove.definition_publish", {"definition": definition})
+        self.assertTrue(again["already_published"])
+        self.assertEqual(again["definition_ref"], reference)
+
+    def test_formal_extensions_share_material_and_drive_commits_across_actors(self):
+        definitions = json.loads((Path(__file__).resolve().parents[1]/"examples/shared_grove_extensions.json").read_text())
+        ref, vat_objects = self.publish("A", definitions["material_processing"]["definition"], ["vat"])
+        vat = vat_objects["vat"]
+        kettle = self.item("A", "水壶")["id"]
+        source = next(entity for entity in self.view()["entities"] if "water_source" in entity["capabilities"])
+        self.approach("A", source["id"])
+        self.interact("A", source["id"], "fill", item_id=kettle, amount=2)
+        self.approach("A", vat)
+        for material in ("wood", "cloth", "water"):
+            item = next(item for item in self.view()["inventory"] if "personal" not in item["capabilities"]
+                        and any(lot["material"] == material for lot in item["matter"]))
+            lot = next(lot for lot in self.entity(item["id"])["matter"] if lot["material"] == material)
+            self.interact("A", vat, "transfer", item_id=item["id"], lot_id=lot["id"], amount=2)
+        self.action("A", vat, "enable_mixing")
+        self.ticks(1)
+        self.assertEqual(creative._quantities(self.entity(vat)), {"wood": 1, "cloth": 1, "water": 1, "binder": 4})
+        self.ticks(1)
+        self.assertEqual(self.entity(vat)["state"]["program"]["process"]["steps"], 1)
+        self.action("B", vat, "pause_mixing")
+        received = self.item("B", "水壶")["id"]
+        lot = next(lot for lot in self.entity(vat)["matter"] if lot["material"] == ref+"#binder")
+        self.interact("B", received, "transfer", item_id=vat, lot_id=lot["id"], amount=4)
+        self.action("B", vat, "enable_mixing")
+        self.ticks(1)
+        self.assertEqual(creative._quantities(self.entity(vat)), {"binder": 4})
+        self.assertEqual(sum(lot["quantity"] for lot in self.entity(received)["matter"] if lot["material"] == ref+"#binder"), 4)
+        # Honor the existing regional publication cooldown through normal simulated
+        # world steps. This wait proves a rule boundary, not additional play depth.
+        self.ticks(27)
+        _, drive = self.publish("B", definitions["mechanical_drive"]["definition"], ["source", "gear", "actuator"])
+        self.action("B", drive["source"], "connect", other_id=drive["gear"])
+        self.action("B", drive["gear"], "connect", other_id=drive["actuator"])
+        self.action("B", drive["source"], "fuel", item_id=self.item("B", "木柴")["id"], amount=2)
+        self.action("B", drive["source"], "start")
+        self.ticks(1)
+        self.assertEqual(self.entity(drive["actuator"])["state"]["program"]["mechanical"]["position"], 3)
+        self.action("A", drive["source"], "stop")
+        self.action("A", drive["source"], "fuel", item_id=self.item("A", "木柴")["id"], amount=4)
+        self.action("A", drive["source"], "start")
+        self.ticks(2)
+        self.action("A", drive["source"], "stop")
+        self.ticks(1)
+        mechanical = self.entity(drive["actuator"])["state"]["program"]["mechanical"]
+        self.assertEqual((mechanical["position"], mechanical["speed"]), (7, 0))
+        saved = {eid: self.entity(eid) for eid in [vat, received, *drive.values()]}
+        # Runtime opens storage transactions per operation; recreate it against
+        # the same persisted database without installing a fresh world.
+        self.world = WorldRuntime(self.db)
+        self.world.install_world("w", make_world())
+        self.assertEqual({eid: self.entity(eid) for eid in saved}, saved)
+        self.assertEqual(self.view("A")["player"]["id"], self.roles["A"])
+        self.assertEqual(self.view("B")["player"]["id"], self.roles["B"])
+
     def ticks(self, count):
         for _ in range(count):
             self.time.return_value += 1
@@ -176,7 +249,7 @@ class CreativeWorldTests(unittest.TestCase):
                       {"id": "activate", "phase": "after", "when": True,
                        "effects": [{"op": "set", "field": "armed", "value": True}]}]}}}
         definition = {**gate_definition, "types": {**gate_definition["types"], **observer_definition["types"]}}
-        original_spawn = m.spawn_entity
+        original_spawn = commit.spawn_entity
 
         def fixed_ids(ctx, entity):
             if entity.get("source") == "agent":
@@ -184,7 +257,7 @@ class CreativeWorldTests(unittest.TestCase):
                 entity = {**entity, "id": {"gate": gate_id, "observer": observer_id}[kind]}
             return original_spawn(ctx, entity)
 
-        with patch.object(m, "spawn_entity", side_effect=fixed_ids):
+        with patch.object(commit, "spawn_entity", side_effect=fixed_ids):
             self.publish("A", definition, ["gate", "observer"])
         self.ticks(1)
         self.assertFalse(self.entity(gate_id)["components"]["barrier"]["active"])
@@ -256,14 +329,14 @@ class CreativeWorldTests(unittest.TestCase):
             "pact": {"name": "读取上步传动", "body_material": "stone", "cost": {"stone": 1},
                 "contract": {"material": "wood", "quantity": 1, "duration_ticks": 100,
                              "completion_when": condition}}}
-        original_spawn = m.spawn_entity
+        original_spawn = commit.spawn_entity
 
         def fixed_source(ctx, entity):
             if entity.get("source") == "agent" and entity["state"]["program"]["type_id"] == "source":
                 entity = {**entity, "id": source_id}
             return original_spawn(ctx, entity)
 
-        with patch.object(m, "spawn_entity", side_effect=fixed_source):
+        with patch.object(commit, "spawn_entity", side_effect=fixed_source):
             _, objects = self.publish("A", definition, ["source", "pact"])
         pact_id = objects["pact"]
         offered = self.action("A", pact_id, "offer", other_id=self.roles["B"])
@@ -289,7 +362,7 @@ class CreativeWorldTests(unittest.TestCase):
             wood = next(e for eid in player["inventory"]
                         if (e := m.get_entity(ctx, eid))["name"] == "木柴")
             lot = next(lot for lot in wood["matter"] if lot["slot"] == "body")
-            m.transfer_material(ctx, wood, bag, lot["id"], 2, reason="persisted_contained_fixture")
+            commit.transfer_material(ctx, wood, bag, lot["id"], 2, reason="persisted_contained_fixture")
             return FunctionOutcome({})
         world = make_world()
         fixture = FunctionSpec("grove.contained_fixture", contained_fixture,
@@ -937,7 +1010,7 @@ class CreativeWorldTests(unittest.TestCase):
         # Controlled placement removes travel from this capacity regression.
         # Publication still pays real regional stock through content_submit.
         def visit(ctx, args):
-            m.ensure_chunk(ctx, args["cx"], args["cy"])
+            commit.ensure_chunk(ctx, args["cx"], args["cy"])
             player = m.get_player(ctx)
             player.update(x=args["cx"]*16+1, y=args["cy"]*16+1)
             m.save_player(ctx, player)
