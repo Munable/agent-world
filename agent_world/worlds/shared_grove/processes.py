@@ -152,218 +152,217 @@ def tick(ctx, args):
     if late:
         clock["epoch"] = m.identifier("clock")
     clock.update(sequence=sequence, last_tick_at=ctx.now, rules_version=RULES_VERSION)
-    commit.begin_batch(ctx)
-    changes, affected = [], []
-    processes = [p for pid in activity.active_process_ids(ctx) if (p := activity.get_process(ctx, pid)) and p["status"] == "active"]
-    if any(p.get("rules_version") != RULES_VERSION or p.get("rule_version") != 1 for p in processes):
-        raise RuleViolation("持久过程规则版本不匹配。请使用当前规则的新世界。")
-    if not late:
-        objects, chunks = activity.physical_closure(ctx)
-        original = deepcopy(objects)
-        protected = set()
-        for eid, entity in objects.items():
-            x, y = m.entity_location(ctx, entity)
-            if entity.get("owner") or "personal" in entity["components"] or m.is_safe(ctx, x, y):
-                protected.add(eid)
-        spills = {}
-        for cid in chunks:
-            _, cx, cy = cid.split("_")
-            spills.update(m.get_chunk(ctx, int(cx), int(cy)).get("water_reservoirs", {}))
-        frame = Frame(registry_for(objects), objects, sequence, protected=protected, spills=spills, bind_material=bind_material, mixture_capacity=mixture_capacity)
-        # Finite water contact spends one source lot with a deterministic budget.
-        contact_effects, source_available, wet_by_rain = [], {}, set()
-        for eid, entity in sorted(frame.objects.items()):
-            x, y = m.entity_location(ctx, entity)
-            if entity.get("owner") or x is None or "absorbent" not in entity["components"] or m.tile_at(ctx, x, y) != "water":
-                continue
-            targets = [[bound, capacity] for bound, capacity in sm.absorption_targets(entity, frame.objects)]
-            if not targets:
-                continue
-            _, sources = m.region_resources(ctx, *m.chunk_for(x, y))
-            amount = min(entity["components"]["absorbent"]["rate"], sum(target[1] for target in targets))
-            for source in sources:
-                if source["id"] not in frame.objects:
+    with commit.candidate_batch(ctx) as batch:
+        changes, affected = [], []
+        processes = [p for pid in activity.active_process_ids(ctx) if (p := activity.get_process(ctx, pid)) and p["status"] == "active"]
+        if any(p.get("rules_version") != RULES_VERSION or p.get("rule_version") != 1 for p in processes):
+            raise RuleViolation("持久过程规则版本不匹配。请使用当前规则的新世界。")
+        if not late:
+            objects, chunks = activity.physical_closure(ctx)
+            original = deepcopy(objects)
+            protected = set()
+            for eid, entity in objects.items():
+                x, y = m.entity_location(ctx, entity)
+                if entity.get("owner") or "personal" in entity["components"] or m.is_safe(ctx, x, y):
+                    protected.add(eid)
+            spills = {}
+            for cid in chunks:
+                _, cx, cy = cid.split("_")
+                spills.update(m.get_chunk(ctx, int(cx), int(cy)).get("water_reservoirs", {}))
+            frame = Frame(registry_for(objects), objects, sequence, protected=protected, spills=spills, bind_material=bind_material, mixture_capacity=mixture_capacity)
+            # Finite water contact spends one source lot with a deterministic budget.
+            contact_effects, source_available, wet_by_rain = [], {}, set()
+            for eid, entity in sorted(frame.objects.items()):
+                x, y = m.entity_location(ctx, entity)
+                if entity.get("owner") or x is None or "absorbent" not in entity["components"] or m.tile_at(ctx, x, y) != "water":
                     continue
-                for lot in source["matter"]:
-                    if lot["material"] != "water" or lot["slot"] != "contained":
-                        continue
-                    key = (source["id"], lot["id"])
-                    available = source_available.setdefault(key, lot["quantity"])
-                    for target in targets:
-                        take = min(amount, available, target[1])
-                        if take:
-                            contact_effects.append(Transfer(source["id"], lot["id"], eid, take, "absorbed", target[0]))
-                            available -= take
-                            source_available[key] -= take
-                            amount -= take
-                            target[1] -= take
-                            wet_by_rain.add(eid)
-        frame.apply(contact_effects)
-        inputs = []
-        absorption = {eid: [[bound, capacity] for bound, capacity in sm.absorption_targets(entity, frame.objects)] for eid, entity in frame.objects.items()}
-        # Rain proposes its finite capture before the reducer checks actual
-        # shared liquid/mixture room. Rejected capture remains a declared drain
-        # and consumes the original rain budget; it cannot move to another target.
-        proposed_water = {eid: sm.quantity(entity, "water", "contained") for eid, entity in frame.objects.items()}
-        for process in sorted(processes, key=lambda p:p["id"]):
-            if process["kind"] != "rain" or sequence <= process["start_tick"]:
-                continue
-            if sequence <= process["end_tick"]:
-                for eid, entity in sorted(frame.objects.items()):
-                    if not m.is_ground(entity) or m.chunk_id(*m.chunk_for(entity["x"], entity["y"])) not in process["chunk_ids"]:
-                        continue
-                    effect = building.rain_effect(ctx, entity, process["intensity"])
-                    if effect.get("protected_by"):
-                        continue
-                    amount = min(process["intensity"], process["water_remaining"])
-                    collect = effect.get("collect_capacity", 0)
-                    rate = effect.get("collect_rate", 0)
-                    if "water_source" in entity["components"]:
-                        collect = entity["components"]["water_source"]["capacity"]
-                        rate = process["intensity"]
-                    captured = min(amount, rate, max(0, collect-proposed_water[eid])) if collect else 0
-                    if captured:
-                        inputs.append({"target": eid, "material": "water", "quantity": captured, "slot": "contained", "reason": "rain"})
-                        proposed_water[eid] += captured
-                        amount -= captured
-                        process["water_remaining"] -= captured
-                    for target in absorption[eid]:
-                        taken = min(amount, target[1])
-                        if taken:
-                            inputs.append({"target": eid, "material": "water", "quantity": taken, "slot": "absorbed", "reason": "rain", "bound_to": target[0]})
-                            target[1] -= taken
-                            amount -= taken
-                            process["water_remaining"] -= taken
-                            wet_by_rain.add(eid)
-            process["remaining_ticks"] = max(0, process["end_tick"]-sequence)
-            if sequence >= process["end_tick"]:
-                process["status"] = "complete"
-                changes.append("短雨结束。")
-            activity.save_process(ctx, process)
-        # Existing structure helper only enables the declared fuel lots and
-        # identifies deduplicated dry targets; all quantity rates stay in rules.
-        heated = building.tick_structures(ctx, sequence, changes, frame.objects, dirty=frame.dirty)
-        frame.inputs, frame.heated, frame.wet_by_rain = tuple(inputs), frozenset(heated), frozenset(wet_by_rain)
-        moves, drift_by_entity, destinations = [], {}, set()
-        for process in sorted(processes, key=lambda p:p["id"]):
-            if process["kind"] != "drift" or sequence <= process["start_tick"]:
-                continue
-            entity = frame.objects.get(process["entity_id"])
-            index = process["route_index"]+1
-            if entity is None or not m.is_ground(entity) or index >= len(process["route"]):
-                process["status"] = "complete"
-            else:
-                point = process["route"][index]
-                key = point["x"], point["y"]
-                occupants = m.public_entities_near(ctx, *key, radius=0, limit=m.MAX_CHUNK_ENTITIES)
-                if (key in destinations or m.is_safe(ctx, *key) or m.public_players_near(ctx, *key, radius=0)
-                        or any(obj["id"] != entity["id"] for obj in occupants)):
-                    process["paused"] = True
-                else:
-                    moves.append({"target": entity["id"], **point})
-                    drift_by_entity[entity["id"]] = process
-                    destinations.add(key)
-            process["remaining_ticks"] = max(0, process["end_tick"]-sequence)
-            if sequence >= process["end_tick"]:
-                process["status"] = "complete"
-        frame.moves = tuple(moves)
-        try:
-            frame.run()
-            frame.verify_balance()
-        except ValueError as exc:
-            raise RuleViolation(str(exc)) from exc
-        # Growth is an explicit biological source, paid by the tend water sink.
-        for process in processes:
-            if process["kind"] != "growth":
-                continue
-            process["remaining_ticks"] = max(0, process["end_tick"]-sequence)
-            node = frame.objects.get(process["entity_id"])
-            if not node or node["lifecycle"] != "intact":
-                process["status"] = "complete"
-            elif sequence >= process["end_tick"]:
-                resource = node["components"]["resource"]
-                quantity = min(REGISTRY.materials[resource["material"]].piece_quantity,
-                               resource["capacity"]*REGISTRY.materials[resource["material"]].piece_quantity-sm.quantity(node, resource["material"], "contained"))
-                frame.apply([Source(node["id"], resource["material"], quantity, "contained", "growth")], allowed_sources={"growth"})
-                node["state"]["regrowth_tick"] = None
-                resource.pop("regrowth_tick", None)
-                process["status"] = "complete"
-                changes.append(f"{node['name']}经照料再生了一份材料。")
-            activity.save_process(ctx, process)
-        # Spread never advances the newly ignited material's rate in this tick.
-        ctx._grove_entities.update(deepcopy(frame.objects))
-        if sequence % COMBUSTION_CADENCE_TICKS == 0:
-            spread = SPREAD_BATCH
-            for entity in sorted(frame.objects.values(), key=lambda obj:obj["id"]):
-                if not spread or not m.is_ground(entity) or not entity["components"].get("combustion", {}).get("spread") or not any(lot.get("burning") for lot in entity["matter"]):
+                targets = [[bound, capacity] for bound, capacity in sm.absorption_targets(entity, frame.objects)]
+                if not targets:
                     continue
-                for target in m.public_entities_near(ctx, entity["x"], entity["y"], radius=1, limit=m.MAX_CHUNK_ENTITIES):
-                    if abs(target["x"]-entity["x"])+abs(target["y"]-entity["y"]) != 1 or target["id"] not in frame.objects or target["id"] in protected:
+                _, sources = m.region_resources(ctx, *m.chunk_for(x, y))
+                amount = min(entity["components"]["absorbent"]["rate"], sum(target[1] for target in targets))
+                for source in sources:
+                    if source["id"] not in frame.objects:
                         continue
-                    current = frame.objects[target["id"]]
-                    if any(lot.get("burning") for lot in current["matter"]) or sm.quantity(current, "water", "surface"):
-                        continue
-                    burning_count = sum(any(lot.get("burning") for lot in obj["matter"]) for obj in frame.objects.values())
-                    if burning_count >= MAX_BURNING_ENTITIES:
-                        break
-                    lot = next((lot for lot in current["matter"] if sm.ignitable_lot(frame.registry, current, lot, frame.objects)), None)
-                    if lot:
-                        lot["burning"] = True
-                        sm.project(registry_for(frame.objects), current)
-                        ctx._grove_entities[current["id"]] = deepcopy(current)
-                        try:
-                            activity.physical_closure(ctx, list(frame.objects.values()))
-                        except RuleViolation:
-                            lot["burning"] = False
-                            sm.project(registry_for(frame.objects), current)
-                            ctx._grove_entities[current["id"]] = deepcopy(current)
+                    for lot in source["matter"]:
+                        if lot["material"] != "water" or lot["slot"] != "contained":
                             continue
-                        frame.dirty.add(current["id"])
-                        spread -= 1
-                        changes.append(f"火蔓延到相邻的{current['name']}。")
-                        if not spread:
-                            break
-        committed = commit.commit_frame(ctx, frame, chunks=chunks, tick=sequence)
-        for eid in sorted(committed):
-            entity = m.get_entity(ctx, eid)
-            if m.is_ground(entity):
-                affected.append({"x": entity["x"], "y": entity["y"], "entity_id": eid})
-        outcomes = []
-        for eid in frame.broken:
-            if frame.objects[eid].get("owner") or frame.objects[eid].get("physical_parent"):
-                continue
-            changes.append(f"{frame.objects[eid]['name']}结构失效，剩余材料和原内容留在现场。")
-            outcomes.append((eid, "broken", changes[-1], None))
-        for process in processes:
-            if process["kind"] == "drift":
+                        key = (source["id"], lot["id"])
+                        available = source_available.setdefault(key, lot["quantity"])
+                        for target in targets:
+                            take = min(amount, available, target[1])
+                            if take:
+                                contact_effects.append(Transfer(source["id"], lot["id"], eid, take, "absorbed", target[0]))
+                                available -= take
+                                source_available[key] -= take
+                                amount -= take
+                                target[1] -= take
+                                wet_by_rain.add(eid)
+            frame.apply(contact_effects)
+            inputs = []
+            absorption = {eid: [[bound, capacity] for bound, capacity in sm.absorption_targets(entity, frame.objects)] for eid, entity in frame.objects.items()}
+            # Rain proposes its finite capture before the reducer checks actual
+            # shared liquid/mixture room. Rejected capture remains a declared drain
+            # and consumes the original rain budget; it cannot move to another target.
+            proposed_water = {eid: sm.quantity(entity, "water", "contained") for eid, entity in frame.objects.items()}
+            for process in sorted(processes, key=lambda p:p["id"]):
+                if process["kind"] != "rain" or sequence <= process["start_tick"]:
+                    continue
+                if sequence <= process["end_tick"]:
+                    for eid, entity in sorted(frame.objects.items()):
+                        if not m.is_ground(entity) or m.chunk_id(*m.chunk_for(entity["x"], entity["y"])) not in process["chunk_ids"]:
+                            continue
+                        effect = building.rain_effect(ctx, entity, process["intensity"])
+                        if effect.get("protected_by"):
+                            continue
+                        amount = min(process["intensity"], process["water_remaining"])
+                        collect = effect.get("collect_capacity", 0)
+                        rate = effect.get("collect_rate", 0)
+                        if "water_source" in entity["components"]:
+                            collect = entity["components"]["water_source"]["capacity"]
+                            rate = process["intensity"]
+                        captured = min(amount, rate, max(0, collect-proposed_water[eid])) if collect else 0
+                        if captured:
+                            inputs.append({"target": eid, "material": "water", "quantity": captured, "slot": "contained", "reason": "rain"})
+                            proposed_water[eid] += captured
+                            amount -= captured
+                            process["water_remaining"] -= captured
+                        for target in absorption[eid]:
+                            taken = min(amount, target[1])
+                            if taken:
+                                inputs.append({"target": eid, "material": "water", "quantity": taken, "slot": "absorbed", "reason": "rain", "bound_to": target[0]})
+                                target[1] -= taken
+                                amount -= taken
+                                process["water_remaining"] -= taken
+                                wet_by_rain.add(eid)
+                process["remaining_ticks"] = max(0, process["end_tick"]-sequence)
+                if sequence >= process["end_tick"]:
+                    process["status"] = "complete"
+                    changes.append("短雨结束。")
+                activity.save_process(ctx, process)
+            # Existing structure helper only enables the declared fuel lots and
+            # identifies deduplicated dry targets; all quantity rates stay in rules.
+            heated = building.tick_structures(ctx, sequence, changes, frame.objects, dirty=frame.dirty)
+            frame.inputs, frame.heated, frame.wet_by_rain = tuple(inputs), frozenset(heated), frozenset(wet_by_rain)
+            moves, drift_by_entity, destinations = [], {}, set()
+            for process in sorted(processes, key=lambda p:p["id"]):
+                if process["kind"] != "drift" or sequence <= process["start_tick"]:
+                    continue
                 entity = frame.objects.get(process["entity_id"])
-                before = original.get(process["entity_id"])
-                if entity and before and (entity.get("x"), entity.get("y")) != (before.get("x"), before.get("y")):
-                    process["route_index"] += 1
-                    process["paused"] = False
-                    process["chunk_ids"] = [m.chunk_id(*m.chunk_for(entity["x"], entity["y"]))]
-                    if m.tile_at(ctx, entity["x"], entity["y"]) != "water":
-                        process["status"] = "complete"
-                        changes.append(f"{entity['name']}漂到了岸边。")
-                        outcomes.append((entity["id"], "shore", changes[-1], process["id"]))
-                elif entity and entity["lifecycle"] != "intact":
+                index = process["route_index"]+1
+                if entity is None or not m.is_ground(entity) or index >= len(process["route"]):
                     process["status"] = "complete"
                 else:
-                    process["paused"] = True
+                    point = process["route"][index]
+                    key = point["x"], point["y"]
+                    occupants = m.public_entities_near(ctx, *key, radius=0, limit=m.MAX_CHUNK_ENTITIES)
+                    if (key in destinations or m.is_safe(ctx, *key) or m.public_players_near(ctx, *key, radius=0)
+                            or any(obj["id"] != entity["id"] for obj in occupants)):
+                        process["paused"] = True
+                    else:
+                        moves.append({"target": entity["id"], **point})
+                        drift_by_entity[entity["id"]] = process
+                        destinations.add(key)
+                process["remaining_ticks"] = max(0, process["end_tick"]-sequence)
+                if sequence >= process["end_tick"]:
+                    process["status"] = "complete"
+            frame.moves = tuple(moves)
+            try:
+                frame.run()
+                frame.verify_balance()
+            except ValueError as exc:
+                raise RuleViolation(str(exc)) from exc
+            # Growth is an explicit biological source, paid by the tend water sink.
+            for process in processes:
+                if process["kind"] != "growth":
+                    continue
+                process["remaining_ticks"] = max(0, process["end_tick"]-sequence)
+                node = frame.objects.get(process["entity_id"])
+                if not node or node["lifecycle"] != "intact":
+                    process["status"] = "complete"
+                elif sequence >= process["end_tick"]:
+                    resource = node["components"]["resource"]
+                    quantity = min(REGISTRY.materials[resource["material"]].piece_quantity,
+                                   resource["capacity"]*REGISTRY.materials[resource["material"]].piece_quantity-sm.quantity(node, resource["material"], "contained"))
+                    frame.apply([Source(node["id"], resource["material"], quantity, "contained", "growth")], allowed_sources={"growth"})
+                    node["state"]["regrowth_tick"] = None
+                    resource.pop("regrowth_tick", None)
+                    process["status"] = "complete"
+                    changes.append(f"{node['name']}经照料再生了一份材料。")
                 activity.save_process(ctx, process)
-            if process["status"] == "complete":
-                _finished_opportunity(ctx, process)
-        # Each wet/burning/overloaded object's state has already advanced fully.
-        # No density-dependent scan delays, query materialization or catch-up.
-    ctx.set_state(m.META, "clock", clock)
-    if not late:
-        from .creative import tick as creative_tick
-        creative_outcomes = creative_tick(ctx)
-        outcomes.extend((eid, action, summary, None) for eid, action, summary in creative_outcomes)
-        changes.extend(summary for _, _, summary in creative_outcomes)
-    for summary in changes[:8]:
-        commit.record_change(ctx, summary, x=None, y=None, action="process")
-    commit.flush_batch(ctx)
+            # Spread never advances the newly ignited material's rate in this tick.
+            batch.entities.update(deepcopy(frame.objects))
+            if sequence % COMBUSTION_CADENCE_TICKS == 0:
+                spread = SPREAD_BATCH
+                for entity in sorted(frame.objects.values(), key=lambda obj:obj["id"]):
+                    if not spread or not m.is_ground(entity) or not entity["components"].get("combustion", {}).get("spread") or not any(lot.get("burning") for lot in entity["matter"]):
+                        continue
+                    for target in m.public_entities_near(ctx, entity["x"], entity["y"], radius=1, limit=m.MAX_CHUNK_ENTITIES):
+                        if abs(target["x"]-entity["x"])+abs(target["y"]-entity["y"]) != 1 or target["id"] not in frame.objects or target["id"] in protected:
+                            continue
+                        current = frame.objects[target["id"]]
+                        if any(lot.get("burning") for lot in current["matter"]) or sm.quantity(current, "water", "surface"):
+                            continue
+                        burning_count = sum(any(lot.get("burning") for lot in obj["matter"]) for obj in frame.objects.values())
+                        if burning_count >= MAX_BURNING_ENTITIES:
+                            break
+                        lot = next((lot for lot in current["matter"] if sm.ignitable_lot(frame.registry, current, lot, frame.objects)), None)
+                        if lot:
+                            lot["burning"] = True
+                            sm.project(registry_for(frame.objects), current)
+                            batch.entities[current["id"]] = deepcopy(current)
+                            try:
+                                activity.physical_closure(ctx, list(frame.objects.values()))
+                            except RuleViolation:
+                                lot["burning"] = False
+                                sm.project(registry_for(frame.objects), current)
+                                batch.entities[current["id"]] = deepcopy(current)
+                                continue
+                            frame.dirty.add(current["id"])
+                            spread -= 1
+                            changes.append(f"火蔓延到相邻的{current['name']}。")
+                            if not spread:
+                                break
+            committed = commit.commit_frame(ctx, frame, chunks=chunks, tick=sequence)
+            for eid in sorted(committed):
+                entity = m.get_entity(ctx, eid)
+                if m.is_ground(entity):
+                    affected.append({"x": entity["x"], "y": entity["y"], "entity_id": eid})
+            outcomes = []
+            for eid in frame.broken:
+                if frame.objects[eid].get("owner") or frame.objects[eid].get("physical_parent"):
+                    continue
+                changes.append(f"{frame.objects[eid]['name']}结构失效，剩余材料和原内容留在现场。")
+                outcomes.append((eid, "broken", changes[-1], None))
+            for process in processes:
+                if process["kind"] == "drift":
+                    entity = frame.objects.get(process["entity_id"])
+                    before = original.get(process["entity_id"])
+                    if entity and before and (entity.get("x"), entity.get("y")) != (before.get("x"), before.get("y")):
+                        process["route_index"] += 1
+                        process["paused"] = False
+                        process["chunk_ids"] = [m.chunk_id(*m.chunk_for(entity["x"], entity["y"]))]
+                        if m.tile_at(ctx, entity["x"], entity["y"]) != "water":
+                            process["status"] = "complete"
+                            changes.append(f"{entity['name']}漂到了岸边。")
+                            outcomes.append((entity["id"], "shore", changes[-1], process["id"]))
+                    elif entity and entity["lifecycle"] != "intact":
+                        process["status"] = "complete"
+                    else:
+                        process["paused"] = True
+                    activity.save_process(ctx, process)
+                if process["status"] == "complete":
+                    _finished_opportunity(ctx, process)
+            # Each wet/burning/overloaded object's state has already advanced fully.
+            # No density-dependent scan delays, query materialization or catch-up.
+        ctx.set_state(m.META, "clock", clock)
+        if not late:
+            from .creative import tick as creative_tick
+            creative_outcomes = creative_tick(ctx)
+            outcomes.extend((eid, action, summary, None) for eid, action, summary in creative_outcomes)
+            changes.extend(summary for _, _, summary in creative_outcomes)
+        for summary in changes[:8]:
+            commit.record_change(ctx, summary, x=None, y=None, action="process")
     from .generation import record_content_outcomes
     record_content_outcomes(ctx, [{"entity_id": entity_id, "action": action, "summary": summary, "process_id": process_id}
                                  for entity_id, action, summary, process_id in (outcomes if not late else [])])

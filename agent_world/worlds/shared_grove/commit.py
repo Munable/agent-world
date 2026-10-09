@@ -8,6 +8,7 @@ Storage and simulation never call back into the action or authored-rule runner.
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager, nullcontext
 import hashlib
 
 from agent_world.errors import RuleViolation, StateConflict
@@ -500,38 +501,43 @@ def public_event(ctx, **fact):
         save_entity(ctx, entity)
 
 
-_BATCH_ATTRIBUTES = (
-    "_grove_entities", "_grove_chunks", "_grove_players", "_grove_dirty_entities", "_grove_dirty_chunks",
-    "_grove_dirty_players", "_grove_process_cache", "_grove_process_versions", "_grove_pending_processes",
-    "_grove_meta_cache", "_grove_pending_meta",
-)
+@contextmanager
+def candidate_batch(ctx):
+    """Own one candidate view: flush on success, discard it on every exit.
+
+    This is not a transaction. Runtime still owns atomic state, effects,
+    receipts and rollback. Reducers join this view but never close it; a failed
+    normalization, capacity check, event admission or CAS escapes to Runtime.
+    """
+    if getattr(ctx, "_grove_batch", None) is not None:
+        raise RuntimeError("A Grove candidate batch already has an owner.")
+    batch = m.CandidateBatch()
+    ctx._grove_batch = batch
+    try:
+        yield batch
+        _flush_batch(ctx, batch)
+    finally:
+        del ctx._grove_batch
 
 
-def begin_batch(ctx):
-    m.begin_batch(ctx)
-    ctx._grove_process_cache, ctx._grove_process_versions = {}, {}
-    ctx._grove_pending_processes = set()
-    ctx._grove_meta_cache, ctx._grove_pending_meta = {}, set()
-
-
-def flush_batch(ctx):
-    """Write admitted object/index/process/meta candidates through existing CAS."""
-    if (len(ctx._grove_pending_processes) > activity.MAX_PROCESSES
-            or len(ctx._grove_pending_meta) > activity.MAX_FRAME_META):
+def _flush_batch(ctx, batch):
+    """Write this owner's admitted state and public facts through existing CAS."""
+    if (len(batch.dirty_processes) > activity.MAX_PROCESSES
+            or len(batch.dirty_meta) > activity.MAX_FRAME_META):
         raise RuleViolation("过程及索引写入超过预留记录预算。")
-    m.flush_batch(ctx)
-    for pid in sorted(ctx._grove_pending_processes):
-        process = ctx._grove_process_cache[pid]
+    m.write_candidates(ctx, batch)
+    for pid in sorted(batch.dirty_processes):
+        process = batch.processes[pid]
         value = {k:v for k,v in process.items() if k != "version"}
         if sm.encoded_size(value) > activity.MAX_PROCESS_BYTES:
             raise RuleViolation("过程记录超过准入预算。")
-        ctx.set_state(m.PROCESSES, pid, value, expected_version=ctx._grove_process_versions[pid])
-    for key in sorted(ctx._grove_pending_meta):
-        ctx.set_state(m.META, key, ctx._grove_meta_cache[key])
-    # A caller-owned batch ends here. Later action/event writes must not remain
-    # hidden in a cache that will never be flushed again in this transaction.
-    for name in _BATCH_ATTRIBUTES:
-        delattr(ctx, name)
+        ctx.set_state(m.PROCESSES, pid, value, expected_version=batch.process_versions[pid])
+    for key in sorted(batch.dirty_meta):
+        ctx.set_state(m.META, key, batch.meta[key])
+    if batch.event_journal is not None:
+        events._save(ctx, m.META, "creative_events", batch.event_journal)
+    for eid, record in sorted(batch.records.items()):
+        events._save(ctx, events.RECORDS, eid, record)
 
 
 def commit_results(ctx, objects, dirty, *, accounts=None, spills=None, chunks=(), tick=None):
@@ -542,44 +548,50 @@ def commit_results(ctx, objects, dirty, *, accounts=None, spills=None, chunks=()
     inventory membership, finite spilled water and accounts are common effects
     of action and tick results, never separately reimplemented by those runners.
     """
-    own_batch = not hasattr(ctx, "_grove_entities")
-    if own_batch:
-        begin_batch(ctx)
-    candidates = deepcopy(objects)
-    changed = set(dirty)
-    for eid, entity in candidates.items():
-        if physical_contract_failure(ctx, entity, tick=tick):
-            changed.add(eid)
-    ctx._grove_entities.update(candidates)
-    ctx._grove_dirty_entities.update(changed)
-    for eid in sorted(changed):
-        entity = candidates[eid]
-        save_entity(ctx, entity)
-        if entity["lifecycle"] == "consumed" and entity.get("owner"):
-            player = m.get_player(ctx, entity["owner"])
-            if eid in player["inventory"]:
-                player["inventory"].remove(eid)
-                m.save_player(ctx, player)
-    if spills is not None:
-        covered = set(chunks)
-        indexed = set(activity.meta_get(ctx, "spill_chunks", []))-covered
-        for cid in sorted(covered):
-            _, cx, cy = cid.split("_")
-            point = int(cx), int(cy)
-            chunk = m.get_chunk(ctx, *point)
-            held = {key: amount for key, amount in spills.items()
-                    if amount and m.chunk_for(*map(int, key.split(","))) == point}
-            if held != chunk.get("water_reservoirs", {}):
-                chunk["water_reservoirs"] = held
-                m.save_chunk(ctx, chunk)
-            if held:
-                indexed.add(cid)
-        activity.meta_set(ctx, "spill_chunks", sorted(indexed))
-    for (category, material, reason), amount in sorted((accounts or {}).items()):
-        record_account(ctx, category, material, amount, reason)
-    if own_batch:
-        flush_batch(ctx)
-    return changed
+    current = getattr(ctx, "_grove_batch", None)
+    # Ordinary actions own their small batch; physics and authored rules join
+    # their logical step's existing owner. Only that owner flushes or discards.
+    with (candidate_batch(ctx) if current is None else nullcontext(current)) as batch:
+        candidates = deepcopy(objects)
+        changed = set(dirty)
+        for eid, entity in candidates.items():
+            if physical_contract_failure(ctx, entity, tick=tick):
+                changed.add(eid)
+        batch.entities.update(candidates)
+        batch.dirty_entities.update(changed)
+        for eid in sorted(changed):
+            entity = candidates[eid]
+            save_entity(ctx, entity)
+            if entity["lifecycle"] == "consumed" and entity.get("owner"):
+                player = m.get_player(ctx, entity["owner"])
+                if eid in player["inventory"]:
+                    player["inventory"].remove(eid)
+                    m.save_player(ctx, player)
+        if spills is not None:
+            covered = set(chunks)
+            indexed = set(activity.meta_get(ctx, "spill_chunks", []))-covered
+            # Partition this frame's final reservoirs once, rather than
+            # parsing every spilled coordinate again for each covered chunk.
+            by_point = {}
+            if covered:
+                for key, amount in spills.items():
+                    if amount:
+                        point = m.chunk_for(*map(int, key.split(",")))
+                        by_point.setdefault(point, {})[key] = amount
+            for cid in sorted(covered):
+                _, cx, cy = cid.split("_")
+                point = int(cx), int(cy)
+                chunk = m.get_chunk(ctx, *point)
+                held = by_point.get(point, {})
+                if held != chunk.get("water_reservoirs", {}):
+                    chunk["water_reservoirs"] = held
+                    m.save_chunk(ctx, chunk)
+                if held:
+                    indexed.add(cid)
+            activity.meta_set(ctx, "spill_chunks", sorted(indexed))
+        for (category, material, reason), amount in sorted((accounts or {}).items()):
+            record_account(ctx, category, material, amount, reason)
+        return changed
 
 
 def commit_frame(ctx, frame, *, chunks=(), tick=None):

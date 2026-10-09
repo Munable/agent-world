@@ -32,7 +32,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.uncertain_write, self.host_busy = False, False
         self.attach(self.session)
         self.session.execution_controller.state.update(task_id="test-task", goal="Go to the observed destination",
-            segment_id="test-segment", status="starting", max_actions=4, remaining_actions=4, max_requests=4,
+            segment_id="test-segment", status="starting", max_actions=4, max_requests=4,
             context_reference_attempted=False)
 
     def attach(self, session):
@@ -87,7 +87,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def host(self, method, path, body=None, timeout=15):
         if path.endswith("/abort"):
-            self.assertFalse(self.session.active_execution)
+            self.assertFalse(self.session.execution_controller.active)
             self.aborts += 1
             return True
         if path == "/session/status":
@@ -164,7 +164,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         await self.session.execute_goal(self.session.execution["goal"])
         self.assertEqual(self.requests, 1)
         self.assertEqual(self.session.execution["request_status"], "unsettled")
-        self.assertFalse(self.session.active_execution)
+        self.assertFalse(self.session.execution_controller.active)
         self.assertFalse(self.session.execution["resume_allowed"])
 
     async def test_cancel_before_any_native_session_does_not_lock_first_entry(self):
@@ -263,7 +263,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await self.session.execute_goal(self.session.execution["goal"])
         self.assertEqual((self.requests, len(self.attempts)), (1, 1))
-        self.assertFalse(self.session.active_execution)
+        self.assertFalse(self.session.execution_controller.active)
 
     async def test_fast_reclaim_confirms_world_before_slow_abort_and_blocks_new_tasks(self):
         await self.session.invoke('grove.control_grant',{'goal':'Keep exploring','max_actions':4})
@@ -318,7 +318,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.execution["status"], "completed")
 
     async def test_untouched_task_restores_own_zero_and_ignores_other_control_counts(self):
-        self.session.execution_controller.state.update(status="paused", actions_count=1, remaining_actions=3,
+        self.session.execution_controller.state.update(status="paused", actions_count=1,
             grant_version=99, readback_actions_count=1)
         self.session.remember()
         self.session = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
@@ -327,13 +327,13 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         task = self.session.execution_controller.state
         self.assertEqual((task["task_id"], task["goal"], task["max_actions"], task["max_requests"]),
             ("test-task", "Go to the observed destination", 4, 4))
-        self.assertEqual((task["actions_count"], task["remaining_actions"], task["requests_used"]), (0, 4, 0))
+        self.assertEqual((task["actions_count"], self.session.execution_controller.remaining_actions, task["requests_used"]), (0, 4, 0))
         self.assertEqual(task["receipts"], [])
         self.assertIsNone(task["grant_operation_id"])
         # A matching goal string also does not grant this new task ownership of
         # a prior control record. It needs its own original grant receipt.
         for old_goal in ("Previous goal", task["goal"]):
-            self.session.update_execution_control({"goal": old_goal, "status": "active",
+            self.session.execution_controller.update_control({"goal": old_goal, "status": "active",
                 "actions_count": 7, "max_actions": 8, "version": 100})
             self.assertEqual(task["actions_count"], 0)
             self.assertFalse(task["delegation_active"])
@@ -345,9 +345,9 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         task["status"] = "running"
         await self.move()
         self.assertEqual(task["actions_count"], 1)
-        self.session.update_execution_control({"goal": "Different current goal", "status": "active",
+        self.session.execution_controller.update_control({"goal": "Different current goal", "status": "active",
             "actions_count": 7, "max_actions": 8, "version": 101})
-        self.assertEqual((task["actions_count"], task["remaining_actions"]), (1, 3))
+        self.assertEqual((task["actions_count"], self.session.execution_controller.remaining_actions), (1, 3))
         self.assertFalse(task["delegation_active"])
 
     async def test_metadata_timeout_identifies_unconfirmed_stage_without_grant_or_model(self):
@@ -428,11 +428,11 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(patches),2)
 
     async def test_early_confirmed_progress_remains_usable_after_many_rejected_attempts(self):
-        self.session.execution_receipt("grove.move", "original-confirmed-action", {"commit_seq":7}, status="confirmed")
+        self.session.execution_controller.receipt("grove.move", "original-confirmed-action", {"commit_seq":7}, status="confirmed")
         # These attempts fit the task's 8 x 16 tool-call allowance. Rejections
         # do not consume its successful-action allowance.
         for number in range(80):
-            self.session.execution_receipt("grove.rule_action", f"rejected-{number}", status="rejected")
+            self.session.execution_controller.receipt("grove.rule_action", f"rejected-{number}", status="rejected")
         self.session.execution_controller.active = True
         self.session.execution_controller.state["status"] = "running"
         await self.session.execution_checkpoint({"task_id":"test-task", "status":"continue",
@@ -485,7 +485,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
                 self.summary_calls += 1
                 self.assertEqual(body, {"providerID": "provider", "modelID": "model", "auto": False})
                 self.assertFalse(self.grants)
-                self.assertFalse(self.session.active_execution)
+                self.assertFalse(self.session.execution_controller.active)
                 self.assertEqual(self.session.execution["requests_used"], 1)
                 messages.extend([{"info": {"id": "compact-user", "role": "user", "sessionID": "test-session"},
                     "parts": [{"type": "compaction", "auto": False}]},
@@ -526,7 +526,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
             await self.session.execute_goal(self.session.execution["goal"])
         self.assertEqual((self.summary_calls, self.requests, len(self.grants)), (1, 0, 0))
         self.assertEqual(self.session.execution["history_recovery"]["status"], "failed")
-        self.assertFalse(self.session.execution_can_resume())
+        self.assertFalse(self.session.execution_controller.can_resume())
         app = create_connector_app(storage=self.manager.storage, wrapper=None)
         app.state.connector.authorized = Mock(return_value=self.session)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=self.manager.local_url,
@@ -542,9 +542,9 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
             await self.session.recover_execution_history()
         self.assertEqual(self.session.execution["history_recovery"]["status"], "uncertain")
         self.session.execution_controller.state.update(status="paused", request_status="idle_confirmed")
-        self.assertFalse(self.session.execution_can_resume())
+        self.assertFalse(self.session.execution_controller.can_resume())
         await self.session.verify_history_recovery()
-        self.assertTrue(self.session.execution_can_resume())
+        self.assertTrue(self.session.execution_controller.can_resume())
         self.assertEqual((self.summary_calls, self.session.execution["requests_used"], self.requests, len(self.grants)), (1, 1, 0, 0))
         self.assertIsNone(self.session.execution["goal_result"])
 
@@ -626,8 +626,8 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_contract_world_verdict_does_not_prove_extra_goal_or_release(self):
         self.session.execution_controller.state.update(context_entity_id="bound-contract", goal="完成交付并取回收益", status="paused")
-        self.session.execution_world_results(self.contract_facts(), establish_reference=True)
-        result = self.session.execution_world_results(self.contract_facts(status="complete"))[0]
+        self.session.execution_controller.world_results(self.contract_facts(), establish_reference=True)
+        result = self.session.execution_controller.world_results(self.contract_facts(status="complete"))[0]
         self.assertEqual(result["verification"]["status"], "verified_complete")
         self.assertEqual(result["released"], 0)
         self.assertEqual(self.session.execution["status"], "paused")
@@ -636,19 +636,19 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_changed_contract_terms_and_other_object_cannot_replace_original_reference(self):
         self.session.execution_controller.state["context_entity_id"] = "bound-contract"
-        self.session.execution_world_results(self.contract_facts(), establish_reference=True)
+        self.session.execution_controller.world_results(self.contract_facts(), establish_reference=True)
         original = deepcopy(self.session.execution["context_result_reference"])
-        changed = self.session.execution_world_results(self.contract_facts(terms=2, status="complete"), establish_reference=True)[0]
+        changed = self.session.execution_controller.world_results(self.contract_facts(terms=2, status="complete"), establish_reference=True)[0]
         self.assertEqual(changed["verification"]["status"], "reference_mismatch")
         self.assertEqual(self.session.execution["context_result_reference"], original)
-        self.assertEqual(self.session.execution_world_results(self.contract_facts(entity="easier-contract", status="complete")), [])
+        self.assertEqual(self.session.execution_controller.world_results(self.contract_facts(entity="easier-contract", status="complete")), [])
 
     def test_old_task_without_start_reference_cannot_bind_on_resume(self):
         self.session.execution_controller.state.update(context_entity_id="bound-contract", status="paused")
         self.session.execution_controller.state.pop("context_reference_attempted", None)
         self.session.remember()
         restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
-        result = restored.execution_world_results(self.contract_facts(status="complete"), establish_reference=True)[0]
+        result = restored.execution_controller.world_results(self.contract_facts(status="complete"), establish_reference=True)[0]
         self.assertEqual(result["verification"]["status"], "unbound")
         self.assertIsNone(restored.execution["context_result_reference"])
 
@@ -656,20 +656,20 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.session.execution_controller.state["context_entity_id"] = "bound-contract"
         initial = self.contract_facts()
         initial["selected_inspection"]["entity"]["creative"].pop("contract")
-        self.assertEqual(self.session.execution_world_results(initial, establish_reference=True), [])
+        self.assertEqual(self.session.execution_controller.world_results(initial, establish_reference=True), [])
         restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
-        result = restored.execution_world_results(self.contract_facts(terms=2, status="complete"), establish_reference=True)[0]
+        result = restored.execution_controller.world_results(self.contract_facts(terms=2, status="complete"), establish_reference=True)[0]
         self.assertEqual(result["verification"]["status"], "unbound")
         self.assertIsNone(restored.execution["context_result_reference"])
 
     def test_new_task_reference_is_fixed_once_and_persisted_across_restart(self):
         self.session.execution_controller.state["context_entity_id"] = "bound-contract"
-        initial = self.session.execution_world_results(self.contract_facts(), establish_reference=True)[0]
+        initial = self.session.execution_controller.world_results(self.contract_facts(), establish_reference=True)[0]
         restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
-        result = restored.execution_world_results(self.contract_facts(status="complete"), establish_reference=True)[0]
+        result = restored.execution_controller.world_results(self.contract_facts(status="complete"), establish_reference=True)[0]
         self.assertEqual(result["verification"]["status"], "verified_complete")
         self.assertEqual(result["reference"], initial["reference"])
-        changed = restored.execution_world_results(self.contract_facts(terms=2), establish_reference=True)[0]
+        changed = restored.execution_controller.world_results(self.contract_facts(terms=2), establish_reference=True)[0]
         self.assertEqual(changed["verification"]["status"], "reference_mismatch")
         self.assertEqual(changed["reference"], initial["reference"])
 
@@ -681,7 +681,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests, 0)
         self.assertTrue(self.session.execution["context_reference_attempted"])
         restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
-        result = restored.execution_world_results(self.contract_facts(terms=2), establish_reference=True)[0]
+        result = restored.execution_controller.world_results(self.contract_facts(terms=2), establish_reference=True)[0]
         self.assertEqual(result["verification"]["status"], "unbound")
 
     async def test_initial_network_outage_keeps_first_valid_pre_execution_binding(self):
@@ -691,21 +691,21 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
             await self.session.turn("原交付目标", executing=True, context_entity_id="bound-contract")
         self.assertEqual(self.requests, 0)
         self.assertFalse(self.session.execution["context_reference_attempted"])
-        result = self.session.execution_world_results(self.contract_facts(), establish_reference=True)[0]
+        result = self.session.execution_controller.world_results(self.contract_facts(), establish_reference=True)[0]
         self.assertEqual(result["reference"]["terms_version"], 1)
 
     async def test_recovery_refusal_closes_initial_binding_before_readable_new_terms(self):
         self.session.execution_controller.state["context_entity_id"] = "bound-contract"
         self.session.current_turn_facts = AsyncMock(side_effect=ConnectorError("WorldUnavailable", "Network read failed", 503))
         with self.assertRaises(ConnectorError):
-            await self.session.execution_readback()
+            await self.session.execution_controller.readback()
         self.assertFalse(self.session.execution["context_reference_attempted"])
         self.session.current_turn_facts = AsyncMock(return_value={"player": {"id": "test-user", "x": 0, "y": 0},
             "selected_inspection_unavailable": {"entity_id": "bound-contract", "code": "PermissionDenied"}})
-        await self.session.execution_readback()
+        await self.session.execution_controller.readback()
         self.assertTrue(self.session.execution["context_reference_attempted"])
         restored = GroveSession(self.manager, self.identity, "fixture-bearer", "Test", "provider/model")
-        result = restored.execution_world_results(self.contract_facts(terms=2, status="complete"), establish_reference=True)[0]
+        result = restored.execution_controller.world_results(self.contract_facts(terms=2, status="complete"), establish_reference=True)[0]
         self.assertEqual(result["verification"]["status"], "unbound")
         self.assertIsNone(result["reference"])
 

@@ -27,15 +27,18 @@ def _references(value):
             yield from _references(child)
 
 
-def _visible_context(ctx, player, entity, pack, *, params=None):
-    from .creative import _context
+def _visible_context(ctx, player, entity, pack):
+    from .creative import _bound_ids, _context
     from .world import _accessible
 
-    context = _context(entity, params=params, ctx=ctx, definition=pack)
+    # Resolve the definition's fixed object references once in this read view.
+    # Context construction and reader visibility check the same actual entities.
+    targets = {eid: m.get_entity(ctx, eid, required=False) for eid in sorted(_bound_ids(pack or {}))}
+    context = _context(entity, ctx=ctx, definition=pack, objects=targets)
     # Rule execution observes around its anchor. Presentation must also respect
     # this reader's radius, so an anchor eight tiles away cannot reveal sixteen.
     for eid in list(context["objects"]):
-        target = m.get_entity(ctx, eid, required=False)
+        target = targets[eid]
         try:
             if target is None:
                 raise RuleViolation("不可观察的公共事实。")
@@ -98,17 +101,16 @@ def action_condition_observations(ctx, player, entity):
     """Default-input predicates are observations, not submitted-input admission."""
 
     pack, spec = _type(ctx, entity)
-    if not spec:
+    if not spec or not (spec["actions"] or "contract" in spec):
         return {}
     result = {}
+    context = _visible_context(ctx, player, entity, pack)
     for action in spec["actions"]:
         params = {name: field["default"] for name, field in action["parameters"].items()}
-        context = _visible_context(ctx, player, entity, pack, params=params)
-        observation = condition_observation(action.get("when", True), context)
+        observation = condition_observation(action.get("when", True), {**context, "params": params})
         observation.update(input_scope="parameter_defaults", submitted_input_rechecked=True)
         result[action["id"]] = observation
     if "contract" in spec:
-        context = _visible_context(ctx, player, entity, pack)
         result["deliver"] = condition_observation(spec["contract"].get("delivery_when", True), context)
     return result
 
@@ -131,10 +133,11 @@ def program_observation(ctx, entity, *, detailed=False, player=None):
     process["observed_tick"] = ctx.get_state(m.META, "clock", {}).get("sequence", 0)
     process["steps_meaning"] = "累计发生反应的逻辑步数，不是本次目标进度。"
 
-    quantities = _quantities(entity)
+    context = _visible_context(ctx, player, entity, pack) if detailed else None
+    quantities = context["quantities"] if context is not None else _quantities(entity)
     available = reaction_available_quantities(entity)
     capacity = sm.liquid_capacity(entity)
-    actual_total = sm.quantity(entity, slot="contained")
+    actual_total = sum(quantities.values())
     result = {"material_definitions": deepcopy(binding.get("materials", {})), "process": process,
         "reaction_inputs": {"scope": "this_entity_contained_lots_only", "unit": "logical_matter",
             "quantities": quantities, "available_quantities": available,
@@ -148,7 +151,6 @@ def program_observation(ctx, entity, *, detailed=False, player=None):
         result["reaction_observations_projection"] = "当前材料与历史过程摘要；inspect才返回当前反应条件和材料缺口。"
         return result
 
-    context = _visible_context(ctx, player, entity, pack)
     material_defs = {key: {"load_per_u": value.load_per_u} for key, value in REGISTRY.materials.items()}
     material_defs.update(pack["materials"])
     for symbol, material_id in binding.get("material_aliases", {}).items():

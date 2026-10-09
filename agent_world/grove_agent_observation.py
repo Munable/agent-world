@@ -316,10 +316,10 @@ def _companion_repair_viewport_references(payload):
 
 
 def companion_projection(function: str, payload: dict) -> dict:
-    """Compact an authorized tool response without inventing terrain or authority."""
-    if function not in {"map.viewport", "grove.generation_context", "grove.inspect", "grove.handbook", "grove.rule_catalog"} | AGENT_WRITE_FUNCTIONS:
-        return payload
+    """Own one mutable copy of an authorized response, then compact its facts."""
     result = deepcopy(payload)
+    if function not in {"map.viewport", "grove.generation_context", "grove.inspect", "grove.handbook", "grove.rule_catalog"} | AGENT_WRITE_FUNCTIONS:
+        return result
     value = result.get("result", result)
     if not isinstance(value, dict):
         return result
@@ -481,7 +481,7 @@ def companion_projection(function: str, payload: dict) -> dict:
     if function in AGENT_WRITE_FUNCTIONS and function != "grove.generation_context":
         viewport = value.get("viewport")
         if isinstance(viewport, dict):
-            value["viewport"] = _companion_scene_index(companion_projection("map.viewport", viewport))
+            value["viewport"] = _companion_scene_index(compact_scene(viewport))
         if isinstance(value.get("entity"), dict):
             value["entity"] = compact_entity(value["entity"])
         if isinstance(value.get("entities"), list):
@@ -624,12 +624,11 @@ def companion_projection(function: str, payload: dict) -> dict:
     return result
 
 
-def _companion_action_projection(payload, *, base_id=None, versions=None, entity_ids=(), source=None):
-    """Defer repeated discovery; only retained authorized rows reach binding."""
-    readback = payload.get("execution_readback")
+def _companion_action_projection(result, *, base_id=None, versions=None, entity_ids=(), source=None):
+    """Reduce this call's owned projection; only retained rows reach binding."""
+    readback = result.get("execution_readback")
     if not isinstance(readback, dict):
-        return payload
-    result = deepcopy(payload)
+        return result
     value = result.get("result", result)
     if not isinstance(value, dict):
         return result
@@ -644,12 +643,12 @@ def _companion_action_projection(payload, *, base_id=None, versions=None, entity
     if isinstance(selected, dict) and isinstance(selected.get("entity"), dict):
         relevant.add(selected["entity"].get("id"))
 
-    compact = {key: deepcopy(readback[key]) for key in (
+    compact = {key: readback[key] for key in (
         "player", "clock", "bounds", "inventory", "inventory_total", "inventory_next", "truncated",
         "observed_at", "selected_inspection", "selected_inspection_unavailable", "world_results") if key in readback}
     construction = readback.get("construction")
     if isinstance(construction, dict):
-        compact["construction"] = {key: deepcopy(construction[key]) for key in ("material_totals", "unit")
+        compact["construction"] = {key: construction[key] for key in ("material_totals", "unit")
                                    if key in construction}
     rows = readback.get("entities", [])
     rows = rows if isinstance(rows, list) else []
@@ -659,10 +658,10 @@ def _companion_action_projection(payload, *, base_id=None, versions=None, entity
     discovery = [row for row in changed if row.get("id") not in relevant]
     retained = [row for row in rows if isinstance(row, dict) and
                 (row.get("id") in relevant or row in discovery[:discovery_limit])]
-    compact["entities"] = deepcopy(retained)
+    compact["entities"] = retained
     for field in ("players", "nearby_players"):
         if isinstance(readback.get(field), list):
-            compact[field] = [deepcopy(row) for row in readback[field]
+            compact[field] = [row for row in readback[field]
                               if isinstance(row, dict) and row.get("id") in relevant]
 
     # Current nearby history is useful context, not proof of this action's cause.
@@ -694,9 +693,9 @@ def _companion_action_projection(payload, *, base_id=None, versions=None, entity
         metadata = {}
         for field in ("bounds", "clock", "truncated"):
             if field in viewport:
-                metadata[field] = deepcopy(viewport[field])
+                metadata[field] = viewport[field]
             elif viewport.get("field_references", {}).get(field) == "#/execution_readback/" + field and field in readback:
-                metadata[field] = deepcopy(readback[field])
+                metadata[field] = readback[field]
         value["viewport"] = metadata | {"projection": {"scope": "operation_viewport_deferred",
             "meaning": "This operation's direct result and changes remain above. Its expanded viewport "
                        "is deferred; execution_readback is a later compact read, not this operation's snapshot."}}
@@ -708,7 +707,7 @@ def _companion_action_projection(payload, *, base_id=None, versions=None, entity
             if isinstance(reference, str) and reference.startswith("#/execution_readback/entities/"):
                 suffix = reference.rsplit("/", 1)[-1]
                 if suffix.isdigit() and int(suffix) < len(rows):
-                    public["entities"][index] = deepcopy(rows[int(suffix)])
+                    public["entities"][index] = rows[int(suffix)]
         public.pop("readback_projection", None)
     result["read_requests"] = [{"tool": "map_viewport", "arguments": {}}]
     return result
@@ -968,10 +967,14 @@ class AgentObservations:
     def serialize(payload: dict) -> str:
         return _checked_agent_tool_text(payload)
 
-    def get(self, observation_id):
+    def _require(self, observation_id):
         if not isinstance(observation_id, str) or observation_id not in self._observations:
             raise ConnectorError("ObservationRequired", "请先读取世界并引用返回的observation_id；当前观察标识未知或已因服务重启失效。", 409)
-        return deepcopy(self._observations[observation_id])
+        return self._observations[observation_id]
+
+    def get(self, observation_id):
+        """Detach external readers; internal binding only reads the fixed bundle."""
+        return deepcopy(self._require(observation_id))
 
     def present(self, function, payload, *, base_id=None, preflight=False, action_entity_ids=()):
         """Create a new fixed bundle solely from this presented response.
@@ -979,7 +982,7 @@ class AgentObservations:
         No invoke/UI/recovery path calls this. Another parallel tool's unseen
         response cannot alter the bundle selected by an already submitted write.
         """
-        result = deepcopy(companion_projection(function, payload))
+        result = companion_projection(function, payload)
         bundle = (self.get(base_id) if base_id is not None else
                   {"versions": {kind: {} for kind in ("player", "entity", "opportunity", "content")},
                    "continuation_bases": {}, "pour_target_slots": {}})
@@ -1103,7 +1106,7 @@ class AgentObservations:
 
     def bind(self, function, arguments, observation_id, schema):
         """Use an explicitly selected immutable observation; never query state."""
-        bundle = self.get(observation_id)
+        bundle = self._require(observation_id)
         root = deepcopy(arguments)
         versions = bundle["versions"]
         if (function == "grove.interact" and root.get("action") == "pour" and

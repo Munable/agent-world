@@ -9,6 +9,7 @@ import hashlib
 import math
 import uuid
 from copy import deepcopy
+from dataclasses import dataclass, field
 
 from agent_world.simulation import matter as sm
 from .definitions import REGISTRY, RULES_VERSION, PIECE_QUANTITIES, registry_for, mixture_capacity
@@ -37,6 +38,29 @@ MAX_INVENTORY = 64
 MAX_ACTIVE = sm.MAX_FRAME_OBJECTS
 MAX_CHUNK_BYTES = 16384
 MAX_META_BYTES = 8192
+
+
+@dataclass(slots=True)
+class CandidateBatch:
+    """One Grove commit's isolated read view and dirty candidates.
+
+    Only commit.candidate_batch owns this transaction-local object. Persisted
+    records remain the source for current-version checks and write budgets;
+    these candidates provide a coherent view while reducers reconcile them.
+    """
+    entities: dict[str, dict] = field(default_factory=dict)
+    chunks: dict[str, dict] = field(default_factory=dict)
+    players: dict[str, dict] = field(default_factory=dict)
+    dirty_entities: set[str] = field(default_factory=set)
+    dirty_chunks: set[str] = field(default_factory=set)
+    dirty_players: set[str] = field(default_factory=set)
+    processes: dict[str, dict | None] = field(default_factory=dict)
+    process_versions: dict[str, int] = field(default_factory=dict)
+    dirty_processes: set[str] = field(default_factory=set)
+    meta: dict[str, object] = field(default_factory=dict)
+    dirty_meta: set[str] = field(default_factory=set)
+    event_journal: dict | None = None
+    records: dict[str, dict] = field(default_factory=dict)
 
 
 def liquid_quantity(entity, slot="contained", registry=None):
@@ -106,8 +130,9 @@ def terrain(x, y):
 
 def get_chunk(ctx, cx, cy):
     cid = chunk_id(cx, cy)
-    if hasattr(ctx, "_grove_chunks") and cid in ctx._grove_chunks:
-        return ctx._grove_chunks[cid]
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is not None and cid in batch.chunks:
+        return batch.chunks[cid]
     rec = ctx.get_state_record(CHUNKS, cid)
     if rec["exists"]:
         return {**rec["value"], "version": rec["version"]}
@@ -130,9 +155,10 @@ def save_chunk(ctx, chunk):
             raise RuleViolation("泄水坐标或真实数量超过地块界限。")
     if sm.encoded_size(value) > MAX_CHUNK_BYTES:
         raise RuleViolation("地块记录超过16KiB空间预算。")
-    if hasattr(ctx, "_grove_chunks"):
-        ctx._grove_chunks[chunk["id"]] = chunk
-        ctx._grove_dirty_chunks.add(chunk["id"])
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is not None:
+        batch.chunks[chunk["id"]] = chunk
+        batch.dirty_chunks.add(chunk["id"])
         return chunk
     version = ctx.set_state(CHUNKS, chunk["id"], value, expected_version=chunk.get("version"))
     chunk["version"] = version
@@ -147,8 +173,9 @@ def tile_at(ctx, x, y):
 
 def get_player(ctx, role_id=None, *, required=True):
     role_id = role_id or ctx.actor_role_id
-    if hasattr(ctx, "_grove_players") and role_id in ctx._grove_players:
-        return deepcopy(ctx._grove_players[role_id])
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is not None and role_id in batch.players:
+        return deepcopy(batch.players[role_id])
     rec = ctx.get_state_record(PLAYERS, role_id)
     if not rec["exists"]:
         if required:
@@ -160,9 +187,10 @@ def get_player(ctx, role_id=None, *, required=True):
 def save_player(ctx, player, expected_version=None):
     if len(player.get("inventory", [])) > MAX_INVENTORY or sm.encoded_size(player) > MAX_META_BYTES:
         raise RuleViolation("背包记录超过受保护空间预算。")
-    if hasattr(ctx, "_grove_players"):
-        ctx._grove_players[player["id"]] = player
-        ctx._grove_dirty_players.add(player["id"])
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is not None:
+        batch.players[player["id"]] = player
+        batch.dirty_players.add(player["id"])
         return player
     version = ctx.set_state(PLAYERS, player["id"], {k:v for k,v in player.items() if k != "version"},
                             expected_version=player.get("version") if expected_version is None else expected_version)
@@ -176,8 +204,9 @@ def check_player_version(player, expected):
 
 
 def get_entity(ctx, entity_id, *, required=True):
-    if hasattr(ctx, "_grove_entities") and entity_id in ctx._grove_entities:
-        return deepcopy(ctx._grove_entities[entity_id])
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is not None and entity_id in batch.entities:
+        return deepcopy(batch.entities[entity_id])
     rec = ctx.get_state_record(ENTITIES, entity_id)
     if not rec["exists"]:
         if required:
@@ -542,7 +571,8 @@ def normalize_entity(entity):
 def store_entity(ctx, entity, expected_version=None):
     """Return the normalized entity and whether storage accepted a change."""
     value = normalize_entity(entity)
-    if hasattr(ctx, "_grove_entities"):
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is not None:
         record = ctx.get_state_record(ENTITIES, value["id"])
         previous = {**record["value"], "version": record["version"]} if record["exists"] else None
     else:
@@ -550,7 +580,7 @@ def store_entity(ctx, entity, expected_version=None):
     expected = entity.get("version") if expected_version is None else expected_version
     if previous and expected is not None and previous["version"] != expected:
         raise StateConflict("物件已经变化，请刷新后再行动。")
-    if previous and value == {k:v for k,v in previous.items() if k != "version"} and not (hasattr(ctx, "_grove_dirty_entities") and value["id"] in ctx._grove_dirty_entities):
+    if previous and value == {k:v for k,v in previous.items() if k != "version"} and not (batch is not None and value["id"] in batch.dirty_entities):
         entity.update(previous)
         return previous, False
     if previous and ((previous.get("x"), previous.get("y"), previous.get("owner"), previous.get("container")) != (value.get("x"), value.get("y"), value.get("owner"), value.get("container"))
@@ -558,10 +588,10 @@ def store_entity(ctx, entity, expected_version=None):
         _index_entity(ctx, previous, False)
     if is_ground(value):
         _index_entity(ctx, value, True)
-    if hasattr(ctx, "_grove_entities"):
+    if batch is not None:
         result = {**value, "version": previous["version"] if previous else 0}
-        ctx._grove_entities[value["id"]] = result
-        ctx._grove_dirty_entities.add(value["id"])
+        batch.entities[value["id"]] = result
+        batch.dirty_entities.add(value["id"])
         entity.update(result)
         return result, True
     version = ctx.set_state(ENTITIES, value["id"], value,
@@ -736,33 +766,24 @@ def can_attach(ctx, part, target):
     return {"allowed": True, "reason": None}
 
 
-def begin_batch(ctx):
-    ctx._grove_entities, ctx._grove_chunks, ctx._grove_players = {}, {}, {}
-    ctx._grove_dirty_entities, ctx._grove_dirty_chunks, ctx._grove_dirty_players = set(), set(), set()
-
-
-def flush_batch(ctx):
-    """Each dirty object/index/player is written exactly once, within hard caps."""
-    if len(ctx._grove_dirty_entities) > sm.MAX_FRAME_OBJECTS or len(ctx._grove_dirty_chunks) > 8 or len(ctx._grove_dirty_players) > 4:
+def write_candidates(ctx, batch):
+    """Admit the complete write plan, then CAS each current record once."""
+    if len(batch.dirty_entities) > sm.MAX_FRAME_OBJECTS or len(batch.dirty_chunks) > 8 or len(batch.dirty_players) > 4:
         raise RuleViolation("本步物理提交超过已预留的记录预算。")
-    estimate = 0
-    for scope, cache, dirty in ((ENTITIES, ctx._grove_entities, ctx._grove_dirty_entities),
-                              (CHUNKS, ctx._grove_chunks, ctx._grove_dirty_chunks),
-                              (PLAYERS, ctx._grove_players, ctx._grove_dirty_players)):
+    estimate, writes = 0, []
+    for scope, cache, dirty in ((ENTITIES, batch.entities, batch.dirty_entities),
+                              (CHUNKS, batch.chunks, batch.dirty_chunks),
+                              (PLAYERS, batch.players, batch.dirty_players)):
         for key in sorted(dirty):
             rec = ctx.get_state_record(scope, key)
             value = {k:v for k,v in cache[key].items() if k != "version"}
             estimate += sm.encoded_size(value)+sm.encoded_size(rec["value"] if rec["exists"] else None)+256
+            writes.append((scope, key, cache[key], value, rec["version"]))
     # 600KiB covers bounded process/meta/outcome rows and Runtime journal framing.
     if estimate > 1400000:
         raise RuleViolation("本步物理提交超过2MiB中预留给对象和空间索引的预算。")
-    for scope, cache, dirty in ((ENTITIES, ctx._grove_entities, ctx._grove_dirty_entities),
-                              (CHUNKS, ctx._grove_chunks, ctx._grove_dirty_chunks),
-                              (PLAYERS, ctx._grove_players, ctx._grove_dirty_players)):
-        for key in sorted(dirty):
-            rec = ctx.get_state_record(scope, key)
-            value = {k:v for k,v in cache[key].items() if k != "version"}
-            cache[key]["version"] = ctx.set_state(scope, key, value, expected_version=rec["version"])
+    for scope, key, candidate, value, current_version in writes:
+        candidate["version"] = ctx.set_state(scope, key, value, expected_version=current_version)
 
 
 def public_location(ctx, entity):

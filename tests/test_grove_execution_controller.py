@@ -34,7 +34,7 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         snapshot["request_status"] = "idle_confirmed"
         self.assertEqual(self.controller.state["readback"]["nested"]["x"], 1)
         decisions = self.controller.admission(entered=True, native_connected=True,
-            unknown=False, worker_busy=False, catalog=CATALOG)
+            worker_busy=False, catalog=CATALOG)
         self.assertTrue(all(not item["allowed"] for item in decisions.values()))
         self.assertEqual(decisions["conversation"]["code"], "OriginalRequestUnsettled")
 
@@ -51,16 +51,16 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.persist = Mock()
         self.calls, self.receipts, self.replays = [], {}, []
         self.control = {"status": "idle", "actions_count": 0}
-        self.unresolved = False
+        self.unknown_operations = []
         self.native_action = None
         self.controller = ExecutionController("same-role", max_requests=8, max_world_calls=16, max_seconds=150,
-            ports=ExecutionPorts(invoke=self.invoke, read=self.read, recover=self.recover,
+            ports=ExecutionPorts(invoke=self.invoke, read=self.read, recover=self.recover, unknown_operations=lambda: self.unknown_operations,
                 native_segment=self.native_segment, settle=self.settle, persist=self.persist))
 
     def start(self, **options):
         return self.controller.start({"goal": "Explore the actual shared consequence", "max_actions": 4,
             "max_requests": 4} | options, entered=True, native_connected=True,
-            unknown=False, worker_busy=False, catalog=CATALOG)
+            worker_busy=False, catalog=CATALOG)
 
     def test_unconfirmed_old_request_cannot_be_replaced_after_reclaim_worker_finishes(self):
         self.start()
@@ -116,9 +116,9 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kind, "facts")
         return {"player": {"id": "same-role", "x": self.control["actions_count"], "y": 0}, "entities": []}
 
-    async def recover(self, *, replay):
-        self.replays.append(replay)
-        return self.unresolved
+    async def recover(self):
+        # The controller port settles original operations and cannot replay.
+        self.replays.append(False)
 
     async def settle(self, *, abort=False):
         self.controller.active = False
@@ -160,7 +160,7 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.start(goal="Late replacement")
         self.assertEqual(blocked.exception.code, "ReclaimBusy")
         self.assertEqual(self.controller.state["task_id"], original["task_id"])
-        self.controller.record_reclaimed(finished=True)
+        self.controller.record_reclaimed()
         with self.assertRaises(ConnectorError):
             self.start(goal="Still cleaning up the original abort")
         self.controller.state["request_status"] = "idle_confirmed"
@@ -232,11 +232,11 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         task = self.controller.state
         original = task["task_id"]
         task.update(status="paused", request_status="idle_confirmed", requests_used=2,
-            actions_count=1, remaining_actions=3, resume_allowed=False)
+            actions_count=1, resume_allowed=False)
         self.controller.receipt("grove.move", "owned-action", {"commit_seq": 1}, status="confirmed",
             task_id=original, segment_id="previous-segment")
         result = self.controller.resume({"task_id": original, "additional_requests": 1}, entered=True,
-            native_connected=True, unknown=False, worker_busy=False)
+            native_connected=True, worker_busy=False)
         self.assertEqual(result["mode"], "execute-resume")
         self.assertEqual((task["task_id"], task["max_actions"], task["actions_count"], task["max_requests"], task["requests_used"]),
             (original, 4, 1, 3, 2))
@@ -245,9 +245,9 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_original_stops_with_no_replay_or_new_native_segment(self):
         self.start()
-        self.unresolved = True
         async def action():
-            self.controller.unresolved = True
+            self.unknown_operations.append({"function_id": "grove.move",
+                "envelope": {"operation_id": "original-unknown"}})
         self.native_action = action
         await self.controller.execute_goal(self.controller.state["goal"])
         self.assertEqual(self.controller.state["requests_used"], 1)
@@ -302,13 +302,13 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.start(max_requests=1)
         task = self.controller.state
         task.update(status="paused", request_status="idle_confirmed", requests_used=1)
-        original = {key: deepcopy(task[key]) for key in
+        original = {key: self.controller.value(key) for key in
             ("task_id", "goal", "segment_id", "actions_count", "remaining_actions", "requests_used", "max_requests", "receipts")}
         for purpose in ("entry", "explain"):
             fields = self.controller.request_started(purpose)
             self.assertEqual(fields, {})
             self.assertEqual(task["request_status"], "running")
-            self.assertEqual({key: task[key] for key in original}, original)
+            self.assertEqual({key: self.controller.value(key) for key in original}, original)
             with self.assertRaises(ConnectorError) as unsettled:
                 self.controller.ensure_native_ready()
             self.assertEqual(unsettled.exception.code, "OriginalRequestUnsettled")
@@ -320,7 +320,7 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.controller.ensure_native_ready()
             self.assertEqual(task["request_status"], "idle_confirmed")
             self.assertEqual(self.controller.request_started(purpose), {})
-            self.assertEqual({key: task[key] for key in original}, original)
+            self.assertEqual({key: self.controller.value(key) for key in original}, original)
             await self.settle()
 
     def test_isolated_blueprint_purposes_do_not_mutate_main_native_or_goal_budget(self):
@@ -352,13 +352,13 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.start(max_requests=1)
         task = self.controller.state
         task.update(status="paused", requests_used=1)
-        original = {key: deepcopy(task[key]) for key in
+        original = {key: self.controller.value(key) for key in
             ("task_id", "goal", "status", "goal_result", "actions_count", "requests_used", "max_requests")}
         for purpose in ("entry", "explain"):
             self.controller.request_started(purpose)
             self.assertTrue(self.controller.request_returned(purpose))
             self.assertEqual(task["request_status"], "idle")
-            self.assertEqual({key: task[key] for key in original}, original)
+            self.assertEqual({key: self.controller.value(key) for key in original}, original)
             self.controller.ensure_native_ready()
 
     def test_late_ordinary_return_cannot_release_reclaim_or_stop(self):

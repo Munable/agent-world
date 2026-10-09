@@ -28,12 +28,12 @@ DRIFT_BATCH = MAX_EVENTS
 
 
 def meta_get(ctx, key, default=None):
-    cache = getattr(ctx, "_grove_meta_cache", None)
-    if cache is None:
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is None:
         return deepcopy(ctx.get_state(m.META, key, default))
-    if key not in cache:
-        cache[key] = deepcopy(ctx.get_state(m.META, key, default))
-    return deepcopy(cache[key])
+    if key not in batch.meta:
+        batch.meta[key] = deepcopy(ctx.get_state(m.META, key, default))
+    return deepcopy(batch.meta[key])
 
 
 def meta_set(ctx, key, value):
@@ -41,23 +41,23 @@ def meta_set(ctx, key, value):
         raise RuleViolation("世界过程索引超过8KiB记录界限。")
     if meta_get(ctx, key) == value:
         return
-    cache = getattr(ctx, "_grove_meta_cache", None)
-    if cache is None:
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is None:
         ctx.set_state(m.META, key, value)
     else:
-        cache[key] = deepcopy(value)
-        ctx._grove_pending_meta.add(key)
+        batch.meta[key] = deepcopy(value)
+        batch.dirty_meta.add(key)
 
 
 def get_process(ctx, process_id):
-    cache = getattr(ctx, "_grove_process_cache", None)
-    if cache is not None and process_id in cache:
-        return deepcopy(cache[process_id])
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is not None and process_id in batch.processes:
+        return deepcopy(batch.processes[process_id])
     record = ctx.get_state_record(m.PROCESSES, process_id)
     result = {**record["value"], "version": record["version"]} if record["exists"] else None
-    if cache is not None:
-        cache[process_id] = deepcopy(result)
-        ctx._grove_process_versions[process_id] = record["version"]
+    if batch is not None:
+        batch.processes[process_id] = deepcopy(result)
+        batch.process_versions[process_id] = record["version"]
     return deepcopy(result)
 
 
@@ -74,13 +74,13 @@ def save_process(ctx, process):
         raise RuleViolation("过程记录超过2KiB预算。")
     previous = get_process(ctx, process["id"])
     if previous is None or value != {key: item for key, item in previous.items() if key != "version"}:
-        cache = getattr(ctx, "_grove_process_cache", None)
-        if cache is None:
+        batch = getattr(ctx, "_grove_batch", None)
+        if batch is None:
             process["version"] = ctx.set_state(m.PROCESSES, process["id"], value, expected_version=process.get("version", 0))
         else:
-            process["version"] = ctx._grove_process_versions[process["id"]]
-            cache[process["id"]] = deepcopy(process)
-            ctx._grove_pending_processes.add(process["id"])
+            process["version"] = batch.process_versions[process["id"]]
+            batch.processes[process["id"]] = deepcopy(process)
+            batch.dirty_processes.add(process["id"])
     ids = active_process_ids(ctx)
     if process["status"] == "active" and process["id"] not in ids:
         if len(ids) >= MAX_PROCESSES:
@@ -92,13 +92,12 @@ def save_process(ctx, process):
     return process
 
 
-def needs_physics(ctx, entity, objects=None):
+def needs_physics(ctx, entity, objects, registry):
     if entity["state"].get("retired") or entity["lifecycle"] == "consumed":
         return False
     contact = False
-    objects = m._tree_objects(ctx, entity) if objects is None else objects
     try:
-        overload = sm.load_summary(registry_for(objects), entity, objects)["overload"]
+        overload = sm.load_summary(registry, entity, objects)["overload"]
     except ValueError as exc:
         raise RuleViolation(str(exc)) from exc
     if m.is_ground(entity) and "absorbent" in entity["components"] and m.tile_at(ctx, entity["x"], entity["y"]) == "water" and sm.absorption_targets(entity, objects):
@@ -171,8 +170,11 @@ def physical_closure(ctx, extra=(), reserve_chunks=()):
             for target in m.public_entities_near(ctx, x, y, radius=1, limit=4*m.MAX_CHUNK_ENTITIES):
                 if sm.quantity(target, "water", "absorbed") or sm.quantity(target, "water", "surface"):
                     objects.update(m._tree_objects(ctx, target))
-    locations = {m.chunk_id(*m.chunk_for(*m.entity_location(ctx, obj))) for obj in objects.values() if m.entity_location(ctx, obj)[0] is not None}
-    locations.update(reserved)
+    locations = set(reserved)
+    for obj in objects.values():
+        point = m.entity_location(ctx, obj)
+        if point[0] is not None:
+            locations.add(m.chunk_id(*m.chunk_for(*point)))
     if len(objects) > sm.MAX_FRAME_OBJECTS or len(locations) > MAX_FRAME_CHUNKS:
         raise RuleViolation("活动物理闭包最多64个对象、8个地块（含内容、绑定、湿物和释放接触物）。")
     if len({obj["owner"] for obj in objects.values() if obj.get("owner")}) > 4:
@@ -195,7 +197,11 @@ def reconcile_entity(ctx, entity):
     ids.difference_update(tree)
     # Recompute every member after containment, attachment, ownership or load
     # changes. A healthy outer vessel can still contain an overloaded inner one.
-    needed = {eid for eid, obj in tree.items() if needs_physics(ctx, obj, tree)}
+    try:
+        registry = registry_for(tree)
+    except ValueError as exc:
+        raise RuleViolation(str(exc)) from exc
+    needed = {eid for eid, obj in tree.items() if needs_physics(ctx, obj, tree, registry)}
     ids.update(needed)
     if len(ids) > sm.MAX_FRAME_OBJECTS:
         raise RuleViolation("活动物理对象已满。")

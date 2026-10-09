@@ -51,11 +51,13 @@ def record_event(ctx, *, action, entity_id=None, x=None, y=None, kind="action", 
         x, y = location
     if x is None or y is None:
         return
-    journal = getattr(ctx, "_grove_event_batch", None)
+    batch = getattr(ctx, "_grove_batch", None)
+    journal = batch.event_journal if batch is not None else None
     if journal is None:
         journal = ctx.get_state(m.META, "creative_events", {"sequence": 0, "events": []})
     sequence = journal["sequence"] + 1
-    event = {"sequence": sequence, "tick": ctx.get_state(m.META, "clock", {"sequence": 0})["sequence"], "occurred_at": ctx.now, "kind": kind,
+    tick = ctx.get_state(m.META, "clock", {"sequence": 0})["sequence"]
+    event = {"sequence": sequence, "tick": tick, "occurred_at": ctx.now, "kind": kind,
              "action": action or "", "entity_id": entity_id or "", "actor": actor or ctx.actor_role_id,
              "x": x, "y": y, "mechanical_position": 0, "passable": False}
     if entity_id and entity:
@@ -69,13 +71,16 @@ def record_event(ctx, *, action, entity_id=None, x=None, y=None, kind="action", 
             updates[entity["id"]] = entity
     if sm.encoded_size(event) > MAX_EVENT_BYTES:
         raise RuleViolation("公开事件超过单条事实容量；本次行动未提交。")
-    cursors = []
+    # Consumer admission and recorder publication share one current-instance
+    # read. Journal writes cannot change these objects or their definitions.
+    cursors, instances = [], []
     for eid in activity.meta_get(ctx, "creative_instances", []):
         consumer = m.get_entity(ctx, eid, required=False)
-        if not consumer or consumer["lifecycle"] != "intact" or consumer["state"]["program"]["process"]["status"] == "error":
+        if not consumer or consumer["lifecycle"] != "intact":
             continue
         _, spec = instance_definition(ctx, consumer)
-        if has_event(spec):
+        instances.append((consumer, spec))
+        if consumer["state"]["program"]["process"]["status"] != "error" and has_event(spec):
             cursors.append(consumer["state"]["program"].get("event_cursor", 0))
     consumed = min(cursors, default=journal["sequence"])
     pending = [old for old in journal["events"] if old["sequence"] > consumed]
@@ -83,29 +88,26 @@ def record_event(ctx, *, action, entity_id=None, x=None, y=None, kind="action", 
     journal = {"sequence": sequence, "events": [*pending, event], "consumed_through": consumed}
     if len(pending) >= limit or sm.encoded_size(journal) > MAX_EVENT_JOURNAL_BYTES:
         raise StateConflict("本逻辑步公开事件处理预算已满，请待下一世界步读取结果再继续；本次行动未提交。")
-    if hasattr(ctx, "_grove_event_batch"):
-        ctx._grove_event_batch = journal
+    if batch is not None:
+        batch.event_journal = journal
     else:
         _save(ctx, m.META, "creative_events", journal)
-    for eid in activity.meta_get(ctx, "creative_instances", []):
-        recorder = updates.get(eid) or m.get_entity(ctx, eid, required=False)
-        if not recorder or recorder["lifecycle"] != "intact":
-            continue
-        pack, spec = instance_definition(ctx, recorder)
+    for current, spec in instances:
+        eid = current["id"]
+        recorder = updates.get(eid) or current
         state = recorder["state"]["program"].get("recorder")
         location = m.public_location(ctx, recorder)
-        if not state or not state["active"] or location is None or ctx.get_state(m.META, "clock", {"sequence": 0})["sequence"] > state["until_tick"]:
+        if not state or not state["active"] or location is None or tick > state["until_tick"]:
             continue
         if max(abs(x-location[0]), abs(y-location[1])) > spec["recorder"]["radius"]:
             continue
-        batch = getattr(ctx, "_grove_record_batch", None)
-        record = batch.get(eid) if batch is not None else None
+        record = batch.records.get(eid) if batch is not None else None
         if record is None:
             record = ctx.get_state(RECORDS, eid, {"history": [], "reads": []})
-        record["history"] = [*record["history"], {**event, "recorded_tick": ctx.get_state(m.META, "clock", {"sequence": 0})["sequence"]}][-MAX_RECORDS:]
+        record["history"] = [*record["history"], {**event, "recorded_tick": tick}][-MAX_RECORDS:]
         record = bounded_record(record)
         if batch is not None:
-            batch[eid] = record
+            batch.records[eid] = record
         else:
             _save(ctx, RECORDS, eid, record)
         state["recorded_count"] += 1

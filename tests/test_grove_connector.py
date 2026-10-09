@@ -477,7 +477,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(facts["player"], scene["player"])
         self.assertNotIn("selected_inspection", facts)
         self.assertEqual(facts["selected_inspection_unavailable"]["entity_id"], "old-target")
-        self.assertEqual(self.session.execution_world_results(facts), [])
+        self.assertEqual(self.session.execution_controller.world_results(facts), [])
         self.session.invoke = AsyncMock(side_effect=[scene, ConnectorError("WorldUnavailable", "Network read failed", 503)])
         with self.assertRaises(ConnectorError) as unavailable:
             await self.session.current_turn_facts(context_entity_id="old-target", optional_selected=True)
@@ -518,7 +518,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed.exception.code, 'HostUnavailable')
         self.assertEqual(self.session.inference_count, 1)
         self.assertEqual(requests, ['/session/test-session/message'])
-        self.assertFalse(self.session.active_execution)
+        self.assertFalse(self.session.execution_controller.active)
         self.session.invoke.assert_not_awaited()
 
     async def test_discovery_index_keeps_real_material_and_location_without_copying_details(self):

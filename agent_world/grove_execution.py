@@ -1,6 +1,6 @@
 """Owned execution state for a person's explicitly delegated Grove goal.
 
-The connector supplies six narrow ports. This component owns task admission,
+The connector supplies narrow ports. This component owns task admission,
 request/action budgets, segment authority, the receipt ledger and the local
 stop boundary; it never receives a connector session or native host client.
 Native conversation, observation binding and HTTP recovery journals remain at
@@ -27,14 +27,15 @@ class ExecutionPorts:
 
     read accepts kind="receipt"/"facts" and operation_id/context_entity_id.
     native_segment accepts kind="execute"/"compact"/"history", a goal and an
-    optional context_entity_id. recover returns whether originals remain
-    unresolved; execution recovery always requests replay=False.
+    optional context_entity_id. recover settles original operations without
+    replay; unknown_operations exposes the transport's original journal.
     settle confirms the saved native request and admitted-write drain.
     """
 
     invoke: Callable[..., Awaitable[dict]]
     read: Callable[..., Awaitable[dict]]
-    recover: Callable[..., Awaitable[bool]]
+    recover: Callable[..., Awaitable[None]]
+    unknown_operations: Callable[[], list[dict]]
     native_segment: Callable[..., Awaitable[None]]
     settle: Callable[..., Awaitable[bool]]
     persist: Callable[[], None]
@@ -47,7 +48,7 @@ class ExecutionController:
         self.request_limit, self.world_call_limit = max_requests, max_world_calls
         self.ports = ports
         self.state = {"status": "idle", "goal": "", "max_actions": 0, "actions_count": 0,
-            "remaining_actions": 0, "control_status": "idle", "delegation_active": False,
+            "control_status": "idle", "delegation_active": False,
             "grant_version": None, "receipts": [], "readback": None,
             "readback_actual": False, "error": None,
             "task_id": "", "context_entity_id": None, "requests_used": 0, "max_requests": 4,
@@ -63,11 +64,21 @@ class ExecutionController:
             "budget": {"max_steps": 8, "max_tool_calls": max_world_calls, "max_seconds": max_seconds}}
         self.archive: list[dict] = []
         self.delegation = ""
+        # These boundaries differ: a checkpoint closes segment writes while the
+        # task may continue; reclaiming spans native/write cleanup; stopped
+        # remains set after cleanup until a newly admitted request starts.
         self.active = False
         self.stopped = False
         self.reclaiming = False
-        self.unresolved = False
-        self._unknown_revoke = False
+
+    @property
+    def unresolved(self) -> bool:
+        """The adapter's original journal is the only unknown-write fact."""
+        return bool(self.ports and self.ports.unknown_operations())
+
+    @property
+    def remaining_actions(self) -> int:
+        return max(0, self.state["max_actions"] - self.state["actions_count"])
 
     def _persist(self):
         if self.ports is not None:
@@ -75,25 +86,27 @@ class ExecutionController:
 
     def snapshot(self) -> dict:
         """Adapters observe owned task state; nested records are never write ports."""
-        return deepcopy(self.state)
+        return deepcopy(self.state) | {"remaining_actions": self.remaining_actions}
 
     def value(self, field: str, default=None):
         """Read one current fact without copying the whole saved world readback."""
+        if field == "remaining_actions":
+            return self.remaining_actions
         return deepcopy(self.state.get(field, default))
 
     def archived_snapshots(self) -> list[dict]:
         return deepcopy(self.archive)
 
-    def restore(self, saved: dict | None, *, archive=None, delegation="", unknown=()):
+    def restore(self, saved: dict | None, *, archive=None, delegation=""):
         """Restore the same task/session authority, without reopening a goal."""
         if isinstance(saved, dict):
             self.state.update(deepcopy(saved))
+            self.state.pop("remaining_actions", None)
         self.archive = deepcopy(archive[-8:]) if isinstance(archive, list) else []
         if not isinstance(delegation, str):
             raise ValueError("invalid execution delegation")
         self.delegation = delegation
         self.active = False
-        self.sync_unknown(unknown)
         if self.state.get("status") in {"starting", "running"}:
             self.state.update(status="paused", request_status="unsettled", resume_allowed=False,
                 stop_reason="连接器已重启；先恢复原回执和现场，再明确接续。")
@@ -101,15 +114,10 @@ class ExecutionController:
             self.state["history_recovery"]["status"] = "uncertain"
         return self.normalize_progress()
 
-    def sync_unknown(self, records):
-        """Receive journal status, without taking transport envelopes or replay authority."""
-        self.unresolved = bool(records)
-        self._unknown_revoke = any(item.get("function_id") == "grove.control_revoke" for item in records)
-
-    def ensure_admission(self, *, reclaiming=False):
+    def ensure_admission(self, *, disconnecting=False):
         # World revocation may be ready before native abort finishes. That
         # short-stage result permits manual control, never a new partner task.
-        if reclaiming or self.reclaiming:
+        if disconnecting or self.reclaiming:
             raise ConnectorError("ReclaimBusy", "原请求正在收尾；世界行动权已按当前状态处理，先等原收尾完成再启动伙伴任务。", 409)
 
     def ensure_native_ready(self):
@@ -121,9 +129,9 @@ class ExecutionController:
         never_started = self.state.get("request_status") == "not_started" and not self.state.get("requests_used")
         return bool(never_started or self.state.get("request_status") in {"idle", "idle_confirmed"})
 
-    def admission(self, *, entered: bool, native_connected: bool, unknown: bool,
+    def admission(self, *, entered: bool, native_connected: bool,
                   worker_busy: bool, catalog: dict, publication_pending=False,
-                  reclaiming=False) -> dict:
+                  disconnecting=False) -> dict:
         """One inference admission policy used by HTTP entry points and the UI.
 
         Transport reports connection/worker/publication facts. Task authority,
@@ -133,9 +141,9 @@ class ExecutionController:
         def decision(code="", reason=""):
             return {"allowed": not code, "code": code, "reason": reason}
 
-        if reclaiming or self.reclaiming:
+        if disconnecting or self.reclaiming:
             common = decision("ReclaimBusy", "原请求正在收尾；先等原收尾完成再启动伙伴任务。")
-        elif unknown or self.unresolved:
+        elif self.unresolved:
             common = decision("UnknownWrite", "先核对原操作结果，再启动伙伴请求。")
         elif not entered or not native_connected:
             common = decision("EntryRequired", "请先连接伙伴并进入现场。")
@@ -177,14 +185,8 @@ class ExecutionController:
         self.state["request_status"] = "idle"
         self._persist()
 
-    def _connected_admission(self, *, entered, native_connected, unknown, worker_busy, resume=False):
-        self.require_admission("conversation", entered=entered, native_connected=native_connected,
-            unknown=unknown, worker_busy=worker_busy, catalog={})
-        self.unresolved = False
-        self._unknown_revoke = False
-
     def start(self, body: dict, *, entered: bool, native_connected: bool,
-              unknown: bool, worker_busy: bool, catalog: dict) -> dict:
+              worker_busy: bool, catalog: dict) -> dict:
         self.ensure_admission()
         if not isinstance(body, dict) or set(body) - {"goal", "max_actions", "max_requests", "context_entity_id", "compact_history"}:
             raise ConnectorError("InvalidArguments", "Expected an explicit goal and bounded action grant.")
@@ -204,19 +206,16 @@ class ExecutionController:
         selected = body.get("context_entity_id")
         if selected is not None and (not isinstance(selected, str) or not 1 <= len(selected) <= 256 or not selected.strip()):
             raise ConnectorError("InvalidArguments", "context_entity_id 需要真实已选物件的标识。")
-        self._connected_admission(entered=entered, native_connected=native_connected,
-            unknown=unknown, worker_busy=worker_busy)
         self.require_admission("goal", entered=entered, native_connected=native_connected,
-            unknown=unknown, worker_busy=worker_busy, catalog=catalog)
+            worker_busy=worker_busy, catalog=catalog)
         if not Draft202012Validator(catalog["grove.control_grant"]["input_schema"]).is_valid(
                 {"goal": goal.strip(), "max_actions": maximum}):
             raise ConnectorError("InvalidGoal", "执行目标或动作额度不符合这个世界当前的授权规则。")
-        self.ensure_native_ready()
         if self.state.get("task_id"):
-            self.archive = (self.archive + [deepcopy(self.state)])[-8:]
+            self.archive = (self.archive + [self.snapshot()])[-8:]
         # Preserve the public state shape and the fixed per-request budget.
         self.state.update(status="starting", goal=goal.strip(), max_actions=maximum, actions_count=0,
-            remaining_actions=maximum, delegation_active=False, grant_version=None, control_status=None,
+            delegation_active=False, grant_version=None, control_status=None,
             receipts=[], readback=None, readback_actual=False, error=None,
             task_id="grove-task-" + secrets.token_hex(16), context_entity_id=selected,
             requests_used=0, max_requests=request_budget, request_status="idle", stop_reason="", resume_allowed=False,
@@ -231,7 +230,7 @@ class ExecutionController:
         return {"goal": self.state["goal"], "context_entity_id": selected, "mode": "execute"}
 
     def resume(self, body: dict, *, entered: bool, native_connected: bool,
-               unknown: bool, worker_busy: bool) -> dict:
+               worker_busy: bool) -> dict:
         self.ensure_admission()
         if (not isinstance(body, dict) or "task_id" not in body or set(body) - {"task_id", "compact_history", "additional_requests"} or
                 not isinstance(body["task_id"], str) or body["task_id"] != self.state.get("task_id")):
@@ -241,8 +240,8 @@ class ExecutionController:
             raise ConnectorError("InvalidArguments", "compact_history 需要布尔值。")
         if type(additional) is not int or additional < 0 or self.state.get("max_requests", 0) + additional > self.request_limit:
             raise ConnectorError("InvalidRequestBudget", "追加后的原目标模型请求总额度不能超过 8 次。")
-        self._connected_admission(entered=entered, native_connected=native_connected,
-            unknown=unknown, worker_busy=worker_busy, resume=True)
+        self.require_admission("conversation", entered=entered, native_connected=native_connected,
+            worker_busy=worker_busy, catalog={})
         if (self.state.get("status") == "completed" or
                 (not additional and not self.state.get("resume_allowed")) or
                 not self.can_resume(additional_requests=additional)):
@@ -270,8 +269,7 @@ class ExecutionController:
         if not self.state.get("task_id") or self.state.get("grant_operation_id") or self.state.get("receipts") or self.unresolved:
             return False
         changed = self.state.get("actions_count", 0) != 0 or self.state.get("grant_action_offset", 0) != 0
-        self.state.update(actions_count=0, grant_action_offset=0, grant_version=None,
-            remaining_actions=self.state["max_actions"], delegation_active=False)
+        self.state.update(actions_count=0, grant_action_offset=0, grant_version=None, delegation_active=False)
         if self.state.get("readback_actions_count") is not None:
             self.state["readback_actions_count"] = 0
         return changed
@@ -535,7 +533,6 @@ class ExecutionController:
         self.state["delegation_active"] = value.get("delegation_active", value.get("status") == "active") is True
         if self.state.get("task_id") and not task_control:
             self.state["delegation_active"] = False
-        self.state["remaining_actions"] = max(0, self.state["max_actions"] - self.state["actions_count"])
 
     def observe_control(self, function: str, payload: dict, *, operation_record=None):
         value = payload.get("result", payload)
@@ -568,16 +565,16 @@ class ExecutionController:
         self.state.update(request_status="settling", resume_allowed=False)
         self._persist()
 
-    def record_reclaimed(self, revoke_error=None, *, finished=False):
+    def record_reclaimed(self, revoke_error=None):
         if self.state.get("goal") and self.state.get("status") != "completed":
             self.state.update(status="unknown" if self.unresolved or revoke_error else "paused",
                 stop_reason="你已收回后续行动；已成立结果保留。")
             if revoke_error:
                 self.state["error"] = {"code": revoke_error.code,
                     "message": "收回或原操作结果尚未确认；后续本机动作已停止，请恢复后核对。"}
-        # Even the final state record precedes the reclaim worker's durable
-        # cleanup. Only finish_reclaim closes that whole boundary.
-        self.state["resume_allowed"] = finished and not self.reclaiming and self.can_resume()
+        # Recording the world revoke never settles the native request. Only
+        # finish_reclaim may expose continuation after the whole cleanup.
+        self.state["resume_allowed"] = False
         self._persist()
 
     def finish_reclaim(self, *, error=None):
@@ -615,7 +612,8 @@ class ExecutionController:
         return facts
 
     async def revoke(self):
-        if self._unknown_revoke:
+        if any(record.get("function_id") == "grove.control_revoke"
+                for record in self.ports.unknown_operations()):
             raise ConnectorError("UnknownRevoke", "收回控制的原操作尚待核对；不会发起替代操作。", 409)
         if not (self.delegation or self.state.get("delegation_active") or self.state.get("status") in {"starting", "running"}):
             return
@@ -646,7 +644,7 @@ class ExecutionController:
             raise
         projection = deepcopy(result)
         projection["execution_readback"] = facts
-        projection["execution_control"] = {key: self.state.get(key) for key in
+        projection["execution_control"] = {key: self.value(key) for key in
             ("actions_count", "max_actions", "remaining_actions", "delegation_active", "grant_version")}
         return projection
 
@@ -662,7 +660,7 @@ class ExecutionController:
                 self.pause(state + "；没有授予新动作或调用模型。", error=self.state.get("error"))
                 return
             if resume:
-                self.unresolved = bool(await self.ports.recover(replay=False))
+                await self.ports.recover()
                 if self.unresolved:
                     self.pause("原操作结果待核对；没有开始替代执行。")
                     return
@@ -691,7 +689,7 @@ class ExecutionController:
                 if self.state["requests_used"] >= self.state["max_requests"]:
                     self.pause("模型请求额度已用完；目标未宣称完成。")
                     break
-                if not self.state["delegation_active"] or self.state["remaining_actions"] <= 0:
+                if not self.state["delegation_active"] or self.remaining_actions <= 0:
                     self.pause("行动权已收回或原动作额度已用完。")
                     break
                 before = self.state["actions_count"]
@@ -710,7 +708,7 @@ class ExecutionController:
                 if not await self.ports.settle(abort=failure is not None):
                     self.pause("上一段模型执行未确认停止；保留现场与原回执。", error=self.state.get("error"))
                     break
-                self.unresolved = bool(await self.ports.recover(replay=False))
+                await self.ports.recover()
                 if self.unresolved:
                     self.pause("原行动结果待核对；没有发起新操作。")
                     break

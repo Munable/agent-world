@@ -507,8 +507,6 @@ def tick(ctx):
     # Logical-step facts and recorder histories are one commit, not one state
     # write per event/observer pair. Instance admission reserves their complete
     # combination with physics; history growth cannot exceed that reservation.
-    ctx._grove_event_batch = None
-    ctx._grove_record_batch = {}
     objects = {eid: entity for eid in ids if (entity := m.get_entity(ctx, eid, required=False))
                and entity["lifecycle"] == "intact" and not entity["state"].get("retired")}
     if list(objects) != ids:
@@ -639,12 +637,6 @@ def tick(ctx):
     commit.commit_results(ctx, objects, changed, accounts=accounts, tick=step(ctx))
     for eid, action, summary in outcomes:
         public_event(ctx, action=action, entity_id=eid, kind="process", actor="system:rules")
-    if ctx._grove_event_batch is not None:
-        _save(ctx, m.META, "creative_events", ctx._grove_event_batch)
-    for eid, record in sorted(ctx._grove_record_batch.items()):
-        _save(ctx, RECORDS, eid, record)
-    del ctx._grove_event_batch
-    del ctx._grove_record_batch
     return outcomes
 
 
