@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel} from './grove-world-ui.js?v=playable-context';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel,fabricationSources,fabricationPlan} from './grove-world-ui.js?v=published-materials-bind-port';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -25,6 +25,7 @@ const touchedBuildChoices=new Set();
 let activeRainChunks=new Set();
 let goalDirty=false,executionReclaimBusy=false,hostCommandEpoch=0,manualControlRecoveryPending=false;
 let definitionReadEpoch=0,definitionReadBusy=false,definitionReadValue=null,definitionReadError=null,definitionReadRef=null,definitionReadOpen=false;
+let directoryEpoch=0,directoryBusy=false,directoryFilters={},directoryInputs={author:'',key:''},directoryPage=null,directoryCursors=[null],directoryError=null,directoryOpen=false,directoryDefinition=null,directoryDefinitionRef=null,directoryType=null,fabricationMenu=null,fabricationBusy=false,fabricationRows=[],fabricationError=null;
 const factDisclosures=new Map();
 let activeActionKey=null,hostCommandKind=null,hostCommandFlight=null;
 const actionDrafts=new Map();
@@ -348,11 +349,12 @@ function renderPending(){
   $('recover-operation').disabled=operationRecoveryBusy||actionBusy;$('release-operation').disabled=operationRecoveryBusy||actionBusy;
   if(pending){$('pending-detail').textContent=pending.rejection?'服务器拒绝了原操作：'+pending.rejection.message:'回应中断，结果尚未核对。操作 '+pending.body.operation_id.slice(0,8)+' 保留；不会自动发出替代操作。';$('release-operation').hidden=!pending.rejection;$('recover-operation').hidden=!!pending.rejection;}
   if(playing&&host)renderExecution();
+  $('rule-catalog-result').querySelector('.fabrication-editor')?.dispatchEvent(new Event('refresh-fabrication-state'));
 }
 async function recoverWorldOperation(release=false){
   if(operationRecoveryBusy||actionBusy||!playing||!client.pending())return;
-  stopWalking();const epoch=session;operationRecoveryBusy=true;renderPending();
-  try{const result=release?await client.releaseRejected():await client.recover();if(epoch!==session||!playing)return;if(result?.rejected){renderPending();return;}$('error').hidden=true;await refreshWorld(true);if(epoch!==session||!playing)return;announce(release?'已读取当前状态，可以重新选择行动。':'原操作结果已核对。');}
+  stopWalking();const epoch=session,original=client.pending();operationRecoveryBusy=true;renderPending();
+  try{const result=release?await client.releaseRejected():await client.recover();if(epoch!==session||!playing)return;if(result?.rejected){renderPending();return;}$('error').hidden=true;await refreshWorld(true);if(epoch!==session||!playing)return;if(!release&&original.name==='grove.fabricate')await clearRecoveredFabricationDraft(original.body.arguments);announce(release?'已读取当前状态，可以重新选择行动。':'原操作结果已核对。');}
   catch(error){if(epoch===session&&playing)throw error;}
   finally{if(epoch===session){operationRecoveryBusy=false;renderPending();renderSelection();}}
 }
@@ -656,6 +658,130 @@ async function readRuleDefinition(ref,id){
   catch(error){if(epoch===session&&reading===definitionReadEpoch)definitionReadError=error.message||'尚未读到规则定义。';}
   finally{if(epoch===session&&reading===definitionReadEpoch){definitionReadBusy=false;lastSelectionSignature='';renderSelection();}}
 }
+function fabricationDraftRoute(){return 'grove-fabrication:'+directoryDefinitionRef+':'+directoryType;}
+async function clearRecoveredFabricationDraft(args){
+  const route='grove-fabrication:'+args.definition_ref+':'+args.type_id;let rows;try{rows=JSON.parse(client.draft(route)||'null');}catch{}
+  const fields=value=>({entity_id:value.entity_id,lot_id:value.lot_id,quantity_u:Number(value.quantity_u)});
+  if(!Array.isArray(rows)||JSON.stringify(rows.map(fields))!==JSON.stringify((args.sources||[]).map(fields)))return;
+  client.saveDraft(route,'[]');
+  if(directoryDefinitionRef===args.definition_ref&&directoryType===args.type_id){fabricationRows=[];fabricationMenu=null;await readFabricationMenu();renderDefinitionDirectory();}
+}
+function saveFabricationDraft(){
+  if(!current()||!directoryDefinitionRef||!directoryType)return;
+  try{client.saveDraft(fabricationDraftRoute(),JSON.stringify(fabricationRows));client.saveDraft('grove-fabrication-selection',JSON.stringify({definition_ref:directoryDefinitionRef,type_id:directoryType}));}catch(error){announce('成型草稿未能保存在本机：'+error.message,true);}
+}
+function loadFabricationDraft(){
+  let saved=null;try{saved=JSON.parse(client.draft(fabricationDraftRoute())||'null');}catch{}
+  fabricationRows=Array.isArray(saved)?saved.slice(0,8).filter(row=>row&&typeof row.row_id==='string'&&typeof row.entity_id==='string'&&typeof row.lot_id==='string').map(row=>({...row})):[];
+  if(saved===null)fabricationRows.push({row_id:crypto.randomUUID(),entity_id:'',lot_id:'',material_id:'',quantity_u:'1'});
+}
+async function readDefinitionDirectory({after=directoryCursors.at(-1),filters=directoryFilters,reset=false,direction=null}={}){
+  if(directoryBusy||fabricationBusy||!playing||!current())return;
+  if(filters.key&&!filters.author){directoryError='按规则系列查询时，请同时填写作者身份。';renderDefinitionDirectory();return;}
+  const epoch=session,reading=++directoryEpoch;directoryOpen=true;directoryBusy=true;directoryError=null;
+  if(reset){directoryFilters={...filters};directoryCursors=[null];directoryPage=null;after=null;}
+  const cursors=direction==='next'?[...directoryCursors,after]:direction==='previous'?directoryCursors.slice(0,-1):[...directoryCursors];renderDefinitionDirectory();
+  try{const page=await client.query('grove.definition_list',{...filters,limit:8,...(after?{after}:{})});if(epoch!==session||reading!==directoryEpoch||!playing)return;directoryPage=page;directoryCursors=cursors;}
+  catch(error){if(epoch===session&&reading===directoryEpoch)directoryError=error.message||'规则目录尚未读到；原选择保留。';}
+  finally{if(epoch===session&&reading===directoryEpoch){directoryBusy=false;renderDefinitionDirectory();}}
+}
+async function readPublishedDefinition(ref,{type_id=null}={}){
+  if(directoryBusy||fabricationBusy||actionBusy||!playing||!current())return;
+  saveFabricationDraft();const epoch=session,reading=++directoryEpoch;
+  directoryDefinitionRef=ref;directoryDefinition=null;directoryType=null;fabricationMenu=null;fabricationRows=[];fabricationError=null;directoryError=null;directoryBusy=true;renderDefinitionDirectory();
+  try{const value=await client.query('grove.definition_read',{definition_ref:ref});if(epoch!==session||reading!==directoryEpoch||!playing)return;if(value.definition_ref!==ref)throw new Error('读取结果不属于所选规则版本。');directoryDefinition=value;}
+  catch(error){if(epoch===session&&reading===directoryEpoch)directoryError=error.message||'详细定义尚未读到。';}
+  finally{if(epoch===session&&reading===directoryEpoch){directoryBusy=false;renderDefinitionDirectory();}}
+  if(epoch===session&&reading===directoryEpoch&&directoryDefinition&&type_id&&Object.hasOwn(directoryDefinition.definition?.types||{},type_id))await readFabricationMenu(type_id);
+}
+async function readFabricationMenu(type=directoryType){
+  if(directoryBusy||fabricationBusy||actionBusy||!directoryDefinition||!type||!playing||!current())return;
+  if(directoryType!==type){saveFabricationDraft();directoryType=type;fabricationMenu=null;loadFabricationDraft();}
+  const epoch=session,reading=++directoryEpoch,ref=directoryDefinitionRef;fabricationBusy=true;fabricationError=null;renderDefinitionDirectory();saveFabricationDraft();
+  try{const menu=await client.query('grove.fabrication_options',{definition_ref:ref,type_id:type});if(epoch!==session||reading!==directoryEpoch||!playing)return;if(menu.definition_ref!==ref||menu.type_id!==type)throw new Error('成型菜单不属于所选规则和类型。');fabricationMenu=menu;}
+  catch(error){if(epoch===session&&reading===directoryEpoch){fabricationMenu=null;fabricationError=error.message||'尚未读到成型来源。';}}
+  finally{if(epoch===session&&reading===directoryEpoch){fabricationBusy=false;renderDefinitionDirectory();}}
+}
+function renderDefinitionDirectory(){
+  const area=$('rule-catalog-result');if(!directoryOpen)return;area.replaceChildren();
+  const filters=node('form',undefined,'descriptor-action'),author=node('input'),series=node('input');author.type=series.type='text';author.maxLength=128;series.maxLength=80;author.value=directoryInputs.author;series.value=directoryInputs.key;
+  for(const [label,control] of [['作者身份（可选）',author],['规则系列（须同时指定作者）',series]]){const field=node('label',label);field.append(control);filters.append(field);}
+  author.addEventListener('input',()=>directoryInputs.author=author.value);series.addEventListener('input',()=>directoryInputs.key=series.value);
+  const search=button('读取这一页',()=>{}, {disabled:directoryBusy||fabricationBusy});search.type='submit';filters.append(search);
+  filters.addEventListener('submit',event=>{event.preventDefault();if(search.disabled)return;const values={};if(author.value.trim())values.author=author.value.trim();if(series.value.trim())values.key=series.value.trim();run(()=>readDefinitionDirectory({filters:values,reset:true}));});area.append(filters);
+  if(directoryError)area.append(node('p',directoryError,'action-reason'));
+  if(directoryBusy)area.append(node('p','正在读取所选目录或规则版本…','small'));
+  const definitions=directoryPage?.definitions||[];
+  if(directoryPage){area.append(node('p','第 '+directoryCursors.length+' 页 · '+definitions.length+' 份已发表定义'+(directoryPage.has_more?' · 后面还有内容':' · 已到这一查询的末页'),'small'));}
+  for(const definition of definitions){
+    const section=node('section',undefined,'content-contribution');section.append(node('strong',(definition.name||definition.key)+' · 版本 '+definition.version),node('p','作者：'+authorLabel(definition.author),'small'),node('p',definition.author+' · '+definition.key+' · '+definition.definition_ref,'fact-reference'));
+    section.append(button('读取类型与详细做法',()=>run(()=>readPublishedDefinition(definition.definition_ref)),{disabled:directoryBusy||fabricationBusy||actionBusy,secondary:true}));area.append(section);
+  }
+  if(directoryPage&&!definitions.length)area.append(node('p','这一查询没有已发表定义；可以清空筛选重新读取。','small'));
+  const pagination=node('div',undefined,'content-pagination');
+  pagination.append(button('上一页',()=>run(()=>readDefinitionDirectory({after:directoryCursors.at(-2),direction:'previous'})),{disabled:directoryBusy||fabricationBusy||directoryCursors.length<2,secondary:true}),button('下一页',()=>run(()=>readDefinitionDirectory({after:directoryPage.next_cursor,direction:'next'})),{disabled:directoryBusy||fabricationBusy||!directoryPage?.has_more||!directoryPage?.next_cursor,secondary:true}));area.append(pagination);
+  if(directoryDefinition){
+    const section=node('section',undefined,'creative-state'),definition=directoryDefinition.definition;section.append(node('h4',definition.name||'所选规则'),node('p',directoryDefinitionRef,'fact-reference'));
+    const detail=node('details',undefined,'rule-definition');detail.append(node('summary','所选不可变版本的完整说明'));appendFacts(detail,directoryDefinition);section.append(detail);
+    const types=Object.entries(definition.types||{}),choices=node('select');choices.setAttribute('aria-label','按真实批次成型的类型');const empty=node('option','请选择按真实材料成型的类型');empty.value='';choices.append(empty);
+    for(const [id,kind] of types.filter(([,kind])=>kind.cost_u&&Object.keys(kind.cost_u).length)){const option=node('option',kind.name||kind.label||id);option.value=id;choices.append(option);}choices.value=directoryType||'';choices.disabled=directoryBusy||fabricationBusy||actionBusy;
+    const field=node('label','成型类型');field.append(choices);section.append(field);choices.addEventListener('change',()=>{if(choices.value)run(()=>readFabricationMenu(choices.value));else{saveFabricationDraft();directoryType=null;fabricationMenu=null;fabricationRows=[];fabricationError=null;renderDefinitionDirectory();}});
+    if(choices.options.length===1)section.append(node('p','这份规则没有真实批次成型类型；其他类型仍按其公开创建规则使用。','small'));
+    if(directoryType)section.append(button('刷新原类型的来源与数量',()=>run(()=>readFabricationMenu()),{disabled:directoryBusy||fabricationBusy||actionBusy,secondary:true}));
+    if(fabricationBusy)section.append(node('p','正在读取当前可用的真实来源；保留原选择。','small'));
+    if(fabricationError)section.append(node('p',fabricationError,'action-reason'));
+    if(fabricationMenu)renderFabricationEditor(section);area.append(section);
+  }
+  const language=node('details',undefined,'rule-definition'),languageResult=node('div');language.append(node('summary','规则语言能力（不展开发表历史）'),button('读取语言目录',()=>run(async()=>{const epoch=session;languageResult.replaceChildren(node('p','正在读取…','small'));try{const result=await client.query('grove.rule_catalog',{});if(epoch===session&&language.isConnected){languageResult.replaceChildren();appendFacts(languageResult,result);}}catch(error){if(epoch===session&&language.isConnected)languageResult.replaceChildren(node('p',error.message,'action-reason'));}}),{secondary:true}),languageResult);area.append(language);
+}
+function renderFabricationEditor(container){
+  const menu=fabricationMenu,form=node('form',undefined,'descriptor-action fabrication-editor'),rowsArea=node('div'),summary=node('div',undefined,'interaction-preview'),note=node('p',undefined,'small');
+  const materials=menu.materials||[],choices=fabricationSources(menu),materialName=id=>materialLabel(materials.find(value=>value.material_id===id)||id);
+  form.append(node('p','用原材料成型一件物件','descriptor-label'),node('p','所用身份：'+(menu.player?.name||point()?.name||'当前角色'),'small'),node('p',menu.player?.id||'身份尚未读到','fact-reference'));
+  for(const [id,quantity] of Object.entries(menu.cost_u||{}))form.append(node('p','需要 '+quantity+' 单位 '+materialName(id),'small'),node('p',id,'fact-reference'));
+  form.append(node('p','这里按材料单位 u 计量，与区域原料份数不同。只取明确选择的批次，成品放入自己的背包；名称相同不会合并材料身份。','small'),rowsArea);
+  for(const row of fabricationRows){
+    const section=node('section',undefined,'creative-state'),sourceSelect=node('select'),lotSelect=node('select'),amount=node('input');amount.type='number';amount.step='1';amount.min='1';amount.inputMode='numeric';amount.value=row.quantity_u;sourceSelect.setAttribute('aria-label','成型材料来源');lotSelect.setAttribute('aria-label','成型材料批次');
+    const sourceEmpty=node('option','请选择真实来源');sourceEmpty.value='';sourceSelect.append(sourceEmpty);
+    for(const source of choices){const option=node('option',candidateLabel(source,choices,'单位'));option.value=source.id;sourceSelect.append(option);}
+    if(row.entity_id&&!choices.some(source=>source.id===row.entity_id)){const invalid=node('option',(row.source_name||'原来源')+' · 当前不可用，请重选');invalid.value=row.entity_id;invalid.disabled=true;sourceSelect.append(invalid);}sourceSelect.value=row.entity_id;
+    const source=choices.find(value=>value.id===row.entity_id),lotEmpty=node('option','请选择材料批次');lotEmpty.value='';lotSelect.append(lotEmpty);
+    for(const lot of source?.lots||[]){const option=node('option',materialName(lot.material)+' · '+slotLabel(lot.slot)+' · 当前 '+lot.quantity+' 单位');option.value=lot.id;lotSelect.append(option);}
+    if(row.lot_id&&!source?.lots.some(lot=>lot.id===row.lot_id&&lot.material===row.material_id)){const invalid=node('option',(row.material_name||'原批次')+' · 当前不可用，请重选');invalid.value=row.lot_id;invalid.disabled=true;lotSelect.append(invalid);}lotSelect.value=row.lot_id;
+    for(const [label,control] of [['从哪里取',sourceSelect],['其中哪一批',lotSelect],['投入数量（单位）',amount]]){const field=node('label',label);field.append(control);section.append(field);}
+    const identity=node('p',undefined,'fact-reference');section.append(identity);
+    function showIdentity(){identity.textContent=[row.entity_id?'来源 '+row.entity_id:null,row.lot_id?'批次 '+row.lot_id:null,row.material_id?'原材料 '+row.material_id:null].filter(Boolean).join(' · ');}showIdentity();
+    sourceSelect.addEventListener('change',()=>{row.entity_id=sourceSelect.value;row.source_name=choices.find(value=>value.id===row.entity_id)?.name||'';row.lot_id='';row.material_id='';row.material_name='';saveFabricationDraft();renderDefinitionDirectory();});
+    lotSelect.addEventListener('change',()=>{const lot=source?.lots.find(value=>value.id===lotSelect.value);row.lot_id=lotSelect.value;row.material_id=lot?.material||'';row.material_name=lot?materialName(lot.material):'';saveFabricationDraft();showIdentity();update();});
+    amount.addEventListener('input',()=>{row.quantity_u=amount.value;saveFabricationDraft();update();});
+    section.append(button('删除这一来源行',()=>{fabricationRows=fabricationRows.filter(value=>value.row_id!==row.row_id);saveFabricationDraft();renderDefinitionDirectory();},{secondary:true}));rowsArea.append(section);
+  }
+  const add=button('添加来源行（最多8行）',()=>{fabricationRows.push({row_id:crypto.randomUUID(),entity_id:'',lot_id:'',material_id:'',quantity_u:'1'});saveFabricationDraft();renderDefinitionDirectory();},{secondary:true}),controls=node('div',undefined,'content-pagination'),submit=button('用所选原材料成型',()=>{}, {disabled:true}),cancel=button('取消材料选择',()=>{fabricationRows=[];saveFabricationDraft();renderDefinitionDirectory();},{secondary:true});submit.type='submit';
+  controls.append(submit,cancel);form.append(add,summary,note,controls);
+  function update(){
+    const plan=fabricationPlan(menu,fabricationRows),busy=actionBusy||executionReclaimBusy||operationRecoveryBusy||fabricationBusy||!!client.pending(),available=menu.action?.available??menu.available;
+    for(const control of rowsArea.querySelectorAll('input,select,button'))control.disabled=busy;add.disabled=busy||fabricationRows.length>=8;cancel.disabled=busy;
+    submit.disabled=busy||available!==true||!Number.isInteger(menu.player?.version)||plan.errors.length>0;
+    summary.replaceChildren(...Object.entries(menu.cost_u||{}).map(([id,quantity])=>node('p',materialName(id)+'：已选 '+(plan.totals[id]||0)+' / '+quantity+' 单位','small')));
+    note.textContent=client.pending()?'先核对原操作结果，草稿保留，不发出替代成型。':busy?'当前操作正在保存或恢复；原材料选择保留。':available!==true?menu.action?.reason||menu.reason||'当前没有取得成型资格。':plan.errors[0]||'提交前会再次读取同一规则、类型和原来源；只核对原批次，不自动换料。';
+  }
+  form.addEventListener('refresh-fabrication-state',update);
+  form.addEventListener('submit',event=>{event.preventDefault();update();if(submit.disabled)return;run(fabricateSelected);});update();container.append(form);
+}
+async function fabricateSelected(){
+  const ref=directoryDefinitionRef,type=directoryType,rows=fabricationRows.map(row=>({...row})),draft=JSON.stringify(rows);saveFabricationDraft();stopWalking();
+  const success=await perform('grove.fabricate',async isCurrent=>{
+    const menu=await client.query('grove.fabrication_options',{definition_ref:ref,type_id:type});if(!isCurrent())return null;
+    if(directoryDefinitionRef!==ref||directoryType!==type||JSON.stringify(fabricationRows)!==draft)throw new Error('选择已改变，成型尚未提交。请确认原材料选择后再点一次。');
+    if(menu.definition_ref!==ref||menu.type_id!==type)throw new Error('成型菜单与原规则引用不一致，尚未提交。');fabricationMenu=menu;
+    const plan=fabricationPlan(menu,rows);renderDefinitionDirectory();
+    if((menu.action?.available??menu.available)!==true||plan.errors.length)throw new Error(menu.action?.reason||menu.reason||plan.errors[0]||'当前不能成型。');
+    if(menu.player?.id!==client.roleId||!Number.isInteger(menu.player?.version))throw new Error('当前身份与成型菜单未能一致核对，尚未提交。');
+    return {definition_ref:ref,type_id:type,expected_player_version:menu.player.version,placement:{kind:'inventory'},sources:plan.sources};
+  },'用原材料成型');
+  if(success&&directoryDefinitionRef===ref&&directoryType===type&&JSON.stringify(fabricationRows)===draft){fabricationRows=[];saveFabricationDraft();fabricationMenu=null;await readFabricationMenu(type);}
+  renderDefinitionDirectory();
+}
 function renderRuleAction(descriptor,entity,disabled){
   const label=descriptorLabel(descriptor);
   if(descriptor.available===false){$('selection-actions').append(node('p',label+'：'+(descriptor.reason||'当前条件不满足。'),'action-reason'));for(const line of conditionObservationLines(descriptor.condition_observation,entity))$('selection-actions').append(node('p',line,'small'));return;}
@@ -665,7 +791,8 @@ function renderRuleAction(descriptor,entity,disabled){
   const fields=[],unsupported=[],fixed=descriptor.arguments||{},topSchema=descriptor.input_schema||{type:'object',properties:{},required:[]};
   const candidateKeys={item_id:'items',other_id:'others',material:'materials'};
   const generatedFields=new Set(['action','target_id','expected_target_version','expected_player_version','expected_item_version','expected_other_version','params','delegation']);
-  const topProperties=Object.fromEntries(Object.entries(topSchema.properties||{}).filter(([key])=>!generatedFields.has(key)));
+  let topProperties=Object.fromEntries(Object.entries(topSchema.properties||{}).filter(([key])=>!generatedFields.has(key)));
+  if(descriptor.action==='bind_port'&&topProperties.port)topProperties={port:topProperties.port,...topProperties};
   for(const [argument,key] of Object.entries(candidateKeys))if(Object.hasOwn(descriptor.choices||{},key)&&!topProperties[argument])topProperties[argument]={type:'string',title:factLabel(argument)};
   const topRequired=new Set([...(topSchema.required||[]),...Object.keys(candidateKeys).filter(argument=>Object.hasOwn(descriptor.choices||{},candidateKeys[argument]))]);
   function addFields(schema,prefix,defaults,requiredNames,depth=0,container=form){
@@ -681,11 +808,15 @@ function renderRuleAction(descriptor,entity,disabled){
         addFields(property.properties,path,fallback,new Set(property.required||[]),depth+1,section);continue;
       }
       const field=node('label',(property.title||factLabel(name))+(required?'':'（可选）'));
-      const choiceKey=prefix.length===0?candidateKeys[name]:null,candidates=choiceKey?ruleChoices(descriptor,choiceKey):[];
+      const portField=prefix.length===0&&name==='port'&&descriptor.action==='bind_port';
+      const choiceKey=prefix.length===0?(name==='lot_id'&&Object.hasOwn(descriptor.choices||{},'items')?'lots':candidateKeys[name]):null,candidates=choiceKey==='lots'?descriptorLots(descriptor,fixed.item_id):choiceKey?ruleChoices(descriptor,choiceKey,fixed.port):[];
       let control,enumValues=null;
-      if(choiceKey&&Object.hasOwn(descriptor.choices||{},choiceKey)){
+      if(choiceKey&&(choiceKey==='lots'||Object.hasOwn(descriptor.choices||{},choiceKey))){
         control=node('select');const empty=node('option','请选择');empty.value='';control.append(empty);
-        for(const candidate of candidates){const option=node('option',candidateLabel(readableCandidate(candidate),candidates.map(readableCandidate)));option.value=candidate.id;control.append(option);}
+        for(const candidate of candidates){const option=node('option',choiceKey==='lots'?materialLabel(candidate,entity)+' · '+slotLabel(candidate.slot)+' · '+candidate.quantity+' 份':candidateLabel(readableCandidate(candidate),candidates.map(readableCandidate)));option.value=candidate.id;control.append(option);}
+      }else if(portField&&Array.isArray(property.enum)){
+        control=node('select');const empty=node('option','请选择槽位');empty.value='';control.append(empty);
+        for(const value of property.enum){const option=node('option',value);option.value=value;control.append(option);}
       }else if(Array.isArray(property.enum)||property.type==='boolean'){
         control=node('select');enumValues=Array.isArray(property.enum)?property.enum:[true,false];const empty=node('option','请选择');empty.value='';control.append(empty);
         enumValues.forEach((value,index)=>{const option=node('option',factValue(value));option.value=String(index);control.append(option);});
@@ -696,7 +827,7 @@ function renderRuleAction(descriptor,entity,disabled){
       else{unsupported.push(property.title||name);continue;}
       control.disabled=disabled;control.setAttribute('aria-label',label+' · '+path.map(factLabel).join(' / '));control.required=required;
       if(fallback!==undefined){if(enumValues){const index=enumValues.findIndex(value=>value===fallback);if(index>=0)control.value=String(index);}else control.value=Array.isArray(fallback)?fallback.join('\n'):String(fallback);}
-      field.append(control);if(property.description)field.append(node('small',property.description));container.append(field);fields.push({path,property,control,required,enumValues,choiceKey});
+      field.append(control);if(property.description)field.append(node('small',property.description));container.append(field);fields.push({path,property,control,required,enumValues,choiceKey,portField});
     }
   }
   addFields(topProperties,[],fixed,topRequired);
@@ -704,33 +835,44 @@ function renderRuleAction(descriptor,entity,disabled){
   const intent=node('p',undefined,'interaction-preview'),note=node('p',undefined,'small'),controls=node('div',undefined,'descriptor-controls'),submit=button(label,()=>{}, {disabled:true});submit.type='submit';
   controls.append(submit,button('取消选择',()=>{actionDrafts.delete(entity.id+':'+descriptor.action);form.reset();for(const field of fields)if(field.control.tagName==='SELECT')field.control.value='';update();},{disabled,secondary:true}));form.append(intent,note,controls);
   const liveDescriptor=()=>inspection?.entity?.id===entity.id&&!inspection.reading?actionDescriptors(inspection).find(option=>option.function_id==='grove.rule_action'&&option.action===descriptor.action):null;
+  const selectedPort=()=>fields.find(field=>field.portField)?.control.value;
+  const selectedItem=()=>fields.find(field=>field.path.length===1&&field.path[0]==='item_id')?.control.value;
   function readValues(live){
     const result={},errors=[];
     function set(path,value){let target=result;for(const key of path.slice(0,-1))target=target[key]||(target[key]=Object.create(null));target[path.at(-1)]=value;}
     for(const field of fields){const {control,property,path,enumValues,required,choiceKey}=field,raw=control.value.trim();if(!raw){if(required)errors.push('请选择或填写 '+(property.title||factLabel(path.at(-1))));continue;}
       let value=enumValues?enumValues[Number(raw)]:raw;
-      if(choiceKey&&!ruleChoices(live,choiceKey).some(candidate=>candidate.id===raw)){errors.push('所选 '+factLabel(path.at(-1))+' 的条件已改变，请重新选择。');continue;}
+      const choices=choiceKey==='lots'?descriptorLots(live,selectedItem()):choiceKey?ruleChoices(live,choiceKey,selectedPort()):null;
+      if(choices&&!choices.some(candidate=>candidate.id===raw)){errors.push('所选 '+factLabel(path.at(-1))+' 的条件已改变，请重新选择。');continue;}
+      if(field.portField&&!live.input_schema?.properties?.port?.enum?.includes(raw)){errors.push('原槽位当前不可用，请重新选择。');continue;}
       if(['integer','number'].includes(property.type)){value=Number(raw);if(!Number.isFinite(value)||property.type==='integer'&&!Number.isInteger(value)||Number.isFinite(property.minimum)&&value<property.minimum||Number.isFinite(property.maximum)&&value>property.maximum)errors.push((property.title||factLabel(path.at(-1)))+' 超出当前允许范围。');}
       if(property.type==='string'&&(Number.isInteger(property.minLength)&&raw.length<property.minLength||Number.isInteger(property.maxLength)&&raw.length>property.maxLength))errors.push((property.title||factLabel(path.at(-1)))+' 长度超出当前允许范围。');
       if(property.type==='array'){const parts=raw.split('\n').map(part=>part.trim()).filter(Boolean),type=property.items.type;value=parts.map(part=>type==='string'?part:type==='boolean'?part==='true'||part==='是'?true:part==='false'||part==='否'?false:null:Number(part));if(value.some(item=>item===null||typeof item==='number'&&(!Number.isFinite(item)||type==='integer'&&!Number.isInteger(item)))||Number.isInteger(property.minItems)&&value.length<property.minItems||Number.isInteger(property.maxItems)&&value.length>property.maxItems)errors.push((property.title||factLabel(path.at(-1)))+' 列表不符合当前规则。');}
       set(path,value);
     }
+    const lot=result.lot_id&&descriptorLots(live,result.item_id).find(value=>value.id===result.lot_id),amount=result.amount??result.params?.amount;
+    if(lot&&Number.isFinite(amount)&&amount>lot.quantity)errors.push('所选批次只有 '+lot.quantity+' 份，请重新选择数量。');
     return {result,errors};
   }
   function update(){
     const live=liveDescriptor(),reading=!live;
+    for(const field of fields)if(field.portField){
+      const selected=field.control.value,ports=(live||descriptor).input_schema?.properties?.port?.enum||[],empty=node('option','请选择槽位');empty.value='';field.control.replaceChildren(empty);
+      for(const port of ports){const option=node('option',port);option.value=port;field.control.append(option);}
+      if(selected&&!ports.includes(selected)){const previous=node('option','原槽位当前不可用，请重选');previous.value=selected;previous.disabled=true;field.control.append(previous);}field.control.value=selected;
+    }
     for(const field of fields)if(field.choiceKey&&field.control.tagName==='SELECT'){
-      const selected=field.control.value,candidates=ruleChoices(live||descriptor,field.choiceKey),empty=node('option','请选择');empty.value='';field.control.replaceChildren(empty);
-      for(const candidate of candidates){const option=node('option',candidateLabel(readableCandidate(candidate),candidates.map(readableCandidate)));option.value=candidate.id;field.control.append(option);}
+      const selected=field.control.value,candidates=field.choiceKey==='lots'?descriptorLots(live||descriptor,selectedItem()):ruleChoices(live||descriptor,field.choiceKey,selectedPort()),empty=node('option',field.choiceKey==='lots'?'请选择材料批次':'请选择');empty.value='';field.control.replaceChildren(empty);
+      for(const candidate of candidates){const option=node('option',field.choiceKey==='lots'?materialLabel(candidate,readableCandidate(ruleChoices(live||descriptor,'items').find(value=>value.id===selectedItem())))+' · '+slotLabel(candidate.slot)+' · '+candidate.quantity+' 份':candidateLabel(readableCandidate(candidate),candidates.map(readableCandidate)));option.value=candidate.id;field.control.append(option);}
       if(selected&&!candidates.some(candidate=>candidate.id===selected)){const previous=node('option','原选择当前不可用，请重选');previous.value=selected;previous.disabled=true;field.control.append(previous);}
       field.control.value=selected;field.control.disabled=disabled||!candidates.length;
     }
-    const values=live?readValues(live):{errors:[]};submit.disabled=disabled||actionBusy||reading||live?.available===false||unsupported.length>0||values.errors.length>0;
-    const result=values.result||{},item=ruleChoices(live||descriptor,'items').find(candidate=>candidate.id===result.item_id);
-    intent.textContent=operationIntentLabel(live||descriptor,entity,{item:item?readableCandidate(item):null,amount:result.amount??result.params?.amount,choice:result.material});
+    const values=live?readValues(live):{errors:[]};submit.disabled=disabled||actionBusy||!!client.pending()||reading||live?.available===false||unsupported.length>0||values.errors.length>0;
+    const result=values.result||{},item=ruleChoices(live||descriptor,'items').find(candidate=>candidate.id===result.item_id)||ruleChoices(live||descriptor,'others',result.port).find(candidate=>candidate.id===result.other_id);
+    intent.textContent=operationIntentLabel(live||descriptor,entity,{item:item?readableCandidate(item):null,lot:result.lot_id,amount:result.amount??result.params?.amount,choice:result.material,port:result.port});
     note.textContent=reading?'正在核对当前行动条件。取得当前状态后再提交。':live.available===false?live.reason||'当前条件不满足。':unsupported.length?'此参数结构尚未接入网页：'+unsupported.join('、')+'。可明确委托 Agent 通过正式接口操作。':values.errors[0]||'普通操作直接由规则结算，不调用模型；提交前重新读取版本和资格。';
   }
-  form.addEventListener('input',update);form.addEventListener('change',update);form.addEventListener('refresh-candidate-preview',update);
+  form.addEventListener('input',update);form.addEventListener('change',event=>{if(event.target===fields.find(field=>field.path.length===1&&field.path[0]==='item_id')?.control){const lot=fields.find(field=>field.choiceKey==='lots');if(lot)lot.control.value='';}update();});form.addEventListener('refresh-candidate-preview',update);
   form.addEventListener('submit',event=>{event.preventDefault();if(submit.disabled)return;const live=liveDescriptor(),values=readValues(live);if(values.errors.length)return;run(()=>ruleAction(descriptor.action,entity,values.result,live));});
   restoreActionDraft(form,update);update();$('selection-actions').append(form);
 }
@@ -751,10 +893,12 @@ async function ruleAction(action,entity,values,chosenDescriptor){
     const args={...values,action,target_id:entity.id,expected_target_version:latest.entity.version,expected_player_version:point().version};
     if(Object.hasOwn(live.arguments||{},'terms_version'))args.terms_version=chosenDescriptor.arguments.terms_version;
     for(const [argument,key,versionKey] of [['item_id','items','expected_item_version'],['other_id','others','expected_other_version']]){
-      const id=values[argument];if(!id)continue;const candidate=ruleChoices(live,key).find(candidate=>candidate.id===id);if(!candidate)throw new Error('所选对象已不在当前候选中，尚未提交。');
+      const id=values[argument];if(!id)continue;const candidate=ruleChoices(live,key,values.port).find(candidate=>candidate.id===id);if(!candidate)throw new Error('所选对象已不在当前槽位或候选中，尚未提交。');
       if(candidate.kind==='role'){if(Number.isInteger(candidate.version))args[versionKey]=candidate.version;}
       else{const item=await readEntity(id);if(!isCurrent()||!item)return null;args[versionKey]=item.entity.version;}
     }
+    if(action==='bind_port'&&!live.input_schema?.properties?.port?.enum?.includes(values.port))throw new Error('原槽位当前不可用，尚未提交。请重新选择。');
+    if(live.input_schema?.required?.includes('lot_id')||values.lot_id){const lot=descriptorLots(live,values.item_id).find(value=>value.id===values.lot_id),amount=values.amount??values.params?.amount;if(!lot||!Number.isInteger(amount)||amount<1||amount>lot.quantity)throw new Error('原燃料批次或数量已改变，尚未提交。请重新选择。');}
     if(values.material&&!ruleChoices(live,'materials').some(candidate=>candidate.id===values.material))throw new Error('材料已经不符合当前规则，尚未提交。');
     return args;
   },label);
@@ -1026,7 +1170,7 @@ $('import-key').addEventListener('change',event=>run(async()=>{
     $('identity-status').textContent='已选中恢复身份。进入后会保存它并接续原角色。';
   }finally{input.value='';}
 }));
-$('refresh').addEventListener('click',()=>run(async()=>{stopWalking();const epoch=session;await refreshWorld(true);if(epoch===session&&playing)announce('已读取最新附近现场。');}));
+$('refresh').addEventListener('click',()=>run(async()=>{stopWalking();const epoch=session;await refreshWorld(true);if(epoch===session&&playing){if(directoryDefinition&&directoryType)await readFabricationMenu();announce('已读取最新附近现场。');}}));
 $('backup').addEventListener('click',()=>{if(!key)return;const blob=new Blob([JSON.stringify(key,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=node('a');a.href=url;a.download='shared-grove-identity.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);announce('恢复文件包含你的身份密钥，请保存在自己的安全位置。');});
 $('follow-player').addEventListener('click',()=>{if(point()){camera={x:point().x,y:point().y};canvas.focus({preventScroll:true});}});$('dismiss-onboarding').addEventListener('click',()=>{$('onboarding').hidden=true;});
 $('selection-close').addEventListener('click',()=>{rememberActionDrafts();closePanels();canvas.focus({preventScroll:true});});
@@ -1063,10 +1207,11 @@ $('execution-resume').addEventListener('click',()=>run(async()=>{
 $('execution-additional-requests').addEventListener('input',renderExecution);
 $('execution-reclaim').addEventListener('click',()=>run(reclaimExecution));$('execution-reclaim-quick').addEventListener('click',()=>run(reclaimExecution));
 $('execution-recover').addEventListener('click',()=>run(()=>hostCommand('recover',{token:client.token,public_key:key.public_key,name:point()?.name||prefs().name},{refresh:true})));
+$('rule-catalog-read').textContent='浏览已发表规则与成型';
+$('rule-catalog-read').closest('.rule-catalog').querySelector('summary').textContent='规则目录与材料成型';
 $('rule-catalog-read').addEventListener('click',()=>run(async()=>{
-  if(!playing||!current())return;const epoch=session,control=$('rule-catalog-read');control.disabled=true;$('rule-catalog-result').replaceChildren(node('p','正在读取当前规则能力…','small'));
-  try{const result=await client.query('grove.rule_catalog',{});if(epoch!==session||!playing)return;$('rule-catalog-result').replaceChildren();appendFacts($('rule-catalog-result'),result);}
-  catch(error){if(epoch===session&&playing)$('rule-catalog-result').replaceChildren(node('p',error.message||'尚未取得规则目录。','action-reason'));}
+  if(directoryBusy||fabricationBusy||!playing||!current())return;const epoch=session,control=$('rule-catalog-read');control.disabled=true;
+  try{await readDefinitionDirectory();if(epoch!==session||!playing||directoryDefinition)return;let saved;try{saved=JSON.parse(client.draft('grove-fabrication-selection')||'null');}catch{}if(saved?.definition_ref&&saved?.type_id)await readPublishedDefinition(saved.definition_ref,{type_id:saved.type_id});}
   finally{if(epoch===session)control.disabled=false;}
 }));
 $('generation-form').addEventListener('submit',event=>{event.preventDefault();run(async()=>{const text=$('generation-text').value.trim();if(!text)return;if(await hostCommand('generate',{text,kind:$('generation-kind').value,intent:$('host-intent').value.trim()}))intentDirty=false;});});
@@ -1080,15 +1225,16 @@ $('agent-cancel').addEventListener('click',()=>run(async()=>{if(await hostComman
 $('generation-cancel').addEventListener('click',()=>run(async()=>{if(await hostCommand('cancel',{}))announce('已请求中止创作；已经发表的内容保留，结果以世界读回为准。');}));
 $('agent-disconnect').addEventListener('click',()=>run(async()=>{if(await hostCommand('disconnect',{})){clearTimeout(hostTimer);announce('Agent 已断开。仍可以亲手走动和操作。');}}));$('agent-reconnect').addEventListener('click',()=>run(restartHost));
 $('leave').addEventListener('click',()=>{
-  stopWalking();++session;++readEpoch;++hostReadEpoch;++inspectEpoch;++hostCommandEpoch;++definitionReadEpoch;
+  saveFabricationDraft();stopWalking();++session;++readEpoch;++hostReadEpoch;++inspectEpoch;++hostCommandEpoch;++definitionReadEpoch;++directoryEpoch;
   playing=false;entering=false;actionBusy=false;hostCommandBusy=false;executionReclaimBusy=false;
   chosenBuildMaterials.clear();touchedBuildChoices.clear();activeRainChunks.clear();factDisclosures.clear();actionDrafts.clear();activeActionKey=null;hostCommandKind=null;hostCommandFlight=null;
   clearTimeout(worldTimer);clearTimeout(hostTimer);client.cancel();client.token=null;identity=null;world=null;inspection=null;inspectionError=null;inspectionErrorStatus=null;inspectionFlight=null;selectedId=null;selectedTile=null;combinationCheckingForm=null;
   ledger.clear();streamCursor=null;lastSelectionSignature='';lastInventorySignature='';lastChatSignature='';lastGenerationSignature='';lastContentSignature='';contentHistoryId=null;contentHistoryPages=[];contentHistoryBusy=false;operationRecoveryBusy=false;inventoryPageBusy=false;inventoryPageCursors=[null];intentDirty=false;goalDirty=false;
   definitionReadBusy=false;definitionReadValue=null;definitionReadError=null;definitionReadRef=null;definitionReadOpen=false;$('rule-catalog-result').replaceChildren();$('rule-catalog-read').disabled=false;
+  directoryBusy=false;directoryFilters={};directoryInputs={author:'',key:''};directoryPage=null;directoryCursors=[null];directoryError=null;directoryOpen=false;directoryDefinition=null;directoryDefinitionRef=null;directoryType=null;fabricationMenu=null;fabricationBusy=false;fabricationRows=[];fabricationError=null;
   closePanels();document.body.classList.remove('playing');$('game').hidden=true;$('entry').hidden=false;$('world-status').textContent='已离开 · 可接续';$('entry-progress').replaceChildren();$('enter').disabled=false;
   announce('已离开网页。身份、目标进度与变化保留；已委托行动仍受这个目标的总额度约束。离开网页不等于收回行动权。');
 });
-window.addEventListener('resize',resize);window.addEventListener('pagehide',()=>{stopWalking();client.cancel();});document.addEventListener('visibilitychange',()=>{if(document.hidden)stopWalking();else if(playing){run(()=>refreshWorld());scheduleHost(250);}});
+window.addEventListener('resize',resize);window.addEventListener('pagehide',()=>{saveFabricationDraft();stopWalking();client.cancel();});document.addEventListener('visibilitychange',()=>{if(document.hidden)stopWalking();else if(playing){run(()=>refreshWorld());scheduleHost(250);}});
 window.addEventListener('pageshow',event=>{if(event.persisted&&playing){run(()=>refreshWorld(true));scheduleWorld();scheduleHost(250);}});
 new ResizeObserver(resize).observe(canvas);requestAnimationFrame(draw);readIdentity();

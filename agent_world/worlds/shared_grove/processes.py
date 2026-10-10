@@ -11,6 +11,7 @@ from agent_world.simulation.effects import Break, Source, Transfer
 from agent_world.simulation.frame import Frame
 
 from . import model as m, commit, activity
+from .contact import bind_incoming
 from .activity import (MAX_WET_ENTITIES, MAX_BURNING_ENTITIES, MAX_BURNING_CONTENTS, MAX_EVENTS,
     MAX_GROWTH, MAX_PROCESSES, MAX_PROCESS_BYTES, MAX_FRAME_CHUNKS, MAX_FRAME_META, MAX_RAIN_CHUNKS,
     MAX_RAIN_INTENSITY, SPREAD_BATCH, WEATHER_BATCH, MOISTURE_BATCH, BURNING_BATCH, DRIFT_BATCH)
@@ -119,7 +120,7 @@ def destroy_entity(ctx, entity):
         spills = chunk.get("water_reservoirs", {})
         extra.extend(m.public_entities_near(ctx, x, y, radius=0, limit=m.MAX_CHUNK_ENTITIES))
     objects, _ = activity.physical_closure(ctx, extra)
-    frame = Frame(registry_for(objects), objects, spills=spills, bind_material=bind_material, mixture_capacity=mixture_capacity)
+    frame = Frame(registry_for(objects), objects, spills=spills, bind_material=lambda entity, definition: bind_incoming(ctx, entity, definition), mixture_capacity=mixture_capacity)
     frame.apply([Break(entity["id"])], allowed_sinks={"drain"})
     frame.apply(spill_rule(frame.snapshot()), allowed_sinks={"drain"}, allocate=True)
     commit.commit_frame(ctx, frame, chunks=(chunk["id"],) if chunk else ())
@@ -169,7 +170,7 @@ def tick(ctx, args):
             for cid in chunks:
                 _, cx, cy = cid.split("_")
                 spills.update(m.get_chunk(ctx, int(cx), int(cy)).get("water_reservoirs", {}))
-            frame = Frame(registry_for(objects), objects, sequence, protected=protected, spills=spills, bind_material=bind_material, mixture_capacity=mixture_capacity)
+            frame = Frame(registry_for(objects), objects, sequence, protected=protected, spills=spills, bind_material=lambda entity, definition: bind_incoming(ctx, entity, definition), mixture_capacity=mixture_capacity)
             # Finite water contact spends one source lot with a deterministic budget.
             contact_effects, source_available, wet_by_rain = [], {}, set()
             for eid, entity in sorted(frame.objects.items()):

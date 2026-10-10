@@ -288,7 +288,16 @@ class CreativeWorldTests(unittest.TestCase):
             {"op": "set", "field": "latched", "value": True},
             {"op": "react", "inputs": {"amber": 1}, "outputs": {"resin": 1}, "rate": 1},
             {"op": "set", "field": "bounded", "value": 1}]}]
-        ref, objects = self.publish("A", definition, ["source", "gear", "gate"])
+        definition["types"]["observer"] = {"name": "真实停机观察", "body_material": "wood", "cost": {"wood": 1},
+            "ports": {"machine": {"fields": ["mechanical.speed", "mechanical.available_torque"]}},
+            "fields": {name: {"type": "integer", "default": 0, "min": 0, "max": 100}
+                for name in ("reaction_speed", "reaction_torque", "after_speed")},
+            "rules": [{"id": name, "phase": phase, "when": True,
+                "effects": [{"op": "set", "field": name, "value": {"object": {"port": "machine", "field": field}}}]}
+                for name, phase, field in (("reaction_speed", "reaction", "mechanical.speed"),
+                    ("reaction_torque", "reaction", "mechanical.available_torque"), ("after_speed", "after", "mechanical.speed"))]}
+        ref, objects = self.publish("A", definition, ["source", "gear", "gate", "observer"])
+        self.action("A", objects["observer"], "bind_port", port="machine", other_id=objects["gate"])
         fuel = self.item("A", "木柴")["id"]
         self.action("A", objects["gate"], "charge", item_id=fuel, material="amber", amount=2)
         # Two meshes preserve the positive actuator direction from position 0.
@@ -306,8 +315,9 @@ class CreativeWorldTests(unittest.TestCase):
         current = self.entity(objects["gate"])
         program = current["state"]["program"]
         self.assertEqual(program["mechanical"]["position"], 2)
-        self.assertEqual(program["mechanical"]["speed"], 0)
-        self.assertEqual(program["mechanical"]["status"], "program_error")
+        # The after failure cannot undo this step's already solved network.
+        self.assertEqual(program["mechanical"]["speed"], 1)
+        self.assertEqual(program["mechanical"]["status"], "running")
         self.assertFalse(program["mechanical"]["enabled"])
         self.assertEqual(program["fields"], {"latched": False, "bounded": 0})
         self.assertEqual(current["matter"], matter_before)
@@ -315,10 +325,59 @@ class CreativeWorldTests(unittest.TestCase):
         self.assertIn("bounded", program["process"]["error"])
         source = self.entity(objects["source"])["state"]["program"]["mechanical"]
         self.assertEqual(source["energy"], 2)
+        self.assertEqual(self.entity(objects["observer"])["state"]["program"]["fields"]["after_speed"], 1)
+        self.ticks(1)
+        stopped = self.entity(objects["gate"])["state"]["program"]["mechanical"]
+        self.assertEqual((stopped["position"], stopped["speed"], stopped["status"]), (2, 0, "program_error"))
+        self.assertEqual(stopped["available_torque"], 0)
+        self.assertEqual(self.entity(objects["observer"])["state"]["program"]["fields"],
+            {"reaction_speed": 0, "reaction_torque": 0, "after_speed": 0})
         self.assertEqual(source["speed"], 1)
         for category, material in (("sources", "resin"), ("sinks", "amber")):
             key = hashlib.sha256("\0".join((category, ref + "#" + material, "creative_reaction")).encode()).hexdigest()
             self.assertFalse(self.world.get_state("w", m.CREATIVE_ACCOUNTING, key)["exists"])
+
+    def test_unknown_event_contract_and_barrier_do_not_resume_failed_program(self):
+        unknown = {"op": "gt", "left": {"object": {"port": "water", "field": "physical.contained_water"}}, "right": 0}
+        definition = {"key": "error_priority", "name": "错误优先", "version": 1, "types": {"machine": {
+            "name": "停止后仍有期限的装置", "body_material": "wood", "cost": {"wood": 1},
+            "mechanical": {"role": "source", "teeth": 16, "torque": 40, "speed": 1},
+            "ports": {"water": {"fields": ["physical.contained_water"]}}, "barrier": unknown,
+            "fields": {"bounded": {"type": "integer", "default": 0, "min": 0, "max": 0}},
+            "rules": [{"id": "fails_after", "phase": "after", "when": True,
+                "effects": [{"op": "set", "field": "bounded", "value": 1}]}],
+            "contract": {"material": "wood", "quantity": 1, "duration_ticks": 5,
+                "completion_when": {"op": "all", "args": [
+                    {"op": "ne", "left": {"event": "action"}, "right": ""}, unknown]}}}}}
+        _, objects = self.publish("A", definition, ["machine"])
+        machine = objects["machine"]
+        kettle = self.item("A", "水壶")["id"]
+        self.interact("A", kettle, "drop")
+        self.action("A", machine, "bind_port", port="water", other_id=kettle)
+        self.action("A", machine, "offer", other_id=self.roles["B"])
+        terms = self.entity(machine)["state"]["program"]["contract"]["terms_version"]
+        for actor in "AB":self.action(actor, machine, "accept", terms_version=terms)
+        self.action("B", machine, "deliver", item_id=self.item("B", "木柴")["id"], amount=1)
+        self.approach("A", kettle)
+        self.interact("A", kettle, "close")
+        self.action("A", machine, "fuel", item_id=self.item("A", "木柴")["id"], amount=3)
+        self.action("A", machine, "start")
+        self.ticks(1)
+        first = self.entity(machine)["state"]["program"]
+        self.assertEqual(first["process"]["status"], "error")
+        self.assertEqual(first["mechanical"]["speed"], 1)
+        self.assertTrue(first["contract"].get("condition_error"))
+        self.ticks(1)
+        current = self.entity(machine)["state"]["program"]
+        self.assertEqual(current["process"]["status"], "error")
+        self.assertEqual(current["mechanical"]["speed"], 0)
+        self.assertEqual(current["mechanical"]["available_torque"], 0)
+        self.assertEqual((current["mechanical"]["angle"], current["mechanical"]["energy"]),
+            (first["mechanical"]["angle"], first["mechanical"]["energy"]))
+        self.ticks(3)
+        final = self.entity(machine)["state"]["program"]
+        self.assertEqual(final["process"]["status"], "error")
+        self.assertEqual(final["contract"]["status"], "failed")
 
     def test_tick_contract_conditions_retain_step_start_mechanical_facts(self):
         definition = package()
@@ -1030,7 +1089,8 @@ class CreativeWorldTests(unittest.TestCase):
                 "types": {"echo": {"name": "真实事件记录器", "body_material": "wood", "cost": {"wood": 1},
                     "recorder": {"radius": 8, "window_ticks": 3600}}}}
             definitions.append(self.call("A", "grove.definition_publish", {"definition": definition})["definition_ref"])
-        self.assertEqual(len(self.read("A", "grove.rule_catalog")["definitions"]), 32)
+            if index % 8 == 7:self.ticks(1)
+        self.assertEqual(self.read("A", "grove.definition_list")["storage"]["definitions_count"], 32)
         regions = [(0, 0)] + [(x, y) for y in range(-3, 4) for x in range(-3, 4)
             if (x, y) != (0, 0) and m.chunk_landscape(x, y) == "willow_grove"][:3]
         self.assertEqual(len(regions), 4)
@@ -1091,6 +1151,7 @@ class CreativeWorldTests(unittest.TestCase):
                          "mode": "independent", "channel": left+right}]}
                         for left, right in (("a", "b"), ("b", "a"), ("c", "d"), ("d", "c"))]}}}
             refs.append(self.call("A", "grove.definition_publish", {"definition": definition})["definition_ref"])
+            if index % 8 == 7:self.ticks(1)
         combined_ids = []
         for index in range(0, 8, 2):
             self.time.return_value += 31

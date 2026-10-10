@@ -12,6 +12,8 @@ import math
 import re
 
 from .registry import MaterialDef
+from .facts import FACT_TYPES, PHYSICAL_TYPES, FactUnavailable, reference_value
+from .declarations import has_event
 
 MAX_EXPRESSION_DEPTH = 8
 MAX_EXPRESSION_NODES = 64
@@ -28,11 +30,7 @@ _EVENT_FIELDS = {
     "kind": "string", "action": "string", "entity_id": "string", "actor": "string",
     "mechanical_position": "integer", "passable": "boolean",
 }
-_OBJECT_FIELDS = {
-    "intact": "boolean", "barrier.active": "boolean", "barrier.opened_sequence": "integer",
-    "mechanical.position": "integer", "mechanical.speed": "integer",
-    "mechanical.angle": "integer", "mechanical.energy": "integer", "mechanical.status": "string",
-}
+_OBJECT_FIELDS = FACT_TYPES
 _CONTRACT_FIELDS = {
     "status": "string", "started_event_sequence": "integer", "deadline_tick": "integer",
     "delivered": "integer", "quantity": "integer",
@@ -50,6 +48,7 @@ _MECHANICAL_RANGES = {
 _RESERVED_ACTIONS = {
     "charge", "fuel", "connect", "disconnect", "start_recording", "stop_recording",
     "read_records", "offer", "accept", "deliver", "release", "start", "stop",
+    "bind_port", "unbind_port",
 }
 
 
@@ -122,9 +121,11 @@ def _fields(definitions, path):
     return result
 
 
-def _expression(expr, fields, params, materials, path, expected=None, object_ids=None):
+def _expression(expr, fields, params, materials, path, expected=None, object_ids=None, ports=None, *, fact_catalog=None):
     """Validate and infer one expression; string literals support event matching."""
     count = 0
+    object_fields = FACT_TYPES if fact_catalog is None else fact_catalog
+    physical_fields = {key.removeprefix("physical."): kind for key, kind in object_fields.items() if key.startswith("physical.")}
     if object_ids is None:
         object_ids = set()
 
@@ -147,26 +148,33 @@ def _expression(expr, fields, params, materials, path, expected=None, object_ids
             key = next(iter(value))
             name = value[key]
             if key == "object":
-                binding = _mapping(name, at + ".object", {"id", "field"}, {"id", "field"})
-                entity_id = _text(binding["id"], at + ".object.id", 128)
+                binding = _mapping(name, at + ".object", {"id", "port", "field"}, {"field"})
+                if ("id" in binding) == ("port" in binding):
+                    _fail(at + ".object", "requires exactly one id or declared port")
                 public_field = binding["field"]
-                if not isinstance(public_field, str) or public_field not in _OBJECT_FIELDS:
+                if not isinstance(public_field, str) or public_field not in object_fields:
                     _fail(at + ".object.field", "must reference a supported public object field")
-                object_ids.add(entity_id)
+                if "port" in binding:
+                    port = _text(binding["port"], at + ".object.port", 48, _SYMBOL)
+                    if port not in (ports or {}) or public_field not in ports[port]["fields"]:
+                        _fail(at + ".object.port", "requires a declared port and one of its typed fields")
+                else:
+                    entity_id = _text(binding["id"], at + ".object.id", 128)
+                    object_ids.add(entity_id)
                 if len(object_ids) > 8:
                     _fail(at + ".object.id", "at most 8 distinct object bindings are allowed per program")
-                return _OBJECT_FIELDS[public_field]
-            if key in {"field", "param", "quantity", "concentration", "mechanical", "event", "contract"}:
+                return object_fields[public_field]
+            if key in {"field", "param", "quantity", "concentration", "mechanical", "event", "contract", "physical"}:
                 if not isinstance(name, str):
                     _fail(at, "reference name must be a string")
                 table = {"field": fields, "param": params, "quantity": materials,
                          "concentration": materials, "mechanical": _MECHANICAL_FIELDS,
-                         "event": _EVENT_FIELDS, "contract": _CONTRACT_FIELDS}[key]
+                         "event": _EVENT_FIELDS, "contract": _CONTRACT_FIELDS, "physical": physical_fields}[key]
                 if name not in table:
                     _fail(at, f"undeclared {key} reference {name!r}")
                 if key in {"field", "param"}:
                     return table[name]["type"]
-                return table[name] if key in {"mechanical", "event", "contract"} else "integer"
+                return table[name] if key in {"mechanical", "event", "contract", "physical"} else "integer"
         op = value.get("op")
         if isinstance(op, str) and op in _BINARY:
             _mapping(value, at, {"op", "left", "right"}, {"op", "left", "right"})
@@ -232,7 +240,7 @@ def _reaction(effect, materials, path):
             "channel": _text(effect.get("channel", "chemistry"), path + ".channel", 80, _KEY), "mode": mode}
 
 
-def _effects(effects, fields, params, materials, path, object_ids):
+def _effects(effects, fields, params, materials, path, object_ids, ports=None, *, fact_catalog=None):
     result = []
     for index, effect in enumerate(_list(effects, path, 8)):
         at = f"{path}[{index}]"
@@ -243,14 +251,17 @@ def _effects(effects, fields, params, materials, path, object_ids):
             name = effect["field"]
             if not isinstance(name, str) or name not in fields:
                 _fail(at + ".field", "set may only write a declared program field")
-            result.append({"op": "set", "field": name, "value": _expression(effect["value"], fields, params, materials, at + ".value", fields[name]["type"], object_ids)})
+            result.append({"op": "set", "field": name, "value": _expression(effect["value"], fields, params, materials, at + ".value", fields[name]["type"], object_ids, ports, fact_catalog=fact_catalog)})
+        elif op == "drive":
+            _mapping(effect, at, {"op", "enabled"}, {"op", "enabled"})
+            result.append({"op": "drive", "enabled": _expression(effect["enabled"], fields, params, materials, at + ".enabled", "boolean", object_ids, ports, fact_catalog=fact_catalog)})
         elif op == "react":
             result.append(_reaction(effect, materials, at))
         elif op == "emit":
             _mapping(effect, at, {"op", "name"}, {"op", "name"})
             result.append({"op": "emit", "name": _text(effect["name"], at + ".name", 80)})
         else:
-            _fail(at + ".op", "must be set, react or emit")
+            _fail(at + ".op", "must be set, react, emit or drive")
     return result
 
 
@@ -269,8 +280,34 @@ def _choices(values):
     return ", ".join(values[:-1]) + " or " + values[-1] if len(values) > 1 else values[0]
 
 
-def compile_program(definition, *, materials, body_materials, max_custom_materials, imported_materials=None):
+def has_live_reference(value):
+    if isinstance(value, dict):
+        if set(value) == {"physical"}:
+            return True
+        if set(value) == {"object"}:
+            return "port" in value["object"] or value["object"].get("field", "").startswith("physical.")
+        return any(has_live_reference(child) for child in value.values())
+    return isinstance(value, list) and any(has_live_reference(child) for child in value)
+
+
+def _literal_ids(value):
+    if isinstance(value, dict):
+        if set(value) == {"object"}:
+            return {value["object"]["id"]} if "id" in value["object"] else set()
+        return set().union(*(_literal_ids(child) for child in value.values()))
+    if isinstance(value, list):
+        return set().union(*(_literal_ids(child) for child in value))
+    return set()
+
+
+def compile_program(definition, *, materials, body_materials, max_custom_materials, imported_materials=None, component_catalog=None, fact_catalog=None):
     """Return a validated canonical deep copy; invalid declarations raise ValueError."""
+    from functools import partial
+    fact_catalog = dict(FACT_TYPES if fact_catalog is None else fact_catalog)
+    if any(not isinstance(name, str) or kind not in {"boolean", "integer", "string"} for name, kind in fact_catalog.items()):
+        _fail("fact_catalog", "trusted facts require names and boolean/integer/string types")
+    expression = partial(_expression, fact_catalog=fact_catalog)
+    effects = partial(_effects, fact_catalog=fact_catalog)
     _mapping(definition, "program", {"key", "name", "version", "materials", "material_imports", "types", "contact_reactions"}, {"key", "name", "version", "types"})
     result = {"key": _text(definition["key"], "program.key", 80, _KEY),
               "name": _text(definition["name"], "program.name"),
@@ -295,7 +332,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
         _text(symbol, at, 48, _SYMBOL)
         if symbol in builtin_materials:
             _fail(at, "built-in materials cannot be redefined; choose a new symbol")
-        _mapping(spec, at, {"name", "feedstock", "load_per_u", "combustible", "liquid"}, {"name", "feedstock", "load_per_u", "combustible", "liquid"})
+        _mapping(spec, at, {"name", "feedstock", "load_per_u", "combustible", "liquid", "uses"}, {"name", "feedstock", "load_per_u", "combustible", "liquid"})
         if not isinstance(spec["feedstock"], str) or spec["feedstock"] not in builtin_materials:
             _fail(at + ".feedstock", "must be " + _choices(list(builtin_materials)))
         name = _text(spec["name"], at + ".name", 80)
@@ -305,6 +342,11 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
                      "load_per_u": _integer(spec["load_per_u"], at + ".load_per_u", 1, 8),
                      "combustible": _boolean(spec["combustible"], at + ".combustible"),
                      "liquid": _boolean(spec["liquid"], at + ".liquid")}
+        if "uses" in spec:
+            uses = _mapping(spec["uses"], at + ".uses", {"hearth_fuel", "mechanical_fuel"})
+            canonical["uses"] = {use: _boolean(value, at + ".uses." + use) for use, value in uses.items()}
+            if any(canonical["uses"].values()) and (not canonical["combustible"] or canonical["liquid"]):
+                _fail(at + ".uses", "fuel uses require combustible non-liquid material")
         if canonical["load_per_u"] != builtin_materials[canonical["feedstock"]]["load_per_u"]:
             required = builtin_materials[canonical["feedstock"]]["load_per_u"]
             _fail(at + ".load_per_u", f"must equal feedstock {canonical['feedstock']} load_per_u {required}, received {canonical['load_per_u']}; preparation converts one feedstock u into one local material u")
@@ -328,7 +370,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             if imported_materials is None or symbol not in imported_materials:
                 _fail(at, "requires an existing immutable published material reference")
             source = imported_materials[symbol]
-            _mapping(source, at + ".resolved", {"name", "feedstock", "load_per_u", "combustible", "liquid"},
+            _mapping(source, at + ".resolved", {"name", "feedstock", "load_per_u", "combustible", "liquid", "uses"},
                      {"name", "load_per_u", "combustible", "liquid"})
             physical = {"name": _text(source["name"], at + ".resolved.name", 80),
                         "load_per_u": _integer(source["load_per_u"], at + ".resolved.load_per_u", 1, 8),
@@ -342,16 +384,55 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
     for symbol, spec in types.items():
         at = "program.types." + symbol
         _text(symbol, at, 48, _SYMBOL)
-        _mapping(spec, at, {"name", "body_material", "cost", "fields", "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions"}, {"name", "body_material", "cost"})
-        if not isinstance(spec["body_material"], str) or spec["body_material"] not in body_materials:
-            _fail(at + ".body_material", "must be " + _choices(body_materials))
-        cost = _mapping(spec["cost"], at + ".cost", body_materials)
+        _mapping(spec, at, {"name", "body_material", "cost", "cost_u", "components", "ports", "fields", "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions"}, {"name", "body_material"})
+        if ("cost" in spec) == ("cost_u" in spec):
+            _fail(at, "requires exactly one cost (builtin pieces) or cost_u (actual material units)")
         canonical = {"name": _text(spec["name"], at + ".name"), "body_material": spec["body_material"],
-                     "cost": {key: _integer(cost.get(key, 0), at + ".cost." + key, 0, 4) for key in body_materials},
                      "fields": _fields(spec.get("fields", {}), at + ".fields"), "rules": [], "actions": []}
-        # Every body must consume real feedstock. The world converts pieces to lots.
-        if canonical["cost"][spec["body_material"]] < 1:
-            _fail(at + ".cost", "body_material must cost at least one real feedstock piece")
+        if not isinstance(spec["body_material"], str) or spec["body_material"] not in materials:
+            _fail(at + ".body_material", "must name an existing local, imported or builtin material")
+        if "cost" in spec:
+            if not isinstance(spec["body_material"], str) or spec["body_material"] not in body_materials:
+                _fail(at + ".body_material", "must be " + _choices(body_materials))
+            cost = _mapping(spec["cost"], at + ".cost", body_materials)
+            canonical["cost"] = {key: _integer(cost.get(key, 0), at + ".cost." + key, 0, 4) for key in body_materials}
+            if canonical["cost"][spec["body_material"]] < 1:
+                _fail(at + ".cost", "body_material must cost at least one real feedstock piece")
+        else:
+            cost = _mapping(spec["cost_u"], at + ".cost_u", materials)
+            if not cost or len(cost) > 8 or spec["body_material"] not in cost:
+                _fail(at + ".cost_u", "requires 1..8 actual materials including body_material")
+            canonical["cost_u"] = {}
+            for material, amount in cost.items():
+                if materials[material]["liquid"]:
+                    _fail(at + ".cost_u." + material, "liquid cannot form a rigid body; use actual contained liquids")
+                canonical["cost_u"][material] = _integer(amount, at + ".cost_u." + material, 1, 200)
+            if sum(canonical["cost_u"].values()) > 200:
+                _fail(at + ".cost_u", "one formation consumes at most 200u")
+        if "components" in spec:
+            declared_components = _mapping(spec["components"], at + ".components", component_catalog or {})
+            canonical["components"] = {}
+            for name, parameters in declared_components.items():
+                _mapping(parameters, at + ".components." + name)
+                if "supports" in parameters:
+                    _fail(at + ".components." + name, "supports are derived from actual formed body lots")
+                component_catalog[name].validate(parameters)
+                canonical["components"][name] = deepcopy(parameters)
+        ports = {}
+        if "ports" in spec:
+            _mapping(spec["ports"], at + ".ports")
+            if len(spec["ports"]) > 8:
+                _fail(at + ".ports", "at most 8 read-only ports")
+            for port, value in spec["ports"].items():
+                _text(port, at + ".ports", 48, _SYMBOL)
+                _mapping(value, at + ".ports." + port, {"label", "fields"}, {"fields"})
+                fields_list = _list(value["fields"], at + ".ports." + port + ".fields", 8)
+                if not fields_list or any(not isinstance(field, str) or field not in fact_catalog for field in fields_list) or len(set(fields_list)) != len(fields_list):
+                    _fail(at + ".ports." + port, "fields require 1..8 distinct typed public facts")
+                ports[port] = {"fields": deepcopy(fields_list)}
+                if "label" in value:
+                    ports[port]["label"] = _text(value["label"], at + ".ports." + port + ".label", 80)
+            canonical["ports"] = ports
         fields = canonical["fields"]
         if "container_capacity" in spec:
             canonical["container_capacity"] = _integer(spec["container_capacity"], at + ".container_capacity", 1, 200)
@@ -382,9 +463,9 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
                                      "duration_ticks": _integer(contract["duration_ticks"], at + ".contract.duration_ticks", 1, 3600)}
             for condition in ("completion_when", "delivery_when"):
                 if condition in contract:
-                    canonical["contract"][condition] = _expression(contract[condition], fields, {}, materials, at + ".contract." + condition, "boolean", object_ids)
+                    canonical["contract"][condition] = expression(contract[condition], fields, {}, materials, at + ".contract." + condition, "boolean", object_ids, ports)
         if "barrier" in spec:
-            canonical["barrier"] = _expression(spec["barrier"], fields, {}, materials, at + ".barrier", "boolean", object_ids)
+            canonical["barrier"] = expression(spec["barrier"], fields, {}, materials, at + ".barrier", "boolean", object_ids, ports)
         rule_ids = set()
         for index, rule in enumerate(_list(spec.get("rules", []), at + ".rules", 8)):
             rp = f"{at}.rules[{index}]"
@@ -396,8 +477,8 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             if not isinstance(rule["phase"], str) or rule["phase"] not in {"reaction", "after"}:
                 _fail(rp + ".phase", "must be reaction or after")
             canonical["rules"].append({"id": rid, "phase": rule["phase"],
-                                       "when": _expression(rule["when"], fields, {}, materials, rp + ".when", "boolean", object_ids),
-                                       "effects": _effects(rule["effects"], fields, {}, materials, rp + ".effects", object_ids)})
+                                       "when": expression(rule["when"], fields, {}, materials, rp + ".when", "boolean", object_ids, ports),
+                                       "effects": effects(rule["effects"], fields, {}, materials, rp + ".effects", object_ids, ports)})
         action_ids = set()
         for index, action in enumerate(_list(spec.get("actions", []), at + ".actions", 8)):
             ap = f"{at}.actions[{index}]"
@@ -410,10 +491,14 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             action_ids.add(aid)
             params = _fields(action.get("parameters", {}), ap + ".parameters")
             compiled = {"id": aid, "label": _text(action["label"], ap + ".label"), "parameters": params,
-                        "effects": _effects(action["effects"], fields, params, materials, ap + ".effects", object_ids)}
+                        "effects": effects(action["effects"], fields, params, materials, ap + ".effects", object_ids, ports)}
             if "when" in action:
-                compiled["when"] = _expression(action["when"], fields, params, materials, ap + ".when", "boolean", object_ids)
+                compiled["when"] = expression(action["when"], fields, params, materials, ap + ".when", "boolean", object_ids, ports)
             canonical["actions"].append(compiled)
+        if len(ports) + len(_literal_ids(canonical)) > 8:
+            _fail(at + ".ports", "literal objects and ports combined may use at most 8 sources per instance")
+        if any(effect["op"] == "drive" for declaration in canonical["rules"] + canonical["actions"] for effect in declaration["effects"]) and canonical.get("mechanical", {}).get("role") != "source":
+            _fail(at, "drive controls only this type's existing mechanical source")
         result["types"][symbol] = canonical
     if "contact_reactions" in definition:
         result["contact_reactions"] = []
@@ -425,10 +510,10 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             if rid in reaction_ids:
                 _fail(at + ".id", "duplicate contact reaction id")
             reaction_ids.add(rid)
-            condition = _expression(rule["when"], {}, {}, materials, at + ".when", "boolean", set())
+            condition = expression(rule["when"], {}, {}, materials, at + ".when", "boolean", set())
             def check_refs(value):
                 if isinstance(value, dict):
-                    if set(value).intersection({"field", "param", "mechanical", "event", "contract", "object"}):
+                    if set(value).intersection({"field", "param", "mechanical", "event", "contract", "object", "physical"}):
                         _fail(at + ".when", "contact conditions only read local quantities and concentrations")
                     for child in value.values():
                         check_refs(child)
@@ -472,6 +557,10 @@ def program_material_semantics(definition, definition_ref, *, materials, type_id
                         "outputs_per_extent": deepcopy(effect["outputs"]),
                         "max_extent": effect["rate"], "channel": effect["channel"], "mode": effect["mode"]})
         current = {"reactions": reactions}
+        if "cost_u" in kind:
+            symbols.update(kind["cost_u"])
+            current["formation"] = {"body_material": kind["body_material"], "cost_u": deepcopy(kind["cost_u"]),
+                                    "actual_sources_required": True, "function_id": "grove.fabricate"}
         if "contract" in kind:
             contract = kind["contract"]
             symbols.add(contract["material"])
@@ -512,7 +601,7 @@ def program_material_semantics(definition, definition_ref, *, materials, type_id
             "Delivery quantities describe terms, not acceptance or completed delivery."}
 
 
-def evaluate(expr, context):
+def evaluate(expr, context, *, fact_catalog=None):
     """Evaluate bounded data against explicit state and public fact context.
 
     Concentration is the integer percentage of simplified volume shares (u),
@@ -521,6 +610,8 @@ def evaluate(expr, context):
     are errors. Mechanical fractions are truncated toward zero for expressions.
     """
     _mapping(context, "context")
+    object_fields = FACT_TYPES if fact_catalog is None else fact_catalog
+    physical_fields = {key.removeprefix("physical."): kind for key, kind in object_fields.items() if key.startswith("physical.")}
     count = 0
 
     def public_fact(current, kind, reference):
@@ -544,18 +635,32 @@ def evaluate(expr, context):
             ref = next(iter(value))
             name = value[ref]
             if ref == "object":
-                binding = _mapping(name, "expression.object", {"id", "field"}, {"id", "field"})
-                entity_id = _text(binding["id"], "expression.object.id", 128)
+                binding = _mapping(name, "expression.object", {"id", "port", "field"}, {"field"})
+                if ("id" in binding) == ("port" in binding):
+                    _fail("expression.object", "requires exactly one id or port")
+                if "port" in binding:
+                    port = _text(binding["port"], "expression.object.port", 48, _SYMBOL)
+                    entity_id = reference_value(context.get("ports", {}), port)
+                else:
+                    entity_id = _text(binding["id"], "expression.object.id", 128)
                 public_field = binding["field"]
-                if not isinstance(public_field, str) or public_field not in _OBJECT_FIELDS:
+                if not isinstance(public_field, str) or public_field not in object_fields:
                     _fail("expression.object.field", "must reference a supported public object field")
                 objects = _mapping(context.get("objects", {}), "context.objects")
                 if entity_id not in objects:
+                    if "port" in binding or public_field.startswith("physical."):
+                        raise FactUnavailable("绑定事实当前不可读：" + public_field)
                     _fail("expression", f"missing public object fact {entity_id!r}.{public_field}")
                 source = _mapping(objects[entity_id], "context.objects." + entity_id)
                 if public_field not in source:
+                    if "port" in binding or public_field.startswith("physical."):
+                        raise FactUnavailable("绑定对象不具备可读事实：" + public_field)
                     _fail("expression", f"missing public object fact {entity_id!r}.{public_field}")
-                return public_fact(source[public_field], _OBJECT_FIELDS[public_field], f"object {entity_id!r}.{public_field}")
+                return public_fact(source[public_field], object_fields[public_field], f"object {entity_id!r}.{public_field}")
+            if ref == "physical":
+                if not isinstance(name, str) or name not in physical_fields:
+                    _fail("expression.physical", "must name a typed physical fact")
+                return public_fact(reference_value(context.get("physical", {}), name), physical_fields[name], "physical." + name)
             if ref in {"field", "param", "quantity", "concentration", "mechanical", "event", "contract"}:
                 if not isinstance(name, str):
                     _fail("expression", "reference name must be a string")

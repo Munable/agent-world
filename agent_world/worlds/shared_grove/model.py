@@ -407,7 +407,7 @@ def normalize_entity(entity):
     value.setdefault("authored_description", "")
     material = value.get("material")
     caps = value.get("capabilities", [])
-    if material not in MATERIALS or not isinstance(caps, list) or set(caps)-CAPABILITIES:
+    if not isinstance(caps, list) or set(caps)-CAPABILITIES:
         raise RuleViolation("未知材质或物件能力。")
     if len(caps) != len(set(caps)):
         raise RuleViolation("能力不能重复。")
@@ -437,9 +437,13 @@ def normalize_entity(entity):
         registry = registry_for(value)
     except ValueError as exc:
         raise RuleViolation(str(exc)) from exc
+    if material not in registry.materials:
+        raise RuleViolation("主材须引用本物件已绑定的原始材料身份。")
     # These defaults are a trusted new-object constructor, not a migration of
     # old percentage/fuel facts. Once matter exists, those projections are ignored.
     if "matter" not in value:
+        if material not in PIECE_QUANTITIES:
+            raise RuleViolation("自创本体必须由明确的真实批次成型，不能默认生成物质。")
         value["matter"] = [{"id": "body", "material": material, "quantity": PIECE_QUANTITIES[material], "slot": "body", "role": "structural", "burning": False}]
         if "water_source" in caps:
             value["matter"].append({"id": "source", "material": "water", "quantity": state.get("water_remaining", 200), "slot": "contained", "role": "substance", "burning": False})
@@ -579,6 +583,7 @@ def future_water_slots(value, registry):
 def store_entity(ctx, entity, expected_version=None):
     """Return the normalized entity and whether storage accepted a change."""
     value = normalize_entity(entity)
+    project_world_uses(ctx, value)
     batch = getattr(ctx, "_grove_batch", None)
     if batch is not None:
         record = ctx.get_state_record(ENTITIES, value["id"])
@@ -607,6 +612,14 @@ def store_entity(ctx, entity, expected_version=None):
     result = {**value, "version": version}
     entity.update(result)
     return result, True
+
+
+def project_world_uses(ctx, entity):
+    """Use qualifications are world metadata, not another physical registry."""
+    if "heater" in entity.get("components", {}):
+        from .definitions import fuel_lots
+        entity["state"]["hearth_fuel"] = sum(lot["quantity"] for lot in
+            fuel_lots(ctx, entity, "hearth_fuel", include_burning=True, require_dry=False) if lot["slot"] == "contained")
 
 
 def region_resources(ctx, cx, cy):

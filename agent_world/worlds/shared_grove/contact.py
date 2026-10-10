@@ -6,7 +6,7 @@ from agent_world.simulation import matter as sm
 from agent_world.simulation.programs import evaluate, plan_reaction
 from agent_world.simulation.registry import MaterialDef
 from . import model as m
-from .definitions import (DEFINITIONS, REGISTRY, bind_material, registry_for,
+from .definitions import (DEFINITIONS, REGISTRY, bind_material, registry_for, retain_material_snapshots,
                           contained_quantities, reaction_available_quantities, mixture_capacity)
 
 MAX_CANDIDATES = 8
@@ -104,6 +104,7 @@ def reserve(ctx, entity, *, incoming=()):
     if not all_rules and not incoming:
         return []
     probe = deepcopy(entity)
+    retain_material_snapshots(probe, possible)
     for identity in incoming:
         bind_material(probe, _material(ctx, identity))
     for row in all_rules.values():
@@ -132,6 +133,20 @@ def reserve(ctx, entity, *, incoming=()):
     if size > sm.MAX_ENTITY_BYTES:
         raise RuleViolation("物件无足够8KiB空间预留完整接触结果；本次入料未提交。")
     return list(all_rules.values())
+
+
+def prepare_materials(ctx, entity, *, incoming=()):
+    rows = reserve(ctx, entity, incoming=incoming)
+    needed = set(incoming)
+    needed.update(identity for row in rows for identity in row["reaction"]["outputs"])
+    retain_material_snapshots(entity, needed)
+
+
+def bind_incoming(ctx, entity, definition):
+    # Metadata follows the real transfer. Final candidate admission checks the
+    # actual destination slot and reserves reachable contact products there.
+    retain_material_snapshots(entity, (definition.id,))
+    bind_material(entity, definition)
 
 
 def reserve_forest(ctx, objects, *, authored_outputs=None):
@@ -224,6 +239,7 @@ def settle(ctx, entity, snapshot, supply, tick):
                 sm.take_material(result, identity, amount)
                 available_supply[identity] = available_supply.get(identity, 0) - amount
                 sm.accumulate_quantity(accounts, ("sinks", identity, "contact_reaction"), amount)
+            retain_material_snapshots(result, planned["produce"])
             for identity, amount in planned["produce"].items():
                 bind_material(result, registry.materials[identity])
                 sm.add_lot(result, identity, amount, "contained", id_factory=lambda: m.identifier("lot"),

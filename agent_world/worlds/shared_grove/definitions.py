@@ -60,6 +60,97 @@ def bind_material(entity, definition):
     materials[definition.id] = snapshot
 
 
+def retain_material_snapshots(entity, identities):
+    """Prune active receiving metadata; published programs retain their table."""
+    program = entity.get("state", {}).get("program", {})
+    if program.get("definition_ref") or not isinstance(program.get("materials"), dict):
+        return
+    needed = set(identities)
+    needed.update(lot["material"] for lot in entity.get("matter", []) if lot["quantity"] > 0)
+    for key in ("material", "lining"):
+        value = entity.get("composition", {}).get(key)
+        if isinstance(value, str):
+            needed.add(value)
+    needed.add(entity.get("material"))
+    program["materials"] = {identity: snapshot for identity, snapshot in program["materials"].items() if identity in needed}
+
+
+def material_uses(ctx, identity):
+    """Use qualification belongs to the original definition, not its name."""
+    if identity in REGISTRY.materials:
+        return {"hearth_fuel": True, "mechanical_fuel": True} if identity == "wood" else {}
+    if not isinstance(identity, str) or "#" not in identity:
+        return {}
+    reference, symbol = identity.split("#", 1)
+    record = ctx.get_state(DEFINITIONS, reference)
+    material = record["definition"]["materials"].get(symbol) if record else None
+    return dict(material.get("uses", {})) if material else {}
+
+
+def material_import(identity):
+    """The original canonical identity, usable as an import without renaming it."""
+    if identity in REGISTRY.materials:
+        return None
+    _custom_material_id(identity)
+    reference, symbol = identity.split("#", 1)
+    return {"definition_ref": reference, "symbol": symbol}
+
+
+def fuel_lots(ctx, entity, use, *, include_burning=False, require_dry=True):
+    """Eligible actual lots only; declaration cannot make wet fuel dry."""
+    registry = registry_for(entity)
+    result = []
+    for lot in entity.get("matter", []):
+        definition = registry.materials[lot["material"]]
+        if (lot["quantity"] > 0 and lot["slot"] in {"body", "contained", "surface"}
+                and (include_burning or not lot.get("burning")) and not lot.get("escrow")
+                and definition.combustible and not definition.liquid
+                and material_uses(ctx, lot["material"]).get(use, False)
+                and (not require_dry or use == "mechanical_fuel" and lot["material"] == "wood" or sm_lot_dry(entity, lot))):
+            result.append(lot)
+    return result
+
+
+def usable_fuel_lots(ctx, player, entity, use):
+    """Source admission is separate from stored-fuel qualification."""
+    from .creative import guard_ordinary_action
+    from .world import _accessible
+    from agent_world.errors import PermissionDenied
+    try:
+        _accessible(ctx, player, entity, subject="item")
+        guard_ordinary_action(ctx, "fuel", entity)
+    except (RuleViolation, PermissionDenied):
+        return []
+    if (entity.get("owner") != player["id"] or entity["lifecycle"] != "intact"
+            or entity["state"].get("retired") or entity["state"]["burning"]
+            or "personal" in entity["capabilities"]):
+        return []
+    from .building import material_status
+    raw = (material_status(ctx, player, entity)["eligible"] and not entity["state"].get("program", {}).get("definition_ref")
+           and entity.get("source") != "fabrication")
+    return [lot for lot in fuel_lots(ctx, entity, use)
+            if use == "mechanical_fuel" and lot["material"] == "wood" and not (entity.get("source") == "fabrication" and lot["slot"] == "body")
+            or not lot.get("bound_to") and (lot["slot"] == "body" and raw
+                                           or lot["slot"] == "contained" and entity["state"]["open"])]
+
+
+def select_fuel(ctx, player, entity, use, lot_id=None):
+    lots = usable_fuel_lots(ctx, player, entity, use)
+    if lot_id is None:
+        if len(lots) != 1:
+            raise RuleViolation("请选择一个明确可用的实际燃料lot_id；没有自动替换来源批次。")
+        return lots[0]
+    lot = next((lot for lot in lots if lot["id"] == lot_id), None)
+    if lot is None:
+        raise RuleViolation("所选实际燃料批次不可用；须有原定义用途资格，且满足来源状态。")
+    return lot
+
+
+def sm_lot_dry(entity, lot):
+    from agent_world.simulation import matter as sm
+    return sm.lot_moisture(entity, lot) < 35 and not sm.quantity(entity, "water", "surface")
+
+
 def registry_for(entity_or_list):
     """Build a local registry from the participating entities' trusted snapshots.
 

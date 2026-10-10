@@ -44,7 +44,7 @@ BLUEPRINT_AGENT = "shared-grove-blueprint"
 EXECUTOR_AGENT = "shared-grove-executor"
 MCP_NAME = "grove_world"
 AGENT_READ_FUNCTIONS = frozenset({"map.viewport", "grove.inspect", "grove.handbook", "grove.content_history",
-    "grove.rule_catalog", "grove.definition_read", "grove.control_status"})
+    "grove.rule_catalog", "grove.definition_read", "grove.definition_list", "grove.fabrication_options", "grove.control_status"})
 MAX_SECONDS, MAX_WORLD_CALLS = 150, 16
 MAX_EXECUTION_REQUESTS = 8
 HOST_START_SECONDS = 45
@@ -174,8 +174,21 @@ EXECUTION_INSTRUCTIONS = (
     "base_observation_id; omission starts from this request's fixed preflight, "
     "not your previous read. Use "
     "the declared tools' inputSchema for exact action envelopes. If a new program "
-    "is needed, publish only a valid bounded definition, then spawn from actual "
-    "available resources and use the declared rule actions. Publishing a "
+    "is needed, first inspect the actual materials. A visible custom lot's material_import "
+    "is the exact {definition_ref,symbol} to copy into material_imports under your chosen alias. "
+    "Local materials declare NEW identities, not the existing same-named lots; publication creates no matter. "
+    "For a body made from actual carried materials, publish cost_u, measured in the lots' u quantities. "
+    "Old cost consumes regional resource stock in pieces, not backpack lots; do not choose it for this goal. "
+    "In grove_interact, target_id is the object whose inspected action is invoked: pickup/drop target the "
+    "object itself, never the backpack; store/transfer target the recipient and item_id names the source; "
+    "fill targets the water source and item_id names the recipient; pour targets the recipient and item_id "
+    "names the water source. Use the exact inspected action arguments, not an inferred destination. "
+    "Publish a bounded definition using actual canonical inputs. For cost_u types, read fabrication_options, "
+    "obtain the required eligible lots in your own open items, then fabricate with exact source IDs, lot IDs "
+    "and quantities; drop or attach the resulting real body. Do not send cost_u types to content_submit. "
+    "Only old cost types use generation_context(layout) then content_submit with actual regional resources. "
+    "A new local material needs an independently constructible preparation or reaction carrier; "
+    "a carrier requiring its own not-yet-existent material is a blocked recipe, not free stock. Publishing a "
     "definition does not spawn an object or accomplish the goal. Do not infer "
     "capabilities or action params from names; use the live catalog. "
     "Perform one write at a time, referencing the returned observation_id; the connector binds its fixed snapshot versions. "
@@ -2361,7 +2374,7 @@ class GroveSession:
             spec = self.catalog[function]
             if function in AGENT_READ_FUNCTIONS and spec.get("access") != "read":
                 continue
-            schema = agent_tool_schema(spec["input_schema"])
+            schema = agent_tool_schema(spec["input_schema"], function=function)
             description = spec.get("description", function)
             if function in AGENT_WRITE_FUNCTIONS:
                 schema.get("properties", {}).pop("delegation", None)
@@ -2374,10 +2387,14 @@ class GroveSession:
                 schema["properties"]["observation_id"] = {
                     "type": "string", "minLength": 1, "maxLength": 100,
                     "description": "Use the opaque ID returned with the exact observations you are acting on. "
-                                   "The connector supplies their fixed player/target/item/other and opportunity versions."}
+                                   "The connector supplies their fixed player/target/item/other, fabrication source entity and opportunity versions."}
                 schema["required"].append("observation_id")
                 description += " Snapshot guards are bound from observation_id; terms_version remains explicit. " \
                     "Store/attach requires this observation's complete matching candidate.preview; its exact combination fingerprint is bound and rechecked by the world."
+                if function == "grove.fabricate":
+                    description += " Each sources row keeps its chosen entity_id, lot_id and quantity_u; " \
+                        "its entity version is bound by that ID from the one selected observation. " \
+                        "Missing observations require a read; stale versions are sent unchanged for world rejection."
                 if function == "grove.interact":
                     pour_binding = ("For pour with explicit amount, omitted target_slot is supplied from the "
                         "target's presented pour_target_slot in the selected observation_id. An explicit pour "
@@ -2443,8 +2460,12 @@ class GroveSession:
                 # version binding cannot open authority or replace an operation.
                 projection = await self.execution_controller.write(function, bound, segment_id=segment_id)
                 self.request_milestone("first_confirmed_action_seconds", source="receipt_and_world_readback")
+                action_entity_ids = [bound.get(key) for key in ("target_id", "item_id", "other_id")]
+                if function == "grove.fabricate":
+                    action_entity_ids.extend(source.get("entity_id") for source in bound.get("sources", [])
+                                             if isinstance(source, dict))
                 return self.present_agent_result(function, projection, base_id=observation_id,
-                    action_entity_ids=[bound.get(key) for key in ("target_id", "item_id", "other_id")])
+                    action_entity_ids=action_entity_ids)
         elif self.catalog[function].get("access") != "read":
             raise ConnectorError("ToolDenied", "The declared read tool is not read-only.", 403)
         clean = deepcopy(arguments)

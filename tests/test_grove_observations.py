@@ -236,22 +236,19 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("grove_inspect", decoded["public_facts"]["projection"])
         self.assertEqual(original["result"], facts)
 
-    def test_full_definition_discovery_limit_defers_large_type_details(self):
+    def test_definition_directory_preserves_complete_bounded_page_and_cursor(self):
         definitions = [{"definition_ref": "program_" + f"{i:064x}", "author": self.role,
                         "key": "pack_" + str(i), "version": 1,
-                        "types": {"type_" + str(j): {"name": "公开名称" * 40,
-                            "cost": {"wood": 4, "stone": 4, "cloth": 4}} for j in range(8)}} for i in range(32)]
-        original = {"result": {"definitions": definitions, "definition_shape": {"material_imports": "immutable reference"}}}
-        self.assertGreater(len(json.dumps(original, ensure_ascii=False).encode()), 51200)
-        presented = self.session.present_agent_result("grove.rule_catalog", original)
+                        "name": "公开名称", "type_ids": ["type_" + str(j) for j in range(8)]} for i in range(16)]
+        original = {"result": {"definitions": definitions, "has_more": True, "next_cursor": "actual-seek-cursor",
+            "filters": {"author": self.role}, "storage": {"definitions_count": 1000, "payload_bytes": 8000000},
+            "scope": "one_query_page"}}
+        presented = self.session.present_agent_result("grove.definition_list", original)
         text = json.dumps(presented, ensure_ascii=False, indent=1)
         self.assertLess(len(text.encode()), 51200)
         self.assertLess(len(text.splitlines()), 2000)
         actual = presented["result"]
-        self.assertEqual(len(actual["definitions"]), 32)
-        self.assertEqual(actual["definitions"][31]["type_ids"], list(definitions[31]["types"]))
-        self.assertEqual(actual["definition_shape"], original["result"]["definition_shape"])
-        self.assertIn("grove_definition_read", actual["definitions_projection"])
+        self.assertEqual(actual, original["result"])
         self.assertEqual(original["result"]["definitions"], definitions)
 
     def test_write_receipt_never_references_full_state_in_a_scene_index(self):

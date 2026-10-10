@@ -6,6 +6,23 @@ const source=readFileSync(new URL('../agent_world/grove_web/grove-world-ui.js',i
 const ui=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 {
+  const menu={cost_u:{wood:3,cloth:2},action:{choices:{sources:[
+    {id:'wood',version:4,lots:[{id:'wood-lot',material:'wood',quantity:8,slot:'body'}]},
+    {id:'cloth',version:5,lots:[{id:'cloth-lot',material:'cloth',quantity:2,slot:'body'}]}]}}};
+  const rows=[{entity_id:'wood',lot_id:'wood-lot',material_id:'wood',quantity_u:'3'},
+    {entity_id:'cloth',lot_id:'cloth-lot',material_id:'cloth',quantity_u:'2'}];
+  assert.equal(ui.fabricationPlan(menu,rows).errors.length,0);
+  const changed=structuredClone(menu);changed.action.choices.sources.reverse();changed.action.choices.sources[1].version=6;
+  assert.equal(ui.fabricationPlan(changed,rows).sources[0].entity_id,'wood');
+  assert.equal(ui.fabricationPlan(changed,rows).sources[0].expected_entity_version,6);
+  changed.action.choices.sources[1].lots=[];
+  assert.ok(ui.fabricationPlan(changed,rows).errors.length>0);
+  assert.ok(ui.fabricationPlan(menu,[...rows,rows[0]]).errors.some(value=>value.includes('一行')));
+  const descriptor={action:'bind_port',choices:{others:[{id:'water',eligible_ports:['wet']},{id:'gear',eligible_ports:['drive']}]}};
+  assert.deepEqual(ui.ruleChoices(descriptor,'others','wet').map(value=>value.id),['water']);
+}
+
+{
   const entity={simulation:{contact:{candidate_count:0,process:{status:'waiting',steps:1},last_actual_reactions:[{
     extent:1,inputs:{'program_original#x':1},outputs:{'program_original#y':2},
     material_names:{'program_original#x':'旧配料','program_original#y':'新产物'}}]}}};
@@ -121,7 +138,7 @@ function formNode(tag,text,className){
   const target={id:'rule-target',name:'做法'},actions=formNode('section'),writes=[];
   const initial={function_id:'grove.rule_action',action:'process',available:true,choices:{items:[{id:'old-item',name:'原料'}]},
     params_schema:{properties:{amount:{type:'integer',minimum:1,default:1}},required:['amount']}};
-  const context={inspection:{entity:target,action_options:[initial]},actionBusy:false,node:formNode,$:()=>actions,
+  const context={inspection:{entity:target,action_options:[initial]},actionBusy:false,client:{pending:()=>null},node:formNode,$:()=>actions,
     actionKey:option=>option.action,descriptorLabel:ui.descriptorLabel,actionDescriptors:ui.actionDescriptors,
     conditionObservationLines:()=>[],ruleChoices:ui.ruleChoices,candidateLabel:ui.candidateLabel,
     readableCandidate:value=>value,factLabel:ui.factLabel,operationIntentLabel:ui.operationIntentLabel,
@@ -142,31 +159,35 @@ function formNode(tag,text,className){
 // the actual edited values, including after the server refreshes the choices.
 for(const action of ['fuel','charge']){
   const target={id:'source',name:'十二齿有限动力'},actions=formNode('section'),writes=[];
-  const choices={items:[{id:'wood',name:'木料'},{id:'cloth',name:'布料'}]};
+  const choices={items:[{id:'wood',name:'木料',lots:[{id:'wood-lot',material:'wood',quantity:6,slot:'body'}]},
+    {id:'cloth',name:'布料',lots:[{id:'cloth-lot',material:'cloth',quantity:6,slot:'body'}]}]};
   if(action==='charge')choices.materials=[{id:'resin',name:'木合料',feedstock:'wood'},{id:'binder',name:'布合料',feedstock:'cloth'}];
   const initial={function_id:'grove.rule_action',action,label:action==='fuel'?'消耗木料储能':'制备已声明材料',available:true,
-    arguments:{amount:1},choices,input_schema:{properties:{amount:{type:'integer',minimum:1,maximum:10}},required:['amount']}};
-  const context={inspection:{entity:target,action_options:[initial]},actionBusy:false,node:formNode,$:()=>actions,
+    arguments:{amount:1},choices,input_schema:{properties:{item_id:{type:'string'},amount:{type:'integer',minimum:1,maximum:10},
+      ...(action==='fuel'?{lot_id:{type:'string',minLength:1}}:{})},required:action==='fuel'?['amount','lot_id']:['amount']}};
+  const context={inspection:{entity:target,action_options:[initial]},actionBusy:false,client:{pending:()=>null},node:formNode,$:()=>actions,
     actionKey:option=>option.action,descriptorLabel:ui.descriptorLabel,actionDescriptors:ui.actionDescriptors,
     conditionObservationLines:()=>[],ruleChoices:ui.ruleChoices,candidateLabel:ui.candidateLabel,
+    descriptorLots:ui.descriptorLots,materialLabel:ui.materialLabel,slotLabel:ui.slotLabel,
     readableCandidate:value=>value,factLabel:ui.factLabel,operationIntentLabel:ui.operationIntentLabel,
     restoreActionDraft:()=>{},run:fn=>fn(),ruleAction:(...args)=>writes.push(args)};
   vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('function renderRuleAction(','async function ruleAction('),context);
   context.renderRuleAction(initial,target,false);
   const form=actions.children[0],[items,materials]=form.querySelectorAll('select'),amount=form.querySelectorAll('input')[0];
   const intent=form.querySelectorAll('p').find(element=>element.className==='interaction-preview');
-  items.value='wood';if(materials)materials.value='resin';amount.value='2';form.dispatchEvent({type:'input'});
-  assert.ok(intent.textContent.includes('木料 的 2 份木'));assert.ok(!intent.textContent.includes('1 份'));
+  items.value='wood';form.dispatchEvent({type:'change',target:items});if(materials)materials.value=action==='fuel'?'wood-lot':'resin';amount.value='2';form.dispatchEvent({type:'input'});
+  assert.ok(intent.textContent.includes(action==='fuel'?'木料 添入 2 份木':'木料 的 2 份木'));assert.ok(!intent.textContent.includes('1 份'));
   context.inspection={entity:target,action_options:[{...initial,arguments:{amount:1},choices:{...choices,
-    items:[{id:'wood',name:'留下的木料'},{id:'cloth',name:'布料'}]}}]};
+    items:[{...choices.items[0],name:'留下的木料'},choices.items[1]]}}]};
   form.dispatchEvent({type:'refresh-candidate-preview'});
-  assert.equal(amount.value,'2');assert.ok(intent.textContent.includes('留下的木料 的 2 份木'));
-  items.value='cloth';if(materials)materials.value='binder';amount.value='3';form.dispatchEvent({type:'change'});
-  assert.ok(intent.textContent.includes('布料 的 3 份'+(materials?'布':'木')));
-  if(materials)assert.ok(intent.textContent.includes('3 份布合料'));
+  assert.equal(amount.value,'2');assert.ok(intent.textContent.includes(action==='fuel'?'留下的木料 添入 2 份木':'留下的木料 的 2 份木'));
+  items.value='cloth';form.dispatchEvent({type:'change',target:items});if(materials)materials.value=action==='fuel'?'cloth-lot':'binder';amount.value='3';form.dispatchEvent({type:'change'});
+  assert.ok(intent.textContent.includes(action==='fuel'?'布料 添入 3 份布':'布料 的 3 份布'));
+  if(action==='charge')assert.ok(intent.textContent.includes('3 份布合料'));
   form.dispatchEvent({type:'submit',preventDefault(){}});
   assert.equal(writes[0][2].item_id,'cloth');assert.equal(writes[0][2].amount,3);
-  if(materials)assert.equal(writes[0][2].material,'binder');
+  if(action==='charge')assert.equal(writes[0][2].material,'binder');
+  if(action==='fuel')assert.equal(writes[0][2].lot_id,'cloth-lot');
 }
 
 for(const status of [403,404,401])for(const kind of ['combination-target','ordinary-target','item']){

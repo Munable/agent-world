@@ -15,7 +15,7 @@ from . import commit
 from . import activity
 from . import processes
 from . import building
-from .definitions import COMBUSTION_CADENCE_TICKS, COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for
+from .definitions import COMBUSTION_CADENCE_TICKS, COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for, material_import
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 ID = {"type": "string", "minLength": 1, "maxLength": 128}
@@ -176,6 +176,8 @@ def initialize(ctx):
     ctx.set_state(m.META, "active_hearths", [])
     ctx.set_state(m.META, "join_count", 0)
     ctx.set_state(m.META, "changes", [])
+    from .publication import migrate_catalog
+    migrate_catalog(ctx)
     commit.ensure_chunk(ctx, 0, 0)
     commit.ensure_chunk(ctx, -1, 0)
     ctx.schedule_timer(f"grove.tick.{epoch}.0", "grove.tick", {"epoch": epoch, "sequence": 0}, due_at=ctx.now+1)
@@ -484,6 +486,9 @@ def _candidate(entity, lots=None):
         registry = registry_for(entity)
         value["lots"] = [{"id": lot["id"], "material": lot["material"], "material_name": registry.materials[lot["material"]].name, "quantity": lot["quantity"],
                           "slot": lot["slot"], "item_id": entity["id"]} for lot in lots]
+        for lot in value["lots"]:
+            binding = material_import(lot["material"])
+            if binding:lot["material_import"] = binding
     return value
 
 
@@ -693,15 +698,16 @@ def _action_options(ctx, player, entity):
             _input(candidates, quantity=max([lot["quantity"] for c in candidates for lot in c["lots"]] or [1]), lots=True), target_slot="contained")
     for option in options:
         action = option["action"]
-        option.update(label=labels[action], arguments={"target_id": entity["id"], "expected_target_version": entity["version"]})
+        option.update(label=labels[action], arguments={"action": action, "target_id": entity["id"], "expected_target_version": entity["version"]})
         option["preconditions"] = [_access_observation(ctx, player, entity)]
         if "target_slot" in option:
             option["arguments"]["target_slot"] = option["target_slot"]
         if action == "tend":
             option["input"] = _input([_candidate(e) for e in building._water_items(ctx, player, 5)])
         elif action == "fuel":
-            fuels = [e for e in own if e["material"] == "wood" and building.material_status(ctx, player, e)["eligible"]]
-            option["input"] = _input([_candidate(e, [lot for lot in building._body_lots(e) if lot["material"] == "wood"]) for e in fuels], quantity=option["maximum"], lots=True)
+            from .definitions import usable_fuel_lots
+            fuels = [_candidate(e, lots) for e in own if (lots := usable_fuel_lots(ctx, player, e, "hearth_fuel"))]
+            option["input"] = _input(fuels, quantity=option["maximum"], lots=True)
         elif action == "switch_mode":
             option["input"] = _input(choices=[{"value": value, "label": "遮雨" if value == "shelter" else "集雨"} for value in option["modes"]])
         for candidate in (option.get("input") or {}).get("candidates", []):
@@ -847,8 +853,11 @@ def interact(ctx, args):
             raise StateConflict("组合物件或承载依据已经变化，请刷新预览后再次选择。")
     _accessible(ctx, player, target)
     option = next((o for o in _action_options(ctx, player, target) if o["action"] == action), None)
-    if not option or not option["available"]:
-        raise RuleViolation(option["reason"] if option else "此物件没有所选行动。")
+    if not option:
+        raise RuleViolation(f"目标「{target['name']}」（{target['id']}）没有{action}行动；请读取所要操作物件自身的行动入口。",
+            details={"reason": "action_not_offered", "action": action, "target_id": target["id"], "target_name": target["name"]})
+    if not option["available"]:
+        raise RuleViolation(option["reason"])
     affected_ids = {target["id"]}
     if args.get("item_id"):
         affected_ids.add(args["item_id"])
@@ -1033,9 +1042,15 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
                                 first = m.entity_location(ctx, entity)
                                 second = m.entity_location(ctx, item)
                                 distance = max(abs(first[0]-second[0]), abs(first[1]-second[1]))
-                                observation.update(condition="interface_distance", metric="chebyshev",
-                                    actual_distance=distance, required_max=2, satisfied=distance <= 2,
+                                fact_port = option["action"] == "bind_port"
+                                maximum = 8 if fact_port else 2
+                                actor_distance = max(abs(second[0]-player["x"]), abs(second[1]-player["y"]))
+                                observation.update(condition="public_fact_range" if fact_port else "interface_distance", metric="chebyshev",
+                                    actual_distance=distance, required_max=maximum, satisfied=distance <= maximum,
                                     reference_id=entity["id"], reference_location={"x": first[0], "y": first[1]})
+                                if fact_port:
+                                    observation.update(actor_distance=actor_distance, required_actor_max=8,
+                                        satisfied=distance <= 8 and actor_distance <= 8)
                                 observation.pop("player_location", None)
                             candidate["preconditions"] = [observation]
                             if subject == "item" and observation["known"] and option["action"] in {"charge", "fuel", "deliver"}:
@@ -1071,6 +1086,8 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
     entity_registry = registry_for(entity)
     for lot in value["matter"]:
         lot["material_name"] = entity_registry.materials[lot["material"]].name
+        binding = material_import(lot["material"])
+        if binding and lot["quantity"] > 0:lot["material_import"] = binding
     combustible_lots = [lot for lot in value["matter"] if entity_registry.materials[lot["material"]].combustible]
     if combustible_lots or "combustion" in value["components"]:
         tick = ctx.get_state(m.META, "clock", {"sequence": 0})["sequence"]
@@ -1120,6 +1137,9 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
             grouped[key] = grouped.get(key, 0)+lot["quantity"]
         value["matter"] = [{"material": key[0], "material_name": entity_registry.materials[key[0]].name, "slot": key[1], "role": key[2], "burning": key[3], "quantity": amount}
                            for key, amount in grouped.items()]
+        for lot in value["matter"]:
+            binding = material_import(lot["material"])
+            if binding and lot["quantity"] > 0:lot["material_import"] = binding
     return value
 
 
@@ -1217,6 +1237,8 @@ def _registered_entity_schema():
     # Immutable material snapshots are validated by the trusted world handler;
     # the static state schema must not snapshot one world's dynamic registry.
     props["matter"]["items"]["properties"]["material"] = {"type": "string", "minLength": 1, "maxLength": 180}
+    props["material"] = {"type": "string", "minLength": 1, "maxLength": 180}
+    props["composition"]["properties"]["material"] = {"type": "string", "minLength": 1, "maxLength": 180}
     props["composition"]["properties"]["construction"]["enum"] = list(CONSTRUCTIONS)
     props["components"]["properties"] = {name: {"type": "object", "properties": {
         field: ({"type": "boolean"} if kind is bool else {"type": "string", "maxLength": 80} if kind is str
@@ -1230,6 +1252,10 @@ def _registered_entity_schema():
 def make_world():
     from .generation import generation_specs, generation_state_specs
     from . import creative
+    def migrate_creation(ctx):
+        from .publication import migrate_catalog
+        migrate_catalog(ctx)
+        resume_clock(ctx)
     def with_delegation(schema):
         schema = deepcopy(schema)
         schema["properties"]["delegation"] = creative.DELEGATION
@@ -1242,14 +1268,14 @@ def make_world():
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=2,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=24,state_version=15,
+        *generation_specs(), *creative.specs()),version=25,state_version=16,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
-        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: lambda ctx: None, 13: lambda ctx: None, 14: lambda ctx: None, 15: resume_clock},
+        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: lambda ctx: None, 13: lambda ctx: None, 14: lambda ctx: None, 15: lambda ctx: None, 16: migrate_creation},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),

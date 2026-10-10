@@ -15,8 +15,8 @@ import secrets
 from .grove_connector_errors import ConnectorError
 
 AGENT_WRITE_FUNCTIONS = frozenset({"grove.move", "grove.interact", "grove.build", "grove.generation_context",
-    "grove.content_submit", "grove.content_release", "grove.definition_publish", "grove.rule_action"})
-AGENT_ACTION_FUNCTIONS = frozenset({"grove.move", "grove.interact", "grove.build", "grove.rule_action"})
+    "grove.content_submit", "grove.content_release", "grove.definition_publish", "grove.rule_action", "grove.fabricate"})
+AGENT_ACTION_FUNCTIONS = frozenset({"grove.move", "grove.interact", "grove.build", "grove.rule_action", "grove.fabricate"})
 
 _NATIVE_TOOL_MAX_BYTES = 50 * 1024
 _NATIVE_TOOL_MAX_LINES = 2000
@@ -234,7 +234,7 @@ def _companion_scene_index(scene):
                 # of transferable lots. Never manufacture lot IDs from it.
                 if isinstance(entity.get("matter"), list):
                     row["matter"] = [{key: deepcopy(lot[key]) for key in
-                        ("material", "material_name", "slot", "quantity", "role", "burning") if key in lot}
+                        ("material", "material_name", "material_import", "slot", "quantity", "role", "burning") if key in lot}
                         for lot in entity["matter"] if isinstance(lot, dict)]
                     quantities = entity.get("material_quantity")
                     row["matter_unit"] = (quantities.get("unit", "logical_matter")
@@ -325,17 +325,18 @@ def _companion_repair_viewport_references(payload):
 def companion_projection(function: str, payload: dict) -> dict:
     """Own one mutable copy of an authorized response, then compact its facts."""
     result = deepcopy(payload)
+    if function in {"grove.definition_list", "grove.fabrication_options"}:
+        # The list's page/cursor contract and selected recipe's complete source
+        # lots are already bounded world reads, not expandable scene indexes.
+        return result
     if function not in {"map.viewport", "grove.generation_context", "grove.inspect", "grove.handbook", "grove.rule_catalog"} | AGENT_WRITE_FUNCTIONS:
         return result
     value = result.get("result", result)
     if not isinstance(value, dict):
         return result
     if function == "grove.rule_catalog":
-        value["definitions"] = [{key: deepcopy(row[key]) for key in
-            ("definition_ref", "author", "key", "version") if key in row} |
-            {"type_ids": list(row.get("types", {}))} for row in value.get("definitions", [])]
-        value["definitions_projection"] = "Immutable definition discovery index. Read grove_definition_read(definition_ref) " \
-            "for selected types, costs, materials and rules; omitted details are not absent."
+        value["definitions_projection"] = "Page actual immutable definitions with grove_definition_list, " \
+            "then read the chosen grove_definition_read(definition_ref). This static language catalog is not an empty publication list."
         return result
     if function in {"map.viewport", "grove.inspect"} | AGENT_WRITE_FUNCTIONS and "public_content" in value:
         value["public_content"] = _companion_public_content_index(value["public_content"])
@@ -575,6 +576,8 @@ def companion_projection(function: str, payload: dict) -> dict:
                 "properties": {key: deepcopy(OBJECT_SCHEMA["properties"][key]) for key in
                                ("definition_ref", "type_id", "x", "y", "name", "description")}},
             "scope": "Exact definition-reference branch's core fields, from the current content schema. "
+                     "This regional layout branch applies only to cost types; cost_u types use "
+                     "grove_fabrication_options then grove_fabricate with actual own material lots. "
                      "Full optional contents/water and envelope rules are in grove_content_submit inputSchema. "
                      "Use only an actually published reference and type, actual allowed_tiles and this "
                      "owned opportunity/version. Actual costs, material budgets and resource stock still apply."}
@@ -804,7 +807,8 @@ def _companion_inspection_index(payload):
         outline["read_request"] = request
         candidates = (option.get("input") or {}).get("candidates", [])
         choices = option.get("choices") or {}
-        candidates = [*candidates, *choices.get("items", []), *choices.get("others", [])]
+        candidates = [*candidates, *choices.get("items", []), *choices.get("others", []),
+                      *choices.get("sources", [])]
         if candidates:
             outline["candidates_index"] = [{key: deepcopy(candidate[key]) for key in
                 ("id", "name", "kind") if key in candidate} | {"read_request": {
@@ -832,6 +836,21 @@ def _bounded_agent_projection(function, payload):
     """Run before observation binding; oversized reads never imply full inspect."""
     if _agent_tool_text_fits(_agent_tool_text(payload)):
         return payload
+    if function in {"grove.definition_read", "grove.definition_publish"}:
+        complete = deepcopy(payload)
+        value = complete.get("result", complete)
+        if isinstance(value, dict) and isinstance(value.get("definition"), dict):
+            omitted = [key for key in ("material_semantics", "declaration_semantics") if key in value]
+            for key in omitted:
+                value.pop(key)
+            value["projection"] = {"scope": "complete_definition_without_derived_explanations",
+                "complete_definition": True, "complete_explanation": False, "omitted_sections": omitted,
+                "meaning": "The immutable definition, exact rules, actions, coefficients, phases and material imports "
+                    "remain complete. Only duplicated derived explanations were omitted, not rules or capabilities. "
+                    "Read grove_rule_catalog for language and phase policy; grove_inspect for actual lots, permissions "
+                    "and current action inputs. This definition is not an observation of an instance."}
+            if omitted and _agent_tool_text_fits(_agent_tool_text(complete)):
+                return complete
     if function == "grove.inspect":
         index = _companion_inspection_index(payload)
         if index is not None and _agent_tool_text_fits(_agent_tool_text(index)):
@@ -953,7 +972,7 @@ def _agent_version_field(name):
     return match.group(1) if match else "anchor" if name == "observed_anchor_version" else None
 
 
-def agent_tool_schema(schema):
+def agent_tool_schema(schema, *, function=None):
     """Hide only optimistic snapshot guards from this connector's MCP input."""
     result = deepcopy(schema)
 
@@ -961,14 +980,17 @@ def agent_tool_schema(schema):
         if not isinstance(value, dict):
             return
         guarded = path in {(), ("continuation",)}
+        source_row = function == "grove.fabricate" and path == ("sources", "[]")
         properties = value.get("properties", {})
         for key in list(properties):
-            if guarded and _agent_version_field(key):
+            if (guarded and _agent_version_field(key)) or (source_row and key == "expected_entity_version"):
                 properties.pop(key)
             else:
                 visit(properties[key], (*path, key))
         if guarded and isinstance(value.get("required"), list):
             value["required"] = [key for key in value["required"] if not _agent_version_field(key)]
+        elif source_row and isinstance(value.get("required"), list):
+            value["required"] = [key for key in value["required"] if key != "expected_entity_version"]
         for branch in ("oneOf", "anyOf", "allOf"):
             for child in value.get(branch, []):
                 visit(child, path)
@@ -1009,8 +1031,8 @@ class AgentObservations:
         return self._preflight_id
 
     @staticmethod
-    def tool_schema(schema: dict) -> dict:
-        return agent_tool_schema(schema)
+    def tool_schema(schema: dict, *, function=None) -> dict:
+        return agent_tool_schema(schema, function=function)
 
     @staticmethod
     def serialize(payload: dict) -> str:
@@ -1062,6 +1084,11 @@ class AgentObservations:
                 choices = option.get("choices", {})
                 if isinstance(choices, dict):
                     candidates = [*candidates, *rows(choices.get("items")), *rows(choices.get("others"))]
+                    if option.get("function_id") == "grove.fabricate":
+                        for source in rows(choices.get("sources")):
+                            # A source row's id identifies the real entity;
+                            # its nested lot ids never become entity snapshots.
+                            remember("entity", source)
                 for candidate in candidates:
                     if isinstance(candidate, dict):
                         remember("player" if candidate.get("kind") == "role" else "entity", candidate)
@@ -1076,10 +1103,14 @@ class AgentObservations:
                                 "target_version": bundle["versions"]["entity"].get(target),
                                 "item_version": bundle["versions"]["entity"].get(candidate["id"])}
                 if isinstance(option.get("input_schema"), dict):
-                    option["input_schema"] = agent_tool_schema(option["input_schema"])
+                    option["input_schema"] = agent_tool_schema(option["input_schema"], function=option.get("function_id"))
                 if isinstance(option.get("arguments"), dict):
                     option["arguments"] = {key: value for key, value in option["arguments"].items()
                                            if not _agent_version_field(key)}
+                    if option.get("function_id") == "grove.fabricate":
+                        for source in rows(option["arguments"].get("sources")):
+                            if isinstance(source, dict):
+                                source.pop("expected_entity_version", None)
 
         def entity(value):
             if isinstance(value, dict):
@@ -1126,6 +1157,10 @@ class AgentObservations:
             entity(value.get("entity"))
             selected = value.get("entity")
             options(value.get("action_options"), target=selected.get("id") if isinstance(selected, dict) else None)
+            if function == "grove.fabrication_options":
+                action = value.get("action")
+                if isinstance(action, dict) and action.get("function_id") == "grove.fabricate":
+                    options([action])
             opportunities = list(rows(value.get("opportunities")))
             if isinstance(value.get("opportunity"), dict):
                 opportunities.append(value["opportunity"])
@@ -1189,9 +1224,13 @@ class AgentObservations:
             props = schema.get("properties", {})
             for key, field in props.items():
                 subject = _agent_version_field(key) if path in {(), ("continuation",)} else None
+                if function == "grove.fabricate" and path == ("sources", "[]") and key == "expected_entity_version":
+                    subject = "entity"
                 if subject is None:
                     if key in node and isinstance(node[key], dict):
                         node[key] = bind(field, node[key], (*path, key))
+                    elif function == "grove.fabricate" and not path and key == "sources" and isinstance(node.get(key), list):
+                        node[key] = [bind(field.get("items", {}), source, ("sources", "[]")) for source in node[key]]
                     continue
                 node.pop(key, None)  # A copied model number is never authority.
                 if path == ("continuation",) and subject in {"content", "anchor"}:

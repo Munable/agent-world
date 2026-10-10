@@ -8,7 +8,7 @@ from agent_world.simulation.programs import evaluate, plan_reaction
 from agent_world.simulation import matter as sm
 
 from . import model as m
-from .definitions import REGISTRY, registry_for, instance_definition as _type, material_identity as _material, contained_quantities as _quantities, reaction_available_quantities
+from .definitions import REGISTRY, registry_for, instance_definition as _type, material_identity as _material, contained_quantities as _quantities, reaction_available_quantities, mixture_capacity
 
 MAX_REACTION_OBSERVATIONS = 8
 
@@ -16,7 +16,7 @@ MAX_REACTION_OBSERVATIONS = 8
 def _references(value):
     if isinstance(value, dict):
         if len(value) == 1 and next(iter(value)) in {
-            "field", "param", "quantity", "concentration", "mechanical", "event", "contract", "object"
+            "field", "param", "quantity", "concentration", "mechanical", "physical", "event", "contract", "object"
         }:
             yield value
         else:
@@ -28,13 +28,17 @@ def _references(value):
 
 
 def _visible_context(ctx, player, entity, pack):
-    from .creative import _bound_ids, _context
+    from .creative import _context
+    from . import world_facts
     from .world import _accessible
 
     # Resolve the definition's fixed object references once in this read view.
     # Context construction and reader visibility check the same actual entities.
-    targets = {eid: m.get_entity(ctx, eid, required=False) for eid in sorted(_bound_ids(pack or {}))}
+    targets = world_facts.freeze(ctx, {entity["id"]: entity})
     context = _context(entity, ctx=ctx, definition=pack, objects=targets)
+    if entity.get("owner") != player["id"]:
+        public = world_facts.facts(entity, targets, external=True)
+        context["physical"] = {key.removeprefix("physical."): value for key, value in public.items() if key.startswith("physical.")}
     # Rule execution observes around its anchor. Presentation must also respect
     # this reader's radius, so an anchor eight tiles away cannot reveal sixteen.
     for eid in list(context["objects"]):
@@ -43,8 +47,6 @@ def _visible_context(ctx, player, entity, pack):
             if target is None:
                 raise RuleViolation("不可观察的公共事实。")
             _accessible(ctx, player, target, near=False)
-            if target["owner"] is None and not target["state"]["open"] and "container" in target["components"]:
-                raise RuleViolation("关闭公共容器的内部规则状态未公开。")
         except (PermissionDenied, RuleViolation):
             context["objects"].pop(eid, None)
     return context
@@ -136,7 +138,8 @@ def program_observation(ctx, entity, *, detailed=False, player=None):
     context = _visible_context(ctx, player, entity, pack) if detailed else None
     quantities = context["quantities"] if context is not None else _quantities(entity)
     available = reaction_available_quantities(entity)
-    capacity = sm.liquid_capacity(entity)
+    capacity = mixture_capacity(entity)
+    capacity = sm.liquid_capacity(entity) if capacity is None else capacity
     actual_total = sum(quantities.values())
     result = {"material_definitions": deepcopy(binding.get("materials", {})), "process": process,
         "reaction_inputs": {"scope": "this_entity_contained_lots_only", "unit": "logical_matter",

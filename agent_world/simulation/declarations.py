@@ -57,6 +57,10 @@ def declaration_semantics(definition, *, type_id=None):
                         ids = writers.setdefault(effect["field"], [])
                         if rule["id"] not in ids:
                             ids.append(rule["id"])
+                    elif effect["op"] == "drive":
+                        ids = writers.setdefault("mechanical.enabled", [])
+                        if rule["id"] not in ids:
+                            ids.append(rule["id"])
             entries.extend({"phase": phase, "field": field, "rule_ids": ids,
                             "policy": PHASE_POLICY["field_conflict"]}
                            for field, ids in sorted(writers.items()) if len(ids) > 1)

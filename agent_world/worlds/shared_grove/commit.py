@@ -20,6 +20,8 @@ from .definitions import RULES_VERSION, PIECE_QUANTITIES, registry_for, bind_mat
 
 
 def save_entity(ctx, entity, expected_version=None):
+    from .contact import prepare_materials
+    prepare_materials(ctx, entity)
     result, changed = m.store_entity(ctx, entity, expected_version=expected_version)
     if changed:
         from .contact import reserve, may_contact, authored_outputs
@@ -287,9 +289,10 @@ def record_account(ctx, category, material, amount, reason):
 
 
 def apply_matter(ctx, objects, effects, *, sources=(), sinks=()):
+    from .contact import bind_incoming
     try:
         frame = Frame(registry_for(objects), {obj["id"]: obj for obj in objects},
-                      bind_material=bind_material, mixture_capacity=mixture_capacity)
+                      bind_material=lambda entity, definition: bind_incoming(ctx, entity, definition), mixture_capacity=mixture_capacity)
         frame.apply(effects, allowed_sources=sources, allowed_sinks=sinks)
     except ValueError as exc:
         raise RuleViolation(str(exc)) from exc
@@ -407,7 +410,9 @@ def start_burning(ctx, entity, lot_id=None):
         raise RuleViolation("没有可暴露的可燃物质批次。")
     for lot in selected:
         lot["burning"] = True
-    if "heater" in entity["components"] and any(lot["slot"] == "contained" for lot in selected):
+    from .definitions import fuel_lots
+    qualified = {lot["id"] for lot in fuel_lots(ctx, entity, "hearth_fuel", include_burning=True)}
+    if "heater" in entity["components"] and any(lot["slot"] == "contained" and lot["id"] in qualified for lot in selected):
         entity["components"]["heater"]["lit"] = True
     return save_entity(ctx, entity)
 
@@ -537,6 +542,15 @@ def _flush_batch(ctx, batch):
     if (len(batch.dirty_processes) > activity.MAX_PROCESSES
             or len(batch.dirty_meta) > activity.MAX_FRAME_META):
         raise RuleViolation("过程及索引写入超过预留记录预算。")
+    from .contact import prepare_materials
+    for eid in batch.dirty_entities:
+        entity = batch.entities[eid]
+        prepare_materials(ctx, entity)
+        version = entity.get("version")
+        batch.entities[eid] = m.normalize_entity(entity)
+        m.project_world_uses(ctx, batch.entities[eid])
+        if version is not None:
+            batch.entities[eid]["version"] = version
     if batch.contact_admission:
         from .creative import _check_instance_capacity
         _check_instance_capacity(ctx, activity.meta_get(ctx, "creative_instances", []))

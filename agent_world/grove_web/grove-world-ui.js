@@ -104,7 +104,8 @@ export function safePresentation(entity){
     glyph:entityGlyph(entity),size:(entity?.composition?.size??presentation.size)===2?2:1};
 }
 const factLabels={definition_ref:'规则定义',type_id:'对象类型',fields:'当前属性',materials:'材料定义',material_definitions:'材料定义',mechanical:'机械状态',recorder:'记录状态',contract:'双方契约',connections:'当前连接',process:'过程状态与历史',last_reaction:'保存的上次反应',source_last_tick:'保存的过程逻辑步',observed_tick:'本次观察逻辑步',last_tick:'过程保存的逻辑步',steps:'累计反应步数',steps_meaning:'步数含义',historical:'历史记录',current_production:'是否本次生产',meaning:'含义',history:'已发生的记录',position:'位置',angle:'角度',speed:'速度',status:'状态',energy:'能量',available_torque:'可用扭矩',active:'正在运行',started_tick:'开始逻辑步',until_tick:'截止逻辑步',sequence:'事件序号',tick:'逻辑步',occurred_at:'发生时间',recorded_tick:'记录逻辑步',action:'行动',entity_id:'对象',actor:'行动者',read_tick:'读取逻辑步',reads:'实际读取',parties:'双方身份',terms_version:'条款版本',accepted:'已接受的身份',deadline_tick:'截止逻辑步',delivered:'已交付',quantity:'数量',material:'材料',beneficiary:'受益方',id:'标识',name:'名称',version:'版本',unit:'单位',temperature:'温度',pressure:'压力',progress:'进展',running:'运行中',remaining:'剩余量',capacity:'容量',amount:'数量',item_id:'投入物件',other_id:'另一个对象',connected_to:'连接至',direction:'方向',mode:'方式',output:'产物',inputs:'投入',outputs:'产出',rules:'规则',types:'类型',actions:'行动',conditions:'条件',effects:'效果',description:'说明',label:'名称',duration:'持续逻辑步',fuel:'燃料',work:'做功',torque:'扭矩',reaction:'反应',state:'当前状态',owner:'身份',scope:'范围'};
-Object.assign(factLabels,{definition_ref:'使用的规则',type_id:'物件种类',material_aliases:'材料称呼',material_imports:'引用的材料',source_last_tick:'上次反应的世界时刻',observed_tick:'本次观察的世界时刻',last_tick:'上次运行的世界时刻',started_tick:'开始的世界时刻',until_tick:'截止的世界时刻',tick:'世界时刻',recorded_tick:'记录的世界时刻',read_tick:'读取的世界时刻',deadline_tick:'截止的世界时刻',duration:'持续时刻数',terms_version:'当前条款记录',version:'更新记录',id:'引用的对象',entity_id:'关联物件',item_id:'所用物件',other_id:'关联对象',lot_id:'所选材料',target_id:'操作对象',material_id:'材料',symbol:'材料称呼',load_per_u:'每份载荷',per_extent:'每次所需',missing_for_one_extent:'还缺多少',available:'当前可用',slot:'材料位置',scope:'可见范围',snapshot_only:'当前观察',parameter_defaults:'默认参数',known:'是否读到',satisfied:'是否满足',intact:'结构完整',passable:'是否可通过',opened_sequence:'最近开放记录',started_event_sequence:'开始时的事件记录','barrier.active':'通道是否阻挡','barrier.opened_sequence':'通道最近开放记录','mechanical.position':'机械位置','mechanical.speed':'机械速度','mechanical.angle':'机械角度','mechanical.energy':'机械能量','mechanical.status':'机械状态'});
+Object.assign(factLabels,{definition_ref:'使用的规则',type_id:'物件种类',material_aliases:'材料称呼',material_imports:'引用的材料',source_last_tick:'上次反应的世界时刻',observed_tick:'本次观察的世界时刻',last_tick:'上次运行的世界时刻',started_tick:'开始的世界时刻',until_tick:'截止的世界时刻',tick:'世界时刻',recorded_tick:'记录的世界时刻',read_tick:'读取的世界时刻',deadline_tick:'截止的世界时刻',duration:'持续时刻数',terms_version:'当前条款记录',version:'更新记录',id:'引用的对象',entity_id:'关联物件',item_id:'所用物件',other_id:'关联对象',lot_id:'所选材料',target_id:'操作对象',material_id:'材料',symbol:'材料称呼',load_per_u:'每单位u载荷',per_extent:'每次所需',missing_for_one_extent:'还缺多少',available:'当前可用',slot:'材料位置',scope:'可见范围',snapshot_only:'当前观察',parameter_defaults:'默认参数',known:'是否读到',satisfied:'是否满足',intact:'结构完整',passable:'是否可通过',opened_sequence:'最近开放记录',started_event_sequence:'开始时的事件记录','barrier.active':'通道是否阻挡','barrier.opened_sequence':'通道最近开放记录','mechanical.position':'机械位置','mechanical.speed':'机械速度','mechanical.angle':'机械角度','mechanical.energy':'机械能量','mechanical.status':'机械状态'});
+Object.assign(factLabels,{port:'绑定槽位',ports:'关联槽位',port_bindings:'当前绑定',eligible_ports:'可绑定槽位',cost:'区域原料（份）',cost_u:'成型所需（u）',sources:'材料来源',quantity_u:'数量（u）',expected_entity_version:'来源更新记录'});
 export const factLabel=key=>key===null||key===undefined?'属性':factLabels[key]||readableSymbol(String(key))||'属性';
 const valueLabels={...materialLabels,body:'本体',contained:'容纳的材料',surface:'表面',absorbed:'吸附',ground:'地面',held:'随身',attached:'绑定',private:'私人',public:'公共',intact:'完整',broken:'破损',consumed:'材料耗尽',idle:'闲置',running:'运行中',stopped:'已停止',active:'进行中',complete:'已完成',failed:'已失败',error:'已暂停',pending:'等待中',waiting:'等待材料或条件',awaiting_acceptance:'等待双方接受',unoffered:'尚未发起约定',no_source:'未接入动力',program_error:'规则已暂停',accepted:'已接受',released:'已领出',independent:'分别反应',exclusive:'择一反应',reaction:'材料反应',after:'反应之后',logical_matter:'材料份数',whole_entity:'整件物件',material_lot:'材料',role:'人物',entity:'物件',resource_node:'资源点',water_source:'水源',ignition:'火种',container:'容器',structure:'结构'};
 export function factValue(value){
@@ -146,14 +147,16 @@ export function reactionObservationLines(creative,entity){
   if(creative?.process?.last_reaction)lines.push('上次反应是历史记录（世界时刻 '+previewNumber(creative.process.last_reaction.source_last_tick)+'），当前产物数量以物品内的实际材料为准。');
   return lines;
 }
-export function ruleChoices(descriptor,key){
-  return (Array.isArray(descriptor?.choices?.[key])?descriptor.choices[key]:[]).filter(value=>value&&typeof value==='object'&&typeof value.id==='string');
+export function ruleChoices(descriptor,key,port){
+  const candidates=(Array.isArray(descriptor?.choices?.[key])?descriptor.choices[key]:[]).filter(value=>value&&typeof value==='object'&&typeof value.id==='string');
+  if(descriptor?.action==='bind_port'&&key==='others')return candidates.filter(value=>Array.isArray(value.eligible_ports)&&value.eligible_ports.includes(port));
+  return candidates;
 }
 export function actionIds(actions){return (actions||[]).map(action=>typeof action==='string'?action:action?.action).filter(value=>typeof value==='string');}
 export function actionDescriptors(inspection){
   return (inspection?.action_options||[]).filter(value=>value&&typeof value==='object'&&typeof value.action==='string');
 }
-const operationLabels={pickup:'拿进背包',drop:'放到脚下',open:'打开',close:'合上',store:'整件放入',retrieve:'取出整件物品',fill:'从这里装水',pour:'向这里倒水',ignite:'用火种点燃',harvest:'采集',tend:'用水养护',fuel:'添入木料',dismantle:'拆回材料',switch_mode:'切换用途',attach:'绑定部件',detach:'解绑到地面',launch:'放入水中',transfer:'转入材料'};
+const operationLabels={pickup:'拿进背包',drop:'放到脚下',open:'打开',close:'合上',store:'整件放入',retrieve:'取出整件物品',fill:'从这里装水',pour:'向这里倒水',ignite:'用火种点燃',harvest:'采集',tend:'用水养护',fuel:'添入燃料',dismantle:'拆回材料',switch_mode:'切换用途',attach:'绑定部件',detach:'解绑到地面',launch:'放入水中',transfer:'转入材料'};
 export function descriptorLabel(descriptor){
   if(descriptor?.function_id!=='grove.rule_action'&&operationLabels[descriptor?.action])return operationLabels[descriptor.action];
   return readableText(descriptor?.label||descriptor?.use||readableSymbol(descriptor?.action),'使用');
@@ -189,13 +192,13 @@ function readableCandidateSummary(candidate){
   if(!candidate?.summary)return '';
   return readableText(candidate.summary,'').replace(/\b(wood|stone|cloth|metal|water|leather)(?=\d|\b)/g,value=>materialLabels[value]+' ').replace(/(\d+)u\b/g,'$1 份');
 }
-export function candidateLabel(candidate,candidates=[]){
+export function candidateLabel(candidate,candidates=[],quantityUnit='份'){
   const name=objectName(candidate),sameName=Array.isArray(candidates)&&candidates.filter(value=>objectName(value)===name).length>1;
-  const transferable=Array.isArray(candidate?.lots)?candidate.lots.filter(lot=>Number.isInteger(lot?.quantity)&&lot.quantity>0).map(lot=>materialLabel(lot,candidate)+' '+lot.quantity+' 份').join('，'):'';
+  const transferable=Array.isArray(candidate?.lots)?candidate.lots.filter(lot=>Number.isInteger(lot?.quantity)&&lot.quantity>0).map(lot=>materialLabel(lot,candidate)+' '+lot.quantity+' '+quantityUnit).join('，'):'';
   return [name,sameName?candidateContext(candidate):null,candidate?.feedstock?'每制备 1 份，消耗 1 份'+materialLabel(candidate.feedstock,candidate):null,readableCandidateSummary(candidate),transferable?'可转入 '+transferable:null,candidatePreviewSummary(candidate)].filter(Boolean).join(' · ');
 }
-export function operationIntentLabel(descriptor,target,{item,lot,amount,choice}={}){
-  const candidates=[...descriptorCandidates(descriptor),...ruleChoices(descriptor,'items'),...ruleChoices(descriptor,'others')];
+export function operationIntentLabel(descriptor,target,{item,lot,amount,choice,port}={}){
+  const candidates=[...descriptorCandidates(descriptor),...ruleChoices(descriptor,'items'),...ruleChoices(descriptor,'others',port)];
   const source=typeof item==='string'?candidates.find(candidate=>candidate.id===item)||item:item;
   const selectedLot=typeof lot==='string'?descriptorLots(descriptor,source?.id).find(value=>(value.id||value.lot_id)===lot):lot;
   const selectedChoice=typeof choice==='string'?[...(descriptor?.input?.choices||[]),...ruleChoices(descriptor,'materials')].find(value=>(value.id||value.value)===choice)||choice:choice;
@@ -225,7 +228,8 @@ export function operationIntentLabel(descriptor,target,{item,lot,amount,choice}=
       const prepared=materialLabel(selectedChoice,target),feedstock=selectedChoice?.feedstock;
       return '用 '+sourceName+(feedstock?' 的 '+quantity(materialLabel(feedstock,target)):'')+' → 在 '+targetName+' '+descriptorLabel(descriptor)+' '+quantity(prepared);
     }
-    case 'fuel':return descriptor?.function_id==='grove.rule_action'?'用 '+sourceName+' 的 '+quantity('木')+' → '+targetName+' · '+descriptorLabel(descriptor):'从 '+sourceName+' 添入 '+quantity('木')+' → '+targetName;
+    case 'fuel':return '从 '+sourceName+' 添入 '+quantity(selectedLot?materialLabel(selectedLot,source):'所选燃料')+' → '+targetName;
+    case 'bind_port':return '把 '+targetName+' 的 '+(port||'待选槽位')+' 绑定到 '+sourceName;
     case 'switch_mode':return '把 '+targetName+' 切换为 '+objectName(selectedChoice,'所选用途');
     case 'connect':return '把 '+targetName+' 连接到 '+sourceName;
     case 'disconnect':return '断开 '+targetName+' 与 '+sourceName+' 的连接';
@@ -273,9 +277,32 @@ export function previewVersionsChanged(inspection,entities,player){
   }));
 }
 export function descriptorLots(descriptor,itemId){
-  const item=descriptorCandidates(descriptor).find(candidate=>candidate.id===itemId);
-  const values=Array.isArray(item?.lots)?item.lots:descriptor.input?.lots||[];
+  const item=(descriptor?.function_id==='grove.rule_action'?ruleChoices(descriptor,'items'):descriptorCandidates(descriptor)).find(candidate=>candidate.id===itemId);
+  const values=Array.isArray(item?.lots)?item.lots:descriptor?.input?.lots||[];
   return values.filter(lot=>lot&&typeof lot==='object'&&typeof (lot.id||lot.lot_id)==='string'&&(!lot.item_id||lot.item_id===itemId));
+}
+export function fabricationSources(menu){
+  const cost=menu?.cost_u||{};
+  return ruleChoices(menu?.action,'sources').map(source=>({...source,lots:(Array.isArray(source.lots)?source.lots:[]).filter(lot=>lot&&typeof lot.id==='string'&&Object.hasOwn(cost,lot.material)&&Number.isInteger(lot.quantity)&&lot.quantity>0)})).filter(source=>source.lots.length);
+}
+export function fabricationPlan(menu,rows){
+  const errors=[],sources=[],totals=Object.create(null),used=new Map(),choices=fabricationSources(menu),cost=menu?.cost_u||{};
+  if(!Array.isArray(rows)||!rows.length||rows.length>8)return {sources,totals,errors:['请选择一至八行真实来源材料。']};
+  for(const row of rows){
+    const source=choices.find(value=>value.id===row.entity_id),lot=source?.lots.find(value=>value.id===row.lot_id);
+    if(!source||!Number.isInteger(source.version)){errors.push('原来源当前不可用，请重新选择；不会自动换料。');continue;}
+    if(!lot||row.material_id!==lot.material){errors.push('原材料批次已耗尽、改变或不可用，请重新选择。');continue;}
+    const quantity=Number(row.quantity_u);
+    if(!Number.isInteger(quantity)||quantity<1){errors.push('每行数量须为大于零的整数。');continue;}
+    const key=JSON.stringify([source.id,lot.id]);
+    if(used.has(key)){errors.push('同一实际来源批次只能填写一行，请合并数量。');continue;}
+    const quantityUsed=quantity;used.set(key,quantityUsed);
+    if(quantityUsed>lot.quantity)errors.push('同一来源批次的合计用量超过当前 '+lot.quantity+' 单位。');
+    totals[lot.material]=(totals[lot.material]||0)+quantity;
+    sources.push({entity_id:source.id,expected_entity_version:source.version,lot_id:lot.id,quantity_u:quantity});
+  }
+  for(const [material,quantity] of Object.entries(cost))if(totals[material]!==quantity)errors.push('材料 '+material+' 须恰好选择 '+quantity+' 单位，当前 '+(totals[material]||0)+' 单位。');
+  return {sources,totals,errors};
 }
 export function quantityBounds(descriptor,lot){
   const quantity=descriptor.input?.quantity||{};

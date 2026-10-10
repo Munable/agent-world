@@ -15,9 +15,10 @@ from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.simulation import matter as sm
 from agent_world.simulation.declarations import declaration_semantics, has_event, phase_applications
 from agent_world.simulation.programs import compile_program, evaluate, plan_reaction, program_material_semantics, solve_mechanical
+from agent_world.simulation.facts import FactUnavailable, PUBLIC_FACTS, snapshot_facts
 from agent_world.world_streams import StreamEvent
 
-from . import model as m, commit, activity
+from . import model as m, commit, activity, publication
 from .model import public_location as _public_location
 from .commit import public_event, physical_contract_failure
 from .events import bounded_record, RECORDS, MAX_RECORDS, MAX_EVENTS, MAX_RECORD_BYTES, MAX_EVENT_BYTES, MAX_EVENT_JOURNAL_BYTES
@@ -26,7 +27,6 @@ from .definitions import BODY_MATERIALS, MAX_CUSTOM_MATERIALS, REGISTRY, registr
 VERSIONS = "grove.creative.versions"
 CONTROL = "grove.creative.control"
 ACCOUNTING = "grove.creative.accounting"
-MAX_DEFINITIONS = 32
 MAX_INSTANCES = 32
 MAX_LINKS = 8
 MAX_COMMIT_BYTES = 2 * 1024 * 1024
@@ -43,8 +43,8 @@ ACTION_ARGS = {"type": "object", "additionalProperties": False,
         "target_id": ID, "expected_target_version": VERSION, "expected_player_version": VERSION,
         "item_id": ID, "expected_item_version": VERSION, "other_id": ID, "expected_other_version": VERSION,
         "amount": {"type": "integer", "minimum": 1, "maximum": 10000},
-        "material": {"type": "string", "minLength": 1, "maxLength": 180}, "terms_version": VERSION,
-        "params": {"type": "object", "maxProperties": 16}, "delegation": DELEGATION}}
+        "material": {"type": "string", "minLength": 1, "maxLength": 180}, "terms_version": VERSION, "lot_id": ID,
+        "params": {"type": "object", "maxProperties": 16}, "port": {"type": "string", "minLength": 1, "maxLength": 48}, "delegation": DELEGATION}}
 
 
 def _save(ctx, scope, key, value):
@@ -214,7 +214,10 @@ def definition_publish(ctx, args):
                 proposed["material_imports"][alias] = {"definition_ref": reference, "symbol": symbol}
                 resolved[alias] = material
         definition = compile_program(proposed, materials=REGISTRY.materials, body_materials=BODY_MATERIALS,
-                                     max_custom_materials=MAX_CUSTOM_MATERIALS, imported_materials=resolved)
+                                     max_custom_materials=MAX_CUSTOM_MATERIALS, imported_materials=resolved,
+                                     fact_catalog={key: fact.type for key, fact in PUBLIC_FACTS.items()},
+                                     component_catalog={key: REGISTRY.components[key] for key in
+                                         ("structure", "container", "combustion", "absorbent", "buoyant", "attachment")})
     except ValueError as exc:
         raise RuleViolation("定义未发表，世界没有改变：" + str(exc)) from exc
     encoded = json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -230,16 +233,11 @@ def definition_publish(ctx, args):
             raise StateConflict("已发布的同作者／名称／版本不能覆盖；请递增version。旧物件仍引用原版本。")
         return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": True,
                                 "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition)})
-    index = ctx.get_state(m.META, "creative_definitions", [])
-    if len(index) >= MAX_DEFINITIONS:
-        raise RuleViolation("世界当前规则包容量为32；发布版本也占一份，不以覆盖旧版本释放。")
-    _save(ctx, DEFINITIONS, ref, {"definition": definition, "author": ctx.actor_role_id, "hash": digest,
-                                 "published_tick": step(ctx), "published_at": ctx.now})
-    _save(ctx, VERSIONS, version_key, {"definition_ref": ref})
-    _save(ctx, m.META, "creative_definitions", [*index, ref])
+    publication.publish(ctx, ref, version_key, {"definition": definition, "author": ctx.actor_role_id, "hash": digest,
+                                               "published_tick": step(ctx), "published_at": ctx.now})
     return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": False,
                             "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition),
-                            "instantiate": "grove.content_submit: content.objects[].definition_ref and type_id; existing opportunity and real costs apply"})
+                            "instantiate": "cost_u: grove.fabrication_options then grove.fabricate with actual lot sources; cost: grove.content_submit with existing opportunity and builtin piece costs"})
 
 
 def definition_read(ctx, args):
@@ -270,7 +268,7 @@ def _resolve_material(ctx, reference, symbol):
     raise RuleViolation("导入symbol不是该不可变规则包声明或导入的材料。")
 
 
-def object_definition(ctx, spec):
+def object_definition(ctx, spec, *, formation=False):
     pack = definition_read(ctx, {"definition_ref": spec["definition_ref"]}).result["definition"]
     if spec["type_id"] not in pack["types"]:
         raise RuleViolation("type_id不在指定规则版本中。")
@@ -290,6 +288,9 @@ def object_definition(ctx, spec):
                "materials": materials, "event_cursor": ctx.get_state(m.META, "creative_events", {"sequence": 0})["sequence"], "connections": [], "process": {"status": "idle", "steps": 0, "last_tick": step(ctx)}}
     if aliases:
         binding["material_aliases"] = aliases
+    if "ports" in kind:
+        binding["port_bindings"] = {}
+        binding["port_binding_version"] = 0
     if "mechanical" in kind:
         binding["mechanical"] = {"position": 0, "angle": 0, "speed": 0, "energy": 0,
                                  "enabled": False, "status": "no_source", "available_torque": 0}
@@ -300,25 +301,48 @@ def object_definition(ctx, spec):
                                "deadline_tick": None, "delivered": 0, "quantity": kind["contract"]["quantity"],
                                "material": _material({"state": {"program": binding}}, kind["contract"]["material"]),
                                "beneficiary": None, "released": 0}
-    matter = [{"id": "body_" + material, "material": material, "quantity": amount * REGISTRY.materials[material].piece_quantity,
-               "slot": "body", "role": "structural", "burning": False} for material, amount in kind["cost"].items() if amount]
+    if "cost_u" in kind and not formation:
+        raise RuleViolation("此类型按真实u批次成型；先读取grove.fabrication_options，再提交grove.fabricate。区域份数库存不能代替原材料。")
+    matter = ([] if formation else [{"id": "body_" + material, "material": material,
+               "quantity": amount * REGISTRY.materials[material].piece_quantity,
+               "slot": "body", "role": "structural", "burning": False} for material, amount in kind["cost"].items() if amount])
     components = {"structure": {"max_integrity": 100, "integrity": 100, "support_limit": 1000, "overload_rate": 1}}
+    component_defaults = {"structure": components["structure"],
+        "container": {"slots": 4, "liquid_capacity": 0, "open": True},
+        "absorbent": {"capacity": 0, "rate": 2}, "buoyant": {"capacity": 0},
+        "combustion": {"rate": 2, "spread": True},
+        "attachment": {"kind": "part", "fits": "container", "max_children": 16}}
+    for name, parameters in kind.get("components", {}).items():
+        components[name] = {**component_defaults[name], **deepcopy(parameters)}
     capabilities = ["transport"]
     if "container_capacity" in kind or "contract" in kind or any(e["op"] == "react" for r in kind["rules"] for e in r["effects"]):
         capacity = kind.get("container_capacity", 100)
         binding["mixture_capacity"] = capacity
-        components["container"] = {"slots": 4, "liquid_capacity": capacity, "open": True}
+        components.setdefault("container", {"slots": 4, "liquid_capacity": capacity, "open": True})
+        if "container_capacity" in kind:
+            components["container"]["liquid_capacity"] = capacity
         capabilities.append("container")
+    elif "container" in components:
+        capabilities.append("container")
+        # Component-only vessels follow ordinary container policy: object
+        # slots, liquid volume and bounded solid lots are separate capacities.
     if "barrier" in kind:
-        active = bool(evaluate(kind["barrier"], _context({"state": {"program": binding}, "matter": matter,
-            "x": spec["x"], "y": spec["y"]}, ctx=ctx, definition=pack)))
+        try:
+            active = bool(evaluate(kind["barrier"], _context({"state": {"program": binding}, "matter": matter,
+                "components": components, "x": spec.get("x"), "y": spec.get("y")}, ctx=ctx, definition=pack)))
+        except FactUnavailable:
+            active = True
+            binding["process"].update(status="waiting", blocked_reason="unavailable_fact_or_port")
         components["barrier"] = {"active": active}
         if active:
             capabilities.append("blocking")
-    return {"name": kind["name"], "material": kind["body_material"], "capabilities": capabilities,
+    body = _material({"state": {"program": binding}}, kind["body_material"])
+    capabilities += [tag for component, tag in (("absorbent", "wettable"), ("buoyant", "floating"), ("combustion", "flammable"))
+                     if component in components and tag not in capabilities]
+    return {"name": kind["name"], "material": body, "capabilities": capabilities,
             "state": {"kind": "authored", "program": binding}, "matter": matter, "components": components,
-            "composition": {"material": kind["body_material"], "construction": "bundle", "size": 1},
-            "material_cost": deepcopy(kind["cost"]), "material_units": sum(kind["cost"].values()),
+            "composition": {"material": body, "construction": "bundle", "size": 1},
+            "material_cost": deepcopy(kind.get("cost", {})), "material_units": sum(kind.get("cost", {}).values()),
             "water_capacity": components.get("container", {}).get("liquid_capacity", 0)}
 
 
@@ -339,7 +363,7 @@ def _bound_ids(value):
     """Literal object bindings are part of the immutable program, never a query."""
     if isinstance(value, dict):
         if set(value) == {"object"}:
-            return {value["object"]["id"]}
+            return {value["object"]["id"]} if "id" in value["object"] else set()
         return set().union(*(_bound_ids(child) for child in value.values()))
     if isinstance(value, list):
         return set().union(*(_bound_ids(child) for child in value))
@@ -347,29 +371,27 @@ def _bound_ids(value):
 
 
 def _context(entity, params=None, event=None, *, ctx=None, objects=None, definition=None):
+    from . import world_facts
     program = entity["state"]["program"]
     observed = {}
     if ctx is not None:
         definition = definition if definition is not None else _type(ctx, entity)[0]
-        location = _public_location(ctx, entity) if entity.get("id") else (entity.get("x"), entity.get("y"))
-        for eid in sorted(_bound_ids(definition or {})):
-            target = objects.get(eid) if objects is not None and eid in objects else m.get_entity(ctx, eid, required=False)
-            target_location = _public_location(ctx, target) if target else None
+        if objects is None:
+            anchor = entity if entity.get("id") else {"id": "candidate", **entity}
+            objects = world_facts.freeze(ctx, {anchor["id"]: anchor})
+        location = world_facts.public_location(entity, objects)
+        for eid in sorted(world_facts.bound_ids(entity, definition)):
+            target = objects.get(eid)
+            target_location = world_facts.public_location(target, objects) if target else None
             if (location is None or None in location or target_location is None or
                     max(abs(location[0]-target_location[0]), abs(location[1]-target_location[1])) > 8):
                 continue
-            value = {"intact": target["lifecycle"] == "intact"}
-            binding = target["state"].get("program", {})
-            if "barrier" in target["components"]:
-                value.update({"barrier.active": target["components"]["barrier"]["active"],
-                              "barrier.opened_sequence": binding.get("barrier_opened_sequence", 0)})
-            if "mechanical" in binding:
-                value.update({"mechanical." + key: val if key == "status" else int(val)
-                              for key, val in binding["mechanical"].items()
-                              if key in {"position", "speed", "angle", "energy", "status"}})
-            observed[eid] = value
+            observed[eid] = world_facts.facts(target, objects, external=True)
     contract = program.get("contract", {})
+    physical = world_facts.facts((objects or {}).get(entity.get("id"), entity), objects or {})
     return {"fields": program["fields"], "params": params or {}, "quantities": _quantities(entity), "objects": observed,
+            "physical": {key.removeprefix("physical."): value for key, value in physical.items() if key.startswith("physical.")},
+            "ports": deepcopy(program.get("port_bindings", {})),
             "contract": {"status": contract.get("status", "none"), "started_event_sequence": contract.get("started_event_sequence", 0),
                          "deadline_tick": contract.get("deadline_tick") or 0, "delivered": contract.get("delivered", 0), "quantity": contract.get("quantity", 0)},
             "mechanical": program.get("mechanical", {"position": 0, "angle": 0, "speed": 0, "energy": 0, "status": "none", "available_torque": 0}),
@@ -409,6 +431,9 @@ def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=No
                 raise RuleViolation("规则字段" + effect["field"] + "结果越界，请修改表达式。")
             changed |= entity["state"]["program"]["fields"][effect["field"]] != value
             entity["state"]["program"]["fields"][effect["field"]] = value
+        elif effect["op"] == "drive":
+            enabled = evaluate(effect["enabled"], context)
+            changed |= _set_drive(ctx, entity, kind, enabled)
         elif effect["op"] == "react":
             if effect["mode"] == "exclusive" and effect["channel"] in channels:
                 continue
@@ -425,7 +450,9 @@ def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=No
                 if identity in registry.materials:
                     materials[symbol] = {"load_per_u": registry.materials[identity].load_per_u}
             available = reaction_available_quantities(entity, supply=supply)
-            actual_capacity = sm.liquid_capacity(entity)
+            from .definitions import mixture_capacity
+            actual_capacity = mixture_capacity(entity)
+            actual_capacity = sm.liquid_capacity(entity) if actual_capacity is None else actual_capacity
             # Planner supply excludes this phase's products and escrow, while
             # those real lots still occupy volume.
             capacity = sm.reaction_capacity(actual_capacity, sum(context["quantities"].values()), sum(available.values()))
@@ -472,15 +499,98 @@ def _relevant_events(ctx, entity, since):
     return [event for event in events if event["sequence"] > since and max(abs(event["x"]-location[0]), abs(event["y"]-location[1])) <= radius]
 
 
-def _barrier(entity, spec, event=None, *, ctx=None, objects=None):
+def _set_drive(ctx, entity, spec, enabled):
+    if type(enabled) is not bool or spec.get("mechanical", {}).get("role") != "source" or entity["lifecycle"] != "intact":
+        raise RuleViolation("drive只能启停当前完好物件已有的动力源。")
+    binding = entity["state"]["program"]
+    state = binding["mechanical"]
+    changed = state["enabled"] != enabled
+    state["enabled"] = enabled
+    if changed:
+        binding["drive_request"] = {"enabled": enabled, "requested_step": step(ctx), "applies_from_step": step(ctx)+1}
+    return changed
+
+
+def _barrier(entity, spec, event=None, *, ctx=None, objects=None, allow_unknown=False):
+    known = True
     if "barrier" in spec:
         previous = entity["components"]["barrier"]["active"]
-        current = bool(evaluate(spec["barrier"], _context(entity, event=event, ctx=ctx, objects=objects)))
+        try:
+            current = bool(evaluate(spec["barrier"], _context(entity, event=event, ctx=ctx, objects=objects)))
+        except FactUnavailable:
+            if not allow_unknown:
+                raise
+            current = True
+            known = False
+            process = entity["state"]["program"]["process"]
+            if process["status"] != "error":
+                process.update(status="waiting", barrier_blocked_reason="unavailable_fact_or_port")
+        else:
+            entity["state"]["program"]["process"].pop("barrier_blocked_reason", None)
         entity["components"]["barrier"]["active"] = current
         if previous and not current:
             entity["state"]["program"]["barrier_open_pending"] = bool(ctx is not None and _public_location(ctx, entity) is not None)
         elif current:
             entity["state"]["program"].pop("barrier_open_pending", None)
+    return known
+
+
+def _port_candidates(ctx, player, entity, spec):
+    from . import world_facts
+    location = _public_location(ctx, entity)
+    if location is None:
+        return []
+    result = []
+    for target in m.public_entities_near(ctx, *location, radius=8):
+        if target["id"] == entity["id"] or max(abs(target["x"]-player["x"]), abs(target["y"]-player["y"])) > 8:
+            continue
+        forest = world_facts.freeze(ctx, {target["id"]: target})
+        facts = world_facts.facts(target, forest, external=True)
+        eligible = [name for name, port in spec.get("ports", {}).items() if all(field in facts for field in port["fields"])]
+        if eligible:
+            result.append({"id": target["id"], "name": target["name"], "version": target["version"], "kind": "entity", "eligible_ports": eligible})
+    return result
+
+
+def _edit_port(ctx, player, entity, spec, args):
+    from .world import _accessible
+    port = args.get("port")
+    if port not in spec.get("ports", {}):
+        raise RuleViolation("请选择此固定类型已声明的端口名。")
+    program = entity["state"]["program"]
+    contract = program.get("contract")
+    if contract and (contract["status"] not in {"unoffered", "awaiting_acceptance"} or contract["delivered"]):
+        raise RuleViolation("成立或已有结果的契约固定实际绑定；不能切换目标。")
+    if contract and contract["parties"] and contract["beneficiary"] != player["id"]:
+        raise PermissionDenied("只有原提议者能修改未成立条款的绑定。")
+    bindings = program.setdefault("port_bindings", {})
+    previous = bindings.get(port)
+    if args["action"] == "bind_port":
+        other = m.get_entity(ctx, args.get("other_id", ""))
+        _accessible(ctx, player, other, near=False, subject="other")
+        if other["version"] != args.get("expected_other_version"):
+            raise StateConflict("端口目标已变化；请读取同一观察中的实际对象版本。")
+        candidates = _port_candidates(ctx, player, entity, spec)
+        candidate = next((row for row in candidates if row["id"] == other["id"] and port in row["eligible_ports"]), None)
+        if candidate is None:
+            raise RuleViolation("端口目标不在双方可读范围，或不具备端口声明的公开事实。")
+        bindings[port] = other["id"]
+    else:
+        if previous is None:
+            raise RuleViolation("该端口没有实际绑定。")
+        bindings.pop(port)
+    if previous == bindings.get(port):
+        return {"port": port, "previous_entity_id": previous, "entity_id": previous,
+                "binding_version": program["port_binding_version"]}
+    program["port_binding_version"] += 1
+    if contract and contract["status"] == "awaiting_acceptance":
+        contract.update(status="unoffered", terms_version=contract["terms_version"]+1,
+                        parties=[], accepted=[], beneficiary=None, deadline_tick=None)
+        contract.pop("pinned_ports", None)
+        contract.pop("port_binding_version", None)
+    program["process"].pop("blocked_reason", None)
+    return {"port": port, "previous_entity_id": previous, "entity_id": bindings.get(port),
+            "binding_version": program["port_binding_version"]}
 
 
 def _delivery_reason(ctx, entity, spec):
@@ -495,7 +605,7 @@ def _delivery_reason(ctx, entity, spec):
 
 
 
-def _contract_update(ctx, entity, spec, event=None, *, objects=None):
+def _contract_update(ctx, entity, spec, event=None, *, objects=None, defer_unknown=False):
     state = entity["state"]["program"].get("contract")
     physically_changed = physical_contract_failure(ctx, entity)
     if not state or state["status"] != "active":
@@ -515,6 +625,11 @@ def _contract_update(ctx, entity, spec, event=None, *, objects=None):
         else:
             fulfilled = evaluate(condition, _context(entity, ctx=ctx, objects=objects))
         state.pop("condition_error", None)
+    except FactUnavailable as exc:
+        if defer_unknown and has_event(condition):
+            raise
+        state["condition_error"] = str(exc)[:180]
+        fulfilled = False
     except ValueError as exc:
         state["condition_error"] = str(exc)[:180]
         fulfilled = False
@@ -540,30 +655,74 @@ def tick(ctx):
     if list(objects) != ids:
         activity.meta_set(ctx, "creative_instances", list(objects))
     specs = {eid: _type(ctx, entity)[1] for eid, entity in objects.items()}
+    persisted = deepcopy(objects)
+    # A prior authored failure stops the next step before any reader freezes
+    # its facts. Preserve the already solved position/energy of the failed step.
+    for entity in objects.values():
+        program = entity["state"]["program"]
+        if program["process"]["status"] == "error" and "mechanical" in program:
+            program["mechanical"].update(speed=0, available_torque=0, status="program_error", enabled=False)
     original = deepcopy(objects)
-    from . import contact
+    from . import contact, world_facts
+    reaction_view = world_facts.freeze(ctx, original)
     physical_objects, _ = activity.physical_closure(ctx)
     contact_original = {eid: deepcopy(entity) for eid, entity in physical_objects.items()
                         if contact.candidates(ctx, entity)}
     journal_sequence = ctx.get_state(m.META, "creative_events", {"sequence": 0})["sequence"]
     events, pending_accounts, phase_supply = {}, {}, {}
     outcomes = []
+    blocked_events, solved_mechanical = set(), {}
+    blocked_rules = {eid: [] for eid in objects}
 
     def fail_instance(eid, error, preserve_mechanical=False):
         # Declarative evaluation runs on local copies. No account or object
         # write has occurred for this instance, so its entire step can stop.
-        mechanical_result = deepcopy(objects[eid]["state"]["program"].get("mechanical")) if preserve_mechanical else None
+        mechanical_result = deepcopy(solved_mechanical.get(eid)) if preserve_mechanical else None
         objects[eid] = deepcopy(original[eid])
         program = objects[eid]["state"]["program"]
         program["process"].update(status="error", error=str(error)[:180], last_tick=step(ctx))
+        blocked_rules[eid] = []
         if mechanical_result is not None:
             program["mechanical"] = mechanical_result
-        if "mechanical" in program:
-            program["mechanical"].update(speed=0, status="program_error", enabled=False)
+        if "mechanical" in program and mechanical_result is None:
+            program["mechanical"].update(speed=0, available_torque=0, status="program_error", enabled=False)
         pending_accounts[eid] = {}
         phase_supply[eid] = _quantities(original[eid], include_burning=False)
-        outcomes[:] = [item for item in outcomes if item[0] != eid]
+        outcomes[:] = [item for item in outcomes if item[0] != eid or preserve_mechanical and item[1] == "mechanical"]
         outcomes.append((eid, "program_error", "该物件规则暂停：" + str(error)[:120]))
+
+    def wait_event_batch(eid, error):
+        # Event cursors advance only with the complete declarative event batch.
+        # A later retry cannot replay an already-committed prefix. The separately
+        # solved physical result is a fact, not a candidate control request.
+        if objects[eid]["state"]["program"]["process"]["status"] == "error":
+            return
+        objects[eid] = deepcopy(original[eid])
+        program = objects[eid]["state"]["program"]
+        if eid in solved_mechanical:
+            program["mechanical"] = deepcopy(solved_mechanical[eid])
+        program["process"].update(status="waiting", blocked_reason=str(error)[:180])
+        pending_accounts[eid] = {}
+        phase_supply[eid] = _quantities(original[eid], include_burning=False)
+        outcomes[:] = [item for item in outcomes if item[0] != eid or item[1] == "mechanical"]
+        blocked_events.add(eid)
+
+    def apply_declaration(eid, rule, fact, view, channels, *, predicate_snapshot=None):
+        candidate = objects[eid]
+        checkpoint = deepcopy(candidate), deepcopy(pending_accounts[eid]), deepcopy(phase_supply[eid]), set(channels)
+        try:
+            if evaluate(rule["when"], _context(predicate_snapshot or view[eid], event=fact, ctx=ctx, objects=view)):
+                return _effects(ctx, candidate, specs[eid], rule["effects"], event=fact, channels=channels,
+                                accounts=pending_accounts[eid], supply=phase_supply[eid], objects=view)[1]
+        except FactUnavailable as exc:
+            if fact is not None:
+                wait_event_batch(eid, exc)
+            else:
+                objects[eid], pending_accounts[eid], phase_supply[eid], before_channels = checkpoint
+                channels.clear()
+                channels.update(before_channels)
+                blocked_rules[eid].append({"rule_id": rule["id"], "phase": rule["phase"], "reason": str(exc)[:120]})
+        return []
 
     for eid, entity in sorted(objects.items()):
         state = entity["state"]["program"]
@@ -577,10 +736,13 @@ def tick(ctx):
         try:
             channels, reactions = set(), []
             for rule, fact in phase_applications(specs[eid], "reaction", relevant):
-                if evaluate(rule["when"], _context(original[eid], event=fact, ctx=ctx, objects=original)):
-                    _, produced = _effects(ctx, entity, specs[eid], rule["effects"], event=fact, channels=channels,
-                                           accounts=pending_accounts[eid], supply=phase_supply[eid], objects=original)
-                    reactions.extend(produced)
+                reactions.extend(apply_declaration(eid, rule, fact, reaction_view, channels))
+                if eid in blocked_events:
+                    break
+            entity = objects[eid]
+            state = entity["state"]["program"]
+            if eid in blocked_events:
+                continue
             if reactions:
                 state["process"] = {"status": "running", "steps": state["process"]["steps"]+1,
                                     "last_tick": step(ctx), "last_reactions": reactions}
@@ -592,8 +754,6 @@ def tick(ctx):
             # recording alone nor reading live object facts consumes this log.
             # Advancing unused cursors would invalidate otherwise unchanged
             # action targets whenever another object is moving or speaking.
-            if has_event(specs[eid]):
-                state["event_cursor"] = journal_sequence
             m.normalize_entity(entity)
         except (ValueError, RuleViolation) as exc:
             fail_instance(eid, exc)
@@ -602,7 +762,7 @@ def tick(ctx):
     # carried, closed, distant or asymmetrically disconnected pair is no mesh.
     nodes, edges = [], []
     for eid, entity in sorted(original.items()):
-        if "mechanical" not in specs[eid] or _public_location(ctx, entity) is None or objects[eid]["state"]["program"]["process"]["status"] == "error":
+        if "mechanical" not in specs[eid] or world_facts.public_location(entity, reaction_view) is None or objects[eid]["state"]["program"]["process"]["status"] == "error":
             continue
         state = deepcopy(entity["state"]["program"]["mechanical"])
         mechanical = deepcopy(specs[eid]["mechanical"])
@@ -611,17 +771,21 @@ def tick(ctx):
         nodes.append({"id": eid, "mechanical": mechanical, "fields": entity["state"]["program"]["fields"], "state": state})
         for link in entity["state"]["program"].get("connections", []):
             other = original.get(link["other_id"])
-            if not other or eid >= other["id"] or _public_location(ctx, other) is None:
+            if not other or eid >= other["id"] or world_facts.public_location(other, reaction_view) is None:
                 continue
             if not any(reverse["other_id"] == eid for reverse in other["state"]["program"].get("connections", [])):
                 continue
-            first, second = m.entity_location(ctx, entity), m.entity_location(ctx, other)
+            first, second = world_facts.public_location(entity, reaction_view), world_facts.public_location(other, reaction_view)
             if max(abs(first[0]-second[0]), abs(first[1]-second[1])) <= 2:
                 edges.append({"source": eid, "target": other["id"], "meshed": True})
     eligible = {node["id"] for node in nodes}
     edges = [edge for edge in edges if edge["source"] in eligible and edge["target"] in eligible]
     results = solve_mechanical(nodes, edges) if nodes else {}
     for eid, result in results.items():
+        actual = deepcopy(original[eid]["state"]["program"]["mechanical"])
+        actual.update({key: value for key, value in result.items() if key != "energy_used"})
+        actual["energy"] -= result["energy_used"]
+        solved_mechanical[eid] = actual
         state = objects[eid]["state"]["program"]["mechanical"]
         state.update({key: value for key, value in result.items() if key != "energy_used"})
         state["energy"] -= result["energy_used"]
@@ -633,35 +797,62 @@ def tick(ctx):
     # Its candidate writes and failures feed a later step, never another
     # instance selected only by its id. Literal non-instance bindings also
     # belong to this read view; a missing binding remains missing throughout.
-    after_objects = deepcopy(objects)
-    for entity in original.values():
-        definition, _ = _type(ctx, entity)
-        for bound_id in sorted(_bound_ids(definition)):
-            if bound_id not in after_objects:
-                after_objects[bound_id] = m.get_entity(ctx, bound_id, required=False)
-    for eid, entity in sorted(objects.items()):
+    after_candidates = deepcopy(objects)
+    after_objects = deepcopy(reaction_view)
+    for eid, result in solved_mechanical.items():
+        after_objects[eid]["state"]["program"]["mechanical"] = deepcopy(result)
+    for eid, candidate in objects.items():
+        if candidate["state"]["program"]["process"]["status"] == "error" and "mechanical" in candidate["state"]["program"]:
+            after_objects[eid]["state"]["program"]["mechanical"] = deepcopy(candidate["state"]["program"]["mechanical"])
+    for eid in sorted(original):
+        entity = objects[eid]
         spec = specs[eid]
-        if entity["state"]["program"]["process"]["status"] != "error":
+        if entity["state"]["program"]["process"]["status"] != "error" and eid not in blocked_events:
             try:
-                phase_snapshot = after_objects[eid]
                 channels = set()
                 for rule, fact in phase_applications(spec, "after", events[eid]):
-                    if evaluate(rule["when"], _context(phase_snapshot, event=fact, ctx=ctx, objects=after_objects)):
-                        _effects(ctx, entity, spec, rule["effects"], event=fact, channels=channels,
-                                 accounts=pending_accounts[eid], supply=phase_supply[eid], objects=after_objects)
-                _barrier(entity, spec, events[eid][-1] if events[eid] else None, ctx=ctx, objects=after_objects)
+                    apply_declaration(eid, rule, fact, after_objects, channels, predicate_snapshot=after_candidates[eid])
+                    if eid in blocked_events:
+                        break
+                entity = objects[eid]
+                if eid not in blocked_events:
+                    known = _barrier(entity, spec, events[eid][-1] if events[eid] else None, ctx=ctx, objects=after_objects, allow_unknown=True)
+                    if not known and has_event(spec.get("barrier")):
+                        wait_event_batch(eid, FactUnavailable("事件关联的障碍事实当前不可读。"))
+                        entity = objects[eid]
+                        entity["components"]["barrier"]["active"] = True
+                        entity["state"]["program"].pop("barrier_open_pending", None)
                 m.normalize_entity(entity)
             except (ValueError, RuleViolation) as exc:
                 fail_instance(eid, exc, preserve_mechanical=True)
                 entity = objects[eid]
+        process = entity["state"]["program"]["process"]
+        if eid in blocked_events and "barrier" in spec:
+            _barrier(entity, spec, events[eid][-1] if events[eid] else None, ctx=ctx, objects=after_objects, allow_unknown=True)
+        if blocked_rules[eid] and eid not in blocked_events and process["status"] != "error":
+            process.update(status="waiting", blocked_rules=blocked_rules[eid], blocked_reason="unavailable_fact_or_port")
+        elif eid not in blocked_events:
+            process.pop("blocked_rules", None)
+            if process.get("barrier_blocked_reason"):
+                process["blocked_reason"] = process["barrier_blocked_reason"]
+            else:
+                process.pop("blocked_reason", None)
         recorder = entity["state"]["program"].get("recorder")
         if recorder and recorder["active"] and step(ctx) >= recorder["until_tick"]:
             recorder["active"] = False
         # Deadlines still advance even if this instance's authored rule stopped.
         # Cross-object contract conditions retain the step-start read view;
         # after/physical feedback does not move contract completion earlier.
-        if _contract_update(ctx, entity, spec, events[eid], objects=original):
-            outcomes.append((eid, "contract", "契约依据真实交付和逻辑期限形成结果。"))
+        try:
+            if _contract_update(ctx, entity, spec, events[eid], objects=reaction_view, defer_unknown=True):
+                outcomes.append((eid, "contract", "契约依据真实交付和逻辑期限形成结果。"))
+        except FactUnavailable as exc:
+            wait_event_batch(eid, exc)
+            entity = objects[eid]
+            entity["state"]["program"]["contract"]["condition_error"] = str(exc)[:180]
+            _barrier(entity, spec, events[eid][-1] if events[eid] else None, ctx=ctx, objects=after_objects, allow_unknown=True)
+        if has_event(spec) and eid not in blocked_events and entity["state"]["program"]["process"]["status"] != "error":
+            entity["state"]["program"]["event_cursor"] = journal_sequence
     # Existing authored stages retain their order and frozen views. Contact
     # comes last, sharing their remaining original inputs, never their products.
     for eid, snapshot in sorted(contact_original.items()):
@@ -671,6 +862,7 @@ def tick(ctx):
         candidate, entries, outcome = contact.settle(ctx, entity, snapshot, supply, step(ctx))
         objects[eid] = candidate
         original.setdefault(eid, snapshot)
+        persisted.setdefault(eid, snapshot)
         pending_accounts["contact:" + eid] = entries
         if outcome and _public_location(ctx, candidate) is not None and candidate["state"]["open"]:
             outcomes.append(outcome)
@@ -678,7 +870,7 @@ def tick(ctx):
     for entries in pending_accounts.values():
         for key, amount in entries.items():
             sm.accumulate_quantity(accounts, key, amount)
-    changed = {eid for eid, entity in objects.items() if entity != original[eid]}
+    changed = {eid for eid, entity in objects.items() if entity != persisted[eid]}
     commit.commit_results(ctx, objects, changed, accounts=accounts, tick=step(ctx))
     for eid, action, summary in outcomes:
         public_event(ctx, action=action, entity_id=eid, kind="process", actor="system:rules")
@@ -738,7 +930,12 @@ def rule_action(ctx, args):
     summary = ""
     result_extra = {}
     _contract_update(ctx, entity, spec)
-    if action == "charge":
+    if action in {"bind_port", "unbind_port"}:
+        result_extra["port_binding"] = _edit_port(ctx, player, entity, spec, args)
+        summary = "已明确绑定实际公开对象，下一步读取其声明事实。" if action == "bind_port" else "已解除端口；依赖事实保持未知，等待明确重新绑定。"
+        if program.get("contract", {}).get("status") == "unoffered" and program.get("contract", {}).get("terms_version"):
+            summary += "未成立条款的此前接受已清除，需重新提议。"
+    elif action == "charge":
         if "container" not in entity["components"] or not entity["state"]["open"]:
             raise RuleViolation("配料需要打开的实际容器。")
         if args.get("material") not in pack["materials"]:
@@ -752,10 +949,11 @@ def rule_action(ctx, args):
         if item["id"] == entity["id"]:
             raise RuleViolation("请选择独立来源，不能用反应物自身的承重结构无限配料。")
         definition = pack["materials"][args["material"]]
-        if amount > sm.mixture_room(entity, sm.liquid_capacity(entity)):
+        from .definitions import mixture_capacity
+        material = _material(entity, args["material"])
+        if amount > sm.contained_room(registry_for(entity), entity, material, mixture_capacity=mixture_capacity(entity)):
             raise RuleViolation("实际混合物超过定义容积；来源没有消耗。")
         _take(item, definition["feedstock"], amount, slots=("body", "contained", "surface"))
-        material = _material(entity, args["material"])
         _put(entity, material, amount)
         commit.record_account(ctx, "sinks", definition["feedstock"], amount, "creative_charge")
         commit.record_account(ctx, "sources", material, amount, "creative_charge")
@@ -772,13 +970,19 @@ def rule_action(ctx, args):
             item = _item(ctx, player, args, allow_container=False)
             if item["id"] == entity["id"]:
                 raise RuleViolation("动力源不能消耗自己的结构冒充外部燃料。")
-            _take(item, "wood", amount, slots=("body", "contained", "surface"))
+            from .definitions import select_fuel
+            lot = select_fuel(ctx, player, item, "mechanical_fuel", args.get("lot_id"))
+            if amount > lot["quantity"]:
+                raise RuleViolation("所选燃料批次不足；没有自动改用另一批。")
+            material = lot["material"]
+            lot["quantity"] -= amount
+            item["matter"] = sm.normalize_lots(registry_for(item), item["id"], item["matter"])
             state["energy"] += amount
-            commit.record_account(ctx, "sinks", "wood", amount, "mechanical_fuel")
+            commit.record_account(ctx, "sinks", material, amount, "mechanical_fuel")
             _finish_item(ctx, item, entity)
             summary = f"燃料已消耗，储存了{amount}单位有限能源。"
         else:
-            state["enabled"] = action == "start"
+            _set_drive(ctx, entity, spec, action == "start")
             summary = "动力输入已启用。" if state["enabled"] else "动力输入已停止，已有位移保留。"
     elif action in {"connect", "disconnect"}:
         if "mechanical" not in spec or not args.get("other_id"):
@@ -844,6 +1048,18 @@ def rule_action(ctx, args):
                 raise RuleViolation("请选择另一个已进入世界的实际参与者及当前档案版本。")
             if max(abs(other["x"]-player["x"]), abs(other["y"]-player["y"])) > 8:
                 raise RuleViolation("只能向当前可见参与者提出契约。")
+            if spec.get("ports"):
+                from . import world_facts
+                forest = world_facts.freeze(ctx, {entity["id"]: entity})
+                context = _context(entity, ctx=ctx, objects=forest, definition=pack)
+                pinned = {}
+                for port, declaration in spec["ports"].items():
+                    target_id = program["port_bindings"].get(port)
+                    facts = context["objects"].get(target_id, {})
+                    if any(field not in facts for field in declaration["fields"]):
+                        raise RuleViolation("契约提议前须明确绑定全部声明端口及可读的实际事实。")
+                    pinned[port] = {"entity_id": target_id, "entity_version": forest[target_id]["version"]}
+                state.update(pinned_ports=pinned, port_binding_version=program["port_binding_version"])
             state.update(status="awaiting_acceptance", terms_version=state["terms_version"]+1,
                          parties=[player["id"], other["id"]], accepted=[], beneficiary=player["id"], deadline_tick=None)
             summary = "条款已提出，双方均需以自己身份明确接受；提出本身不算接受。"
@@ -942,14 +1158,19 @@ def rule_action(ctx, args):
             value = params[name]
             if (field["type"] == "boolean" and type(value) is not bool) or (field["type"] == "integer" and (type(value) is not int or not field["min"] <= value <= field["max"])):
                 raise RuleViolation("动作参数" + name + "类型或范围无效。")
-        if not evaluate(declared.get("when", True), _context(entity, params, ctx=ctx)):
-            raise RuleViolation("此动作的实际前提尚未成立。")
-        _effects(ctx, entity, spec, declared["effects"], params=params)
+        from . import world_facts
+        action_view = world_facts.freeze(ctx, {entity["id"]: entity})
+        try:
+            if not evaluate(declared.get("when", True), _context(entity, params, ctx=ctx, objects=action_view)):
+                raise RuleViolation("此动作的实际前提尚未成立。")
+            _effects(ctx, entity, spec, declared["effects"], params=params, objects=action_view)
+        except FactUnavailable as exc:
+            raise RuleViolation("声明事实或端口当前不可读；本次动作未执行：" + str(exc)) from exc
         program["process"].update(status="idle", last_tick=step(ctx))
         program["process"].pop("error", None)
         summary = "已执行已发布动作：" + declared["label"] + "。"
     if entity["lifecycle"] == "intact":
-        _barrier(entity, spec, ctx=ctx)
+        _barrier(entity, spec, ctx=ctx, allow_unknown=True)
     commit.save_entity(ctx, entity)
     location = _public_location(ctx, entity)
     events = ()
@@ -1023,6 +1244,9 @@ def action_options(ctx, player, entity):
             fields["amount"] = ACTION_ARGS["properties"]["amount"]
             required.append("amount")
             args["amount"] = 1
+        if any(item.get("lots") for item in choices.get("items", [])):
+            fields["lot_id"] = ID
+            required.append("lot_id")
         if arguments:
             args.update(arguments)
             for key in arguments:
@@ -1045,12 +1269,32 @@ def action_options(ctx, player, entity):
         add("charge", "制备已声明材料", {"items": own_items, "materials": [
             {"id": key, "name": value["name"], "feedstock": value["feedstock"]} for key, value in pack["materials"].items()]}, amount=True,
             use="选材料symbol，消耗来源中的对应feedstock，等量制备该声明材料。转移已有批次用transfer，搬入整件用store；制备不是规则反应。")
+    if spec.get("ports"):
+        contract = entity["state"]["program"].get("contract", {})
+        locked = contract.get("status", "unoffered") not in {"unoffered", "awaiting_acceptance"} or contract.get("delivered", 0)
+        reason = "契约已有实际结果或已成立，绑定固定。" if locked else None
+        port_names = list(spec["ports"])
+        add("bind_port", "绑定公开事实", {"others": _port_candidates(ctx, player, entity, spec)},
+            arguments={"port": port_names[0]}, reason=reason,
+            use="先选择声明端口，再明确选择eligible_ports包含它的实际目标；端口只读，不授予远程写入，也不会自动重绑定。未成立条款修改会清空此前接受。")
+        options[-1]["input_schema"]["properties"]["port"] = {"type": "string", "enum": port_names}
+        options[-1]["input_schema"]["required"].append("port")
+        bound = list(entity["state"]["program"].get("port_bindings", {}))
+        add("unbind_port", "解除事实绑定", arguments={"port": bound[0] if bound else port_names[0]},
+            reason=reason or (None if bound else "当前没有实际端口绑定。"))
+        options[-1]["input_schema"]["properties"]["port"] = {"type": "string", "enum": bound or port_names}
+        options[-1]["input_schema"]["required"].append("port")
     if "mechanical" in spec:
         add("connect", "连接传动", {"others": mechanicals})
         links = {item["other_id"] for item in entity["state"]["program"]["connections"]}
         add("disconnect", "断开传动", {"others": [item for item in mechanicals if item["id"] in links]})
         if spec["mechanical"]["role"] == "source":
-            add("fuel", "消耗木料储能", {"items": own_items}, amount=True)
+            from .definitions import usable_fuel_lots
+            fuels = [{"id": item["id"], "name": item["name"], "version": item["version"], "kind": "entity",
+                      "lots": [{key: lot[key] for key in ("id", "material", "quantity", "slot")} for lot in lots]}
+                     for item in candidates if (lots := usable_fuel_lots(ctx, player, item, "mechanical_fuel"))]
+            add("fuel", "消耗合格燃料储能", {"items": fuels}, amount=True,
+                use="按lot_id消耗实际燃料；原材料定义须声明mechanical_fuel资格。设置启停请求后，下一模拟步才参与原始输入求解。")
             add("start", "启用动力")
             add("stop", "停止动力")
     if "recorder" in spec:
@@ -1083,16 +1327,14 @@ def action_options(ctx, player, entity):
 
 
 def rule_catalog(ctx, args):
-    definitions = []
-    for ref in ctx.get_state(m.META, "creative_definitions", []):
-        pack = ctx.get_state(DEFINITIONS, ref)
-        definitions.append({"definition_ref": ref, "author": pack["author"], "key": pack["definition"]["key"],
-                            "version": pack["definition"]["version"], "types": {key: {"name": kind["name"], "cost": kind["cost"]} for key, kind in pack["definition"]["types"].items()}})
-    return FunctionOutcome({"language_version": 2, "definitions": definitions, "world_tick": step(ctx),
+    return FunctionOutcome({"language_version": 3, "definition_directory": {"function_id": "grove.definition_list",
+        "read_function_id": "grove.definition_read", "seek_paged": True}, "world_tick": step(ctx),
         "builtin_materials": {key: {"name": value.name, "load_per_u": value.load_per_u,
             "combustible": value.combustible, "liquid": value.liquid} for key, value in REGISTRY.materials.items()},
         "phase_policy": declaration_semantics({"types": {}})["phase_policy"],
-        "limits": {"packages": MAX_DEFINITIONS, "instances": MAX_INSTANCES, "types_per_package": 8, "materials_per_package": 4, "rules_per_type": 8,
+        "limits": {"publication_bytes": 24576, "new_publications_per_author_step": publication.MAX_PUBLISH_PER_STEP,
+                   "publication_storage": "no small lifetime package/byte cap; metered JSON payloads and actual host storage remain separate",
+                   "instances": MAX_INSTANCES, "types_per_package": 8, "materials_per_package": 4, "rules_per_type": 8,
                    "effects_per_rule": 8, "expression_depth": 8, "expression_nodes": 64, "links_per_object": MAX_LINKS, "records_per_object": MAX_RECORDS,
                    "record_bytes_per_object": MAX_RECORD_BYTES, "event_bytes": MAX_EVENT_BYTES,
                    "event_journal_bytes": MAX_EVENT_JOURNAL_BYTES,
@@ -1101,9 +1343,16 @@ def rule_catalog(ctx, args):
         "definition_shape": {"key": "lowercase_key", "name": "public name", "version": "positive integer", "materials": "local symbol:{name,feedstock:wood|stone|cloth|water,load_per_u:equal feedstock,combustible:boolean,liquid:boolean}; local and imported materials combined at most4",
             "material_imports": "optional alias:{definition_ref:actual immutable published program reference,symbol:declared or imported material symbol}. Pins original identity/physical properties; same display names do not match. References provide neither matter nor permission; consume/produce only actual lots with mass-balanced reactions. Cannot charge imported material.",
             "contact_reactions": "optional top-level [{id,when:boolean_expression,reaction:{op:react,inputs,outputs,rate?:1..10,channel?,mode?:exclusive|independent,heat?:0}}], at most8. Each consumes at least one material declared in this package's materials; conditions only use quantity/concentration of local, imported or builtin symbols. Travels with original canonical material identity into any ordinary container; only its own positive non-burning contained lots minus escrow. Personal backpack itself never reacts; closed internal containers may. Conditions freeze before authored rules; contact runs after authored stages on shared remaining inputs, products next step. Exclusive channels are per definition_ref. Outputs preserve canonical identity and mass. A name, metadata, whole child object, surface lot or imported-only rule does not activate contact.",
-            "types": "symbol:{name,body_material:wood|stone|cloth,cost:{wood:0..4,stone:0..4,cloth:0..4},fields?:{name:{type:integer|boolean,default,min?,max?}},container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[]}"},
+            "types": "symbol:{name,body_material:builtin|local|imported solid symbol, exactly one of cost:{wood:0..4,stone:0..4,cloth:0..4} or cost_u:{solid_symbol:1..200} (total<=200u, actual sources required),components?:{structure?,container?,combustion?,absorbent?,buoyant?,attachment?},ports?:{name:{fields:[typed public facts],label?}},fields?:{name:{type:integer|boolean,default,min?,max?}},container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[]}"},
+        "public_facts": {name: {"type": fact.type, "component": fact.component, "aggregate": fact.aggregate} for name, fact in PUBLIC_FACTS.items()},
+        "new_semantics": {"fuel_uses": "local materials may declare uses:{hearth_fuel?:boolean,mechanical_fuel?:boolean}; true requires combustible non-liquid. Qualification is read from the original immutable definition, not display names or combustible alone. Builtin wood retains its existing mechanical fuel admission; hearth uses actual dry qualified lots.",
+            "physical": "{physical:wetness|burning|surface_water|contained_water|absorbed_water|structure.integrity|structure.max_integrity|load.local|load.total|load.supported|load.limit|load.overload|buoyancy|can_float}; reads real trusted solver state, never program fields or temperature. Missing/inapplicable/hidden facts are unknown; total buoyancy includes attached parts even if root has no buoyant component.",
+            "ports": "{object:{port:declared_port,field:typed_fact}}; combined ports/literal sources<=8 per instance. bind_port/unbind_port require actual CAS versions and public readable targets within8 tiles of anchor and actor; they are separate from mechanical connect. Unavailable reference retains identity and retries when readable; no auto-rebind. First contract offer pins IDs/binding version/source versions; editing unaccepted bindings clears prior acceptances; active/result contracts cannot switch.",
+            "unknown": "ordinary live-fact rules roll back only that declaration and wait; a blocked event declaration rolls back this instance's full declarative batch and retains its cursor to avoid replaying committed prefixes, preserving independently solved mechanics. Barrier unknown conservatively blocks. Event fields are historical; physical/port facts use trusted physical input plus the phase's actual solved mechanics, never another object's uncommitted reaction candidate or event-time physics. Existing after self fields/quantities use its frozen reaction candidate; products feed physical fact reads in a later step.",
+            "drive": "{op:drive,enabled:boolean_expression} only controls this object's existing source, at the next simulation step; never writes energy, speed, position, burning or other objects. Later rule failure preserves already solved mechanical results, discarding candidate controls.",
+            "fabrication": "read fabrication_options for canonical cost_u and eligible actual own lots; fabricate consumes1..8 exact entity/lot/version/quantity sources in one operation, preserves origins and remainders, binds capacity to actual body lots, creates no material source. Placement inventory, then existing drop/attach actions. Liquid cannot form a rigid body; constructed bodies require a separate disassembly process and cannot be silently consumed."},
         "mechanical": {"shape": {"role": "source|gear|actuator", "teeth": "1..100", "torque": "1..100", "speed": "1..10", "energy_per_step": "1..100", "load": "0..100", "travel": "1..100", "pitch": "1..10", "load_field?": "integer field range0..100", "speed_field?": "integer field range1..10"},
-            "semantics": "meshed connection ratio=-source.teeth/target.teeth; one source per network, finite wood fuel energy; reflected total load exceeds torque or contradictory cycle stops whole network retaining position; snapshot then solve then commit; no inertia/gravity/collision/stress"},
+            "semantics": "meshed connection ratio=-source.teeth/target.teeth; one source per network, finite qualified fuel energy; reflected total load exceeds torque or contradictory cycle stops whole network retaining position; snapshot then solve then commit; no inertia/gravity/collision/stress"},
         "recorder": {"radius": "0..8", "window_ticks": "1..3600", "semantics": "after activation actual public events only; closed/private objects omitted; occurred_at provenance distinct from logical recorded_tick/read_tick. History and reads share a1536-byte retained window (also at most32 events and16 reads); oldest logical facts/reads leave first, recorded_count remains cumulative."},
         "contract": {"material": "declared, explicitly imported or builtin symbol; custom material identity is the original immutable definition_ref#symbol. Different definitions/authors may use the same original identity through local declaration or explicit import; matching names alone are not equivalent, and imports supply neither matter nor permission", "quantity": "1..100", "duration_ticks": "1..3600", "completion_when?": "boolean expression, delivery quantity still required", "delivery_when?": "boolean expression checked atomically before every delivery; false or unavailable fact refuses with no material transfer. A later change never retroactively permits an earlier refused delivery.", "semantics": "offer establishes participants/terms; each actor accepts own terms; second party actual material delivery; completion permits beneficiary release into their own open material-holding container. Personal backpacks hold whole objects only and cannot receive loose matter; expiry fails and permits actual payer recovery through release. Contract escrow release from a closed source container is a lawful exception; ordinary container loading/unloading still requires opening. No silent or prose consent"},
         "expressions": {"literals": "boolean|bounded integer|short string", "references": ["{field:name}", "{param:name}", "{quantity:material_symbol}", "{concentration:material_symbol}", "{mechanical:position|speed|angle|status|available_torque|energy}", "{event:kind|action|entity_id|actor|mechanical_position|passable}", "{contract:status|started_event_sequence|deadline_tick|delivered|quantity}", "{object:{id:actual_entity_id,field:intact|barrier.active|barrier.opened_sequence|mechanical.position|mechanical.speed|mechanical.angle|mechanical.energy|mechanical.status}}"],
@@ -1111,19 +1360,22 @@ def rule_catalog(ctx, args):
             "binary": "{op:eq|ne|lt|lte|gt|gte|add|sub|mul|div|min|max,left:expr,right:expr}", "boolean": "{op:all|any,args:[expr,...]} or {op:not,value:expr}", "concentration": "simplified volume shares percentage of real contained u, not physical chemical units"},
         "rule": "{id,phase:reaction|after,when:boolean_expression,effects:[...]}; phase predicates use snapshot; non-event rules once by id, then events by sequence and rule id within each event; products enter input supply next step, bounded execution",
         "action": "{id,label,parameters?:{name:{type,default,min?,max?}},when?:boolean_expression,effects:[...]}; server reserved charge/fuel/connect/.../accept cannot be overridden",
-        "effects": ["{op:set,field:declared_field,value:expr}", "{op:react,inputs:{symbol:1..100},outputs:{symbol:1..100},rate:1..10,heat:-20..20,channel:family,mode:exclusive|independent}", "{op:emit,name:public_signal}"],
+        "effects": ["{op:set,field:declared_field,value:expr}", "{op:react,inputs:{symbol:1..100},outputs:{symbol:1..100},rate:1..10,heat:-20..20,channel:family,mode:exclusive|independent}", "{op:emit,name:public_signal}", "{op:drive,enabled:boolean_expression}"],
         "reaction": "sum(quantity*load_per_u) must match. Atomic maximal extent/rate/capacity; exclusive same channel substitutes, independent channels compete finite inputs; temperature field receives bounded heat; emitted signal does not prove consent/delivery",
-        "steps": ["publish immutable definition with definition_publish", "claim generation_context layout; actual allowed_tiles/resources/budgets apply", "content_submit object {definition_ref,type_id,x,y,name?,description?} consumes real body materials", "inspect actual actions, source item/lot candidates and versions", "interact store moves a whole child, retaining its own matter; it does not feed the parent's contained reaction inputs", "interact transfer moves an existing lot by item_id/lot_id/amount into target_slot, preserving material identity and source remainder", "rule_action charge consumes a declared symbol's feedstock to prepare that custom material; it is not transfer or reaction evidence. fuel consumes finite wood; connect links actual objects; another identity can use the same definitions/objects"],
+        "steps": ["inspect actual materials first; visible custom lots carry exact material_import {definition_ref,symbol}, copy it into material_imports under a chosen alias. Builtin wood/stone/cloth use their existing symbols. Local materials create new identities, not same-named existing lots; publication creates no matter", "publish immutable definition with definition_publish; a future missing-material recipe may be published, but it cannot yet form an object. New local material production requires an independently constructible carrier, not one that already costs the missing material", "cost_u path: read fabrication_options, obtain eligible actual own lots, then fabricate with exact source entities/versions/lot IDs/u quantities; result enters inventory, use drop/attach to place it. Never use regional resources or content_submit instead", "cost path: claim generation_context layout; actual allowed_tiles/resources/budgets apply; content_submit object {definition_ref,type_id,x,y,name?,description?} pays regional material pieces", "inspect actual actions, source item/lot candidates and versions", "interact store moves a whole child, retaining its own matter; it does not feed the parent's contained reaction inputs", "interact transfer moves an existing lot by item_id/lot_id/amount into target_slot, preserving material identity and source remainder", "rule_action charge consumes a declared symbol's feedstock to prepare that local custom material; it is not transfer or reaction evidence. fuel consumes finite qualified lots; connect links actual objects; another identity can use the same definitions/objects"],
         "time": "all simulation windows/deadlines use clock.sequence; server downtime pauses, no wall-clock catch-up",
         "security": "no arbitrary code, owner/position/security writes or author acceptance for other actors; normal human actions do not call a model"})
 
 
 def specs():
+    from . import fabrication
     return (
-        FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=2, access="read", description="Discover the exact bounded program language, builtin material unit loads, published immutable definitions, physical semantics and actual publication path."),
+        *publication.specs(),
+        *fabrication.specs(),
+        FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=3, access="read", description="Discover the bounded creation language and shared physical facts. For immutable publications page definition_list, then definition_read; this static catalog contains no full-history index."),
         FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=2, access="read", description="Read one immutable definition and its author/hash, with compiled canonical material bindings and consumption/production coefficients; existing instances pin this reference."),
-        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=4, authorize=_member, description="Compile and publish immutable bounded definitions. Optional top-level contact_reactions carries quantity/concentration-only, mass-balanced local contact reactions with a newly declared material into ordinary containers; each must consume one local material and heat is zero. Discover exact shape/limits with rule_catalog. material_imports pins original canonical identities; at most4 local/imported combined. Publication creates no matter, permission or consent; charge preparation is not a reaction result."),
-        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=5, authorize=_member, description="Use published actions and finite resources with current inspect options, conditions and versions. charge requires an actual container instance of the published definition; it consumes only a locally declared symbol's feedstock to prepare that material, never an imported material. Ordinary containers settle contact reactions but do not turn feedstock into declared materials. charge does not transfer an existing lot or prove a reaction. Use grove.interact transfer for actual immutable lots, store for whole children. Contract release requires your own open material-holding container; personal backpacks hold whole objects only and cannot receive loose matter. Distance refusal identifies target, item or other. Same actor human or explicitly delegated Agent."),
+        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=5, authorize=_member, description="Compile immutable definitions with cost_u actual-source bodies, bounded components/ports/physical conditions and self drive control, or the existing piece cost. Optional local material uses qualifies fuel; material_imports pins original identities. Publication creates no matter, permission or consent. Discover precise shape and bounds with rule_catalog."),
+        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=6, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Bindings need same-observation target/other versions and do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
         FunctionSpec("grove.control_status", control_status, EMPTY, authorize=_member, access="read", description="Read own current goal and committed action count, without exposing grant token."),
@@ -1131,4 +1383,4 @@ def specs():
 
 
 def state_specs():
-    return tuple(StateRule(scope, "", {}, history="metadata") for scope in (DEFINITIONS, VERSIONS, CONTROL, RECORDS, ACCOUNTING))
+    return (*publication.state_specs(), *tuple(StateRule(scope, "", {}, history="metadata") for scope in (DEFINITIONS, VERSIONS, CONTROL, RECORDS, ACCOUNTING)))

@@ -334,11 +334,12 @@ def action_options(ctx, player, target):
     if "collector" in components:
         options.append(_option("switch_mode", base, "选择遮雨或集雨；原有真实水保留。", modes=["shelter", "collect"]))
     if "heater" in components:
-        fuel = sum(lot["quantity"] for lot in target["matter"] if lot["slot"] == "contained" and lot["material"] == "wood")
-        fuels = _owned_available(ctx, player, lambda e: e["material"] == "wood" and material_status(ctx, player, e)["eligible"])
-        reason = base or ("请先打开炉口。" if not state["open"] else None) or ("炉中燃料已满。" if fuel >= HEARTH_FUEL_CAPACITY else None) or ("需要自己干燥的裸木料。" if not fuels else None)
+        from .definitions import fuel_lots, usable_fuel_lots
+        fuel = sum(lot["quantity"] for lot in fuel_lots(ctx, target, "hearth_fuel", include_burning=True, require_dry=False) if lot["slot"] == "contained")
+        fuels = _owned_available(ctx, player, lambda e: bool(usable_fuel_lots(ctx, player, e, "hearth_fuel")))
+        reason = base or ("请先打开炉口。" if not state["open"] else None) or ("炉中燃料已满。" if fuel >= HEARTH_FUEL_CAPACITY else None) or ("需要本人实际干燥的合格燃料批次。" if not fuels else None)
         maximum = HEARTH_FUEL_CAPACITY if target["owner"] is None and not state["open"] else HEARTH_FUEL_CAPACITY-fuel
-        options.append(_option("fuel", reason, "从原材料转入所选木料数量；剩余材料不丢失。", {"unit": "logical_matter"}, maximum=maximum))
+        options.append(_option("fuel", reason, "转入所选合格燃料的真实批次；剩余材料不丢失。", {"unit": "logical_matter"}, maximum=maximum))
     return options
 
 
@@ -409,20 +410,16 @@ def interact_structure(ctx, player, args, target):
         return f"消耗5u水养护了{target['name']}，6个物理逻辑步后增加一份资源。"
     if action == "fuel":
         item = _require_own(ctx, player, args)
-        status = material_status(ctx, player, item)
-        if not status["eligible"] or item["material"] != "wood":
-            raise RuleViolation(status["reason"] or "须投入自己可用的裸木料。")
-        lot = next((lot for lot in _body_lots(item) if lot["material"] == "wood" and (not args.get("lot_id") or lot["id"] == args["lot_id"])), None)
-        if not lot:
-            raise RuleViolation("所选木料批次已经不存在。")
+        from .definitions import select_fuel
+        lot = select_fuel(ctx, player, item, "hearth_fuel", args.get("lot_id"))
         quantity = args.get("amount", min(40, lot["quantity"], option["maximum"]))
         if quantity > lot["quantity"] or quantity > option["maximum"]:
-            raise RuleViolation("木料不足或炉中容量不足，未转移任何材料。")
+            raise RuleViolation("所选燃料不足或炉中容量不足，未转移任何材料。")
         commit.transfer_material(ctx, item, target, lot["id"], quantity, reason="fuel")
         item = m.get_entity(ctx, item["id"])
-        if not any(lot["quantity"] for lot in item["matter"]):
+        if not any(lot["quantity"] for lot in item["matter"]) and not item["state"]["contents"] and not item["state"]["attachments"]:
             commit.retire_material(ctx, item, target["id"])
-        return f"向{target['name']}投入{quantity}u木料，原物件的剩余材料保留。"
+        return f"向{target['name']}投入{quantity}u合格燃料，原物件的剩余材料保留。"
     if action == "switch_mode":
         mode = args.get("mode")
         collector = target["components"]["collector"]
@@ -548,7 +545,8 @@ def tick_structures(ctx, sequence, changed, entities=None, *, dirty=None):
     for root in hearths:
         heater = root["components"]["heater"]
         before = (heater["lit"], tuple((lot["id"],lot["burning"]) for lot in root["matter"]))
-        lots = [lot for lot in root["matter"] if lot["slot"] == "contained" and lot["material"] == "wood" and lot["quantity"] > 0]
+        from .definitions import fuel_lots
+        lots = [lot for lot in fuel_lots(ctx, root, "hearth_fuel", include_burning=True) if lot["slot"] == "contained"]
         if heater["lit"] and (root["state"]["wetness"] >= 35 or not root["state"]["open"] or not lots):
             heater["lit"] = False
             for lot in lots:
