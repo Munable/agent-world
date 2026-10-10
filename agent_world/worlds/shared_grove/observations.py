@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from agent_world.errors import PermissionDenied, RuleViolation
+from agent_world.simulation.declarations import has_event
 from agent_world.simulation.programs import evaluate, plan_reaction
 from agent_world.simulation import matter as sm
 
@@ -11,6 +12,7 @@ from . import model as m
 from .definitions import REGISTRY, registry_for, instance_definition as _type, material_identity as _material, contained_quantities as _quantities, reaction_available_quantities, mixture_capacity
 
 MAX_REACTION_OBSERVATIONS = 8
+MAX_AUTOMATIC_RULE_OBSERVATIONS = 8
 
 
 def _references(value):
@@ -27,14 +29,14 @@ def _references(value):
             yield from _references(child)
 
 
-def _visible_context(ctx, player, entity, pack):
+def _visible_context(ctx, player, entity, pack, *, objects=None):
     from .creative import _context
     from . import world_facts
     from .world import _accessible
 
     # Resolve the definition's fixed object references once in this read view.
     # Context construction and reader visibility check the same actual entities.
-    targets = world_facts.freeze(ctx, {entity["id"]: entity})
+    targets = objects if objects is not None else world_facts.freeze(ctx, {entity["id"]: entity})
     context = _context(entity, ctx=ctx, definition=pack, objects=targets)
     if entity.get("owner") != player["id"]:
         public = world_facts.facts(entity, targets, external=True)
@@ -57,7 +59,7 @@ def condition_observation(expression, context):
     references = list(_references(expression))
     if any("event" in reference for reference in references):
         return {"known": False, "satisfied": None, "reason": "event_required",
-                "meaning": "事件条件须有实际事件输入；当前物件快照不能判断。"}
+                "meaning": "须有实际事件；物件快照不能判断。"}
     facts = []
     for reference in references:
         if any(row["reference"] == reference for row in facts):
@@ -95,7 +97,7 @@ def condition_observation(expression, context):
 
     comparisons(expression)
     result.update(expression=deepcopy(expression), facts=facts, checks=checks,
-                  checks_meaning="子比较各自的当前快照；整体结果遵循原表达式的all/any/not组合，不是逐项必须满足的清单。")
+                  checks_meaning="子比较快照；成立条件按原all/any/not组合。")
     return result
 
 
@@ -117,6 +119,77 @@ def action_condition_observations(ctx, player, entity):
     return result
 
 
+def _location_objects(ctx, entity):
+    """Compact deployment needs only the bounded ancestor path."""
+    objects = {entity["id"]: entity}
+    current = entity
+    while (parent := current.get("physical_parent")) and len(objects) < sm.MAX_TREE_DEPTH:
+        parent_id = parent["id"]
+        if parent_id in objects or (current := m.get_entity(ctx, parent_id, required=False)) is None:
+            break
+        objects[parent_id] = current
+    return objects
+
+
+def _deployment_observation(ctx, entity, spec, objects):
+    from . import activity, world_facts
+
+    admitted = entity["id"] in activity.meta_get(ctx, "creative_instances", [])
+    intact = entity["lifecycle"] == "intact" and not entity["state"].get("retired")
+    errored = entity["state"]["program"]["process"]["status"] == "error"
+    runnable = admitted and intact and not errored
+    public = world_facts.public_location(entity, objects) is not None
+    mechanical = "mechanical" in spec
+    blockers = []
+    for blocked, reason in ((not mechanical, "no_mechanical_definition"),
+                            (not admitted, "not_admitted"), (not intact, "not_intact"),
+                            (errored, "program_error"), (not public, "no_public_location")):
+        if blocked:
+            blockers.append(reason)
+    return {"publicly_placed": public, "admitted": admitted,
+            "ordinary_rules_enabled": runnable and any(not has_event(rule) for rule in spec["rules"]),
+            "public_event_input_available": runnable and public,
+            "mechanical_solver_eligible": runnable and public and mechanical,
+            "mechanical_blockers": blockers,
+            "meaning": "自身规则可随身评估；事件／机械需公开。资格非事件或运动证据。"}
+
+
+def _mechanical_observation(binding, spec, deployment, observed_tick):
+    if "mechanical" not in binding:
+        return None
+    last_solved = deepcopy(binding.get("mechanical_last_solved"))
+    if last_solved is not None:
+        last_solved.update(historical=True,
+            meaning="最近求解输出变化的保存步；非每步记录。")
+    request = deepcopy(binding.get("drive_request"))
+    return {"role": spec["mechanical"]["role"], "stored_state": deepcopy(binding["mechanical"]),
+            "last_solved": last_solved, "drive_request": request,
+            "solver_eligible": deployment["mechanical_solver_eligible"],
+            "stored_output_is_history": True, "observed_tick": observed_tick,
+            "pending_next_step": request is not None and request["applies_from_step"] > observed_tick,
+            "meaning": "保存状态非实时运动；空标记非未求解证据，请求生效步已到非已求解证据。"}
+
+
+def _automatic_rule_observations(spec, context):
+    observations = []
+    for rule in sorted(spec["rules"], key=lambda value: value["id"])[:MAX_AUTOMATIC_RULE_OBSERVATIONS]:
+        event_required = has_event(rule)
+        row = {"rule_id": rule["id"], "phase": rule["phase"],
+               "input_kind": "public_event" if event_required else "logical_step",
+               "actual_event_required": event_required,
+               "condition": condition_observation(rule["when"], context),
+               "effect_ops": list(dict.fromkeys(effect["op"] for effect in rule["effects"])),
+               "snapshot_only": True}
+        drive_inputs = [{"effect_index": index,
+                         "observation": condition_observation(effect["enabled"], context),
+                         "snapshot_only": True}
+                        for index, effect in enumerate(rule["effects"]) if effect["op"] == "drive"]
+        if drive_inputs:
+            row["drive_inputs"] = drive_inputs
+        observations.append(row)
+    return observations
+
+
 def program_observation(ctx, entity, *, detailed=False, player=None):
     """Return replacement public fields for creative.projection's binding copy."""
 
@@ -131,28 +204,47 @@ def program_observation(ctx, entity, *, detailed=False, player=None):
         process["last_reaction"] = {
             "source_last_tick": process.get("last_tick"), "reactions": historical,
             "historical": True, "current_production": False,
-            "meaning": "保存的上次反应结果；last_tick是保存的过程字段，不证明当前生产或当前仍有产物。"}
+            "meaning": "上次反应历史；非当前生产或库存。"}
     process["observed_tick"] = ctx.get_state(m.META, "clock", {}).get("sequence", 0)
-    process["steps_meaning"] = "累计发生反应的逻辑步数，不是本次目标进度。"
+    # These short per-object labels travel in state, creative and public anchors.
+    # Full execution policy belongs to handbook/rule_catalog, not every copy.
+    process["steps_meaning"] = "累计反应步数，非目标进度。"
+    process["status_meaning"] = "保存的过程标记；error为错误门禁，其他值不证明整个装置运行／停止。"
+    process["last_tick_meaning"] = "成型／显式行动／反应／错误步；不是最近自动声明评估或机械求解步。"
 
-    context = _visible_context(ctx, player, entity, pack) if detailed else None
+    from . import world_facts
+    # Detailed conditions and deployment share one frozen authorized forest.
+    # Compact reads need only the bounded ancestor path, not descendants or inputs.
+    objects = world_facts.freeze(ctx, {entity["id"]: entity}) if detailed else _location_objects(ctx, entity)
+    context = _visible_context(ctx, player, entity, pack, objects=objects) if detailed else None
+    deployment = _deployment_observation(ctx, entity, spec, objects)
     quantities = context["quantities"] if context is not None else _quantities(entity)
     available = reaction_available_quantities(entity)
     capacity = mixture_capacity(entity)
     capacity = sm.liquid_capacity(entity) if capacity is None else capacity
     actual_total = sum(quantities.values())
     result = {"material_definitions": deepcopy(binding.get("materials", {})), "process": process,
+        "automatic_rule_count": len(spec["rules"]), "explicit_action_count": len(spec["actions"]),
+        "deployment": deployment,
         "reaction_inputs": {"scope": "this_entity_contained_lots_only", "unit": "logical_matter",
             "quantities": quantities, "available_quantities": available,
             "contained_quantity": actual_total, "capacity": capacity,
             "whole_children_are_inputs": False,
-            "meaning": "仅本物件contained材料槽；自身body和完整子物件的材料不计入。可用量排除燃烧与托管材料。"}}
+            "meaning": "仅自身contained；body／整件子物件不混入，燃烧／托管不可用。"}}
+    mechanical = _mechanical_observation(binding, spec, deployment, process["observed_tick"])
+    if mechanical is not None:
+        result["mechanical_observation"] = mechanical
     reactions = [(rule, index, effect) for rule in sorted(spec["rules"], key=lambda value: value["id"])
                  for index, effect in enumerate(rule["effects"]) if effect["op"] == "react"]
     result["reaction_observation_count"] = len(reactions)
     if not detailed:
-        result["reaction_observations_projection"] = "当前材料与历史过程摘要；inspect才返回当前反应条件和材料缺口。"
+        result["reaction_observations_projection"] = "当前contained与反应历史；inspect读取条件／缺口。"
+        result["automatic_rules_projection"] = "inspect读取自动声明条件／动力输入；显式actions另提交。"
         return result
+
+    result["automatic_rules"] = _automatic_rule_observations(spec, context)
+    result["automatic_rules_truncated"] = len(spec["rules"]) > MAX_AUTOMATIC_RULE_OBSERVATIONS
+    result["automatic_rules_meaning"] = "当前快照非执行／预测；事件需真实日志。drive输入是启停读数；when=false跳过，unknown保留控制。"
 
     material_defs = {key: {"load_per_u": value.load_per_u} for key, value in REGISTRY.materials.items()}
     material_defs.update(pack["materials"])
@@ -195,7 +287,7 @@ def program_observation(ctx, entity, *, detailed=False, player=None):
             "isolated_extent": planned["extent"], "capacity_limited": planned["reason"] == "capacity",
             "capacity": capacity, "contained_quantity": actual_total,
             "blockers": blockers, "snapshot_only": True,
-            "meaning": "单条声明基于当前可观察快照的材料与条件；不是已执行反应，不预测通道竞争、先前效果或下一逻辑步结果。"})
+            "meaning": "单项快照，非执行或预测；未合算竞争与先前效果。"})
     result["reaction_observations"] = observations
     result["reaction_observations_truncated"] = len(reactions) > MAX_REACTION_OBSERVATIONS
     if result["reaction_observations_truncated"]:

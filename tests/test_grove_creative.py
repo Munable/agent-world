@@ -795,15 +795,33 @@ class CreativeWorldTests(unittest.TestCase):
         self.assertEqual(self.read("A", "grove.inspect", {"entity_id": target})["entity"]["state"]["program"]["contract"]["status"], "complete")
 
     def test_mechanical_ratio_cycle_overload_and_energy_boundaries(self):
-        nodes = [{"id": "s", "mechanical": {"role": "source", "teeth": 16, "torque": 8, "speed": 1, "energy_per_step": 1}, "state": {"energy": 3, "position": 0}},
-                 {"id": "g", "mechanical": {"role": "gear", "teeth": 32}, "state": {}},
-                 {"id": "a", "mechanical": {"role": "actuator", "teeth": 16, "pitch": 2, "load": 2, "travel": 20}, "state": {"position": 3}}]
+        nodes = [{"id": "s", "mechanical": {"role": "source", "teeth": 16, "torque": 8, "speed": 1, "energy_per_step": 1}, "state": {"energy": 3, "position": 0, "angle": 5}},
+                 {"id": "g", "mechanical": {"role": "gear", "teeth": 32}, "state": {"angle": 7}},
+                 {"id": "a", "mechanical": {"role": "actuator", "teeth": 16, "pitch": 2, "load": 2, "travel": 20}, "state": {"position": 3, "angle": 9}}]
         edges = [{"source": "s", "target": "g", "meshed": True}, {"source": "g", "target": "a", "meshed": True}]
         running = solve_mechanical(nodes, edges)
         self.assertEqual(running["a"]["position"], 5)
         self.assertEqual(sum(result["energy_used"] for result in running.values()), 1)
         reverse = solve_mechanical(list(reversed(nodes)), list(reversed(edges)))
         self.assertEqual(running, reverse)
+        nodes[0]["state"]["enabled"] = False
+        disabled_nodes = deepcopy(nodes)
+        disabled = solve_mechanical(nodes, edges)
+        for node in nodes:
+            output = disabled[node["id"]]
+            self.assertEqual((output["status"], output["speed"], output["energy_used"], output["available_torque"]),
+                             ("stopped", 0, 0, 0))
+            for field in ("position", "angle"):
+                self.assertEqual(output[field], node["state"].get(field, 0))
+        self.assertEqual(nodes, disabled_nodes)
+        cyclic = solve_mechanical(nodes, [*edges, {"source": "a", "target": "s", "meshed": True}])
+        self.assertTrue(all(output["status"] == "inconsistent_cycle" for output in cyclic.values()))
+        second_source = {"id": "second", "mechanical": {"role": "source"}, "state": {"enabled": False, "energy": 3}}
+        multiple = solve_mechanical([*nodes, second_source], [*edges, {"source": "second", "target": "s"}])
+        self.assertTrue(all(output["status"] == "multiple_sources" for output in multiple.values()))
+        nodes[0]["state"]["enabled"] = True
+        self.assertEqual(solve_mechanical(nodes, edges), running)
+        del nodes[0]["state"]["enabled"]
         nodes[2]["mechanical"]["teeth"] = 32
         self.assertEqual(solve_mechanical(nodes, edges)["a"]["position"], 4)
         nodes[2]["mechanical"]["load"] = 20

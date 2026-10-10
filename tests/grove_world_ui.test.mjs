@@ -325,4 +325,84 @@ for(const [execution,label,detail,resume] of [
   assert.equal(context.agentAdmission('conversation').allowed,false);
 }
 
+// Automatic input snapshots, past control and saved mechanical output are
+// distinct from actual execution, including an old running speed in a bag.
+{
+  const creative={automatic_rule_count:1,explicit_action_count:0,
+    deployment:{publicly_placed:false,ordinary_rules_enabled:true,
+      public_event_input_available:false,mechanical_solver_eligible:false,
+      mechanical_blockers:['no_public_location']},
+    automatic_rules:[{rule_id:'sense',phase:'reaction',input_kind:'logical_step',
+      condition:{known:true,satisfied:true},effect_ops:['drive','emit'],snapshot_only:true,
+      drive_inputs:[{observation:{known:true,satisfied:false},snapshot_only:true}]}],
+    mechanical_observation:{role:'source',stored_state:{speed:5,position:7,status:'running'},
+      last_solved:{step:12,historical:true},solver_eligible:false,stored_output_is_history:true,
+      drive_request:{enabled:true,requested_step:13,applies_from_step:14,
+        source:{kind:'automatic_rule',rule_id:'sense',phase:'reaction'}},
+      pending_next_step:false,observed_tick:20},process:{steps:2}};
+  const lines=ui.ruleRuntimeObservationLines(creative,{});
+  assert.ok(lines.some(line=>line.includes('随身携带也可评估')));
+  assert.ok(lines.some(line=>line.includes('不具备机械求解资格')));
+  assert.ok(lines.some(line=>line.includes('速度 5')&&line.includes('历史求解输出或初始值')));
+  assert.ok(lines.some(line=>line.includes('启停表达式当前读数：关闭')&&line.includes('不证明已发出请求')));
+  assert.ok(lines.some(line=>line.includes('自动声明 sense')&&line.includes('来源')));
+  assert.ok(lines.some(line=>line.includes('已到最早生效逻辑步')&&line.includes('不证明已被求解')));
+  assert.ok(lines.some(line=>line.includes('最近输出变化的求解步：12')&&line.includes('不是每步参与')));
+  assert.ok(lines.some(line=>line.includes('不是机械推进次数或目标完成进度')));
+  assert.ok(lines.some(line=>line.includes('不证明自动声明已经执行')));
+  assert.ok(lines.some(line=>line.includes('声明效果：有限动力启停、声明信号')));
+  assert.deepEqual(ui.ruleRuntimeObservationLines({...creative,hidden:true},{}),[]);
+  creative.automatic_rules[0].input_kind='public_event';
+  creative.automatic_rules[0].condition={known:false,reason:'event_required'};
+  creative.automatic_rules[0].drive_inputs[0].observation={known:false};
+  creative.mechanical_observation.last_solved=null;
+  creative.mechanical_observation.pending_next_step=true;
+  const unknown=ui.ruleRuntimeObservationLines(creative,{});
+  assert.ok(unknown.some(line=>line.includes('须有实际事件输入')));
+  assert.ok(unknown.some(line=>line.includes('启停表达式当前未知')&&line.includes('不能据此推定关闭')));
+  assert.ok(unknown.some(line=>line.includes('不把未知当作否')));
+  assert.ok(unknown.some(line=>line.includes('不能据此判断从未求解')));
+  assert.ok(unknown.some(line=>line.includes('尚未到最早生效逻辑步')));
+  const physical=ui.conditionObservationLines({known:true,satisfied:false,
+    checks:[{left:{object:{port:'cup',field:'physical.wetness'}},operator:'gte',
+      known:true,actual_left:0,actual_right:1,satisfied:false}]},{});
+  assert.ok(physical.some(line=>line.includes('槽位 cup · 湿度')));
+}
+
+// A saved waiting declaration record can coexist with actual mechanical motion.
+// Render it contextually without changing contact or mechanical status labels.
+{
+  const creative={process:{status:'waiting',steps:0,last_tick:2,observed_tick:9,
+      status_meaning:'保存的过程标记，不证明整个装置当前运行或停止。',
+      last_tick_meaning:'不是最近自动声明评估或机械求解步。'},
+    mechanical_observation:{role:'source',stored_state:{speed:1,angle:7,energy:3,status:'running'},
+      solver_eligible:true,last_solved:{step:9,historical:true},
+      drive_request:{enabled:true,requested_step:5,applies_from_step:6,
+        source:{kind:'automatic_rule',rule_id:'sense',phase:'after'}},
+      pending_next_step:false,observed_tick:9}};
+  const original=structuredClone(creative),selection=formNode('section');
+  const context={inspection:{creative},node:formNode,$:()=>selection,factDisclosures:new Map(),
+    factLabel:ui.factLabel,factValue:ui.factValue,creativeState:ui.creativeState,
+    ruleRuntimeObservationLines:ui.ruleRuntimeObservationLines,reactionObservationLines:ui.reactionObservationLines};
+  vm.createContext(context);vm.runInContext(extract('function appendFacts(','async function readRuleDefinition('),context);
+  context.renderCreative({id:'moving-source',creative});
+  const labels=selection.querySelectorAll('small,summary').map(node=>node.textContent);
+  assert.ok(labels.includes('保存的过程标记'));
+  assert.ok(labels.includes('过程记录更新时间'));
+  assert.ok(labels.some(label=>label.startsWith('保存的过程记录')));
+  assert.ok(!labels.includes('上次运行的世界时刻'));
+  const values=selection.querySelectorAll('span').map(node=>node.textContent);
+  assert.ok(values.includes('等待'));
+  assert.ok(!values.includes('等待材料或条件'));
+  const lines=selection.querySelectorAll('p').map(node=>node.textContent);
+  assert.ok(lines.some(line=>line.includes('角度 7')&&line.includes('保存状态 运行中')));
+  assert.ok(lines.some(line=>line.includes('自动声明 sense')&&line.includes('来源')));
+  assert.ok(!labels.includes('等待原因'));
+  assert.deepEqual(creative,original);
+  creative.process.blocked_reason='unavailable_fact_or_port';
+  selection.replaceChildren();context.renderCreative({id:'moving-source',creative});
+  assert.ok(selection.querySelectorAll('small').some(node=>node.textContent==='等待原因'));
+  assert.equal(ui.factValue('waiting'),'等待材料或条件');
+}
+
 console.log('Grove presentation: quantities, relationship/action boundaries and truthful goal/resume outcomes passed');

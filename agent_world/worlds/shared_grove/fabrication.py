@@ -83,8 +83,11 @@ def fabrication_options(ctx, args):
         "input_schema": deepcopy(ARGS), "choices": {"sources": choices}, "available": enough,
         "reason": None if enough else "本人可用材料不足；先取得配方所需的真实批次。"}
     result = {"player": _public_self(player), "definition_ref": args["definition_ref"], "type_id": args["type_id"],
+        "source_scope": "Only eligible lots in this person's own inventory are counted. Lots outside that inventory, foreign-owned, too wet, burning and constructed body lots are not fabrication stock. This read neither reserves nor selects sources; fabricate revalidates the exact submitted lots and versions.",
+        "materials_quantity_basis": "quantity_u, available_u and missing_u are totals per canonical material_id, as in cost_u. Rows with different aliases but the same material_id describe the same group; their quantities must not be added again.",
         "cost_u": costs, "materials": [{"symbol": symbol, "material_id": identity,
-            "name": registry.materials[identity].name, "quantity_u": costs[identity]}
+            "name": registry.materials[identity].name, "quantity_u": costs[identity],
+            "available_u": available[identity], "missing_u": max(0, costs[identity]-available[identity])}
             for symbol in spec["cost_u"] for identity in [_material(candidate, symbol)]],
         "action": action}
     if sm.encoded_size(result) > 45000:
@@ -178,6 +181,6 @@ def specs():
     return (FunctionSpec("grove.fabrication_options", fabrication_options,
         {"type": "object", "additionalProperties": False, "required": ["definition_ref", "type_id"],
          "properties": {"definition_ref": ID, "type_id": ARGS["properties"]["type_id"]}},
-        access="read", authorize=_member, description="Read one exact canonical cost_u recipe and bounded actual own source lots/versions, with the same formal fabricate descriptor used by the web UI."),
+        version=2, access="read", authorize=_member, description="Read one exact canonical cost_u recipe, actual eligible own available/missing quantities and bounded source lots/versions, with the same formal fabricate descriptor used by the web UI. No source is reserved or automatically selected."),
         FunctionSpec("grove.fabricate", fabricate, ARGS, authorize=_member,
         description="Atomically form one published cost_u body from1..8 exact own observed lots; pass every source version, exact quantities and placement inventory. Preserves canonical identity, origins and remainders. No new material is generated; a constructed structural body is not a disassembly source."))

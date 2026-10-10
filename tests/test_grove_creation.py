@@ -48,11 +48,52 @@ class CreationTests(unittest.TestCase):
     def place(self, eid, actor="A"):
         self.h.interact(actor, eid, "drop")
 
+    def test_admission_reserves_control_growth_without_double_charging_saved_evidence(self):
+        h = self.h
+        raw = {"key": "bounded_drive", "name": "有界动力", "version": 1, "types": {
+            "source": {"name": "动力", "body_material": "wood", "cost_u": {"wood": 1},
+                "mechanical": {"role": "source"}}}}
+        entity = h.entity(self.form(self.publish(raw), "source"))
+        lower, upper = 0, sm.MAX_ENTITY_BYTES
+        while lower < upper:
+            middle = (lower+upper+1)//2
+            candidate = deepcopy(entity)
+            candidate["state"]["padding"] = "x"*middle
+            try:
+                m.normalize_entity(candidate)
+                lower = middle
+            except RuleViolation:
+                upper = middle-1
+        candidate = deepcopy(entity)
+        candidate["state"]["padding"] = "x"*lower
+        accepted = m.normalize_entity(candidate)
+        program = accepted["state"]["program"]
+        before = m.future_control_bytes(program)
+        self.assertGreater(before, 0)
+        program["drive_request"] = {"enabled": False, "requested_step": 10**20,
+            "applies_from_step": 10**20+1, "source": {"kind": "explicit_action",
+                "action_id": "a"*80, "actor_role_id": "r"*128}}
+        program["mechanical_last_solved"] = {"step": 10**20}
+        self.assertEqual(m.future_control_bytes(program), 0)
+        self.assertLessEqual(sm.encoded_size(m.normalize_entity(accepted)), sm.MAX_ENTITY_BYTES)
+        candidate["state"]["padding"] += "x"
+        with self.assertRaisesRegex(RuleViolation, "8KiB"):
+            m.normalize_entity(candidate)
+        self.assertEqual(h.entity(entity["id"]), entity)
+
     def test_actual_multisource_formation_remainders_supports_receipt_and_restart(self):
         h = self.h
         ref = self.publish(formation_definition())
         menu, args = self.plan(ref, "body")
         self.assertEqual(menu["cost_u"], {"wood": 3, "cloth": 2})
+        for material in menu["materials"]:
+            actual = sum(lot["quantity"] for source in menu["action"]["choices"]["sources"]
+                         for lot in source["lots"] if lot["material"] == material["material_id"])
+            self.assertEqual(material["available_u"], actual)
+            self.assertEqual(material["missing_u"], 0)
+        foreign = h.read("B", "grove.fabrication_options", {"definition_ref": ref, "type_id": "body"})
+        self.assertTrue(set(row["id"] for row in menu["action"]["choices"]["sources"]).isdisjoint(
+            row["id"] for row in foreign["action"]["choices"]["sources"]))
         initial = {row["entity_id"]: h.entity(row["entity_id"]) for row in args["sources"]}
         result = h.call("A", "grove.fabricate", args, operation="form-once")
         formed = h.entity(result["entity"]["id"])
@@ -96,6 +137,11 @@ class CreationTests(unittest.TestCase):
         formed = self.form(ref, "body")
         menu = h.read("A", "grove.fabrication_options", {"definition_ref": ref, "type_id": "body"})
         self.assertNotIn(formed, [row["id"] for row in menu["action"]["choices"]["sources"]])
+        for material in menu["materials"]:
+            actual = sum(lot["quantity"] for source in menu["action"]["choices"]["sources"]
+                         for lot in source["lots"] if lot["material"] == material["material_id"])
+            self.assertEqual(material["available_u"], actual)
+            self.assertEqual(material["missing_u"], max(0, material["quantity_u"]-actual))
 
     def test_imported_qualified_fuel_body_and_live_port_drive_continue_across_actors(self):
         h = self.h
@@ -122,26 +168,42 @@ class CreationTests(unittest.TestCase):
         kettle = h.item("A", "水壶")["id"];self.place(kettle)
         h.action("A", source, "bind_port", port="water", other_id=kettle)
         fuel_lot = next(lot for lot in h.entity(prep)["matter"] if lot["material"] == material_ref+"#coal")
-        h.action("A", source, "fuel", item_id=prep, lot_id=fuel_lot["id"], amount=3)
+        h.action("A", source, "fuel", item_id=prep, lot_id=fuel_lot["id"], amount=4)
         h.ticks(1)
         first = h.entity(source)["state"]["program"]["mechanical"]
         self.assertTrue(first["enabled"]);self.assertEqual(first["position"], 0)
         h.ticks(1)
         moving = h.entity(source)["state"]["program"]["mechanical"]
         self.assertGreater(moving["angle"], 0);self.assertGreater(moving["speed"], 0)
-        self.assertEqual(moving["energy"], 2)
+        self.assertEqual(moving["energy"], 3)
+        automatic = deepcopy(h.entity(source)["state"]["program"]["drive_request"])
+        self.assertEqual(automatic["source"], {"kind": "automatic_rule", "rule_id": "respond", "phase": "after"})
+        self.assertEqual(automatic["applies_from_step"], automatic["requested_step"]+1)
+        self.assertIn("step", h.entity(source)["state"]["program"]["mechanical_last_solved"])
         h.approach("B", kettle);h.interact("B", kettle, "close")
         h.ticks(1)
         blocked = h.entity(source)["state"]["program"]
         self.assertEqual(blocked["process"]["status"], "waiting")
         self.assertEqual(blocked["port_bindings"], {"water": kettle})
         self.assertIn("blocked_reason", blocked["process"])
+        self.assertEqual(blocked["drive_request"], automatic)
+        self.assertTrue(blocked["mechanical"]["enabled"])
+        self.assertEqual(blocked["mechanical"]["energy"], 2)
+        self.assertEqual(blocked["process"]["steps"], 0)
         h.interact("B", kettle, "open")
         h.action("B", source, "unbind_port", port="water")
         h.action("B", source, "bind_port", port="water", other_id=kettle)
         h.ticks(1)
         self.assertNotIn("blocked_reason", h.entity(source)["state"]["program"]["process"])
         self.assertEqual(h.entity(source)["state"]["program"]["port_binding_version"], 3)
+        self.assertEqual(h.entity(source)["state"]["program"]["drive_request"], automatic)
+        h.action("B", source, "stop")
+        saved = deepcopy(h.entity(source))
+        self.assertEqual(saved["state"]["program"]["drive_request"]["source"],
+                         {"kind": "explicit_action", "action_id": "stop", "actor_role_id": h.roles["B"]})
+        h.world = WorldRuntime(h.db)
+        h.world.install_world("w", make_world())
+        self.assertEqual(h.entity(source), saved)
 
     def test_attached_buoyancy_on_nonbuoyant_root_is_real_known_fact(self):
         h = self.h

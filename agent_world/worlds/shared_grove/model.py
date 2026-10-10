@@ -554,7 +554,7 @@ def normalize_entity(entity):
         raise RuleViolation("表面和受湿水合计不能超过10000u。")
     if len(value["matter"])+len(missing) > sm.MAX_LOTS:
         raise RuleViolation("8个物质槽还须为真实吸水、储水和表面接触预留位置。")
-    reserved_bytes = 64
+    reserved_bytes = 64 + future_control_bytes(state.get("program", {}))
     for slot, bound in missing:
         reserved = {"id": sm.lot_identifier(value["id"], ("water", slot, bound, None, None)), "material": "water",
                     "quantity": sm.MAX_QUANTITY, "slot": slot, "role": "substance", "burning": False}
@@ -564,6 +564,29 @@ def normalize_entity(entity):
     if sm.encoded_size(value)+reserved_bytes > sm.MAX_ENTITY_BYTES:
         raise RuleViolation("物件记录超过8KiB物理提交预算。")
     return value
+
+
+def future_control_bytes(program):
+    """Reserve missing growth of bounded saved mechanical evidence.
+
+    Optional control provenance and solver markers can appear after admission.
+    Current serialized fields are deducted, while the ordinary counter reserve
+    remains available for later numeric growth.
+    """
+    if not isinstance(program, dict) or "mechanical" not in program:
+        return 0
+    counter = 10**20
+    sources = ({"kind": "automatic_rule", "rule_id": "r"*80, "phase": "reaction"},
+               {"kind": "explicit_action", "action_id": "a"*80, "actor_role_id": "r"*128})
+    future = {"drive_request": max(({"enabled": False, "requested_step": counter,
+                    "applies_from_step": counter+1, "source": source} for source in sources), key=sm.encoded_size),
+              "mechanical_last_solved": {"step": counter}}
+    reserved = 0
+    for key, record in future.items():
+        maximum = sm.encoded_size({key: record})
+        current = sm.encoded_size({key: program[key]}) if key in program else 2
+        reserved += max(0, maximum-current) + int(key not in program)
+    return reserved
 
 
 def future_water_slots(value, registry):

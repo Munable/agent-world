@@ -638,7 +638,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             "operation_id": "actual-action", "result": {"changes": ["真实动作结果"], "viewport": scene},
             "execution_readback": scene}, base_id=base, action_entity_ids=["nearby-19"])
         readback = delivered["execution_readback"]
-        self.assertIn({"id": "nearby-19", "version": 2, "discovery_state": {}}, readback["entities"])
+        self.assertIn({"id": "nearby-19", "version": 2, "discovery_state": {},
+            "read_request": {"tool": "grove_inspect", "arguments": {"entity_id": "nearby-19"}}},
+            readback["entities"])
         self.assertEqual(len(readback["entities"]), 9)
         self.assertGreater(readback["projection"]["omitted_changed_or_new_entity_count"], 0)
         self.assertEqual(readback["changes"], scene["changes"])

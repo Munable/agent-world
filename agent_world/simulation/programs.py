@@ -40,11 +40,16 @@ _MECHANICAL_FIELDS = {
     "status": "string", "available_torque": "integer", "energy": "integer",
 }
 _BINARY = {"eq", "ne", "lt", "lte", "gt", "gte", "add", "sub", "mul", "div", "min", "max"}
-_MECHANICAL_DEFAULTS = {"teeth": 1, "torque": 1, "speed": 1, "energy_per_step": 1, "load": 0, "travel": 100, "pitch": 1}
-_MECHANICAL_RANGES = {
+MECHANICAL_DEFAULTS = {"teeth": 1, "torque": 1, "speed": 1, "energy_per_step": 1, "load": 0, "travel": 100, "pitch": 1}
+MECHANICAL_RANGES = {
     "teeth": (1, 100), "torque": (1, 100), "speed": (1, 10),
     "energy_per_step": (1, 100), "load": (0, 100), "travel": (1, 100), "pitch": (1, 10),
 }
+PROGRAM_KEYS = ("key", "name", "version", "materials", "material_imports", "types", "contact_reactions")
+PROGRAM_REQUIRED_KEYS = ("key", "name", "version", "types")
+TYPE_KEYS = ("name", "body_material", "cost", "cost_u", "components", "ports", "fields",
+             "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions")
+TYPE_REQUIRED_KEYS = ("name", "body_material")
 _RESERVED_ACTIONS = {
     "charge", "fuel", "connect", "disconnect", "start_recording", "stop_recording",
     "read_records", "offer", "accept", "deliver", "release", "start", "stop",
@@ -308,7 +313,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
         _fail("fact_catalog", "trusted facts require names and boolean/integer/string types")
     expression = partial(_expression, fact_catalog=fact_catalog)
     effects = partial(_effects, fact_catalog=fact_catalog)
-    _mapping(definition, "program", {"key", "name", "version", "materials", "material_imports", "types", "contact_reactions"}, {"key", "name", "version", "types"})
+    _mapping(definition, "program", PROGRAM_KEYS, PROGRAM_REQUIRED_KEYS)
     result = {"key": _text(definition["key"], "program.key", 80, _KEY),
               "name": _text(definition["name"], "program.name"),
               "version": _integer(definition["version"], "program.version", 1, MAX_INTEGER),
@@ -384,7 +389,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
     for symbol, spec in types.items():
         at = "program.types." + symbol
         _text(symbol, at, 48, _SYMBOL)
-        _mapping(spec, at, {"name", "body_material", "cost", "cost_u", "components", "ports", "fields", "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions"}, {"name", "body_material"})
+        _mapping(spec, at, TYPE_KEYS, TYPE_REQUIRED_KEYS)
         if ("cost" in spec) == ("cost_u" in spec):
             _fail(at, "requires exactly one cost (builtin pieces) or cost_u (actual material units)")
         canonical = {"name": _text(spec["name"], at + ".name"), "body_material": spec["body_material"],
@@ -437,13 +442,14 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
         if "container_capacity" in spec:
             canonical["container_capacity"] = _integer(spec["container_capacity"], at + ".container_capacity", 1, 200)
         if "mechanical" in spec:
-            mechanical = _mapping(spec["mechanical"], at + ".mechanical", {"role", "load_field", "speed_field"} | set(_MECHANICAL_DEFAULTS), {"role"})
+            mechanical = _mapping(spec["mechanical"], at + ".mechanical", {"role", "load_field", "speed_field"} | set(MECHANICAL_DEFAULTS), {"role"})
             if not isinstance(mechanical["role"], str) or mechanical["role"] not in {"source", "gear", "actuator"}:
                 _fail(at + ".mechanical.role", "must be source, gear or actuator")
             canonical["mechanical"] = {"role": mechanical["role"]}
-            for key, default in _MECHANICAL_DEFAULTS.items():
-                canonical["mechanical"][key] = _integer(mechanical.get(key, default), at + ".mechanical." + key, *_MECHANICAL_RANGES[key])
-            for reference, minimum, maximum in (("load_field", 0, 100), ("speed_field", 1, 10)):
+            for key, default in MECHANICAL_DEFAULTS.items():
+                canonical["mechanical"][key] = _integer(mechanical.get(key, default), at + ".mechanical." + key, *MECHANICAL_RANGES[key])
+            for reference, target in (("load_field", "load"), ("speed_field", "speed")):
+                minimum, maximum = MECHANICAL_RANGES[target]
                 if reference in mechanical:
                     field = mechanical[reference]
                     if not isinstance(field, str) or field not in fields or fields[field]["type"] != "integer":
@@ -813,6 +819,8 @@ def solve_mechanical(nodes, edges):
     The result records energy_used only at a source, once per connected graph.
     Optional load_field/speed_field resolve against node.fields or state.fields;
     their bounded values override the respective mechanical input parameters.
+    A source's optional enabled flag defaults to true. A disabled sole source
+    stops its valid network without consuming energy or changing position/angle.
     """
     if isinstance(nodes, dict):
         raw_nodes = [(key, value) for key, value in nodes.items()]
@@ -833,18 +841,19 @@ def solve_mechanical(nodes, edges):
         if not isinstance(spec.get("role"), str) or spec.get("role") not in {"source", "gear", "actuator"}:
             _fail("nodes." + key + ".role", "must be source, gear or actuator")
         current = {"role": spec["role"]}
-        for field, default in _MECHANICAL_DEFAULTS.items():
-            current[field] = _integer(spec.get(field, default), "nodes." + key + "." + field, *_MECHANICAL_RANGES[field])
+        for field, default in MECHANICAL_DEFAULTS.items():
+            current[field] = _integer(spec.get(field, default), "nodes." + key + "." + field, *MECHANICAL_RANGES[field])
         fields = _mapping(node.get("fields", state.get("fields", {})), "nodes." + key + ".fields")
         for reference, target in (("load_field", "load"), ("speed_field", "speed")):
             if reference in spec:
                 name = spec[reference]
                 if not isinstance(name, str) or name not in fields:
                     _fail("nodes." + key + "." + reference, "missing referenced integer field")
-                current[target] = _integer(fields[name], "nodes." + key + ".fields." + name, *_MECHANICAL_RANGES[target])
+                current[target] = _integer(fields[name], "nodes." + key + ".fields." + name, *MECHANICAL_RANGES[target])
         for field in ("position", "angle"):
             current[field] = _fraction(state.get(field, node.get(field, 0)), "nodes." + key + "." + field)
         current["energy"] = _integer(state.get("energy", node.get("energy", 0)), "nodes." + key + ".energy", 0, MAX_INTEGER)
+        current["enabled"] = _boolean(state.get("enabled", node.get("enabled", True)), "nodes." + key + ".enabled")
         canonical[key] = current
         result[key] = {"position": _number(current["position"]), "angle": _number(current["angle"]),
                        "speed": 0, "status": "no_source", "energy_used": 0, "available_torque": 0}
@@ -888,7 +897,9 @@ def solve_mechanical(nodes, edges):
             load = sum(Fraction(canonical[key]["load"]) * abs(ratio)
                        * (canonical[key]["pitch"] if canonical[key]["role"] == "actuator" else 1)
                        for key, ratio in relative.items())
-            if origin["energy"] < origin["energy_per_step"]:
+            if not origin["enabled"]:
+                status = "stopped"
+            elif origin["energy"] < origin["energy_per_step"]:
                 status = "insufficient_energy"
             elif load > origin["torque"]:
                 status = "overloaded"

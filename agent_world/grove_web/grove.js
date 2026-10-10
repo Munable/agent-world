@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel,fabricationSources,fabricationPlan} from './grove-world-ui.js?v=published-materials-bind-port';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel,fabricationSources,fabricationPlan} from './grove-world-ui.js?v=automatic-process-readback';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -624,14 +624,14 @@ function renderRelatedObjects(entity,disabled,previous=false){
 function appendFacts(parent,value,depth=0,scope='facts',path=[]){
   if(!value||typeof value!=='object'){parent.append(node('p',factValue(value),'small'));return;}
   if(depth>=6){parent.append(node('p','更深的结构未在此展开。','small'));return;}
-  const entries=Object.entries(value),limit=40;
+  const entries=Object.entries(value),limit=40,processRecord=path.at(-1)==='process'&&typeof value.status_meaning==='string';
   for(const [key,item] of entries.slice(0,limit)){
-    const label=Array.isArray(value)?'记录 '+(Number(key)+1):factLabel(key);
+    const label=processRecord&&key==='status'?'保存的过程标记':processRecord&&key==='last_tick'?'过程记录更新时间':key==='process'&&typeof item?.status_meaning==='string'?'保存的过程记录':Array.isArray(value)?'记录 '+(Number(key)+1):factLabel(key);
     if(item!==null&&typeof item==='object'){
       const disclosureKey=scope+':'+[...path,key].join('.'),detail=node('details',undefined,'fact-group');detail.open=factDisclosures.get(disclosureKey)??(depth===0);
       detail.addEventListener('toggle',()=>{if(!detail.isConnected)return;factDisclosures.set(disclosureKey,detail.open);if(factDisclosures.size>160)factDisclosures.delete(factDisclosures.keys().next().value);});
       detail.append(node('summary',label+' · '+factValue(item)));appendFacts(detail,item,depth+1,scope,[...path,key]);parent.append(detail);
-    }else{const row=node('div',undefined,'fact-row');row.append(node('small',label),node('span',factValue(item)));parent.append(row);}
+    }else{const row=node('div',undefined,'fact-row'),display=processRecord&&key==='status'?({idle:'闲置',running:'运行',waiting:'等待',error:'错误（当前已暂停）'}[item]||factValue(item)):factValue(item);row.append(node('small',label),node('span',display));parent.append(row);}
   }
   if(entries.length>limit)parent.append(node('p','此处展开前 '+limit+' 项，共 '+entries.length+' 项；不是完整历史。','small'));
   if(!entries.length)parent.append(node('p',Array.isArray(value)?'当前没有已读记录。':'当前没有已读属性。','small'));
@@ -639,8 +639,11 @@ function appendFacts(parent,value,depth=0,scope='facts',path=[]){
 function renderCreative(entity,previous=false){
   const creative=creativeState(previous?null:inspection,entity);if(!creative)return;
   const section=node('section',undefined,'creative-state');section.append(node('h4',previous?'规则对象 · 上次已读状态':'规则对象 · 当前事实'),node('p','规则字段、组分、连接与记录来自服务器。逻辑步不是现实经过的秒数，叙述不决定结果。','small'));
+  const runtime=previous?entity.creative:(inspection?.creative||entity.creative);
+  for(const line of ruleRuntimeObservationLines(runtime,entity))section.append(node('p',line,'small'));
   for(const line of reactionObservationLines(creative,entity))section.append(node('p',line,'small'));
-  const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated','contact_process'].includes(key)));
+  const runtimeFields=runtime?.mechanical_observation?['mechanical','drive_request','mechanical_last_solved']:[];
+  const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated','contact_process','automatic_rules','deployment','mechanical_observation',...runtimeFields].includes(key)));
   appendFacts(section,expanded,0,entity.id);
   if(creative.hidden===true)section.append(node('p','这个公共容器已合上。当前只读到规则引用，内部配料、运行与记录未公开。','small'));
   const ref=creative.definition_ref;

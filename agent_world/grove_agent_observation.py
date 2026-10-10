@@ -200,6 +200,61 @@ def _companion_chunk_terrain(chunk):
     return compact
 
 
+def _companion_creative_summary(creative):
+    """Retain a few authorized runtime facts without expanding declarations."""
+    summary = {key: deepcopy(creative[key]) for key in
+               ("definition_ref", "type_id", "hidden") if key in creative}
+    if creative.get("hidden") is True:
+        return summary
+    for key in ("automatic_rule_count", "explicit_action_count", "automatic_rules_projection"):
+        if key in creative:
+            summary[key] = deepcopy(creative[key])
+    deployment = creative.get("deployment")
+    if isinstance(deployment, dict):
+        summary["deployment"] = {key: deepcopy(deployment[key]) for key in (
+            "admitted", "publicly_placed", "ordinary_rules_enabled", "public_event_input_available",
+            "mechanical_solver_eligible", "mechanical_blockers") if key in deployment}
+    process = creative.get("process")
+    if isinstance(process, dict):
+        summary["process"] = {key: deepcopy(process[key]) for key in
+            ("status", "steps", "last_tick", "observed_tick", "steps_meaning", "status_meaning",
+             "last_tick_meaning") if key in process}
+        for key in ("error", "blocked_reason"):
+            if isinstance(process.get(key), str):
+                summary["process"][key] = process[key][:180]
+        if isinstance(process.get("blocked_rules"), list):
+            summary["process"]["blocked_rules"] = [{key: (row[key][:120] if isinstance(row[key], str)
+                else deepcopy(row[key])) for key in ("rule_id", "phase", "reason") if key in row}
+                for row in process["blocked_rules"][:8] if isinstance(row, dict)]
+        previous = process.get("last_reaction")
+        if isinstance(previous, dict):
+            summary["process"]["last_reaction"] = {key: deepcopy(previous[key]) for key in
+                ("source_last_tick", "historical", "current_production") if key in previous}
+    mechanical = creative.get("mechanical_observation")
+    if isinstance(mechanical, dict):
+        observation = {key: deepcopy(mechanical[key]) for key in (
+            "role", "solver_eligible", "stored_output_is_history", "pending_next_step", "observed_tick")
+            if key in mechanical}
+        stored = mechanical.get("stored_state")
+        if isinstance(stored, dict):
+            observation["stored_state"] = {key: deepcopy(stored[key]) for key in
+                ("position", "angle", "speed", "energy", "enabled", "status", "available_torque")
+                if key in stored}
+        for key, fields in (("last_solved", ("step", "historical")),
+                            ("drive_request", ("enabled", "requested_step", "applies_from_step"))):
+            record = mechanical.get(key)
+            if record is None and key in mechanical:
+                observation[key] = None
+            elif isinstance(record, dict):
+                observation[key] = {field: deepcopy(record[field]) for field in fields if field in record}
+                source = record.get("source")
+                if key == "drive_request" and isinstance(source, dict):
+                    observation[key]["source"] = {field: deepcopy(source[field]) for field in
+                        ("kind", "rule_id", "phase", "action_id", "actor_role_id") if field in source}
+        summary["mechanical_observation"] = observation
+    return summary
+
+
 def _companion_scene_index(scene):
     """An authorized discovery index; detailed physics remains an explicit read."""
     if not isinstance(scene, dict):
@@ -242,16 +297,19 @@ def _companion_scene_index(scene):
                 elif "material_quantity" in entity:
                     row["material_quantity"] = deepcopy(entity["material_quantity"])
                 creative = entity.get("creative")
-                contact = entity.get("simulation", {}).get("contact")
+                contact = entity.get("simulation", {}).get("contact") or entity.get("contact")
                 if isinstance(contact, dict):
-                    process = contact.get("process") or {}
+                    process = contact.get("process") or contact
                     row["contact"] = {"candidate_count": contact.get("candidate_count", 0),
                         "status": process.get("status", "waiting"), "steps": process.get("steps", 0),
                         "process_is_history": contact.get("process_is_history", True),
                         "read_request": {"function": "grove.inspect", "arguments": {"entity_id": entity["id"]}}}
                 if isinstance(creative, dict):
-                    row["creative"] = {key: deepcopy(creative[key]) for key in
-                        ("definition_ref", "type_id") if key in creative}
+                    # Only the world's authorized creative projection can
+                    # supply runtime observations; raw program storage cannot.
+                    row["creative"] = _companion_creative_summary(creative)
+                if isinstance(entity.get("id"), str):
+                    row["read_request"] = {"tool": "grove_inspect", "arguments": {"entity_id": entity["id"]}}
                 state = entity.get("state")
                 if not isinstance(state, dict):
                     state = entity.get("discovery_state", {})
@@ -269,6 +327,9 @@ def _companion_scene_index(scene):
         "meaning": "Actual identity/version/location index, not complete state or an action preview. "
                    "Matter rows are actual authorized slot/quantity summaries, not transferable lot IDs; "
                    "canonical material identity is distinct from its display name and instance creator. "
+                   "Creative runtime summaries are read snapshots: saved mechanical output is history, "
+                   "solver eligibility is not participation, and process.steps counts reactions only. "
+                   "last_solved marks output changes, not every solve; a request's earliest step is not confirmation. "
                    "Omitted conditions, contents and history are not absent. Read grove_inspect(entity_id) "
                    "for current physics/actions; grove_content_history(content_id) for history; "
                    "map_viewport for the current scene. Do not infer quantities or success from this index."}
@@ -345,7 +406,7 @@ def companion_projection(function: str, payload: dict) -> dict:
         # schemas or the expanded creation catalog. Retain the source's rules
         # verbatim and label connector control separately from world authority.
         overview = {key: value[key] for key in (
-            "world", "title", "player", "clock", "rules_version", "process_order", "process_limits",
+            "world", "title", "player", "clock", "rules_version", "execution_model", "process_order", "process_limits",
             "terrain", "materials", "material_slots", "material_roles", "combination_preview",
             "capabilities", "rules", "entry") if key in value}
         compositions = value.get("compositions")
@@ -389,7 +450,10 @@ def companion_projection(function: str, payload: dict) -> dict:
                        "repeating grove_handbook returns the same projection, not further manual pages.",
             "read_creation_rules": {
                 "program_language": "grove_rule_catalog: exact bounded declarations, physical semantics, "
-                                    "published references and publication path; grove_definition_read reads a selected immutable reference.",
+                                    "automatic rules versus explicit actions, and publication path. "
+                                    "grove_definition_list pages actual immutable published references; "
+                                    "grove_definition_read reads a selected reference. "
+                                    "grove_fabrication_options reads a selected type's actual cost_u and eligible source lots.",
                 "function_catalog": "Declared Grove MCP tools' inputSchema is the live function catalog "
                                     "for exact input envelopes; the server catalog is /v1/functions. "
                                     "Do not infer parameters or powers from this overview.",
@@ -797,6 +861,26 @@ def _companion_inspection_index(payload):
     if not isinstance(options, list):
         return None
     state = _companion_selected_state_summary({"entity": entity})["entity"]
+    creative = state.get("creative")
+    if isinstance(creative, dict) and isinstance(creative.get("automatic_rules"), list):
+        # The pinned definition is independently readable. Keep every current
+        # fact/comparison, omitting only the duplicate immutable expressions.
+        omitted = False
+        for rule in creative["automatic_rules"]:
+            conditions = [rule.get("condition"), *[item.get("observation")
+                          for item in rule.get("drive_inputs", [])]]
+            for condition in conditions:
+                if isinstance(condition, dict) and "expression" in condition:
+                    condition.pop("expression")
+                    omitted = True
+        if omitted:
+            creative["automatic_rules_expression_projection"] = {
+                "scope": "current_conditions_without_duplicate_expressions",
+                "read_request": {"tool": "grove_definition_read", "arguments": {
+                    "definition_ref": creative["definition_ref"]}},
+                "type_id": creative["type_id"],
+                "meaning": "Current verdicts, facts and checks remain. Only immutable expression trees are omitted; "
+                           "read the pinned type_id/rule_id or indexed drive effect from this definition."}
     outlines = []
     for option in options:
         if not isinstance(option, dict) or not isinstance(option.get("action"), str):
@@ -819,9 +903,8 @@ def _companion_inspection_index(payload):
         "action_options": outlines, "available_actions": deepcopy(value.get("available_actions", [])),
         "action_options_projection": {"scope": "authorized_action_index", "expanded_actions": [],
             "requested_projection": deepcopy(projection),
-            "meaning": "Actual authorized object state and action outlines only. Expanded action arguments, "
-                       "candidate versions, conditions and physical previews were not supplied or bound. "
-                       "Use the declared read_request for an action, or one candidate, before relying on those details."},
+            "meaning": "Actual state and action outlines only. Expanded inputs, candidate versions, conditions and "
+                       "previews were not supplied or bound; use each action/candidate read_request before relying on them."},
         "projection": {"scope": "object_state_and_action_index", "complete_inspection": False,
             "omitted_sections": ["expanded action inputs and previews", "child snapshots", "public content history"]}}
     if "explanation" in value:

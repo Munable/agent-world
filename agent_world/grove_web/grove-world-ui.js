@@ -106,8 +106,12 @@ export function safePresentation(entity){
 const factLabels={definition_ref:'规则定义',type_id:'对象类型',fields:'当前属性',materials:'材料定义',material_definitions:'材料定义',mechanical:'机械状态',recorder:'记录状态',contract:'双方契约',connections:'当前连接',process:'过程状态与历史',last_reaction:'保存的上次反应',source_last_tick:'保存的过程逻辑步',observed_tick:'本次观察逻辑步',last_tick:'过程保存的逻辑步',steps:'累计反应步数',steps_meaning:'步数含义',historical:'历史记录',current_production:'是否本次生产',meaning:'含义',history:'已发生的记录',position:'位置',angle:'角度',speed:'速度',status:'状态',energy:'能量',available_torque:'可用扭矩',active:'正在运行',started_tick:'开始逻辑步',until_tick:'截止逻辑步',sequence:'事件序号',tick:'逻辑步',occurred_at:'发生时间',recorded_tick:'记录逻辑步',action:'行动',entity_id:'对象',actor:'行动者',read_tick:'读取逻辑步',reads:'实际读取',parties:'双方身份',terms_version:'条款版本',accepted:'已接受的身份',deadline_tick:'截止逻辑步',delivered:'已交付',quantity:'数量',material:'材料',beneficiary:'受益方',id:'标识',name:'名称',version:'版本',unit:'单位',temperature:'温度',pressure:'压力',progress:'进展',running:'运行中',remaining:'剩余量',capacity:'容量',amount:'数量',item_id:'投入物件',other_id:'另一个对象',connected_to:'连接至',direction:'方向',mode:'方式',output:'产物',inputs:'投入',outputs:'产出',rules:'规则',types:'类型',actions:'行动',conditions:'条件',effects:'效果',description:'说明',label:'名称',duration:'持续逻辑步',fuel:'燃料',work:'做功',torque:'扭矩',reaction:'反应',state:'当前状态',owner:'身份',scope:'范围'};
 Object.assign(factLabels,{definition_ref:'使用的规则',type_id:'物件种类',material_aliases:'材料称呼',material_imports:'引用的材料',source_last_tick:'上次反应的世界时刻',observed_tick:'本次观察的世界时刻',last_tick:'上次运行的世界时刻',started_tick:'开始的世界时刻',until_tick:'截止的世界时刻',tick:'世界时刻',recorded_tick:'记录的世界时刻',read_tick:'读取的世界时刻',deadline_tick:'截止的世界时刻',duration:'持续时刻数',terms_version:'当前条款记录',version:'更新记录',id:'引用的对象',entity_id:'关联物件',item_id:'所用物件',other_id:'关联对象',lot_id:'所选材料',target_id:'操作对象',material_id:'材料',symbol:'材料称呼',load_per_u:'每单位u载荷',per_extent:'每次所需',missing_for_one_extent:'还缺多少',available:'当前可用',slot:'材料位置',scope:'可见范围',snapshot_only:'当前观察',parameter_defaults:'默认参数',known:'是否读到',satisfied:'是否满足',intact:'结构完整',passable:'是否可通过',opened_sequence:'最近开放记录',started_event_sequence:'开始时的事件记录','barrier.active':'通道是否阻挡','barrier.opened_sequence':'通道最近开放记录','mechanical.position':'机械位置','mechanical.speed':'机械速度','mechanical.angle':'机械角度','mechanical.energy':'机械能量','mechanical.status':'机械状态'});
 Object.assign(factLabels,{port:'绑定槽位',ports:'关联槽位',port_bindings:'当前绑定',eligible_ports:'可绑定槽位',cost:'区域原料（份）',cost_u:'成型所需（u）',sources:'材料来源',quantity_u:'数量（u）',expected_entity_version:'来源更新记录'});
+Object.assign(factLabels,{physical:'真实物理',wetness:'湿度',burning:'是否燃烧','structure.integrity':'结构完整度','load.local':'本件载荷','load.total':'总载荷','load.supported':'承受载荷','load.limit':'承载上限','load.overload':'超出载荷',buoyancy:'浮力',can_float:'是否可浮',mechanical:'保存机械状态',automatic_rule_count:'自动声明数量',explicit_action_count:'显式行动数量',automatic_rules_projection:'自动声明读取范围',automatic_rules_truncated:'自动声明展示未完整'});
+Object.assign(factLabels,{error:'上次运行错误',blocked_reason:'等待原因',blocked_rules:'等待可读事实的声明',rule_id:'声明',phase:'阶段',reason:'原因'});
+Object.assign(factLabels,{status_meaning:'过程标记含义',last_tick_meaning:'过程记录时刻含义'});
 export const factLabel=key=>key===null||key===undefined?'属性':factLabels[key]||readableSymbol(String(key))||'属性';
 const valueLabels={...materialLabels,body:'本体',contained:'容纳的材料',surface:'表面',absorbed:'吸附',ground:'地面',held:'随身',attached:'绑定',private:'私人',public:'公共',intact:'完整',broken:'破损',consumed:'材料耗尽',idle:'闲置',running:'运行中',stopped:'已停止',active:'进行中',complete:'已完成',failed:'已失败',error:'已暂停',pending:'等待中',waiting:'等待材料或条件',awaiting_acceptance:'等待双方接受',unoffered:'尚未发起约定',no_source:'未接入动力',program_error:'规则已暂停',accepted:'已接受',released:'已领出',independent:'分别反应',exclusive:'择一反应',reaction:'材料反应',after:'反应之后',logical_matter:'材料份数',whole_entity:'整件物件',material_lot:'材料',role:'人物',entity:'物件',resource_node:'资源点',water_source:'水源',ignition:'火种',container:'容器',structure:'结构'};
+Object.assign(valueLabels,{unavailable_fact_or_port:'事实或绑定槽位当前不可读'});
 export function factValue(value){
   if(value===null||value===undefined)return '未公开或未设定';
   if(typeof value==='boolean')return value?'是':'否';
@@ -120,15 +124,81 @@ export function creativeState(inspection,entity){
   const value=inspection?.creative||entity?.creative||entity?.state?.program;
   return value&&typeof value==='object'&&!Array.isArray(value)?value:null;
 }
+function conditionReferenceLabel(reference,entity){
+  const kind=Object.keys(reference)[0],key=reference[kind];
+  if(kind==='quantity')return '容纳 '+materialLabel(key,entity);
+  if(kind==='concentration')return materialLabel(key,entity)+'容纳份额';
+  if(kind==='object')return (key?.port?'槽位 '+readableSymbol(key.port):objectName(key,'关联物件'))+' · '+factLabel(typeof key?.field==='string'?key.field.replace(/^physical\./,''):key?.field);
+  if(['field','mechanical','contract','physical'].includes(kind))return factLabel(key);
+  return kind?factLabel(kind)+' · '+factLabel(key):'子条件';
+}
 export function conditionObservationLines(observation,entity){
   if(!observation||typeof observation!=='object')return [];
   if(observation.known!==true)return [observation.reason==='event_required'?'条件未知：须有实际事件输入，当前快照不能判断。':'条件未知：当前未取得所需的可观察事实。'];
   const lines=[observation.satisfied?'声明条件当前成立。':'声明条件当前未成立。'];
   const symbols={eq:'=',ne:'≠',lt:'<',lte:'≤',gt:'>',gte:'≥'};
   if(['all','any','not'].includes(observation.expression?.op))lines.push('以下是子比较的快照；整体条件按原规则组合判断。');
-  for(const check of observation.checks||[]){const reference=check.left||{},kind=Object.keys(reference)[0],key=reference[kind],label=kind==='quantity'?'容纳 '+materialLabel(key,entity):kind==='concentration'?materialLabel(key,entity)+'容纳份额':kind==='object'?objectName(key,'关联物件')+' · '+factLabel(key?.field):kind==='field'||kind==='mechanical'||kind==='contract'?factLabel(key):'子条件';lines.push(label+'：'+(check.known===true?factValue(check.actual_left)+' '+(symbols[check.operator]||check.operator)+' '+factValue(check.actual_right)+'（'+(check.satisfied?'成立':'未成立')+'）':'当前无法核对'));}
-  for(const fact of observation.facts||[]){const reference=fact.reference||{},kind=Object.keys(reference)[0],key=reference[kind],label=kind==='quantity'?'容纳材料 '+materialLabel(key,entity):kind==='concentration'?'容纳份额 '+materialLabel(key,entity):kind==='object'?objectName(key,'关联物件')+' · '+factLabel(key?.field):factLabel(kind)+' · '+factLabel(key);lines.push(label+'：'+(fact.known===true?factValue(fact.actual):'当前未公开或不可观察'));}
+  for(const check of observation.checks||[]){const label=conditionReferenceLabel(check.left||{},entity);lines.push(label+'：'+(check.known===true?factValue(check.actual_left)+' '+(symbols[check.operator]||check.operator)+' '+factValue(check.actual_right)+'（'+(check.satisfied?'成立':'未成立')+'）':'当前无法核对'));}
+  for(const fact of observation.facts||[]){const label=conditionReferenceLabel(fact.reference||{},entity);lines.push(label+'：'+(fact.known===true?factValue(fact.actual):'当前未公开或不可观察'));}
   if(observation.input_scope==='parameter_defaults')lines.push('以上条件使用当前默认参数；实际填写的参数仍在提交时核验。');
+  return lines;
+}
+export function ruleRuntimeObservationLines(creative,entity){
+  if(!creative||creative.hidden===true)return [];
+  const lines=[],deployment=creative.deployment,mechanical=creative.mechanical_observation;
+  if(Number.isInteger(creative.automatic_rule_count)||Number.isInteger(creative.explicit_action_count)){
+    const counts=[];
+    if(Number.isInteger(creative.automatic_rule_count))counts.push('自动声明 '+creative.automatic_rule_count+' 项');
+    if(Number.isInteger(creative.explicit_action_count))counts.push('显式行动 '+creative.explicit_action_count+' 项');
+    lines.push(counts.join('，')+'。自动声明按世界逻辑步或实际公开事件评估；显式行动由人或获准 Agent 提交。');
+  }
+  if(deployment&&typeof deployment==='object'){
+    if(typeof deployment.publicly_placed==='boolean')lines.push('这次观察的公开部署：'+(deployment.publicly_placed?'有公开位置。':'没有公开位置。'));
+    if(typeof deployment.ordinary_rules_enabled==='boolean')lines.push(deployment.ordinary_rules_enabled?'普通自身声明当前具备评估资格，随身携带也可评估；资格不证明已执行。':'当前没有可评估的普通自身声明；这不判断显式行动是否可用。');
+    if(typeof deployment.public_event_input_available==='boolean')lines.push(deployment.public_event_input_available?'这次观察具备公开事件读取资格；仍须有实际日志输入，资格不证明本次发生事件。':'这次观察不具备公开事件读取资格；条件不能以虚构事件补足。');
+  }
+  const rules=Array.isArray(creative.automatic_rules)?creative.automatic_rules:[];
+  const phaseLabel=phase=>phase==='reaction'?'材料反应阶段':phase==='after'?'反应与机械之后':factValue(phase);
+  const effectLabels={set:'自身字段变更',react:'材料反应',drive:'有限动力启停',emit:'声明信号'};
+  for(const rule of rules){
+    const event=rule.input_kind==='public_event',name=readableSymbol(rule.rule_id)||'自动声明';
+    lines.push('自动声明 '+name+' · '+phaseLabel(rule.phase)+' · '+(event?'实际公开事件输入':'世界逻辑步输入')+'。');
+    lines.push(...conditionObservationLines(rule.condition,entity));
+    if(rule.condition?.known===true&&rule.condition.satisfied===false)lines.push('声明条件不成立时跳过该声明；不据此改写上次动力请求。');
+    else if(rule.condition?.known===false)lines.push('声明条件未知时等待可读事实，不把未知当作否，也不据此改写上次动力请求。');
+    if(event)lines.push('事件声明须读取实际事件；当前条件快照不能代替事件输入。');
+    if(Array.isArray(rule.effect_ops)&&rule.effect_ops.length)lines.push('声明效果：'+rule.effect_ops.map(op=>effectLabels[op]||factValue(op)).join('、')+'；只有实际执行后才形成后果。');
+    for(const input of rule.drive_inputs||[]){
+      const observation=input.observation;
+      lines.push(observation?.known===true?'启停表达式当前读数：'+(observation.satisfied?'启用':'关闭')+'；仅在声明实际执行时用于控制，该读数不证明已发出请求。':'启停表达式当前未知；不能据此推定关闭或改写上次控制请求。');
+      if(observation?.known===true)lines.push(...conditionObservationLines(observation,entity).slice(1));
+    }
+  }
+  if(rules.length)lines.push('以上是该次读取的条件快照，不证明自动声明已经执行，也不预测下一步结果。');
+  if(creative.automatic_rules_truncated)lines.push('这里最多展示 8 项自动声明；其余声明须读取完整规则。');
+  if(mechanical&&typeof mechanical==='object'){
+    if(typeof mechanical.role==='string')lines.push('机械用途：'+({source:'动力源',gear:'齿轮传递',actuator:'执行器'}[mechanical.role]||factValue(mechanical.role))+'。');
+    const stored=mechanical.stored_state||{},values=[];
+    for(const key of ['position','angle','speed','energy','available_torque'])if(Number.isFinite(stored[key]))values.push(factLabel(key)+' '+stored[key]);
+    if(typeof stored.enabled==='boolean')values.push('保存启用值 '+factValue(stored.enabled));
+    if(typeof stored.status==='string')values.push('保存状态 '+factValue(stored.status));
+    if(values.length)lines.push('机械保存状态：'+values.join('，')+'；保存的速度和位置是历史求解输出或初始值，不能断言当前正在运动。');
+    if(typeof mechanical.solver_eligible==='boolean')lines.push(mechanical.solver_eligible?'这次观察具备机械求解资格；能源、连接和实际运动仍须核对求解结果。':'这次观察不具备机械求解资格；保存的输出不代表当前参与求解。');
+    if(Array.isArray(deployment?.mechanical_blockers)&&deployment.mechanical_blockers.length){
+      const blockers={no_mechanical_definition:'未声明机械用途',not_admitted:'未获实例准入',not_intact:'物件不完整或已退役',program_error:'规则已暂停',no_public_location:'没有公开位置'};
+      lines.push('机械求解阻塞：'+deployment.mechanical_blockers.map(reason=>blockers[reason]||factValue(reason)).join('、')+'。');
+    }
+    const solved=mechanical.last_solved;
+    lines.push(Number.isFinite(solved?.step)?'最近输出变化的求解步：'+solved.step+'；这不是每步参与求解的记录。':'未读到保存的求解标记；不能据此判断从未求解。');
+    const request=mechanical.drive_request;
+    if(request&&typeof request==='object'){
+      const source=request.source,origin=source?.kind==='automatic_rule'?'自动声明 '+(readableSymbol(source.rule_id)||'未提供名称')+'（'+phaseLabel(source.phase)+'）':source?.kind==='explicit_action'?'显式行动 '+(readableSymbol(source.action_id)||'未提供名称')+(source.actor_role_id?'，行动者 '+objectName(source.actor_role_id,'关联人物'):''):'未读到来源';
+      lines.push('保存的动力请求：'+(typeof request.enabled==='boolean'?(request.enabled?'启用':'关闭'):'未读到启停值')+'；发出于逻辑步 '+previewNumber(request.requested_step)+'，最早用于逻辑步 '+previewNumber(request.applies_from_step)+'；来源 '+origin+'。');
+      if(mechanical.pending_next_step===true)lines.push('该请求尚未到最早生效逻辑步。');
+      else if(mechanical.pending_next_step===false)lines.push('该请求已到最早生效逻辑步；这不证明已被求解或已经运动。');
+    }else if(request===null)lines.push('这次观察没有保存的动力控制请求；启停表达式读数不替代请求记录。');
+  }
+  if(Number.isFinite(creative.process?.steps))lines.push('过程累计 '+creative.process.steps+' 个反应逻辑步；不是机械推进次数或目标完成进度。');
   return lines;
 }
 export function reactionObservationLines(creative,entity){

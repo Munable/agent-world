@@ -29,6 +29,7 @@ CONTROL = "grove.creative.control"
 ACCOUNTING = "grove.creative.accounting"
 MAX_INSTANCES = 32
 MAX_LINKS = 8
+PROGRAM_COMPONENTS = ("structure", "container", "combustion", "absorbent", "buoyant", "attachment")
 MAX_COMMIT_BYTES = 2 * 1024 * 1024
 MAX_COMMIT_CHANGES = 512
 ACCOUNT_HISTORY_BYTES = 512
@@ -216,8 +217,7 @@ def definition_publish(ctx, args):
         definition = compile_program(proposed, materials=REGISTRY.materials, body_materials=BODY_MATERIALS,
                                      max_custom_materials=MAX_CUSTOM_MATERIALS, imported_materials=resolved,
                                      fact_catalog={key: fact.type for key, fact in PUBLIC_FACTS.items()},
-                                     component_catalog={key: REGISTRY.components[key] for key in
-                                         ("structure", "container", "combustion", "absorbent", "buoyant", "attachment")})
+                                     component_catalog={key: REGISTRY.components[key] for key in PROGRAM_COMPONENTS})
     except ValueError as exc:
         raise RuleViolation("定义未发表，世界没有改变：" + str(exc)) from exc
     encoded = json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -413,7 +413,7 @@ def _put(entity, material, amount):
         raise RuleViolation("产物批次数量或容量越界；该原子反应未执行。") from exc
 
 
-def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=None, accounts=None, supply=None, objects=None):
+def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=None, accounts=None, supply=None, objects=None, drive_source=None):
     changed, reactions = False, []
     channels = set() if channels is None else channels
     supply = _quantities(entity, include_burning=False) if supply is None else supply
@@ -433,7 +433,7 @@ def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=No
             entity["state"]["program"]["fields"][effect["field"]] = value
         elif effect["op"] == "drive":
             enabled = evaluate(effect["enabled"], context)
-            changed |= _set_drive(ctx, entity, kind, enabled)
+            changed |= _set_drive(ctx, entity, kind, enabled, source=drive_source)
         elif effect["op"] == "react":
             if effect["mode"] == "exclusive" and effect["channel"] in channels:
                 continue
@@ -499,7 +499,7 @@ def _relevant_events(ctx, entity, since):
     return [event for event in events if event["sequence"] > since and max(abs(event["x"]-location[0]), abs(event["y"]-location[1])) <= radius]
 
 
-def _set_drive(ctx, entity, spec, enabled):
+def _set_drive(ctx, entity, spec, enabled, *, source):
     if type(enabled) is not bool or spec.get("mechanical", {}).get("role") != "source" or entity["lifecycle"] != "intact":
         raise RuleViolation("drive只能启停当前完好物件已有的动力源。")
     binding = entity["state"]["program"]
@@ -507,7 +507,8 @@ def _set_drive(ctx, entity, spec, enabled):
     changed = state["enabled"] != enabled
     state["enabled"] = enabled
     if changed:
-        binding["drive_request"] = {"enabled": enabled, "requested_step": step(ctx), "applies_from_step": step(ctx)+1}
+        binding["drive_request"] = {"enabled": enabled, "requested_step": step(ctx),
+                                    "applies_from_step": step(ctx)+1, "source": deepcopy(source)}
     return changed
 
 
@@ -671,7 +672,7 @@ def tick(ctx):
     journal_sequence = ctx.get_state(m.META, "creative_events", {"sequence": 0})["sequence"]
     events, pending_accounts, phase_supply = {}, {}, {}
     outcomes = []
-    blocked_events, solved_mechanical = set(), {}
+    blocked_events, solved_mechanical, solved_markers = set(), {}, {}
     blocked_rules = {eid: [] for eid in objects}
 
     def fail_instance(eid, error, preserve_mechanical=False):
@@ -684,6 +685,8 @@ def tick(ctx):
         blocked_rules[eid] = []
         if mechanical_result is not None:
             program["mechanical"] = mechanical_result
+            if solved_markers[eid] is not None:
+                program["mechanical_last_solved"] = deepcopy(solved_markers[eid])
         if "mechanical" in program and mechanical_result is None:
             program["mechanical"].update(speed=0, available_torque=0, status="program_error", enabled=False)
         pending_accounts[eid] = {}
@@ -701,6 +704,8 @@ def tick(ctx):
         program = objects[eid]["state"]["program"]
         if eid in solved_mechanical:
             program["mechanical"] = deepcopy(solved_mechanical[eid])
+            if solved_markers[eid] is not None:
+                program["mechanical_last_solved"] = deepcopy(solved_markers[eid])
         program["process"].update(status="waiting", blocked_reason=str(error)[:180])
         pending_accounts[eid] = {}
         phase_supply[eid] = _quantities(original[eid], include_burning=False)
@@ -713,7 +718,8 @@ def tick(ctx):
         try:
             if evaluate(rule["when"], _context(predicate_snapshot or view[eid], event=fact, ctx=ctx, objects=view)):
                 return _effects(ctx, candidate, specs[eid], rule["effects"], event=fact, channels=channels,
-                                accounts=pending_accounts[eid], supply=phase_supply[eid], objects=view)[1]
+                                accounts=pending_accounts[eid], supply=phase_supply[eid], objects=view,
+                                drive_source={"kind": "automatic_rule", "rule_id": rule["id"], "phase": rule["phase"]})[1]
         except FactUnavailable as exc:
             if fact is not None:
                 wait_event_batch(eid, exc)
@@ -766,8 +772,6 @@ def tick(ctx):
             continue
         state = deepcopy(entity["state"]["program"]["mechanical"])
         mechanical = deepcopy(specs[eid]["mechanical"])
-        if mechanical["role"] == "source" and not state["enabled"]:
-            state["energy"] = 0
         nodes.append({"id": eid, "mechanical": mechanical, "fields": entity["state"]["program"]["fields"], "state": state})
         for link in entity["state"]["program"].get("connections", []):
             other = original.get(link["other_id"])
@@ -786,6 +790,15 @@ def tick(ctx):
         actual.update({key: value for key, value in result.items() if key != "energy_used"})
         actual["energy"] -= result["energy_used"]
         solved_mechanical[eid] = actual
+        previous_program = original[eid]["state"]["program"]
+        marker = previous_program.get("mechanical_last_solved")
+        # Mark a real solver change, not every evaluation or a control request.
+        # Carried objects retain this historical marker without new solves.
+        if actual != previous_program["mechanical"]:
+            marker = {"step": step(ctx)}
+        solved_markers[eid] = deepcopy(marker)
+        if marker is not None:
+            objects[eid]["state"]["program"]["mechanical_last_solved"] = deepcopy(marker)
         state = objects[eid]["state"]["program"]["mechanical"]
         state.update({key: value for key, value in result.items() if key != "energy_used"})
         state["energy"] -= result["energy_used"]
@@ -982,7 +995,8 @@ def rule_action(ctx, args):
             _finish_item(ctx, item, entity)
             summary = f"燃料已消耗，储存了{amount}单位有限能源。"
         else:
-            _set_drive(ctx, entity, spec, action == "start")
+            _set_drive(ctx, entity, spec, action == "start", source={"kind": "explicit_action",
+                       "action_id": action, "actor_role_id": ctx.actor_role_id})
             summary = "动力输入已启用。" if state["enabled"] else "动力输入已停止，已有位移保留。"
     elif action in {"connect", "disconnect"}:
         if "mechanical" not in spec or not args.get("other_id"):
@@ -1163,7 +1177,8 @@ def rule_action(ctx, args):
         try:
             if not evaluate(declared.get("when", True), _context(entity, params, ctx=ctx, objects=action_view)):
                 raise RuleViolation("此动作的实际前提尚未成立。")
-            _effects(ctx, entity, spec, declared["effects"], params=params, objects=action_view)
+            _effects(ctx, entity, spec, declared["effects"], params=params, objects=action_view,
+                     drive_source={"kind": "explicit_action", "action_id": action, "actor_role_id": ctx.actor_role_id})
         except FactUnavailable as exc:
             raise RuleViolation("声明事实或端口当前不可读；本次动作未执行：" + str(exc)) from exc
         program["process"].update(status="idle", last_tick=step(ctx))
@@ -1327,11 +1342,33 @@ def action_options(ctx, player, entity):
 
 
 def rule_catalog(ctx, args):
+    from agent_world.simulation.programs import (
+        MECHANICAL_DEFAULTS, MECHANICAL_RANGES, PROGRAM_KEYS, PROGRAM_REQUIRED_KEYS, TYPE_KEYS, TYPE_REQUIRED_KEYS)
+    object_fields = "|".join(PUBLIC_FACTS)
+    physical_fields = "|".join(name.removeprefix("physical.") for name in PUBLIC_FACTS if name.startswith("physical."))
+    component_schema = {
+        name: {"type": "object", "additionalProperties": False,
+               "properties": {field: {"type": {int: "integer", bool: "boolean", str: "string"}[kind],
+                                      **({"minimum": minimum} if minimum is not None else {}),
+                                      **({"maximum": maximum} if maximum is not None else {})}
+                              for field, (kind, minimum, maximum) in REGISTRY.components[name].fields.items()
+                              if field != "supports"}}
+        for name in PROGRAM_COMPONENTS}
     return FunctionOutcome({"language_version": 3, "definition_directory": {"function_id": "grove.definition_list",
         "read_function_id": "grove.definition_read", "seek_paged": True}, "world_tick": step(ctx),
         "builtin_materials": {key: {"name": value.name, "load_per_u": value.load_per_u,
             "combustible": value.combustible, "liquid": value.liquid} for key, value in REGISTRY.materials.items()},
         "phase_policy": declaration_semantics({"types": {}})["phase_policy"],
+        "execution_model": {
+            "automatic_rules": "Each intact admitted instance evaluates types[].rules automatically at world logical steps, including ordinary self rules while carried. There is no action button for an automatic rule and no Agent inference is needed to run it. Publishing a definition alone creates no instance.",
+            "time": "This world advances in the background, not by player turns. The timer targets a roughly one-second logical-step cadence; actual service work and late-timer handling can delay advancement. Reading, model thinking and travel do not pause the world. A successful mechanical solve consumes the source's finite energy_per_step, so available fuel can be spent before the next command. Use clock.sequence and actual readback, not elapsed wall time, to determine what happened. Server downtime pauses the world without catch-up.",
+            "manual_actions": "types[].actions and reserved rule_action operations run only when a person or an explicitly granted Agent invokes them. Setup, fuel, binding and a successful manual action do not prove an automatic rule ran.",
+            "conditions": "when=false skips that rule; it neither undoes earlier effects nor stops an already enabled source. An unavailable rule input produces no new effect and waits, retaining existing control rather than becoming false/zero or automatically switching targets. Other independently valid rules retain their normal semantics. Error status is distinct from recoverable unknown facts.",
+            "event_rules": "Rules using event references consume actual nearby public journal inputs in sequence, not a synthetic current event. A carried/private anchor receives no public events; the default event radius is1, or the declared recorder radius when present.",
+            "deployment": "Self rules do not all require ground placement. Mechanical solve requires public reachable objects: carried/private nodes and closed-contained nodes do not participate. Finite qualified fuel energy, enabled source, actual reciprocal connections within2 tiles and feasible network load determine real motion.",
+            "fact_ports": "A fact port reads a bound public source within8 tiles of the public anchor; binding requires both actor and anchor range. Binding supplies no motion or permission. Mechanical connect establishes a different relation within2 tiles. Missing/private/closed-contained/distant source facts are unknown; the original binding is retained.",
+            "drive": "drive controls only this instance's existing source. A changed request applies from the following logical step; the current mechanical solve uses the step-start control and fuel snapshot. Neither drive nor start writes energy, speed or position. when=false is not an implicit stop request.",
+            "readback": "Inspect current automatic conditions, bindings and actual fields/matter/mechanical state. A satisfied snapshot condition is not execution evidence; a saved control request records a past change, not repeated activity. Read actual state after the request's applies_from_step. process.steps counts reaction steps only, not all rule execution or goal progress. Another person may change public inputs; re-read the same instance and continue from its real shared consequences."},
         "limits": {"publication_bytes": 24576, "new_publications_per_author_step": publication.MAX_PUBLISH_PER_STEP,
                    "publication_storage": "no small lifetime package/byte cap; metered JSON payloads and actual host storage remain separate",
                    "instances": MAX_INSTANCES, "types_per_package": 8, "materials_per_package": 4, "rules_per_type": 8,
@@ -1340,30 +1377,56 @@ def rule_catalog(ctx, args):
                    "event_journal_bytes": MAX_EVENT_JOURNAL_BYTES,
                    "contact_candidates_per_container": 8, "process_facts_per_step": 164,
                    "instance_admission": "all admitted authored and contact future records must fit 512 changes, 2MiB and164 facts before creating an instance or receiving reactive material; future snapshots/slots/results also fit4 custom materials,8 lots,8KiB"},
-        "definition_shape": {"key": "lowercase_key", "name": "public name", "version": "positive integer", "materials": "local symbol:{name,feedstock:wood|stone|cloth|water,load_per_u:equal feedstock,combustible:boolean,liquid:boolean}; local and imported materials combined at most4",
+        "definition_fields": {"allowed": list(PROGRAM_KEYS), "required": list(PROGRAM_REQUIRED_KEYS),
+            "meaning": "Exact top-level fields accepted by the compiler. version belongs here, never inside a type. materials is optional and defaults to an empty object."},
+        "type_fields": {"allowed": list(TYPE_KEYS), "required": list(TYPE_REQUIRED_KEYS),
+            "exactly_one": ["cost", "cost_u"],
+            "meaning": "Each type requires name and body_material, plus exactly one cost path. cost_u must include a positive quantity of body_material; all input symbols must be actual eligible solid materials at formation."},
+        "definition_shape": {"key": "lowercase_key", "name": "public name", "version": "positive integer; top-level only", "materials": "optional, default {}; local symbol:{name,feedstock:wood|stone|cloth|water,load_per_u:equal feedstock,combustible:boolean,liquid:boolean}; local and imported materials combined at most4. A new object name, appearance or capability does not require a new material; builtin materials can directly name body_material and cost/cost_u inputs",
             "material_imports": "optional alias:{definition_ref:actual immutable published program reference,symbol:declared or imported material symbol}. Pins original identity/physical properties; same display names do not match. References provide neither matter nor permission; consume/produce only actual lots with mass-balanced reactions. Cannot charge imported material.",
             "contact_reactions": "optional top-level [{id,when:boolean_expression,reaction:{op:react,inputs,outputs,rate?:1..10,channel?,mode?:exclusive|independent,heat?:0}}], at most8. Each consumes at least one material declared in this package's materials; conditions only use quantity/concentration of local, imported or builtin symbols. Travels with original canonical material identity into any ordinary container; only its own positive non-burning contained lots minus escrow. Personal backpack itself never reacts; closed internal containers may. Conditions freeze before authored rules; contact runs after authored stages on shared remaining inputs, products next step. Exclusive channels are per definition_ref. Outputs preserve canonical identity and mass. A name, metadata, whole child object, surface lot or imported-only rule does not activate contact.",
-            "types": "symbol:{name,body_material:builtin|local|imported solid symbol, exactly one of cost:{wood:0..4,stone:0..4,cloth:0..4} or cost_u:{solid_symbol:1..200} (total<=200u, actual sources required),components?:{structure?,container?,combustion?,absorbent?,buoyant?,attachment?},ports?:{name:{fields:[typed public facts],label?}},fields?:{name:{type:integer|boolean,default,min?,max?}},container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[]}"},
+            "types": "symbol:{name,body_material:builtin|local|imported solid symbol, exactly one of cost:{wood:0..4,stone:0..4,cloth:0..4} or cost_u:{solid_symbol:1..200} (total<=200u, actual sources required),components?:object matching component_schema,ports?:{name:{fields:[typed public facts],label?}},fields?:{name:{type:integer|boolean,default,min?,max?}},container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[]}"},
+        "component_schema": {"type": "object", "additionalProperties": False, "properties": component_schema,
+            "meaning": "Only these components and fields are authorable. Fields are optional overrides; instance construction supplies existing defaults. supports is derived from actual formed body lots, never an authored field."},
         "public_facts": {name: {"type": fact.type, "component": fact.component, "aggregate": fact.aggregate} for name, fact in PUBLIC_FACTS.items()},
         "new_semantics": {"fuel_uses": "local materials may declare uses:{hearth_fuel?:boolean,mechanical_fuel?:boolean}; true requires combustible non-liquid. Qualification is read from the original immutable definition, not display names or combustible alone. Builtin wood retains its existing mechanical fuel admission; hearth uses actual dry qualified lots.",
-            "physical": "{physical:wetness|burning|surface_water|contained_water|absorbed_water|structure.integrity|structure.max_integrity|load.local|load.total|load.supported|load.limit|load.overload|buoyancy|can_float}; reads real trusted solver state, never program fields or temperature. Missing/inapplicable/hidden facts are unknown; total buoyancy includes attached parts even if root has no buoyant component.",
+            "material_publication": "Local publication defines a new canonical material identity, properties and optional carried behavior; imports pin an existing identity. Neither publication nor import creates usable inventory or reserves feedstock. A future recipe may be published, but cost_u formation requires already existing eligible lots of each exact canonical input, including body_material. Existing builtin material can carry a newly named object's declared capabilities without declaring a new material.",
+            "physical": f"{{physical:{physical_fields}}}; reads real trusted solver state, never program fields or temperature. Names and types come from public_facts keys with the physical. prefix removed. Missing/inapplicable/hidden facts are unknown; total buoyancy includes attached parts even if root has no buoyant component.",
             "ports": "{object:{port:declared_port,field:typed_fact}}; combined ports/literal sources<=8 per instance. bind_port/unbind_port require actual CAS versions and public readable targets within8 tiles of anchor and actor; they are separate from mechanical connect. Unavailable reference retains identity and retries when readable; no auto-rebind. First contract offer pins IDs/binding version/source versions; editing unaccepted bindings clears prior acceptances; active/result contracts cannot switch.",
             "unknown": "ordinary live-fact rules roll back only that declaration and wait; a blocked event declaration rolls back this instance's full declarative batch and retains its cursor to avoid replaying committed prefixes, preserving independently solved mechanics. Barrier unknown conservatively blocks. Event fields are historical; physical/port facts use trusted physical input plus the phase's actual solved mechanics, never another object's uncommitted reaction candidate or event-time physics. Existing after self fields/quantities use its frozen reaction candidate; products feed physical fact reads in a later step.",
             "drive": "{op:drive,enabled:boolean_expression} only controls this object's existing source, at the next simulation step; never writes energy, speed, position, burning or other objects. Later rule failure preserves already solved mechanical results, discarding candidate controls.",
             "fabrication": "read fabrication_options for canonical cost_u and eligible actual own lots; fabricate consumes1..8 exact entity/lot/version/quantity sources in one operation, preserves origins and remainders, binds capacity to actual body lots, creates no material source. Placement inventory, then existing drop/attach actions. Liquid cannot form a rigid body; constructed bodies require a separate disassembly process and cannot be silently consumed."},
-        "mechanical": {"shape": {"role": "source|gear|actuator", "teeth": "1..100", "torque": "1..100", "speed": "1..10", "energy_per_step": "1..100", "load": "0..100", "travel": "1..100", "pitch": "1..10", "load_field?": "integer field range0..100", "speed_field?": "integer field range1..10"},
+        "mechanical": {"shape": {"role": "source|gear|actuator",
+            **{name: f"{minimum}..{maximum}" for name, (minimum, maximum) in MECHANICAL_RANGES.items()},
+            "load_field?": f"integer field range{MECHANICAL_RANGES['load'][0]}..{MECHANICAL_RANGES['load'][1]}",
+            "speed_field?": f"integer field range{MECHANICAL_RANGES['speed'][0]}..{MECHANICAL_RANGES['speed'][1]}"},
+            "required": ["role"], "defaults": dict(MECHANICAL_DEFAULTS),
+            "role_semantics": {
+                "source": {"used_parameters": ["teeth", "torque", "speed", "speed_field", "energy_per_step", "load", "load_field"],
+                    "control": "Only source accepts finite qualified fuel and self drive/start/stop. Drive sets enabled for the following logical solve; it supplies no energy. The network must contain exactly one source, enabled and sufficiently fueled; a second source blocks it even if disabled. energy_per_step is consumed once at that source per successful solve.",
+                    "motion": "Source speed, or its speed_field, establishes angular turns per step. Torque bounds the total reflected network load. Its angle advances, but its own position does not perform actuator travel; travel and pitch do not apply to this role."},
+                "gear": {"used_parameters": ["teeth", "load", "load_field"],
+                    "control": "Passive transmission; it cannot receive fuel or self drive/start/stop and creates no power. Its configured torque, speed/speed_field and energy_per_step do not replace the network source's parameters.",
+                    "motion": "Its signed speed and angle follow the network source through meshed tooth ratios. Its own position stays unchanged; travel and pitch do not apply."},
+                "actuator": {"used_parameters": ["teeth", "load", "load_field", "travel", "pitch"],
+                    "control": "Passive driven output, not a source; it cannot self drive or receive fuel/start/stop. Its configured torque, speed/speed_field and energy_per_step do not supply power or set network speed.",
+                    "motion": "position advances by derived signed turns*pitch, clamped to0..travel; angle still follows angular turns. Reaching or trying to cross either bound reports travel_limit. That bound does not automatically stop the source or stop its energy consumption."},
+                "direction_and_load": "Each meshed link contributes the signed ratio -first.teeth/second.teeth; network path ratios determine each output's direction and speed. Actuator displacement uses that signed result, so angular motion alone does not prove position changed at a bound. Each node contributes its load or load_field times the absolute relative ratio; actuator load additionally multiplies pitch. Multiple sources, contradictory cycles, insufficient source energy or excessive reflected load stall the network and preserve positions."},
             "semantics": "meshed connection ratio=-source.teeth/target.teeth; one source per network, finite qualified fuel energy; reflected total load exceeds torque or contradictory cycle stops whole network retaining position; snapshot then solve then commit; no inertia/gravity/collision/stress"},
         "recorder": {"radius": "0..8", "window_ticks": "1..3600", "semantics": "after activation actual public events only; closed/private objects omitted; occurred_at provenance distinct from logical recorded_tick/read_tick. History and reads share a1536-byte retained window (also at most32 events and16 reads); oldest logical facts/reads leave first, recorded_count remains cumulative."},
         "contract": {"material": "declared, explicitly imported or builtin symbol; custom material identity is the original immutable definition_ref#symbol. Different definitions/authors may use the same original identity through local declaration or explicit import; matching names alone are not equivalent, and imports supply neither matter nor permission", "quantity": "1..100", "duration_ticks": "1..3600", "completion_when?": "boolean expression, delivery quantity still required", "delivery_when?": "boolean expression checked atomically before every delivery; false or unavailable fact refuses with no material transfer. A later change never retroactively permits an earlier refused delivery.", "semantics": "offer establishes participants/terms; each actor accepts own terms; second party actual material delivery; completion permits beneficiary release into their own open material-holding container. Personal backpacks hold whole objects only and cannot receive loose matter; expiry fails and permits actual payer recovery through release. Contract escrow release from a closed source container is a lawful exception; ordinary container loading/unloading still requires opening. No silent or prose consent"},
-        "expressions": {"literals": "boolean|bounded integer|short string", "references": ["{field:name}", "{param:name}", "{quantity:material_symbol}", "{concentration:material_symbol}", "{mechanical:position|speed|angle|status|available_torque|energy}", "{event:kind|action|entity_id|actor|mechanical_position|passable}", "{contract:status|started_event_sequence|deadline_tick|delivered|quantity}", "{object:{id:actual_entity_id,field:intact|barrier.active|barrier.opened_sequence|mechanical.position|mechanical.speed|mechanical.angle|mechanical.energy|mechanical.status}}"],
-            "object_bindings": "Literal IDs are immutable definition bindings, at most 8 distinct IDs. Only actual public objects within 8 tiles of this instance can supply facts; missing, private, closed-contained, distant objects or unsupported capabilities fail explicitly, never default false/zero. Mechanical numbers use integer projection as self references do. barrier.opened_sequence is the server public-event sequence of the actual last blocked-to-passable transition; initially 0. Compare it with this contract's started_event_sequence to require opening after bilateral acceptance.",
+        "expressions": {"literals": "boolean|bounded integer|short string", "references": ["{field:name}", "{param:name}", "{quantity:material_symbol}", "{concentration:material_symbol}", "{mechanical:position|speed|angle|status|available_torque|energy}", "{event:kind|action|entity_id|actor|mechanical_position|passable}", "{contract:status|started_event_sequence|deadline_tick|delivered|quantity}",
+            f"{{physical:{physical_fields}}}", f"{{object:{{id:actual_entity_id,field:{object_fields}}}}}",
+            f"{{object:{{port:declared_port,field:{object_fields}}}}}"],
+            "field_catalog": "public_facts is the shared typed catalog for both object sources. Physical self references use its physical.* keys with the physical. prefix removed; they do not introduce a separate fact catalog.",
+            "object_bindings": "Use exactly one id or port. Literal IDs are immutable definition bindings, at most 8 distinct IDs. Port references require a declared port and a field listed in that port's typed fields. Only actual public objects within 8 tiles of this instance can supply facts; missing, private, closed-contained, distant objects or unsupported capabilities fail explicitly, never default false/zero. Mechanical numbers use integer projection as self references do. barrier.opened_sequence is the server public-event sequence of the actual last blocked-to-passable transition; initially 0. Compare it with this contract's started_event_sequence to require opening after bilateral acceptance.",
             "binary": "{op:eq|ne|lt|lte|gt|gte|add|sub|mul|div|min|max,left:expr,right:expr}", "boolean": "{op:all|any,args:[expr,...]} or {op:not,value:expr}", "concentration": "simplified volume shares percentage of real contained u, not physical chemical units"},
         "rule": "{id,phase:reaction|after,when:boolean_expression,effects:[...]}; phase predicates use snapshot; non-event rules once by id, then events by sequence and rule id within each event; products enter input supply next step, bounded execution",
         "action": "{id,label,parameters?:{name:{type,default,min?,max?}},when?:boolean_expression,effects:[...]}; server reserved charge/fuel/connect/.../accept cannot be overridden",
         "effects": ["{op:set,field:declared_field,value:expr}", "{op:react,inputs:{symbol:1..100},outputs:{symbol:1..100},rate:1..10,heat:-20..20,channel:family,mode:exclusive|independent}", "{op:emit,name:public_signal}", "{op:drive,enabled:boolean_expression}"],
         "reaction": "sum(quantity*load_per_u) must match. Atomic maximal extent/rate/capacity; exclusive same channel substitutes, independent channels compete finite inputs; temperature field receives bounded heat; emitted signal does not prove consent/delivery",
         "steps": ["inspect actual materials first; visible custom lots carry exact material_import {definition_ref,symbol}, copy it into material_imports under a chosen alias. Builtin wood/stone/cloth use their existing symbols. Local materials create new identities, not same-named existing lots; publication creates no matter", "publish immutable definition with definition_publish; a future missing-material recipe may be published, but it cannot yet form an object. New local material production requires an independently constructible carrier, not one that already costs the missing material", "cost_u path: read fabrication_options, obtain eligible actual own lots, then fabricate with exact source entities/versions/lot IDs/u quantities; result enters inventory, use drop/attach to place it. Never use regional resources or content_submit instead", "cost path: claim generation_context layout; actual allowed_tiles/resources/budgets apply; content_submit object {definition_ref,type_id,x,y,name?,description?} pays regional material pieces", "inspect actual actions, source item/lot candidates and versions", "interact store moves a whole child, retaining its own matter; it does not feed the parent's contained reaction inputs", "interact transfer moves an existing lot by item_id/lot_id/amount into target_slot, preserving material identity and source remainder", "rule_action charge consumes a declared symbol's feedstock to prepare that local custom material; it is not transfer or reaction evidence. fuel consumes finite qualified lots; connect links actual objects; another identity can use the same definitions/objects"],
-        "time": "all simulation windows/deadlines use clock.sequence; server downtime pauses, no wall-clock catch-up",
+        "time": "all simulation windows/deadlines use clock.sequence; the background timer targets roughly one-second logical steps, subject to actual service delay and late-timer handling, not per player or model turn; reading/thinking/travel do not pause finite mechanical energy use; server downtime pauses, no wall-clock catch-up",
         "security": "no arbitrary code, owner/position/security writes or author acceptance for other actors; normal human actions do not call a model"})
 
 
@@ -1372,10 +1435,10 @@ def specs():
     return (
         *publication.specs(),
         *fabrication.specs(),
-        FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=3, access="read", description="Discover the bounded creation language and shared physical facts. For immutable publications page definition_list, then definition_read; this static catalog contains no full-history index."),
+        FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=4, access="read", description="Discover the bounded creation language and shared physical facts. For immutable publications page definition_list, then definition_read; this static catalog contains no full-history index."),
         FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=2, access="read", description="Read one immutable definition and its author/hash, with compiled canonical material bindings and consumption/production coefficients; existing instances pin this reference."),
         FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=5, authorize=_member, description="Compile immutable definitions with cost_u actual-source bodies, bounded components/ports/physical conditions and self drive control, or the existing piece cost. Optional local material uses qualifies fuel; material_imports pins original identities. Publication creates no matter, permission or consent. Discover precise shape and bounds with rule_catalog."),
-        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=6, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Bindings need same-observation target/other versions and do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
+        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=7, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Bindings need same-observation target/other versions and do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
         FunctionSpec("grove.control_status", control_status, EMPTY, authorize=_member, access="read", description="Read own current goal and committed action count, without exposing grant token."),
