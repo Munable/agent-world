@@ -26,7 +26,7 @@ CHUNKS = "grove.chunk"
 PROCESSES = "grove.process"
 META = "grove.meta"
 CREATIVE_ACCOUNTING = "grove.creative.accounting"
-CREATIVE_ACCOUNT_REASONS = {"seed", "combustion", "creative_reaction", "creative_charge", "mechanical_fuel"}
+CREATIVE_ACCOUNT_REASONS = {"seed", "combustion", "creative_reaction", "contact_reaction", "creative_charge", "mechanical_fuel"}
 MATERIALS = {key: {"fuel": definition.piece_quantity if definition.combustible else 0}
              for key, definition in REGISTRY.materials.items() if key != "water"}
 CAPABILITIES = {"transport", "container", "blocking", "flammable", "wettable",
@@ -60,6 +60,7 @@ class CandidateBatch:
     meta: dict[str, object] = field(default_factory=dict)
     dirty_meta: set[str] = field(default_factory=set)
     event_journal: dict | None = None
+    contact_admission: bool = False
     records: dict[str, dict] = field(default_factory=dict)
 
 
@@ -542,14 +543,7 @@ def normalize_entity(entity):
     if value["lifecycle"] == "broken":
         caps.append("broken")
     value["capabilities"] = sorted(set(caps))
-    future = set()
-    if components.get("container", {}).get("liquid_capacity", 0) or "collector" in components or "water_source" in components:
-        future.add(("contained", None))
-    for lot_id, portion in components.get("absorbent", {}).get("supports", {}).items():
-        if portion["capacity"] and any(lot["id"] == lot_id for lot in value["matter"]):
-            future.add(("absorbed", lot_id))
-    if "absorbent" in components or any(registry.materials[lot["material"]].combustible for lot in value["matter"]):
-        future.add(("surface", None))
+    future = {(slot, bound) for _, slot, bound in future_water_slots(value, registry)}
     held = {(lot["slot"], lot.get("bound_to")) for lot in value["matter"] if lot["material"] == "water"}
     missing = future-held
     if sum(lot["quantity"] for lot in value["matter"] if lot["material"] == "water" and lot["slot"] in {"surface", "absorbed"}) > sm.MAX_QUANTITY:
@@ -566,6 +560,20 @@ def normalize_entity(entity):
     if sm.encoded_size(value)+reserved_bytes > sm.MAX_ENTITY_BYTES:
         raise RuleViolation("物件记录超过8KiB物理提交预算。")
     return value
+
+
+def future_water_slots(value, registry):
+    """Slots reserved by physical normalization and contact output admission."""
+    components = value["components"]
+    future = set()
+    if components.get("container", {}).get("liquid_capacity", 0) or "collector" in components or "water_source" in components:
+        future.add(("water", "contained", None))
+    for lot_id, portion in components.get("absorbent", {}).get("supports", {}).items():
+        if portion["capacity"] and any(lot["id"] == lot_id for lot in value["matter"]):
+            future.add(("water", "absorbed", lot_id))
+    if "absorbent" in components or any(registry.materials[lot["material"]].combustible for lot in value["matter"]):
+        future.add(("water", "surface", None))
+    return future
 
 
 def store_entity(ctx, entity, expected_version=None):

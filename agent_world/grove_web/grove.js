@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,reactionObservationLines,operationIntentLabel} from './grove-world-ui.js?v=playable-context';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel} from './grove-world-ui.js?v=playable-context';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -553,7 +553,7 @@ function renderSelection(){
   for(const reference of references)$('selection-history').append(node('p','公共贡献 · '+authorLabel(reference.author),'small'));
   renderEffects(entity);
   const lots=matterLots(entity),stats=[stat('本体材质',materialLabel(entity.material,entity))];
-  if(entity.simulation){stats.push(...simulationStats(entity,point()?.backpack_id).map(([label,value])=>stat(label,value)));stats.push(stat('结构与残材',lifecycleLabel(entity)||'结构完整'),stat('材料反应',lots.some(lot=>lot.burning)||(entity.simulation.burning_lots||[]).length?'有批次正在燃烧':'未燃烧'));}
+  if(entity.simulation){stats.push(...simulationStats(entity,point()?.backpack_id).map(([label,value])=>stat(label,value)));stats.push(stat('结构与残材',lifecycleLabel(entity)||'结构完整'),stat('燃烧',lots.some(lot=>lot.burning)||(entity.simulation.burning_lots||[]).length?'有批次正在燃烧':'未燃烧'));}
   else{if(caps(entity).includes('wettable'))stats.push(stat('湿度',finite(s.wetness)));if(caps(entity).includes('flammable'))stats.push(stat('燃料',finite(s.fuel)));if(caps(entity).includes('flammable'))stats.push(stat('火',s.destroyed?'材料已耗尽':s.burning?'正在燃烧':'未燃烧'));}
   if(s.water_capacity>0)stats.push(stat('存水',Number.isFinite(s.water)?s.water+' / '+s.water_capacity:'未公开'));if(caps(entity).includes('container'))stats.push(stat('物件容量',s.capacity),stat('容器',s.open?'敞开':'合上'));if(caps(entity).includes('water_source'))stats.push(stat('可取水',finite(s.water_remaining)));if(caps(entity).includes('ignition'))stats.push(stat('余下点火',Number.isFinite(s.uses)?s.uses:'待读取'));
   if(s.kind==='resource_node'){stats.push(stat('余下原料',finite(s.stock)+' / '+finite(s.stock_capacity)));if(s.regrowth_tick!==null&&s.regrowth_tick!==undefined)stats.push(stat('正在再生','剩 '+Math.max(0,s.regrowth_tick-finite(world.clock?.sequence))+' 个世界逻辑步'));}
@@ -565,7 +565,7 @@ function renderSelection(){
   const location=entityLocation(entity);
   renderTargetChoices(location);
   if(!preserveInputs&&!own&&d>1&&Number.isFinite(location.x)&&Number.isFinite(location.y))$('selection-actions').append(button('走近这件物件',()=>goTo(location.x,location.y,true),{disabled:actionBusy}));
-  if(!inspection||inspection.reading){if(preserveInputs){for(const form of $('selection-actions').querySelectorAll('.descriptor-action'))form.dispatchEvent(new Event('refresh-candidate-preview'));}else{$('selection-actions').append(node('p',inspectionError?([403,404].includes(inspectionErrorStatus)?'当前不可访问：':'')+inspectionError:'正在读取可用行动…',inspectionError?'action-reason':'small'));if(inspectionError)$('selection-actions').append(button('重新读取这件物件',()=>run(()=>select(entity.id,selectedFromBag,true)),{disabled:actionBusy,secondary:true}));}if(inspectionError)$('selection-note').textContent='没有取得当前操作资格。原操作与身份保留；重新读取后再选择。';renderMatter(entity);renderRelatedObjects(entity,actionBusy||!!client.pending());renderCreative(entity,true);return;}
+  if(!inspection||inspection.reading){if(preserveInputs){for(const form of $('selection-actions').querySelectorAll('.descriptor-action'))form.dispatchEvent(new Event('refresh-candidate-preview'));}else{$('selection-actions').append(node('p',inspectionError?([403,404].includes(inspectionErrorStatus)?'当前不可访问：':'')+inspectionError:'正在读取可用行动…',inspectionError?'action-reason':'small'));if(inspectionError)$('selection-actions').append(button('重新读取这件物件',()=>run(()=>select(entity.id,selectedFromBag,true)),{disabled:actionBusy,secondary:true}));}if(inspectionError)$('selection-note').textContent='没有取得当前操作资格。原操作与身份保留；重新读取后再选择。';renderMatter(entity);renderRelatedObjects(entity,actionBusy||!!client.pending(),true);renderCreative(entity,true);return;}
   const available=actionIds(inspection.available_actions);
   const disabled=actionBusy||!near||!!client.pending();
   if(!preserveInputs&&!own&&Number.isFinite(location.x)&&Number.isFinite(location.y))$('selection-actions').append(button('选择这里的地面',()=>selectTile(location),{secondary:true}));
@@ -608,7 +608,9 @@ function renderMatter(entity){
   for(const lot of lots){const row=node('div',undefined,'matter-row'),burning=lot.burning||(entity.simulation?.burning_lots||[]).includes(lot.id);row.append(node('strong',slotLabel(lot.slot)+' · '+materialLabel(lot,entity)),node('span',lot.quantity+' 单位'+(burning?' · 燃烧中':'')));section.append(row);}
   $('selection-content').append(section);
 }
-function renderRelatedObjects(entity,disabled){
+function renderRelatedObjects(entity,disabled,previous=false){
+  const lines=contactObservationLines(entity);
+  if(lines.length){const section=node('section',undefined,'creative-state');section.append(node('h4',previous?'材料接触 · 上次已读状态':'本容器的材料接触'));for(const line of lines)section.append(node('p',line,'small'));$('selection-content').append(section);}
   const children=entity.relations?.children||[];
   if(children.length){const section=node('section',undefined,'contents-list');section.append(node('h4','当前完整子物件与绑定 · '+children.length+' 件'),node('p','这些物件保留自己的身份和材料；其本体不计入父物件的反应投料。','small'));
     for(const child of children){const row=node('div',undefined,'contents-row');row.append(node('span',child.name||child.id),node('small',child.relation==='attached'?'绑定部件':child.relation==='contained'?'容纳物件':String(child.relation||'')),button('查看',()=>run(()=>select(child.id)),{disabled,secondary:true}));section.append(row);}$('selection-content').append(section);}
@@ -636,7 +638,7 @@ function renderCreative(entity,previous=false){
   const creative=creativeState(previous?null:inspection,entity);if(!creative)return;
   const section=node('section',undefined,'creative-state');section.append(node('h4',previous?'规则对象 · 上次已读状态':'规则对象 · 当前事实'),node('p','规则字段、组分、连接与记录来自服务器。逻辑步不是现实经过的秒数，叙述不决定结果。','small'));
   for(const line of reactionObservationLines(creative,entity))section.append(node('p',line,'small'));
-  const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated'].includes(key)));
+  const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated','contact_process'].includes(key)));
   appendFacts(section,expanded,0,entity.id);
   if(creative.hidden===true)section.append(node('p','这个公共容器已合上。当前只读到规则引用，内部配料、运行与记录未公开。','small'));
   const ref=creative.definition_ref;

@@ -5,6 +5,18 @@ import vm from 'node:vm';
 const source=readFileSync(new URL('../agent_world/grove_web/grove-world-ui.js',import.meta.url),'utf8');
 const ui=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
+{
+  const entity={simulation:{contact:{candidate_count:0,process:{status:'waiting',steps:1},last_actual_reactions:[{
+    extent:1,inputs:{'program_original#x':1},outputs:{'program_original#y':2},
+    material_names:{'program_original#x':'旧配料','program_original#y':'新产物'}}]}}};
+  const lines=ui.contactObservationLines(entity);
+  assert.ok(lines.some(line=>line.includes('旧配料 1u')&&line.includes('新产物 2u')));
+  assert.ok(lines.some(line=>line.includes('历史生成量不等于现在库存')));
+  assert.deepEqual(ui.contactObservationLines({}),[]);
+  entity.simulation.contact.reactions=[{condition:{known:false,satisfied:null,error:'除零'}}];
+  assert.ok(ui.contactObservationLines(entity).some(line=>line.includes('无法判断（除零）')));
+}
+
 // The same renderer describes quantities and relationships regardless of names.
 const first={name:'器皿',matter:[{id:'body',material:'stone',quantity:40,slot:'body'},
   {id:'water',material:'water',quantity:4,slot:'contained'}],state:{wetness:0},

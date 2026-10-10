@@ -601,6 +601,32 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(versions["entity"]["own-source"], 5)
         self.assertEqual(original, unchanged)
 
+    def test_action_receipt_marks_consumed_commit_lots_without_replacing_evidence(self):
+        committed = {"id": "tray", "version": 3, "matter": [
+            {"material": "salt", "slot": "contained", "quantity": 2, "lot_id": "used-salt"},
+            {"material": "glue", "slot": "contained", "quantity": 2, "lot_id": "old-glue"}]}
+        current = {"id": "tray", "version": 4, "matter": [
+            {"material": "glue", "slot": "contained", "quantity": 1},
+            {"material": "brick", "slot": "contained", "quantity": 1}]}
+        base = self.session.present_agent_result("grove.inspect", {"entity": committed})["observation_id"]
+        original = {"operation_id": "transfer", "commit_seq": 44, "result": {"entity": committed},
+                    "execution_readback": {"entities": [current]}}
+        unchanged = deepcopy(original)
+        delivered = self.session.present_agent_result("grove.interact", original, base_id=base)
+        entity = delivered["result"]["entity"]
+        self.assertEqual(entity["matter"], committed["matter"])
+        projection = entity["snapshot_projection"]
+        self.assertEqual(projection["scope"], "committed_operation_snapshot")
+        self.assertEqual(projection["superseded_by_readback"], {
+            "version": 4, "entity_ref": "#/execution_readback/entities/0"})
+        self.assertEqual(delivered["read_requests"][0], {
+            "tool": "grove_inspect", "arguments": {"entity_id": "tray"}})
+        self.assertEqual(delivered["action_snapshot_projection"]["changed_entity_ids"], ["tray"])
+        self.assertEqual(delivered["execution_readback"]["entities"][0]["matter"], current["matter"])
+        self.assertEqual(self.session.agent_observation(delivered["observation_id"])["versions"]["entity"]["tray"], 4)
+        self.assertEqual(self.session.agent_observation(base)["versions"]["entity"]["tray"], 3)
+        self.assertEqual(original, unchanged)
+
     def test_action_delta_keeps_explicit_target_and_never_binds_omitted_changes(self):
         old = [{"id": f"nearby-{index}", "version": 1} for index in range(20)]
         base = self.session.present_agent_result("map.viewport", {"entities": old})["observation_id"]

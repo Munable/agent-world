@@ -103,7 +103,8 @@ def needs_physics(ctx, entity, objects, registry):
     if m.is_ground(entity) and "absorbent" in entity["components"] and m.tile_at(ctx, entity["x"], entity["y"]) == "water" and sm.absorption_targets(entity, objects):
         _, sources = m.region_resources(ctx, *m.chunk_for(entity["x"], entity["y"]))
         contact = any(sm.quantity(source, "water", "contained") for source in sources)
-    return bool(contact or sm.quantity(entity, "water", "absorbed") or sm.quantity(entity, "water", "surface")
+    from .contact import candidates
+    return bool(contact or candidates(ctx, entity) or sm.quantity(entity, "water", "absorbed") or sm.quantity(entity, "water", "surface")
                 or any(lot.get("burning") for lot in entity["matter"])
                 or entity["components"].get("heater", {}).get("lit")
                 or overload)

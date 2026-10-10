@@ -236,12 +236,12 @@ def material_identity(entity, symbol):
         symbol, program["definition_ref"] + "#" + symbol)
 
 
-def contained_quantities(entity, *, symbolic=True):
+def contained_quantities(entity, *, symbolic=True, include_burning=True):
     values = {}
     prefix = entity["state"].get("program", {}).get("definition_ref", "") + "#"
     aliases = {identity: alias for alias, identity in entity["state"].get("program", {}).get("material_aliases", {}).items()}
     for lot in entity["matter"]:
-        if lot["slot"] != "contained":
+        if lot["slot"] != "contained" or (not include_burning and lot.get("burning", False)):
             continue
         key = lot["material"]
         if symbolic:
@@ -251,20 +251,19 @@ def contained_quantities(entity, *, symbolic=True):
 
 
 
-def reaction_available_quantities(entity, *, supply=None):
+def reaction_available_quantities(entity, *, supply=None, symbolic=True):
     """Actual non-burning contents minus escrow, optionally limited to phase input.
 
     A phase supplies its frozen input balance, excluding same-step products.
     An observation omits it to describe current inputs without granting execution.
     """
-    usable = {**entity, "matter": [lot for lot in entity["matter"] if not lot.get("burning", False)]}
-    actual = contained_quantities(usable)
+    actual = contained_quantities(entity, symbolic=symbolic, include_burning=False)
     offered = actual if supply is None else supply
     available = {key: min(amount, actual.get(key, 0)) for key, amount in offered.items()}
     contract = entity["state"].get("program", {}).get("contract", {})
     reserved = max(0, contract.get("delivered", 0)-contract.get("released", 0))
     if reserved:
         for symbol in available:
-            if material_identity(entity, symbol) == contract.get("material"):
+            if (material_identity(entity, symbol) if symbolic else symbol) == contract.get("material"):
                 available[symbol] = max(0, available[symbol]-reserved)
     return available

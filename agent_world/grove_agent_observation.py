@@ -234,7 +234,7 @@ def _companion_scene_index(scene):
                 # of transferable lots. Never manufacture lot IDs from it.
                 if isinstance(entity.get("matter"), list):
                     row["matter"] = [{key: deepcopy(lot[key]) for key in
-                        ("material", "slot", "quantity", "role", "burning") if key in lot}
+                        ("material", "material_name", "slot", "quantity", "role", "burning") if key in lot}
                         for lot in entity["matter"] if isinstance(lot, dict)]
                     quantities = entity.get("material_quantity")
                     row["matter_unit"] = (quantities.get("unit", "logical_matter")
@@ -242,6 +242,13 @@ def _companion_scene_index(scene):
                 elif "material_quantity" in entity:
                     row["material_quantity"] = deepcopy(entity["material_quantity"])
                 creative = entity.get("creative")
+                contact = entity.get("simulation", {}).get("contact")
+                if isinstance(contact, dict):
+                    process = contact.get("process") or {}
+                    row["contact"] = {"candidate_count": contact.get("candidate_count", 0),
+                        "status": process.get("status", "waiting"), "steps": process.get("steps", 0),
+                        "process_is_history": contact.get("process_is_history", True),
+                        "read_request": {"function": "grove.inspect", "arguments": {"entity_id": entity["id"]}}}
                 if isinstance(creative, dict):
                     row["creative"] = {key: deepcopy(creative[key]) for key in
                         ("definition_ref", "type_id") if key in creative}
@@ -709,7 +716,49 @@ def _companion_action_projection(result, *, base_id=None, versions=None, entity_
                 if suffix.isdigit() and int(suffix) < len(rows):
                     public["entities"][index] = rows[int(suffix)]
         public.pop("readback_projection", None)
-    result["read_requests"] = [{"tool": "map_viewport", "arguments": {}}]
+    # A timer or another actor can change an object between commit and readback.
+    # Preserve both facts, but do not present committed lots as current inputs.
+    current = {}
+    for field in ("entities", "inventory"):
+        entries = compact.get(field, [])
+        entries = entries if isinstance(entries, list) else []
+        for index, row in enumerate(entries):
+            if isinstance(row, dict) and isinstance(row.get("id"), str):
+                current[row["id"]] = (row, f"#/execution_readback/{field}/{index}")
+    selected = compact.get("selected_inspection", {})
+    if isinstance(selected, dict) and isinstance(selected.get("entity"), dict):
+        row = selected["entity"]
+        if isinstance(row.get("id"), str):
+            current[row["id"]] = (row, "#/execution_readback/selected_inspection/entity")
+    reads = {}
+    for entity in [value.get("entity"), *direct]:
+        if (not isinstance(entity, dict) or not isinstance(entity.get("id"), str) or
+                entity["id"] not in current):
+            continue
+        row, reference = current[entity["id"]]
+        old_version, current_version = entity.get("version"), row.get("version")
+        if (type(old_version) is not int or type(current_version) is not int or
+                old_version <= 0 or current_version <= 0 or old_version == current_version):
+            continue
+        request = {"tool": "grove_inspect", "arguments": {"entity_id": entity["id"]}}
+        entity["snapshot_projection"] = {
+            "scope": "committed_operation_snapshot",
+            "superseded_by_readback": {"version": current_version, "entity_ref": reference},
+            "read_request": request,
+            "meaning": "These quantities, lots and action inputs describe the original commit, not "
+                       "current availability. The later readback supersedes current-state assumptions; "
+                       "its summaries are not transferable lot choices. Inspect this object again before "
+                       "another material action and use the returned observation_id."}
+        reads[entity["id"]] = request
+    result["read_requests"] = [*reads.values(), {"tool": "map_viewport", "arguments": {}}]
+    if reads:
+        result["action_snapshot_projection"] = {
+            "scope": "committed_result_with_later_readback",
+            "changed_entity_ids": list(reads),
+            "meaning": "result retains the action's committed state; execution_readback is a later "
+                       "authorized read. Listed objects changed between them. Do not reuse old lots "
+                       "or action candidates; use these read_requests for exact current inputs, "
+                       "referencing this response's observation_id as base_observation_id."}
     return result
 
 

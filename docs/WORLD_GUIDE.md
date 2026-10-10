@@ -1,6 +1,6 @@
 # 面向玩家与 Agent 的世界说明书
 
-复核：2026-10-08。说明书服务[Shared Grove（溪源）](SHARED_GROVE.md)的人与自己的Agent／外部工具，不产生权限、物件或世界效果。当前使用0.26.0冻结候选，最终包安装probe通过；普通模拟人已完成真实Agent定义的混合器合同组合执行，Agent自主完整体验未通过。旧0.24／0.25入口和证据保留各自范围，不是本轮新功能的通过结论。
+复核：2026-10-10。说明书服务[Shared Grove（溪源）](SHARED_GROVE.md)的人与自己的Agent／外部工具，不产生权限、物件或世界效果。当前研发、可体验入口与实际验收状态统一见[当前研发记录](SHARED_GROVE.md#当前研发记录)；历史模型、模拟人、网页与包检查各自保留适用范围，不能代替当前完整体验。
 
 ## 目的与责任
 
@@ -38,7 +38,9 @@
 
 页面显示服务器给出的动作、候选物件／物质批次、数量上限和拒绝原因。配方消耗实际原料数量，可以投入一件物料的部分，余量留在原对象；拆卸只退回仍存在的投入，燃烧或消耗的物質不返。闭容器内容不可用外部描述推知。
 
-装入整件物品（store）保留子物件的身份和自身材料，不把它的本体变成容器配料。转移材料（transfer）选择来源物件、实际批次和数量，将已有材料转到目标材料槽，余量保留。制备已声明材料（charge）则消耗该材料定义中的原料，转换成声明材料；它不是转移，也不能作为反应已发生的证据。网页与Agent读取同一组选项、原料和版本。
+装入整件物品（store）保留子物件的身份和自身材料，不把它的本体变成容器配料。转移材料（transfer）选择来源物件、实际批次和数量，将已有材料转到目标材料槽，余量保留。制备已声明材料（charge）只在该定义的实际容器实例上，消耗指定来源的feedstock并等量制备本包声明材料；普通容器不提供这个制备能力。发表定义不产生材料，创建实例也不自动制备；普通容器接收到真实声明材料批次后才检查接触反应。制备不是转移，也不能作为反应已发生的证据。网页与Agent读取同一组选项、原料和版本。规则目录的`builtin_materials`给出真实每u载荷，反应系数须按它守恒，不能改固定物性来凑配比。
+
+新材料可以在原不可变规则包的顶层声明 `contact_reactions`，把守恒接触反应带进普通容器，详细格式由 `grove.rule_catalog` 给出。至少消耗一种该包自定义材料，仅按自身容纳槽的真实数量／浓度判断；不消耗个人背包本体、表面、相邻物件或完整子物件，合同托管与燃烧批次不可用。关闭容器仍内部反应，开启是装卸和公开读取的边界，不是停止开关。旧设备反应、机械、after 之后结算接触；条件冻结、各声明共享剩余输入、产物下一逻辑步参与。原料不足就等待，不会自己生出材料。详情分开显示当前配比／缺料与上次实际消耗／生成；跨作者须引用真实 `definition_ref#symbol`，名称相同不代表同一材料。接收前预留后续产物的物性、槽位、记录与完整步预算，不能在收到材料后卡住全世界。所有接触候选含可达后续产物最多8条，保守预留输出槽并集；因此耗尽输入后恰好腾槽的边界组合也可能在入料时被拒绝。非法接触候选原子保留本容器原料，旧设备已经成立的本步结果保留。
 
 公共内容页面区分发表时说明、当前锚点和已发生结果；近期页不代表全部历史。雨、反应、机械、记录窗口和合同期限按世界逻辑tick推进，服务器停机世界暂停、重启接续，不追赶墙钟。它们不是日常任务或体验进度。沿你的意图、探索发现、成本行动、真实后果和另一人的接续观察，不要求凑够轮数。
 
@@ -75,11 +77,11 @@ Shared Grove按能力提供取放、开关、存取、物质转移、点燃、�
 
 反应说明实际量、原料残余、原子extent与容量；不同反应竞争来源，同family替代反应排他，本步产物在后续逻辑步才参与。机械说明一网络一source、齿数／方向比、扭矩、有限木燃料能量、负载／行程，统一冻结快照、求解、提交；循环／双source／过载／耗尽保持位置停转，不宣称惯性、重力或碰撞应力。合法有界`load_field / speed_field`可作为机械输入；规则能读取机械／事件状态，但不能写owner、position或security，机械位置仅solver写。
 
-规则引用另一物件时，用`{object:{id:真实物件ID,field:允许公开路径}}`把ID固定在不可变定义中，整包最多8个，只能读anchor周围8 tile内public对象；missing／private／closed／distant明确报missing。固定路径为`intact`、`barrier.active`（bool），`barrier.opened_sequence`、`mechanical.position / speed / angle / energy`（integer），以及`mechanical.status`（string）。self可读`{contract:status|started_event_sequence|deadline_tick|delivered|quantity}`。reactor／contract用`definition_ref#symbol`自定义材料须来自同包types；没有exclusive反应来源谓词，材料名不证明来源，须核对真实反应回执与正常transfer链。
+规则引用另一物件时，用`{object:{id:真实物件ID,field:允许公开路径}}`把ID固定在不可变定义中，整包最多8个，只能读anchor周围8 tile内public对象；missing／private／closed／distant明确报missing。固定路径为`intact`、`barrier.active`（bool），`barrier.opened_sequence`、`mechanical.position / speed / angle / energy`（integer），以及`mechanical.status`（string）。self可读`{contract:status|started_event_sequence|deadline_tick|delivered|quantity}`。reactor／contract的材料须由本地声明或显式`material_imports`引入本包，身份按原始`definition_ref#symbol`核对；导入不产生实物。没有exclusive反应来源谓词，材料名不证明来源，须核对真实反应回执与正常transfer链。
 
 运行中的声明越界仅将该实例标为`process.error`，不停止整个世界。真实字段错误需通过合法已声明动作修复，或发表新版本并创建新实例；不能修改已发表版本或悄悄升级旧对象。记录器只记录启用后半径和`window_ticks`内的真实公共journal；occurred／recorded／read_by分开。合同的`completion_when`是服务器实际条件，并结合真实材料交付；托管材料不能被规则反应消费，作者不能代另一actor接受。`duration_ticks`按世界逻辑钟，停机不令合同在墙钟上赶完或超时。
 
-交付条件`contract.delivery_when`可选，每次交付当场由服务器原子检查；false或不可读取时拒绝且不扣材料。`barrier.opened_sequence`初值0，只记录真实blocked→passable转变的公共event sequence，与合同started_event_sequence比较可排除生效前旧开桥及没有新变化的持续通行；事件中的`mechanical_position / passable`是typed事实。当前现场已验证关桥拒绝不扣材料及停机后2u交付完成；运行中仅StateConflict，旧开桥／不变持续运动拒绝未完成现场验证，不由规则表述或确定性检查补写现场通过。
+交付条件`contract.delivery_when`可选，每次交付当场由服务器原子检查；false或不可读取时拒绝且不扣材料。`barrier.opened_sequence`初值0，只记录真实blocked→passable转变的公共event sequence，与合同started_event_sequence比较可排除生效前旧开桥及没有新变化的持续通行；事件中的`mechanical_position / passable`是typed事实。具体现场已验证与未验证项统一见[当前研发记录](SHARED_GROVE.md#当前研发记录)，不由规则表述或确定性检查补写现场通过。
 
 结构破损只处理实际容纳／绑定关系：仍完整的外层容器不能被内层破损穿透，私人边界不能变成地面公开，剩余材料仍按自身性质反应。释放空间及物理闭包在准入时预留，释放保持原物件ID。旧0.24／0.25检查只说明旧范围；新增声明／机械／记录／合同的检查与实际行动按各自证据记录，不由局部结果推定完整通过，状态见 [当前研发记录](SHARED_GROVE.md#当前研发记录)。
 
@@ -111,4 +113,4 @@ Agent围绕用户的问题给少量实质不同且符合事实的方向，并解
 
 ## 当前适用范围
 
-本说明用于显式委托、有界声明程序及共同事实的当前合同，不搬入旧原型的职业、骰子、固定剧情或裁判角色。旧0.24／0.25的材料链、模型、浏览器与恢复证据保留各自范围。当前0.26.0候选世界8900、A8901、B8902使用独立`creative-rules`库与各自私人连接器资料，旧库与服务保护；启动／恢复参数见[SHARED_GROVE](SHARED_GROVE.md)。最终包安装probe与普通模拟人的混合器合同组合执行通过，原合同complete、delivered2及记录读取成立；机械v1开闭／扭矩错误、B接受后推理超时保留，Agent自主完整目标未通过。新对象共享默认比例fallback、既有皮肤本地保留，完整上传未实现；真人趣味、移动端、跨机器与负载仍未验证，历史最佳仍为0.24。完整状态见 [当前研发记录](SHARED_GROVE.md#当前研发记录)。
+本说明用于显式委托、有界声明程序及共同事实的当前合同，不搬入旧原型的职业、骰子、固定剧情或裁判角色。入口、启动／恢复参数与验收结论统一见[当前研发记录](SHARED_GROVE.md#当前研发记录)。旧0.24／0.25及早期0.26的材料链、模型、浏览器与恢复证据只覆盖当时场景。新对象共享默认比例fallback、既有皮肤本地保留，完整上传未实现；真人趣味、真实移动设备、跨机器、多CLI与完整自然目标稳定完成仍须独立验证。

@@ -28,6 +28,25 @@ export function materialLabel(value,entity){
 }
 export const slotLabel=value=>slotLabels[value]||String(value||'未标明');
 
+export function contactObservationLines(entity){
+  const contact=entity?.simulation?.contact;if(!contact)return [];
+  const process=contact.process||{},lines=['材料接触 · '+({running:'已发生反应',waiting:'等待材料或条件',error:'上次反应未成立'}[process.status]||'等待材料或条件')+' · 已成立 '+(process.steps||0)+' 步'];
+  if(process.error)lines.push('上次失败：'+process.error);
+  for(const reaction of contact.reactions||[]){
+    const names=Object.fromEntries(Object.values(reaction.material_bindings||{}).map(binding=>[binding.material_id,binding.name]));
+    const label=id=>names[id]||materialLabel(id,entity);
+    lines.push('当前配比：'+Object.entries(reaction.inputs_per_extent||{}).map(([id,n])=>label(id)+' '+n+'u').join(' + ')+' → '+Object.entries(reaction.outputs_per_extent||{}).map(([id,n])=>label(id)+' '+n+'u').join(' + '));
+    const condition=reaction.condition||{},conditionText=condition.known===false?'无法判断'+(condition.error?'（'+condition.error+'）':''):condition.satisfied?'满足':'未满足';
+    lines.push('当前条件：'+conditionText+'；可用 '+Object.entries(reaction.available||{}).map(([id,n])=>label(id)+' '+n+'u').join('，'));
+    const missing=Object.entries(reaction.missing_for_one_extent||{}).filter(([,n])=>n>0);if(missing.length)lines.push('一次反应还缺：'+missing.map(([id,n])=>label(id)+' '+n+'u').join('，'));
+  }
+  for(const actual of contact.last_actual_reactions||[]){
+    const label=id=>actual.material_names?.[id]||materialLabel(id,entity);
+    lines.push('上次真实消耗：'+Object.entries(actual.inputs||{}).map(([id,n])=>label(id)+' '+n+'u').join('，')+'；生成 '+Object.entries(actual.outputs||{}).map(([id,n])=>label(id)+' '+n+'u').join('，'));
+  }
+  lines.push('只处理本容器自身配料；整件子物件不混入。产物下一逻辑步可继续反应，历史生成量不等于现在库存。');return lines;
+}
+
 export function matterLots(entity){
   const lots=Array.isArray(entity?.matter)?entity.matter:[];
   return lots.filter(lot=>lot&&typeof lot==='object'&&Number.isInteger(lot.quantity)&&lot.quantity>=0);

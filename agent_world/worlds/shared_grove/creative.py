@@ -64,6 +64,8 @@ def _check_instance_capacity(ctx, ids):
     from . import activity as physical
     from .definitions import MAX_CUSTOM_MATERIALS
     from .generation import MAX_CONTENT_BYTES, MAX_OUTCOME_BYTES
+    from .generation import MAX_OUTCOMES_PER_STEP
+    from . import contact
 
     changes = (sm.MAX_FRAME_OBJECTS + physical.MAX_FRAME_CHUNKS + 4
                + physical.MAX_PROCESSES + physical.MAX_FRAME_META)
@@ -75,6 +77,7 @@ def _check_instance_capacity(ctx, ids):
     # Public content roots/outcomes follow the physical flush. Custom burning
     # lots have their own accounting rows rather than a shared built-in index.
     physical_facts = sm.MAX_FRAME_OBJECTS + physical.MAX_EVENTS
+    total_facts = physical_facts
     burning_accounts = physical.MAX_BURNING_ENTITIES * MAX_CUSTOM_MATERIALS
     changes += physical.MAX_FRAME_CHUNKS + physical_facts + burning_accounts + 2
     journal = ctx.get_state(m.META, "creative_events", {"sequence": 0, "events": []})
@@ -84,6 +87,10 @@ def _check_instance_capacity(ctx, ids):
              + max(sm.encoded_size(journal), MAX_EVENT_JOURNAL_BYTES) + MAX_EVENT_JOURNAL_BYTES
              + 2 * m.MAX_META_BYTES)
     accounts = set()
+    builtin_accounts = {category: set(activity.meta_get(ctx, "matter_accounting", {}).get(category, {}))
+                        for category in ("sinks", "sources")}
+    authored_outputs = {}
+    admitted = {}
     for eid in ids:
         entity = m.get_entity(ctx, eid, required=False)
         if not entity or entity["lifecycle"] != "intact" or entity["state"].get("retired"):
@@ -91,30 +98,51 @@ def _check_instance_capacity(ctx, ids):
         _, spec = _type(ctx, entity)
         if spec is None:
             continue
+        admitted[eid] = entity
         reactions = False
         for rule in spec["rules"]:
             for effect in rule["effects"]:
                 if effect["op"] != "react":
                     continue
                 reactions = True
+                authored_outputs.setdefault(eid, set()).update(_material(entity, symbol) for symbol in effect["outputs"])
                 for category, amounts in (("sinks", effect["inputs"]), ("sources", effect["outputs"])):
                     for symbol in amounts:
                         identity = _material(entity, symbol)
                         if "#" in identity:
-                            accounts.add((category, identity))
+                            accounts.add((category, identity, "creative_reaction"))
         contract = int("contract" in spec)
         facts = max(int(reactions) + int("mechanical" in spec) + contract,
                     int(bool(spec["rules"]) or "barrier" in spec) + contract)
         changes += facts
+        total_facts += facts
         size += facts * MAX_OUTCOME_BYTES
         if "recorder" in spec:
             record = ctx.get_state(RECORDS, eid, {"history": [], "reads": []})
             changes += 1
             size += max(sm.encoded_size(record), MAX_RECORD_BYTES) + MAX_RECORD_BYTES
+    objects, _ = physical.physical_closure(ctx, list(admitted.values()))
+    contact_reservations = contact.reserve_forest(ctx, objects, authored_outputs=authored_outputs)
+    for entity in objects.values():
+        rows = contact_reservations[entity["id"]]
+        if not rows:
+            continue
+        # One container fact carries all of its at-most-eight applications.
+        total_facts += 1
+        changes += 1
+        size += MAX_OUTCOME_BYTES
+        for row in rows:
+            for category, group in (("sinks", "inputs"), ("sources", "outputs")):
+                for identity in row["reaction"][group]:
+                    if "#" in identity:
+                        accounts.add((category, identity, "contact_reaction"))
+                    else:
+                        builtin_accounts[category].add(identity + ":contact_reaction")
     changes += len(accounts)
     size += len(accounts) * ACCOUNT_HISTORY_BYTES
-    if changes > MAX_COMMIT_CHANGES or size > MAX_COMMIT_BYTES:
-        raise RuleViolation("声明物件组合超过完整物理步的提交容量；现有物件继续运行，本次实例创建未提交。")
+    if (any(len(keys) > 32 for keys in builtin_accounts.values()) or total_facts > MAX_OUTCOMES_PER_STEP
+            or changes > MAX_COMMIT_CHANGES or size > MAX_COMMIT_BYTES):
+        raise RuleViolation("活动物件组合超过完整物理步的提交容量；现有物件继续运行，本次入料或创建未提交。")
 
 
 def step(ctx):
@@ -188,7 +216,7 @@ def definition_publish(ctx, args):
         definition = compile_program(proposed, materials=REGISTRY.materials, body_materials=BODY_MATERIALS,
                                      max_custom_materials=MAX_CUSTOM_MATERIALS, imported_materials=resolved)
     except ValueError as exc:
-        raise RuleViolation(str(exc)) from exc
+        raise RuleViolation("定义未发表，世界没有改变：" + str(exc)) from exc
     encoded = json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     if len(encoded) > 24576:
         raise RuleViolation("规则包超过24KiB，请拆成更小的实际能力包。")
@@ -366,7 +394,7 @@ def _put(entity, material, amount):
 def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=None, accounts=None, supply=None, objects=None):
     changed, reactions = False, []
     channels = set() if channels is None else channels
-    supply = deepcopy(_quantities(entity)) if supply is None else supply
+    supply = _quantities(entity, include_burning=False) if supply is None else supply
     def account(category, material, amount):
         if accounts is None:
             commit.record_account(ctx, category, material, amount, "creative_reaction")
@@ -513,6 +541,10 @@ def tick(ctx):
         activity.meta_set(ctx, "creative_instances", list(objects))
     specs = {eid: _type(ctx, entity)[1] for eid, entity in objects.items()}
     original = deepcopy(objects)
+    from . import contact
+    physical_objects, _ = activity.physical_closure(ctx)
+    contact_original = {eid: deepcopy(entity) for eid, entity in physical_objects.items()
+                        if contact.candidates(ctx, entity)}
     journal_sequence = ctx.get_state(m.META, "creative_events", {"sequence": 0})["sequence"]
     events, pending_accounts, phase_supply = {}, {}, {}
     outcomes = []
@@ -529,6 +561,7 @@ def tick(ctx):
         if "mechanical" in program:
             program["mechanical"].update(speed=0, status="program_error", enabled=False)
         pending_accounts[eid] = {}
+        phase_supply[eid] = _quantities(original[eid], include_burning=False)
         outcomes[:] = [item for item in outcomes if item[0] != eid]
         outcomes.append((eid, "program_error", "该物件规则暂停：" + str(error)[:120]))
 
@@ -538,7 +571,7 @@ def tick(ctx):
         event = relevant[-1] if relevant else None
         events[eid] = relevant
         pending_accounts[eid] = {}
-        phase_supply[eid] = deepcopy(_quantities(entity))
+        phase_supply[eid] = _quantities(entity, include_burning=False)
         if state["process"]["status"] == "error":
             continue
         try:
@@ -629,6 +662,18 @@ def tick(ctx):
         # after/physical feedback does not move contract completion earlier.
         if _contract_update(ctx, entity, spec, events[eid], objects=original):
             outcomes.append((eid, "contract", "契约依据真实交付和逻辑期限形成结果。"))
+    # Existing authored stages retain their order and frozen views. Contact
+    # comes last, sharing their remaining original inputs, never their products.
+    for eid, snapshot in sorted(contact_original.items()):
+        entity = objects.get(eid, physical_objects[eid])
+        supply = ({symbol if "#" in symbol else _material(snapshot, symbol): amount for symbol, amount in phase_supply[eid].items()}
+                  if eid in phase_supply else _quantities(snapshot, symbolic=False, include_burning=False))
+        candidate, entries, outcome = contact.settle(ctx, entity, snapshot, supply, step(ctx))
+        objects[eid] = candidate
+        original.setdefault(eid, snapshot)
+        pending_accounts["contact:" + eid] = entries
+        if outcome and _public_location(ctx, candidate) is not None and candidate["state"]["open"]:
+            outcomes.append(outcome)
     accounts = {}
     for entries in pending_accounts.values():
         for key, amount in entries.items():
@@ -685,6 +730,9 @@ def rule_action(ctx, args):
         raise RuleViolation("规则物件已破损或耗尽。")
     pack, spec = _type(ctx, entity)
     if not spec:
+        if args["action"] == "charge":
+            raise RuleViolation("普通物件没有本地声明材料的制备规则。charge需已发表定义的实际容器实例，消耗feedstock制备其声明材料；"
+                "可用generation_context的layout创建该定义中的容器类型。普通容器只对转入的已有材料批次结算接触反应，feedstock不等于新材料。")
         raise RuleViolation("此物件没有可执行的声明规则。")
     program, action = entity["state"]["program"], args["action"]
     summary = ""
@@ -1040,15 +1088,19 @@ def rule_catalog(ctx, args):
         pack = ctx.get_state(DEFINITIONS, ref)
         definitions.append({"definition_ref": ref, "author": pack["author"], "key": pack["definition"]["key"],
                             "version": pack["definition"]["version"], "types": {key: {"name": kind["name"], "cost": kind["cost"]} for key, kind in pack["definition"]["types"].items()}})
-    return FunctionOutcome({"language_version": 1, "definitions": definitions, "world_tick": step(ctx),
+    return FunctionOutcome({"language_version": 2, "definitions": definitions, "world_tick": step(ctx),
+        "builtin_materials": {key: {"name": value.name, "load_per_u": value.load_per_u,
+            "combustible": value.combustible, "liquid": value.liquid} for key, value in REGISTRY.materials.items()},
         "phase_policy": declaration_semantics({"types": {}})["phase_policy"],
         "limits": {"packages": MAX_DEFINITIONS, "instances": MAX_INSTANCES, "types_per_package": 8, "materials_per_package": 4, "rules_per_type": 8,
                    "effects_per_rule": 8, "expression_depth": 8, "expression_nodes": 64, "links_per_object": MAX_LINKS, "records_per_object": MAX_RECORDS,
                    "record_bytes_per_object": MAX_RECORD_BYTES, "event_bytes": MAX_EVENT_BYTES,
                    "event_journal_bytes": MAX_EVENT_JOURNAL_BYTES,
-                   "instance_admission": "types' combined future physical-step records must fit 512 changes and 2MiB before instance creation; definition publication alone consumes no execution slot"},
+                   "contact_candidates_per_container": 8, "process_facts_per_step": 164,
+                   "instance_admission": "all admitted authored and contact future records must fit 512 changes, 2MiB and164 facts before creating an instance or receiving reactive material; future snapshots/slots/results also fit4 custom materials,8 lots,8KiB"},
         "definition_shape": {"key": "lowercase_key", "name": "public name", "version": "positive integer", "materials": "local symbol:{name,feedstock:wood|stone|cloth|water,load_per_u:equal feedstock,combustible:boolean,liquid:boolean}; local and imported materials combined at most4",
             "material_imports": "optional alias:{definition_ref:actual immutable published program reference,symbol:declared or imported material symbol}. Pins original identity/physical properties; same display names do not match. References provide neither matter nor permission; consume/produce only actual lots with mass-balanced reactions. Cannot charge imported material.",
+            "contact_reactions": "optional top-level [{id,when:boolean_expression,reaction:{op:react,inputs,outputs,rate?:1..10,channel?,mode?:exclusive|independent,heat?:0}}], at most8. Each consumes at least one material declared in this package's materials; conditions only use quantity/concentration of local, imported or builtin symbols. Travels with original canonical material identity into any ordinary container; only its own positive non-burning contained lots minus escrow. Personal backpack itself never reacts; closed internal containers may. Conditions freeze before authored rules; contact runs after authored stages on shared remaining inputs, products next step. Exclusive channels are per definition_ref. Outputs preserve canonical identity and mass. A name, metadata, whole child object, surface lot or imported-only rule does not activate contact.",
             "types": "symbol:{name,body_material:wood|stone|cloth,cost:{wood:0..4,stone:0..4,cloth:0..4},fields?:{name:{type:integer|boolean,default,min?,max?}},container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[]}"},
         "mechanical": {"shape": {"role": "source|gear|actuator", "teeth": "1..100", "torque": "1..100", "speed": "1..10", "energy_per_step": "1..100", "load": "0..100", "travel": "1..100", "pitch": "1..10", "load_field?": "integer field range0..100", "speed_field?": "integer field range1..10"},
             "semantics": "meshed connection ratio=-source.teeth/target.teeth; one source per network, finite wood fuel energy; reflected total load exceeds torque or contradictory cycle stops whole network retaining position; snapshot then solve then commit; no inertia/gravity/collision/stress"},
@@ -1068,10 +1120,10 @@ def rule_catalog(ctx, args):
 
 def specs():
     return (
-        FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, access="read", description="Discover the exact bounded program language, published immutable definitions, physical semantics and actual publication path."),
+        FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=2, access="read", description="Discover the exact bounded program language, builtin material unit loads, published immutable definitions, physical semantics and actual publication path."),
         FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=2, access="read", description="Read one immutable definition and its author/hash, with compiled canonical material bindings and consumption/production coefficients; existing instances pin this reference."),
-        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=3, authorize=_member, description="Compile and publish bounded immutable conditions, actions, reactions, processes and relations, returning actual canonical material bindings and consumption/production coefficients. Optional material_imports pins an existing published definition_ref/symbol's original material identity and properties; at most4 local/imported materials combined. No matter, ownership or consent created; mass-balanced reactions use actual lots."),
-        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=4, authorize=_member, description="Use published actions and finite resources with current inspect options, conditions and versions. charge consumes only a locally declared symbol's feedstock, never an imported material; it does not transfer an existing lot or prove a reaction. Use grove.interact transfer for actual immutable lots, store for whole children. Contract release requires your own open material-holding container; personal backpacks hold whole objects only and cannot receive loose matter. Distance refusal identifies target, item or other. Same actor human or explicitly delegated Agent."),
+        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=4, authorize=_member, description="Compile and publish immutable bounded definitions. Optional top-level contact_reactions carries quantity/concentration-only, mass-balanced local contact reactions with a newly declared material into ordinary containers; each must consume one local material and heat is zero. Discover exact shape/limits with rule_catalog. material_imports pins original canonical identities; at most4 local/imported combined. Publication creates no matter, permission or consent; charge preparation is not a reaction result."),
+        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=5, authorize=_member, description="Use published actions and finite resources with current inspect options, conditions and versions. charge requires an actual container instance of the published definition; it consumes only a locally declared symbol's feedstock to prepare that material, never an imported material. Ordinary containers settle contact reactions but do not turn feedstock into declared materials. charge does not transfer an existing lot or prove a reaction. Use grove.interact transfer for actual immutable lots, store for whole children. Contract release requires your own open material-holding container; personal backpacks hold whole objects only and cannot receive loose matter. Distance refusal identifies target, item or other. Same actor human or explicitly delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
         FunctionSpec("grove.control_status", control_status, EMPTY, authorize=_member, access="read", description="Read own current goal and committed action count, without exposing grant token."),

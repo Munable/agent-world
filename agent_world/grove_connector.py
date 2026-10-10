@@ -145,6 +145,11 @@ HOST_INSTRUCTIONS = (
     "agentic steps per turn."
 )
 EXECUTION_INSTRUCTIONS = (
+    "Material-carried contact_reactions are optional top-level published declarations; read rule_catalog for exact shape. "
+    "After actual transfer, ordinary containers settle them automatically at a logical step, without a new reactor or start action. "
+    "Charge consumes declared feedstock to prepare the local material in a published definition's container instance; "
+    "ordinary containers settle contact reactions but cannot prepare an undeclared material from its feedstock. "
+    "Charge never proves a contact reaction or use of another author's existing lot. "
     "You are executing this person's explicitly granted goal in Shared Grove, "
     "using their existing role and this same conversation. Read the current "
     "authenticated world, make a small plan, perform real declared actions, "

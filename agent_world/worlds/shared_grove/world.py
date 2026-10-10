@@ -481,7 +481,8 @@ def _candidate(entity, lots=None):
              "summary": "本体" + "、".join(f"{material}{quantity}u" for material, quantity in body) +
                         "，自身实际水"+water}
     if lots is not None:
-        value["lots"] = [{"id": lot["id"], "material": lot["material"], "quantity": lot["quantity"],
+        registry = registry_for(entity)
+        value["lots"] = [{"id": lot["id"], "material": lot["material"], "material_name": registry.materials[lot["material"]].name, "quantity": lot["quantity"],
                           "slot": lot["slot"], "item_id": entity["id"]} for lot in lots]
     return value
 
@@ -1054,6 +1055,11 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
     x, y = m.entity_location(ctx, entity)
     value["location"] = {"x": x, "y": y}
     value["simulation"] = m.load_summary(ctx, entity)
+    if not hidden:
+        from .contact import projection as contact_projection
+        contact = contact_projection(ctx, entity, detailed=detailed)
+        if contact:
+            value["simulation"]["contact"] = contact
     if hidden:
         value["simulation"]["water"] = None
         value["simulation"]["burning_lots"] = [lot["id"] for lot in value["matter"] if lot.get("burning")]
@@ -1063,6 +1069,8 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
                 body[lot["material"]] = body.get(lot["material"], 0)+lot["quantity"]
         value["simulation"]["body"] = [{"material": material, "quantity": quantity} for material, quantity in body.items()]
     entity_registry = registry_for(entity)
+    for lot in value["matter"]:
+        lot["material_name"] = entity_registry.materials[lot["material"]].name
     combustible_lots = [lot for lot in value["matter"] if entity_registry.materials[lot["material"]].combustible]
     if combustible_lots or "combustion" in value["components"]:
         tick = ctx.get_state(m.META, "clock", {"sequence": 0})["sequence"]
@@ -1110,7 +1118,7 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
         for lot in value["matter"]:
             key = (lot["material"], lot["slot"], lot["role"], lot["burning"])
             grouped[key] = grouped.get(key, 0)+lot["quantity"]
-        value["matter"] = [{"material": key[0], "slot": key[1], "role": key[2], "burning": key[3], "quantity": amount}
+        value["matter"] = [{"material": key[0], "material_name": entity_registry.materials[key[0]].name, "slot": key[1], "role": key[2], "burning": key[3], "quantity": amount}
                            for key, amount in grouped.items()]
     return value
 
@@ -1234,14 +1242,14 @@ def make_world():
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=2,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=21,state_version=12,
+        *generation_specs(), *creative.specs()),version=24,state_version=15,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
-        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: resume_clock},
+        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: lambda ctx: None, 13: lambda ctx: None, 14: lambda ctx: None, 15: resume_clock},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),

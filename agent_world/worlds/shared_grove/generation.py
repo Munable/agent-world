@@ -28,7 +28,7 @@ MAX_CONTENT_ANCHORS = 48
 CONTENT_ANCHOR_VIEW = 12
 CONTRIBUTION_PAGE = 6
 OUTCOME_PAGE = 12
-MAX_OUTCOMES_PER_STEP = 164  #64 physical participants plus up to3 facts for each32 program instances
+MAX_OUTCOMES_PER_STEP = 164  # Shared physical/authored/contact admission; not a display truncation.
 MAX_CONTENT_BYTES = 8192
 MAX_OUTCOME_BYTES = 2048
 LEASE_SECONDS = 120
@@ -232,13 +232,16 @@ def record_content_outcome(ctx, entity_id, action, summary, *, process_id=None, 
 def record_content_outcomes(ctx, entries):
     """Batch trusted post-flush results, writing each content root once."""
     if len(entries) > MAX_OUTCOMES_PER_STEP:
-        raise RuleViolation("one physical step reserves at most 68 public outcome records")
+        raise RuleViolation("one physical step reserves at most164 public outcome records")
     regions, outcomes = {}, []
     for entry in entries:
         entity = model.get_entity(ctx, entry["entity_id"], required=False)
         if not entity or not entity["state"].get("generation_region"):
             continue
-        x, y = model.entity_location(ctx, entity)
+        location = model.public_location(ctx, entity)
+        if location is None:
+            continue
+        x, y = location
         if x is None or y is None:
             continue
         # Provenance marks a real content-derived object; its present physical

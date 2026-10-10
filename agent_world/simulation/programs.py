@@ -221,7 +221,8 @@ def _reaction(effect, materials, path):
     incoming = sum(materials[key]["load_per_u"] * amount for key, amount in inputs.items())
     outgoing = sum(materials[key]["load_per_u"] * amount for key, amount in outputs.items())
     if incoming != outgoing:
-        _fail(path, f"reaction mass must balance: inputs weigh {incoming}, outputs weigh {outgoing}; change coefficients or material load_per_u")
+        detail = lambda group: ", ".join(f"{key}: {amount}u * load {materials[key]['load_per_u']}" for key, amount in sorted(group.items()))
+        _fail(path, f"reaction mass must balance: inputs weigh {incoming} ({detail(inputs)}), outputs weigh {outgoing} ({detail(outputs)}); adjust coefficients or choose materials with appropriate unit loads. Local load_per_u must equal its feedstock; imported and builtin loads are fixed.")
     mode = effect.get("mode", "exclusive")
     if not isinstance(mode, str) or mode not in {"exclusive", "independent"}:
         _fail(path + ".mode", "must be exclusive or independent")
@@ -270,7 +271,7 @@ def _choices(values):
 
 def compile_program(definition, *, materials, body_materials, max_custom_materials, imported_materials=None):
     """Return a validated canonical deep copy; invalid declarations raise ValueError."""
-    _mapping(definition, "program", {"key", "name", "version", "materials", "material_imports", "types"}, {"key", "name", "version", "types"})
+    _mapping(definition, "program", {"key", "name", "version", "materials", "material_imports", "types", "contact_reactions"}, {"key", "name", "version", "types"})
     result = {"key": _text(definition["key"], "program.key", 80, _KEY),
               "name": _text(definition["name"], "program.name"),
               "version": _integer(definition["version"], "program.version", 1, MAX_INTEGER),
@@ -305,7 +306,8 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
                      "combustible": _boolean(spec["combustible"], at + ".combustible"),
                      "liquid": _boolean(spec["liquid"], at + ".liquid")}
         if canonical["load_per_u"] != builtin_materials[canonical["feedstock"]]["load_per_u"]:
-            _fail(at + ".load_per_u", "must equal feedstock load_per_u for a mass-conserving one-to-one conversion")
+            required = builtin_materials[canonical["feedstock"]]["load_per_u"]
+            _fail(at + ".load_per_u", f"must equal feedstock {canonical['feedstock']} load_per_u {required}, received {canonical['load_per_u']}; preparation converts one feedstock u into one local material u")
         result["materials"][symbol] = canonical
         materials[symbol] = canonical
     if imports:
@@ -413,6 +415,33 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
                 compiled["when"] = _expression(action["when"], fields, params, materials, ap + ".when", "boolean", object_ids)
             canonical["actions"].append(compiled)
         result["types"][symbol] = canonical
+    if "contact_reactions" in definition:
+        result["contact_reactions"] = []
+        reaction_ids = set()
+        for index, rule in enumerate(_list(definition["contact_reactions"], "program.contact_reactions", 8)):
+            at = f"program.contact_reactions[{index}]"
+            _mapping(rule, at, {"id", "when", "reaction"}, {"id", "when", "reaction"})
+            rid = _text(rule["id"], at + ".id", 80, _KEY)
+            if rid in reaction_ids:
+                _fail(at + ".id", "duplicate contact reaction id")
+            reaction_ids.add(rid)
+            condition = _expression(rule["when"], {}, {}, materials, at + ".when", "boolean", set())
+            def check_refs(value):
+                if isinstance(value, dict):
+                    if set(value).intersection({"field", "param", "mechanical", "event", "contract", "object"}):
+                        _fail(at + ".when", "contact conditions only read local quantities and concentrations")
+                    for child in value.values():
+                        check_refs(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        check_refs(child)
+            check_refs(condition)
+            effect = _reaction(rule["reaction"], materials, at + ".reaction")
+            if not set(effect["inputs"]).intersection(result["materials"]):
+                _fail(at + ".reaction.inputs", "contact must consume at least one material locally declared by this program")
+            if effect["heat"]:
+                _fail(at + ".reaction.heat", "ordinary containers have no temperature field; contact heat must be zero")
+            result["contact_reactions"].append({"id": rid, "when": condition, "reaction": effect})
     return result
 
 
@@ -449,6 +478,14 @@ def program_material_semantics(definition, definition_ref, *, materials, type_id
             current["delivery"] = {"material": contract["material"], "quantity_u": contract["quantity"]}
         projected_types[symbol] = current
 
+    contacts = []
+    for rule in definition.get("contact_reactions", []):
+        effect = rule["reaction"]
+        symbols.update(effect["inputs"])
+        symbols.update(effect["outputs"])
+        contacts.append({"rule_id": rule["id"], "when": deepcopy(rule["when"]),
+            "inputs_per_extent": deepcopy(effect["inputs"]), "outputs_per_extent": deepcopy(effect["outputs"]),
+            "max_extent": effect["rate"], "channel": effect["channel"], "mode": effect["mode"]})
     preparations = {}
     for symbol, material in definition["materials"].items():
         symbols.add(material["feedstock"])
@@ -467,7 +504,7 @@ def program_material_semantics(definition, definition_ref, *, materials, type_id
                 "definition_ref": reference, "symbol": original_symbol}
     return {"scope": "compiled_material_semantics", "definition_ref": definition_ref,
         "unit": "logical_matter", "materials": bindings, "types": projected_types,
-        "local_preparation": preparations,
+        "local_preparation": preparations, "contact_reactions": contacts,
         "meaning": "Symbols in consumption and production map to materials[symbol].material_id, never to display names. "
             "Reaction coefficients are per extent, not executed quantities; actual conditions, input lots, capacity "
             "and competing effects determine execution. local_preparation is charge's one-to-one feedstock conversion, "
@@ -596,7 +633,7 @@ def evaluate(expr, context):
     return visit(expr, 1)
 
 
-def plan_reaction(effect, quantities, material_defs, capacity):
+def plan_reaction(effect, quantities, material_defs, capacity, *, liquid_capacity=None, liquid_held=0):
     """Plan one atomic integer extent without mutating any input.
 
     All inputs compete for the same extent. Capacity is total quantity in logical
@@ -616,6 +653,9 @@ def plan_reaction(effect, quantities, material_defs, capacity):
         _integer(amount, "quantities." + key, 0, MAX_INTEGER)
     if capacity is not None:
         _integer(capacity, "capacity", 0, MAX_INTEGER)
+    if liquid_capacity is not None:
+        _integer(liquid_capacity, "liquid_capacity", 0, MAX_INTEGER)
+        _integer(liquid_held, "liquid_held", 0, MAX_INTEGER)
     extent = min([canonical["rate"]] + [quantities.get(key, 0) // amount for key, amount in canonical["inputs"].items()])
     reason = "ready"
     if extent < canonical["rate"]:
@@ -629,6 +669,17 @@ def plan_reaction(effect, quantities, material_defs, capacity):
                           if current + candidate * growth <= capacity), 0)
         if permitted < extent or current > capacity and permitted == 0:
             reason = "capacity"
+        extent = permitted
+    if liquid_capacity is not None:
+        def is_liquid(key):
+            spec = material_defs[key]
+            return spec.get("liquid", False) if isinstance(spec, dict) else spec.liquid
+        liquid_growth = sum(n for key, n in canonical["outputs"].items() if is_liquid(key)) - sum(
+            n for key, n in canonical["inputs"].items() if is_liquid(key))
+        permitted = next((candidate for candidate in range(extent, -1, -1)
+                          if liquid_held + candidate * liquid_growth <= liquid_capacity), 0)
+        if permitted < extent:
+            reason = "liquid_capacity"
         extent = permitted
     return {"extent": extent,
             "consume": {key: amount * extent for key, amount in canonical["inputs"].items()} if extent else {},

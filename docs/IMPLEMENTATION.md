@@ -1,10 +1,10 @@
 # L6：当前实现
 
-复核：2026-10-08。本文描述当前分支实际代码与公开表面。0.26.0候选引擎已冻结，最终包安装probe通过；普通模拟人已完成真实Agent定义的混合器合同组合执行，Agent自主完整体验未通过。旧交付结果保留原范围。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-10-10。本文描述当前分支实际代码与公开表面。当前源码范围、模型实验和交付检查统一见[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)，旧交付结果保留原范围。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
-- Python package 要求Python 3.11+。本轮源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，起点`3886bc8`，候选版本0.26.0。引擎17文件SHA256为`6f11fd873f193ab0b082e106798f08b368b6cc52ee8dca3ad1a76146de17824c`，已冻结不再改；连接器、Runtime与UI的检查须按各自源码范围记录。旧0.25.0的562项、14次请求、UI／恢复／wheel仅属历史交付，唯一当前记录见 [SHARED_GROVE](SHARED_GROVE.md#当前研发记录)。
+- Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，候选版本0.26.0。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
@@ -96,6 +96,8 @@ schema 8 的新增 nullable access_mode 列保留原数据库 pending／used v1 
 
 ### Shared Grove 候选实现
 
+材料接触工作轮的现行范围与证据见 [SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)。world24／state15／definition_publish4／rule_catalog2／rule_action5；state15沿原 `resume_clock` 正式交接唯一兼容计时任务，保留tick、期限和全部世界状态，不追赶墙钟。`contact.py`按真实同槽canonical材料读取原不可变包，保留物性快照的有限身份，不增加全局可执行规则池。编译器增加可选顶层接触声明，旧定义缺此字段时保持原canonical形状／摘要；MaterialDef不承载执行代码。旧 authored reaction→mechanical→after 后，接触共用剩余输入，输出下一步参与；统一账户及候选批次提交。普通容器入料和树关系变动沿共同commit准入，预留4材料、8批次、8KiB、可达产物及子容器破裂后可能到达父容器的液体组合，完整步共享164事实／512写／2MiB。默认不逐容器写账户；私有和合盖内部接触只保存授权可读事实，不发布内部过程。网页与Agent详细读取当前条件、缺口和历史实际数量；场景仅保留安全摘要及按需inspect入口。
+
 **0.26.0候选引擎已冻结，普通玩家组合执行完成，自主完整体验未通过。** 新表面为 `grove.rule_catalog / grove.definition_publish / grove.definition_read / grove.rule_action / grove.control_grant / grove.control_revoke / grove.control_status`。规则目录、定义读取和控制状态提供获准事实；合法声明发表自动完成，无人工审批；控制委托与收回作用于同一角色的未来行动，不改变 Ed25519 身份、世界本地档案或凭据体系。
 
 可选`agent_world/simulation/`已接入有界声明解释器，定义不可变且对象固定引用版本。反应按真实量／残余／原子extent／容量结算，独立竞争与同族排他分开，产物到后续逻辑步参与。机械统一freeze network snapshot→solve→commit，一网络一source，有界`load_field / speed_field`提供实际输入，真实木燃料提供有限能量；循环／双source／过载／耗尽保留位置、角度并停止，不产生新耗能。程序只写获准authored fields，owner／position／security禁止，机械位置仅solver写入。运行越界只标记该实例`process.error`，不停止全世界；机械成功后after声明错误保留已求解机械结果，回滚该实例的声明字段／材料。实际字段错误需合法declared action修复或新版本实例，不改已发表定义。
@@ -104,7 +106,7 @@ schema 8 的新增 nullable access_mode 列保留原数据库 pending／used v1 
 
 外部连接器接入显式目标授权下的read→plan→act→readback→adapt，单人单任务；没有目标时不因行为／探索／发表自动推理。取消未来未执行动作，未知提交仍恢复原Receipt，已完成不回滚。普通问句、内容创作与委托分开。服务器不跑模型，也不在每physics step唤醒模型。声明执行每phase非事件规则按rule.id一次，事件规则按事件sequence外层及同事件rule.id排序；when读phase快照，effect逐条更新，产物输入额度下一逻辑step才开放。两个身份原key接续成立；实际委托、工具操作、取消与恢复各按已发生证据验收，不由发表成功推定全链通过。
 
-当前世界8900、A8901、B8902。独立数据库为`/Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/creative-rules/world.sqlite3`；两侧private profiles为`/Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/creative-rules/connector-a`与`/Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/creative-rules/connector-b`，native runtimes为`/Users/mubin/Developer/agent-world/work/creative-runtime-a`与`/Users/mubin/Developer/agent-world/work/creative-runtime-b`。启动／恢复参数见[SHARED_GROVE本轮入口](SHARED_GROVE.md)；旧8896／8897／8898与更早服务、库、profile不用于运行新源码。
+**以下为此前0.26组合执行阶段的证据范围；当前服务入口、源码冻结及验证结论统一见[SHARED_GROVE当前研发记录](SHARED_GROVE.md#当前研发记录)。** 该阶段世界8900、A8901、B8902。独立数据库为`/Volumes/DevDisk/DeveloperData/agent-world/test-work/shared-grove/creative-rules/world.sqlite3`；两侧private profiles为`/Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/creative-rules/connector-a`与`/Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/creative-rules/connector-b`，native runtimes为`/Users/mubin/Developer/agent-world/work/creative-runtime-a`与`/Users/mubin/Developer/agent-world/work/creative-runtime-b`。这些阶段端口和验证数量不是当前启动指引或最终整树结论。
 
 本轮先前完整Python568项通过；随后connector／runtime_core／UI及新回归更新，最新变更由38项针对检查、creative7项、材料accounting单项与两份Node文件通过覆盖，不能把先前全量结果写成最新整树通过。最终包build／install与probe通过。A真实发表echo、机械v1与修正v2，v1开闭／扭矩错误保留；主任务模拟人通过正式`content_submit`放置4物件，不改记为自主操作。
 

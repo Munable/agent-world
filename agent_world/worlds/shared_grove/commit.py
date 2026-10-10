@@ -22,7 +22,19 @@ from .definitions import RULES_VERSION, PIECE_QUANTITIES, registry_for, bind_mat
 def save_entity(ctx, entity, expected_version=None):
     result, changed = m.store_entity(ctx, entity, expected_version=expected_version)
     if changed:
+        from .contact import reserve, may_contact, authored_outputs
+        contacts = reserve(ctx, result)
         activity.reconcile_entity(ctx, result)
+        # Reparenting can create a future spill recipient even when this subject
+        # is only a dry outer vessel. A bounded forest has at most17 members.
+        if not contacts:
+            contacts = any(may_contact(ctx, obj, authored_outputs(ctx, obj)) for obj in m._tree_objects(ctx, result).values())
+        batch = getattr(ctx, "_grove_batch", None)
+        if batch is not None and contacts:
+            batch.contact_admission = True
+        elif contacts:
+            from .creative import _check_instance_capacity
+            _check_instance_capacity(ctx, activity.meta_get(ctx, "creative_instances", []))
     return result
 
 
@@ -525,6 +537,9 @@ def _flush_batch(ctx, batch):
     if (len(batch.dirty_processes) > activity.MAX_PROCESSES
             or len(batch.dirty_meta) > activity.MAX_FRAME_META):
         raise RuleViolation("过程及索引写入超过预留记录预算。")
+    if batch.contact_admission:
+        from .creative import _check_instance_capacity
+        _check_instance_capacity(ctx, activity.meta_get(ctx, "creative_instances", []))
     m.write_candidates(ctx, batch)
     for pid in sorted(batch.dirty_processes):
         process = batch.processes[pid]
