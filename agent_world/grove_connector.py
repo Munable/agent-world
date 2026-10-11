@@ -21,7 +21,7 @@ import signal
 import socket
 import time
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 from jsonschema import Draft202012Validator
@@ -30,6 +30,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .grove_connector_errors import ConnectorError
+from .grove_native_history import (NativeToolHistory, TOOL_DESCRIPTION as NATIVE_HISTORY_DESCRIPTION,
+    TOOL_NAME as NATIVE_HISTORY_TOOL, TOOL_SCHEMA as NATIVE_HISTORY_SCHEMA)
 from .grove_execution import ExecutionController, ExecutionPorts
 from .grove_agent_observation import (AgentObservations, AGENT_WRITE_FUNCTIONS,
     companion_projection, blueprint_model_input, agent_tool_schema, agent_mcp_schema, _checked_agent_tool_text,
@@ -981,7 +983,8 @@ class GroveSession:
             self.opportunity = None
             self.remember()
 
-    async def host(self, method: str, path: str, body: dict | None = None, timeout: float = 15):
+    async def host(self, method: str, path: str, body: dict | None = None, timeout: float = 15,
+                   *, include_page_cursor: bool = False):
         if not self.host_url:
             raise ConnectorError("HostDisconnected", "Local OpenCode is disconnected.", 503)
         async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False,
@@ -994,7 +997,12 @@ class GroveSession:
         if not response.is_success:
             # OpenCode's error details may contain provider material. Never relay them.
             raise ConnectorError("OpenCodeError", f"OpenCode request failed ({response.status_code}); inspect the local host.", 502)
-        return response.json() if response.content else None
+        value = response.json() if response.content else None
+        if include_page_cursor:
+            # Only the formal message-page cursor is returned. The model never
+            # receives host URLs, Link destinations or arbitrary response headers.
+            return {"messages": value, "next_cursor": response.headers.get("X-Next-Cursor")}
+        return value
 
     async def prepare(self, requested_host: str = ""):
         self.status, self.error = "connecting", None
@@ -2393,6 +2401,8 @@ class GroveSession:
                        "type": "string", "minLength": 1, "maxLength": 100,
                        "description": "Optional fixed observation to extend; omitted uses this request's preflight."}},
                        "additionalProperties": False}}]
+        result.append({"name": NATIVE_HISTORY_TOOL, "description": NATIVE_HISTORY_DESCRIPTION,
+                       "inputSchema": deepcopy(NATIVE_HISTORY_SCHEMA)})
         result.append({"name": "execution_checkpoint",
             "description": "Finish this bounded execution segment. Report observed progress and next intention, "
                 "or claim completion after real readback, referencing this task's confirmed operation IDs. "
@@ -2440,6 +2450,8 @@ class GroveSession:
         self.world_call_count += 1
         if self.world_call_count > MAX_WORLD_CALLS:
             raise ConnectorError("TurnBudget", "World tool budget reached; stop this turn.", 429)
+        if name == NATIVE_HISTORY_TOOL:
+            return await self.native_tool_history(arguments)
         if name == "execution_checkpoint":
             return await self.execution_checkpoint(arguments)
         if name == "world_bootstrap":
@@ -2512,6 +2524,29 @@ class GroveSession:
             self.execution_controller.update_control(result.get("result", result))
         self.remember()
         return self.present_agent_result(function, result, base_id=base_id)
+
+    async def native_tool_history(self, arguments):
+        if not self.session_id or not self.host_url:
+            raise ConnectorError("SavedSessionMissing", "本人原专用会话尚未连接；没有提供替代历史。", 409)
+        # Bind the actual owner/session once; arguments can never choose a host,
+        # session, file or world. This entry deliberately bypasses observations.
+        session_id = self.session_id
+        base = "/session/" + quote(session_id, safe="")
+
+        async def read_page(limit, before):
+            query = {"limit": limit}
+            if before is not None:
+                query["before"] = before
+            return await self.host("GET", base + "/message?" + urlencode(query), include_page_cursor=True)
+
+        async def read_message(message_id):
+            return await self.host("GET", base + "/message/" + quote(message_id, safe=""))
+
+        formal_tools = {tool["name"]: MCP_NAME + "_" + tool["name"] for tool in self.tools() if tool["name"] != NATIVE_HISTORY_TOOL}
+        reader = NativeToolHistory(role_id=self.role_id, session_id=session_id, read_page=read_page,
+            read_message=read_message, formal_tools=formal_tools,
+            prompt_prefixes=(CURRENT_FACTS_INSTRUCTIONS, PRIVATE_CONTEXT_INSTRUCTIONS))
+        return await reader.call(arguments)
 
     async def execution_checkpoint(self, arguments):
         if self.execution_write_lock.locked():

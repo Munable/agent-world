@@ -1,5 +1,7 @@
 """Fresh authorized reads may reuse an unchanged non-timeline checkpoint."""
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -112,3 +114,91 @@ class CheckpointReuseTests(unittest.TestCase):
         snap=self.snapshot()
         with self.w._conn() as c:c.execute('DELETE FROM view_checkpoints')
         with self.assertRaises(ViewResetRequired):self.sync(snap)
+
+
+class ConcurrentObservationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.w = WorldRuntime(Path(self.tmp.name) / 'world.sqlite3')
+        self.entered, self.release = threading.Event(), threading.Event()
+        self.block = False
+
+        def project(ctx, args):
+            if self.block:
+                self.entered.set()
+                if not self.release.wait(5):
+                    raise RuntimeError('blocked projection did not finish')
+            return projection(ctx, args)
+
+        self.world = replace(WORLD, views=(ViewSpec('main', project,
+            authorize=lambda c, a: c.get_state('objects', 'gate', {}).get('open', True)),))
+        install_world(self.w, 'u', self.world)
+        self.role = self.w.create_role('A')['role_id']
+        self.cred = self.w.issue_identity_token('u', self.role)
+        self.before = self.w.view_snapshot('u', self.role, 'main', identity_token=self.cred['token'])
+
+    def write(self, key, value):
+        return self.w.call_function('u', 'object.change', self.role, {'key': key, 'value': value},
+            operation_id='concurrent-' + key, identity_token=self.cred['token'])
+
+    def observe_during(self, action, expected_error=None):
+        self.block = True
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reader = pool.submit(self.w.view_sync, 'u', self.role, self.before['cursor'],
+                                 identity_token=self.cred['token'])
+            try:
+                self.assertTrue(self.entered.wait(2))
+                # A writer must finish before releasing the blocked read callback.
+                result = pool.submit(action).result(timeout=2)
+            finally:
+                self.release.set()
+            if expected_error:
+                with self.assertRaises(expected_error): reader.result(timeout=2)
+                return result
+            return reader.result(timeout=2)
+
+    def test_writer_progresses_while_projection_keeps_one_read_snapshot(self):
+        old = self.observe_during(lambda: self.write('door', {'open': True}))
+        self.assertEqual(old['cursor'], self.before['cursor'])
+        self.assertEqual(old['delta']['entities']['upsert'], {})
+        self.block = False
+        fresh = self.w.view_sync('u', self.role, old['cursor'], identity_token=self.cred['token'])
+        self.assertEqual(fresh['delta']['entities']['upsert'], {'door': {'open': True}})
+
+    def test_gate_closed_during_reused_observation_is_rejected(self):
+        self.observe_during(lambda: self.write('gate', {'open': False}), PermissionDenied)
+
+    def test_same_version_callback_replacement_rejects_old_observation(self):
+        changed = replace(self.world, views=(ViewSpec('main', projection,
+            authorize=self.world.views[0].authorize),))
+        self.observe_during(lambda: install_world(self.w, 'u', changed), ViewResetRequired)
+
+    def test_revoked_identity_during_reused_observation_is_rejected(self):
+        self.observe_during(lambda: self.w.revoke_identity_token(self.cred['token_id'],
+            expected_universe='u'), InvalidIdentityToken)
+
+    def test_evicted_checkpoint_during_reused_observation_requires_reset(self):
+        def evict():
+            with self.w._conn(serialized=True) as c:
+                c.execute('DELETE FROM view_checkpoints')
+        self.observe_during(evict, ViewResetRequired)
+
+    def test_identity_expiring_inside_final_authorization_is_rejected(self):
+        with patch('agent_world.runtime_core.time.time', return_value=2000) as clock:
+            credential = self.w.issue_identity_token('u', self.role, ttl_seconds=2)
+            calls, armed = 0, False
+
+            def authorize(ctx, args):
+                nonlocal calls
+                if armed:
+                    calls += 1
+                    if calls == 2:
+                        clock.return_value = 2003
+                return True
+
+            install_world(self.w, 'u', replace(self.world, views=(ViewSpec('main', projection,
+                authorize=authorize),)))
+            snap = self.w.view_snapshot('u', self.role, 'main', identity_token=credential['token'])
+            armed = True
+            with self.assertRaises(InvalidIdentityToken):
+                self.w.view_sync('u', self.role, snap['cursor'], identity_token=credential['token'])
