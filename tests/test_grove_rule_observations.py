@@ -2,12 +2,41 @@
 from copy import deepcopy
 import unittest
 
-from agent_world.errors import PermissionDenied
+from agent_world.errors import PermissionDenied, RuleViolation
 from agent_world.worlds.shared_grove import observations
 import test_grove_creative as fixtures
 
 
 class AutomaticRuleObservationTests(unittest.TestCase):
+    def test_wetness_percentage_and_water_quantity_have_distinct_shared_units(self):
+        from agent_world.simulation.facts import fact_catalog, snapshot_facts
+        from agent_world.worlds.shared_grove.definitions import REGISTRY
+        entity = {"id": "cloth", "components": {"absorbent": {"capacity": 20}},
+                  "matter": [{"id": "water", "material": "water", "quantity": 2, "slot": "absorbed"}]}
+        facts = snapshot_facts(REGISTRY, entity)
+        self.assertEqual(facts["physical.wetness"], 10)
+        self.assertEqual(facts["physical.absorbed_water"], 2)
+        condition = {"op": "gte", "left": {"physical": "wetness"}, "right": 10}
+        observed = observations.condition_observation(condition, {"physical": {
+            name.removeprefix("physical."): value for name, value in facts.items() if name.startswith("physical.")}})
+        self.assertTrue(observed["satisfied"])
+        catalog = fact_catalog()
+        self.assertEqual(observed["facts"][0]["semantics"]["unit"], "%")
+        self.assertEqual(observed["checks"][0]["left_semantics"]["unit"], catalog["physical.wetness"]["unit"])
+        self.assertIn("不是水量u", catalog["physical.wetness"]["meaning"])
+        self.assertEqual(catalog["physical.absorbed_water"]["unit"], "u")
+
+    def test_bound_and_unknown_facts_keep_units_without_inventing_values(self):
+        reference = {"object": {"port": "cloth", "field": "physical.wetness"}}
+        observed = observations.condition_observation({"op": "gte", "left": reference, "right": 10},
+                                                     {"objects": {}, "ports": {}})
+        self.assertFalse(observed["known"])
+        self.assertEqual(observed["facts"][0]["semantics"]["unit"], "%")
+        self.assertNotIn("actual", observed["facts"][0])
+        field = observations.condition_observation({"op": "eq", "left": {"field": "water"}, "right": 2},
+                                                   {"fields": {"water": 2}})
+        self.assertNotIn("semantics", field["facts"][0])
+
     def test_all_eight_rules_include_nonreaction_and_real_event_requirements(self):
         rules = [{"id": "rule_" + str(index), "phase": "after", "when": True,
                   "effects": [{"op": "set", "field": "ready", "value": True}]}
@@ -72,6 +101,75 @@ class AutomaticWorldObservationTests(unittest.TestCase):
 
     def inspect(self, target, actor="A"):
         return self.h.read(actor, "grove.inspect", {"entity_id": target})["entity"]["creative"]
+
+    def test_recent_automatic_net_change_survives_return_to_initial_state_and_restart(self):
+        from agent_world import WorldRuntime
+        from agent_world.worlds.shared_grove import make_world, model as m, creative
+        h = self.h
+        definition = {"key": "observable_signal", "name": "可接续信号", "version": 1,
+            "types": {"signal": {"name": "信号", "body_material": "stone", "cost": {"stone": 1},
+                "container_capacity": 4,
+                "fields": {"running": {"type": "boolean", "default": True},
+                           "lamp": {"type": "integer", "default": 0, "min": 0, "max": 1}},
+                "rules": [{"id": "toggle", "phase": "after", "when": {"field": "running"},
+                    "effects": [{"op": "set", "field": "lamp", "value": {"op": "sub", "left": 1, "right": {"field": "lamp"}}}]}],
+                "actions": [{"id": "halt_signal", "label": "停止", "parameters": {}, "when": True,
+                    "effects": [{"op": "set", "field": "running", "value": False}]}]}}}
+        target = h.publish("A", definition, ["signal"])[1]["signal"]
+        self.assertFalse(h.world.get_state("w", creative.FIELD_CHANGES, target)["exists"])
+        # A previously admitted near-limit entity must not grow a history blob.
+        entity = h.entity(target)
+        lower, upper = 0, 8192
+        while lower < upper:
+            middle = (lower + upper + 1) // 2
+            candidate = deepcopy(entity); candidate["state"]["padding"] = "x" * middle
+            try:
+                m.normalize_entity(candidate); lower = middle
+            except RuleViolation:
+                upper = middle - 1
+        entity["state"]["padding"] = "x" * lower
+        import json
+        with h.world._conn() as connection:
+            connection.execute("UPDATE world_state SET value_json=? WHERE universe=? AND scope=? AND state_key=?",
+                               (json.dumps(m.normalize_entity(entity)), "w", m.ENTITIES, target))
+        h.ticks(1)
+        first = self.inspect(target)["automatic_field_change"]
+        self.assertEqual(first["before"], {"lamp": 0})
+        self.assertEqual(first["after"], {"lamp": 1})
+        h.ticks(1)
+        second = self.inspect(target)["automatic_field_change"]
+        self.assertEqual(second["before"], {"lamp": 1})
+        self.assertEqual(second["after"], {"lamp": 0})
+        self.assertGreater(second["step"], first["step"])
+        self.assertNotIn("automatic_field_change", h.entity(target)["state"]["program"])
+        # A failed optional forward-capacity estimate cannot stop the real
+        # rule, replace saved evidence, or stamp a fictitious latest step.
+        from unittest.mock import patch
+        with patch.object(creative, "_check_instance_capacity", side_effect=RuleViolation("前瞻容量不可用")):
+            h.ticks(1)
+        self.assertEqual(h.entity(target)["state"]["program"]["fields"]["lamp"], 1)
+        self.assertEqual(self.inspect(target)["automatic_field_change"], second)
+        self.assertIn("可能省略", self.inspect(target)["automatic_field_change_status"]["meaning"])
+        h.ticks(1)
+        second = self.inspect(target)["automatic_field_change"]
+        self.assertEqual(second["after"], {"lamp": 0})
+        # The two automatic steps above succeeded at the existing entity limit.
+        # An explicit action also adds its own process metadata; release only
+        # the fixture padding before exercising that independent behaviour.
+        entity = h.entity(target)
+        entity["state"].pop("padding")
+        with h.world._conn() as connection:
+            connection.execute("UPDATE world_state SET value_json=? WHERE universe=? AND scope=? AND state_key=?",
+                               (json.dumps(m.normalize_entity(entity)), "w", m.ENTITIES, target))
+        h.approach("A", target); h.action("A", target, "halt_signal")
+        h.ticks(1)
+        self.assertEqual(self.inspect(target)["automatic_field_change"], second)
+        restored = WorldRuntime(h.db); restored.install_world("w", make_world())
+        self.assertEqual(restored.get_state("w", creative.FIELD_CHANGES, target)["value"], second)
+        h.approach("B", target); h.interact("A", target, "close")
+        hidden = self.inspect(target, "B")
+        self.assertTrue(hidden["hidden"])
+        self.assertNotIn("automatic_field_change", hidden)
 
     def test_drive_expression_exposes_unknown_and_last_control_survives_private_input(self):
         h = self.h

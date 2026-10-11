@@ -25,7 +25,7 @@ class RuntimeActivities:
             identifier(exclusive_group, "exclusive_group")
         if ttl_seconds is not None:
             ttl_seconds = duration(ttl_seconds, "ttl_seconds")
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             now = time.time()
             self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
@@ -98,7 +98,7 @@ class RuntimeActivities:
         identifier(activity_id, "activity_id")
         identifier(runtime_id, "runtime_id")
         lease_seconds = duration(lease_seconds, "lease_seconds", 3600)
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             now = time.time()
             self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
@@ -222,7 +222,7 @@ class RuntimeActivities:
             "activity_id": proof.get("activity_id") if isinstance(proof, dict) else None,
             "lease_seconds": lease_seconds,
         }
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
             old = c.execute(
@@ -264,7 +264,7 @@ class RuntimeActivities:
             "activity_id": proof.get("activity_id") if isinstance(proof, dict) else None,
             "status": status,
         }
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
             old = c.execute(

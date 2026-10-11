@@ -135,30 +135,31 @@ class RuntimeFunctions:
         authorize=None,
         visible_to=None,
     ):
-        with self._lock, self._conn() as c:
-            c.execute("BEGIN IMMEDIATE")
-            if c.execute("SELECT 1 FROM world_definitions WHERE universe=?", (universe,)).fetchone():
-                raise WorldDefinitionError(
-                    "use install_world with a versioned definition to change this universe"
+        with self._lock:
+            with self._conn(serialized=True) as c:
+                c.execute("BEGIN IMMEDIATE")
+                if c.execute("SELECT 1 FROM world_definitions WHERE universe=?", (universe,)).fetchone():
+                    raise WorldDefinitionError(
+                        "use install_world with a versioned definition to change this universe"
+                    )
+                desc = self._register_function_tx(
+                    c,
+                    universe,
+                    function_id,
+                    version,
+                    description,
+                    input_schema,
+                    handler,
+                    access=access,
+                    availability=availability,
+                    requires_activity_claim=requires_activity_claim,
+                    output_schema=output_schema,
+                    authorize=authorize,
+                    visible_to=visible_to,
                 )
-            desc = self._register_function_tx(
-                c,
-                universe,
-                function_id,
-                version,
-                description,
-                input_schema,
-                handler,
-                access=access,
-                availability=availability,
-                requires_activity_claim=requires_activity_claim,
-                output_schema=output_schema,
-                authorize=authorize,
-                visible_to=visible_to,
-            )
-        key = (universe, function_id, version)
-        self._handlers[key] = handler
-        self._function_options[key] = {"authorize": authorize, "visible_to": visible_to}
+            key = (universe, function_id, version)
+            self._handlers[key] = handler
+            self._function_options[key] = {"authorize": authorize, "visible_to": visible_to}
         return desc
 
     def _row_to_descriptor(self, row):
@@ -330,7 +331,7 @@ class RuntimeFunctions:
 
     def list_functions(self, universe, *, actor_role_id=None, identity_token=None):
         identifier(universe, "universe")
-        with self._lock, self._conn(readonly=True) as c:
+        with self._conn(readonly=True, serialized=True) as c:
             c.execute("BEGIN")
             self._check_world_tx(c, universe)
             identity = None
@@ -444,7 +445,7 @@ class RuntimeFunctions:
         identifier(function_id, "function_id")
         if expected_version is not None:
             integer(expected_version, "expected_version", 1)
-        with self._lock, self._conn(readonly=True) as c:
+        with self._conn(readonly=True, serialized=True) as c:
             c.execute("BEGIN")
             self._admit_actor_tx(c, universe, actor_role_id, identity_token)
             self._check_world_tx(c, universe)
@@ -516,7 +517,7 @@ class RuntimeFunctions:
             integer(expected_version, "expected_version", 1)
         if activity_claim is not None and not isinstance(activity_claim, dict):
             raise InvalidArguments("activity_claim must be an object")
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             now = time.time()  # Admission time is AFTER the database write lock.
             identity = self._admit_actor_tx(c, universe, actor_role_id, identity_token, require_control=True)

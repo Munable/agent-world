@@ -67,7 +67,7 @@ export function entitySummary(entity,backpackId){
   const state=entity?.state||{},lots=matterLots(entity);
   const quantities=lots.length?lots.map(lot=>slotLabel(lot.slot)+' '+materialLabel(lot.material,entity)+' '+lot.quantity+' 单位').join('，'):materialLabel(entity?.material,entity);
   const wetness=entity?.simulation?.wetness??state.wetness,burning=(entity?.simulation?.burning_lots||[]).length>0||lots.some(lot=>lot.burning);
-  return [quantities,lifecycleLabel(entity),burning?'有残余材料正在燃烧':null,Number.isFinite(wetness)&&wetness>0?'湿度 '+wetness:null,relationLabel(entity,backpackId)].filter(Boolean).join(' · ');
+  return [quantities,lifecycleLabel(entity),burning?'有残余材料正在燃烧':null,Number.isFinite(wetness)&&wetness>0?'吸水饱和度 '+wetness+'%':null,relationLabel(entity,backpackId)].filter(Boolean).join(' · ');
 }
 export function lifecycleLabel(entity){
   if(entity?.lifecycle==='consumed'||entity?.state?.destroyed)return '材料已耗尽';
@@ -82,7 +82,7 @@ export function simulationStats(entity,backpackId){
   if(typeof sim.can_float==='boolean')rows.push(['下水资格',sim.can_float?'满足浮力条件':'未满足浮力条件']);
   if(entity?.relations)rows.push(['物理关系',entity.relations.parent?relationLabel(entity,backpackId):Number.isFinite(entity.x)&&Number.isFinite(entity.y)?'地面 '+entity.x+'，'+entity.y:'无父物件']);
   if(entity?.custody)rows.push(['保管边界',entity.custody.scope==='private'?'私人':entity.custody.scope==='public'?'公共':String(entity.custody.scope||entity.custody)]);
-  if(Number.isFinite(sim.wetness))rows.push(['派生湿度',sim.wetness]);
+  if(Number.isFinite(sim.wetness))rows.push(['吸水饱和度',sim.wetness+'%']);
   return rows;
 }
 export function entityGlyph(entity){
@@ -135,17 +135,23 @@ function conditionReferenceLabel(reference,entity){
 export function conditionObservationLines(observation,entity){
   if(!observation||typeof observation!=='object')return [];
   if(observation.known!==true)return [observation.reason==='event_required'?'条件未知：须有实际事件输入，当前快照不能判断。':'条件未知：当前未取得所需的可观察事实。'];
-  const lines=[observation.satisfied?'声明条件当前成立。':'声明条件当前未成立。'];
+  const lines=[observation.satisfied?'本次读取时条件成立。':'本次读取时条件未成立。'];
   const symbols={eq:'=',ne:'≠',lt:'<',lte:'≤',gt:'>',gte:'≥'};
   if(['all','any','not'].includes(observation.expression?.op))lines.push('以下是子比较的快照；整体条件按原规则组合判断。');
-  for(const check of observation.checks||[]){const label=conditionReferenceLabel(check.left||{},entity);lines.push(label+'：'+(check.known===true?factValue(check.actual_left)+' '+(symbols[check.operator]||check.operator)+' '+factValue(check.actual_right)+'（'+(check.satisfied?'成立':'未成立')+'）':'当前无法核对'));}
-  for(const fact of observation.facts||[]){const label=conditionReferenceLabel(fact.reference||{},entity);lines.push(label+'：'+(fact.known===true?factValue(fact.actual):'当前未公开或不可观察'));}
+  for(const check of observation.checks||[]){const unit=check.left_semantics?.unit,label=conditionReferenceLabel(check.left||{},entity)+(unit?'（'+unit+'）':'');lines.push(label+'：'+(check.known===true?factValue(check.actual_left)+' '+(symbols[check.operator]||check.operator)+' '+factValue(check.actual_right)+'（'+(check.satisfied?'成立':'未成立')+'）':'当前无法核对'));}
+  for(const fact of observation.facts||[]){const unit=fact.semantics?.unit,label=conditionReferenceLabel(fact.reference||{},entity)+(unit?'（'+unit+'）':'');lines.push(label+'：'+(fact.known===true?factValue(fact.actual):'当前未公开或不可观察'));if(fact.semantics?.meaning)lines.push(fact.semantics.meaning);}
   if(observation.input_scope==='parameter_defaults')lines.push('以上条件使用当前默认参数；实际填写的参数仍在提交时核验。');
   return lines;
 }
 export function ruleRuntimeObservationLines(creative,entity){
   if(!creative||creative.hidden===true)return [];
   const lines=[],deployment=creative.deployment,mechanical=creative.mechanical_observation;
+  for(const [name,semantics] of Object.entries(creative.fact_semantics||{}))if(semantics.meaning)lines.push(factLabel(name.replace(/^physical\./,''))+'：'+semantics.meaning);
+  const transition=creative.automatic_field_change;
+  if(transition&&Number.isInteger(transition.step)){
+    for(const [name,value] of Object.entries(transition.after||{}))lines.push('最近已记录的自动变化（逻辑步 '+transition.step+'）：'+factLabel(name)+' '+factValue(transition.before?.[name])+' → '+factValue(value)+'。这是历史后果，记录可能省略其他变化，不是当前状态或下一步预测。');
+  }
+  if(creative.automatic_field_change_status?.available===false)lines.push('暂无已记录的自动字段变化；不代表此前没有变化。');
   if(Number.isInteger(creative.automatic_rule_count)||Number.isInteger(creative.explicit_action_count)){
     const counts=[];
     if(Number.isInteger(creative.automatic_rule_count))counts.push('自动声明 '+creative.automatic_rule_count+' 项');
@@ -348,6 +354,13 @@ export function previewVersionsChanged(inspection,entities,player){
       (Array.isArray(preview.physics?.affected)?preview.physics.affected:[]).some(row=>row&&(changed(row.id,row.version)||physicsChanged(row.id,row.before)));
   }));
 }
+export function ruleSnapshotChanged(inspection,clock){
+  const creative=inspection?.entity?.creative;
+  if(!creative||creative.hidden||inspection.reading)return false;
+  // Referenced objects and logical-step conditions can change without changing
+  // the selected object's version. Re-read its complete authorised snapshot.
+  return Number.isFinite(creative.world_tick)&&Number.isFinite(clock?.sequence)&&creative.world_tick!==clock.sequence;
+}
 export function descriptorLots(descriptor,itemId){
   const item=(descriptor?.function_id==='grove.rule_action'?ruleChoices(descriptor,'items'):descriptorCandidates(descriptor)).find(candidate=>candidate.id===itemId);
   const values=Array.isArray(item?.lots)?item.lots:descriptor?.input?.lots||[];
@@ -430,4 +443,39 @@ export function visibleWaterQuantity(entity){
   if(summary?.visible!==true)return 0;
   return (summary.materials||[]).filter(row=>row.material==='water').reduce((total,row)=>
     total+(Number.isFinite(row.quantity)?Math.max(0,row.quantity):0),0);
+}
+
+export function receiptOutcomeLines(receipt){
+  const facts=receipt?.confirmed_outcome;
+  if(!['committed','confirmed'].includes(receipt?.status)||facts?.kind!=='server_receipt')return [];
+  const lines=(facts.changes||[]).filter(value=>typeof value==='string').slice(0,4);
+  const action=facts.action_result||{},transfer=action.transfer;
+  if(Number.isInteger(transfer?.transferred))lines.push((transfer.source_name||'来源物件')+' → '+(transfer.target_name||'目的物件')+'：'+transfer.transferred+'u '+materialLabel(transfer.material));
+  for(const cost of (action.costs||[]).slice(0,8))if(Number.isInteger(cost.quantity_u))lines.push((cost.entity_name||'来源物件')+'实际消耗 '+cost.quantity_u+'u '+materialLabel(cost.material));
+  if(Number.isFinite(action.stored_energy_after))lines.push((action.target_name||'动力源')+'提交后储能 '+action.stored_energy_after);
+  for(const entity of (action.related_entities||[]).slice(0,8)){const relation=Number.isFinite(entity.x)&&Number.isFinite(entity.y)?'在地面 '+entity.x+'，'+entity.y:entity.owner===facts.player?.id?'由本人持有':entity.container?'在容器中':'位置未读回';lines.push((entity.name||'关联物件')+'行动后：'+relation);}
+  const player=facts.player;
+  if(Number.isFinite(player?.x)&&Number.isFinite(player?.y))lines.push('行动后本人位置 '+player.x+'，'+player.y);
+  const entity=facts.entity;
+  if(entity){
+    const relation=Number.isFinite(entity.x)&&Number.isFinite(entity.y)?'在地面 '+entity.x+'，'+entity.y:entity.owner===player?.id?'由本人持有':entity.container?'在容器中':'位置未读回';
+    lines.push((entity.name||'所操作物件')+'：'+relation);
+  }
+  if((facts.same_position_public_objects||[]).length)lines.push('行动后同格公开物件：'+facts.same_position_public_objects.map(item=>item.name||'未命名物件').join('、'));
+  return lines;
+}
+
+export function executionReadbackLines(execution){
+  if(execution?.readback_actual!==true)return ['当前现场尚未读回。'];
+  const facts=execution.readback||{},player=facts.player,lines=[];
+  if(Number.isFinite(player?.x)&&Number.isFinite(player?.y))lines.push('最近读回本人位置 '+player.x+'，'+player.y);
+  const selected=facts.selected_inspection?.entity,mechanical=creativeState(null,selected)?.mechanical;
+  if(selected){
+    const lots=matterLots(selected);
+    lines.push((selected.name||'所选物件')+'最近读回材料：'+(!Array.isArray(selected.matter)?'材料尚未读取':lots.length?lots.map(lot=>materialLabel(lot,selected)+' '+lot.quantity+'u').join('、'):'没有可见材料'));
+    if(mechanical){const role=creativeState(null,selected)?.mechanical_observation?.role;lines.push('储能 '+(Number.isFinite(mechanical.energy)?mechanical.energy:'未读取')+' · 角度 '+(Number.isFinite(mechanical.angle)?mechanical.angle:'未读取')+' · '+(role==='actuator'?'行程':'机械位置')+' '+(Number.isFinite(mechanical.position)?mechanical.position:'未读取')+' · 速度 '+(Number.isFinite(mechanical.speed)?mechanical.speed:'未读取'));}
+  }
+  if(selected){const detailTick=creativeState(null,selected)?.world_tick;lines.push(Number.isInteger(detailTick)?'物件详情读取步 '+detailTick:'物件详情来自独立读取，未提供读取步。');}
+  if(Number.isInteger(facts.clock?.sequence))lines.push('地图读取步 '+facts.clock.sequence+'；物件详情另行读取，后续变化请看地图。');
+  return lines;
 }

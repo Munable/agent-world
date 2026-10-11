@@ -211,6 +211,8 @@ class SharedGroveTests(unittest.TestCase):
         self.assertFalse(self.entity(wood)["state"]["burning"])
         seen = self.world.query_function("u", "grove.inspect", self.roles["A"], {"entity_id": wood})["result"]
         option = next(option for option in seen["action_options"] if option["action"] == "pour")
+        self.assertEqual(option["input_schema"]["properties"]["target_slot"], {"const": option["target_slot"]})
+        self.assertNotIn("target_slot", option["input_schema"]["required"])
         self.assertEqual(option["input"]["quantity"]["max"], 1)
         before = self.quantity(bottle, "water")
         with self.assertRaises(RuleViolation):

@@ -43,7 +43,7 @@ class RuntimeRetention:
         import time
         identifier(universe, "universe")
         integer(limit, "limit", 1, 5000)
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             self._check_world_tx(c, universe)
             definition = self._worlds.get(universe)

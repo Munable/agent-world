@@ -130,7 +130,7 @@ class RuntimeTimers:
         """Trusted worker entry. A fixed candidate list prevents recursive catch-up storms."""
         identifier(universe, "universe")
         integer(limit, "limit", 1, 100)
-        with self._lock, self._conn(readonly=True) as c:
+        with self._conn(readonly=True, serialized=True) as c:
             c.execute("BEGIN")
             self._check_world_tx(c, universe)
             if universe not in self._worlds:
@@ -149,7 +149,7 @@ class RuntimeTimers:
         return {"processed": processed, "count": len(processed)}
 
     def _run_one_timer(self, universe, cutoff, timer_id):
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             self._check_world_tx(c, universe)
             now = min(cutoff, time.time())  # Recheck after lock acquisition; never fire early after a clock rollback.

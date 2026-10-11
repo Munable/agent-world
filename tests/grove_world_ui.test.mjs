@@ -83,6 +83,12 @@ assert.equal(ui.previewVersionsChanged(combination,visible,{version:2}),false);
 assert.equal(ui.previewVersionsChanged(combination,[visible[0],{...visible[1],
   simulation:{...visible[1].simulation,total:168,supported:128}}],{version:2}),true);
 assert.equal(ui.previewVersionsChanged(combination,visible,{version:3}),true);
+// A referenced condition/declared action can change while its subject version
+// stays fixed; the next scene step must refresh that subject's observation.
+assert.equal(ui.ruleSnapshotChanged({entity:{version:3,creative:{world_tick:8}}},{sequence:9}),true);
+assert.equal(ui.ruleSnapshotChanged({entity:{version:3,creative:{world_tick:9}}},{sequence:9}),false);
+assert.equal(ui.ruleSnapshotChanged({entity:{creative:{world_tick:8,hidden:true}}},{sequence:9}),false);
+assert.equal(ui.ruleSnapshotChanged({entity:{version:3}},{sequence:9}),false);
 assert.ok(ui.candidatePreviewLines({preview}).some(line=>line.includes('余量 -128')));
 assert.ok(ui.candidatePreviewLines({preview}).some(line=>line.includes('危险实验仍由你选择')));
 assert.ok(ui.candidatePreviewLines({preview}).some(line=>line.includes('不保证后续遇水')));
@@ -137,22 +143,33 @@ function formNode(tag,text,className){
 {
   const target={id:'rule-target',name:'做法'},actions=formNode('section'),writes=[];
   const initial={function_id:'grove.rule_action',action:'process',available:true,choices:{items:[{id:'old-item',name:'原料'}]},
+    condition_observation:{known:true,satisfied:true,checks:[{left:{physical:'wetness'},operator:'gte',known:true,actual_left:10,actual_right:10,satisfied:true}]},
     params_schema:{properties:{amount:{type:'integer',minimum:1,default:1}},required:['amount']}};
   const context={inspection:{entity:target,action_options:[initial]},actionBusy:false,client:{pending:()=>null},node:formNode,$:()=>actions,
     actionKey:option=>option.action,descriptorLabel:ui.descriptorLabel,actionDescriptors:ui.actionDescriptors,
-    conditionObservationLines:()=>[],ruleChoices:ui.ruleChoices,candidateLabel:ui.candidateLabel,
+    conditionObservationLines:ui.conditionObservationLines,ruleChoices:ui.ruleChoices,candidateLabel:ui.candidateLabel,
     readableCandidate:value=>value,factLabel:ui.factLabel,operationIntentLabel:ui.operationIntentLabel,
     restoreActionDraft:()=>{},run:fn=>fn(),ruleAction:(...args)=>writes.push(args)};
   vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('function renderRuleAction(','async function ruleAction('),context);
   context.renderRuleAction(initial,target,false);
   const form=actions.children[0],items=form.querySelectorAll('select')[0],amount=form.querySelectorAll('input')[0],submit=form.querySelectorAll('button').find(button=>button.type==='submit');
   items.value='old-item';amount.value='2';form.dispatchEvent({type:'change'});
+  assert.ok(form.querySelectorAll('p').some(note=>note.textContent.includes('10 ≥ 10')));
   context.inspection={entity:target,action_options:[{...initial,choices:{items:[{id:'new-item',name:'新原料'}]}}]};
   form.dispatchEvent({type:'refresh-candidate-preview'});
   assert.equal(items.value,'old-item');assert.equal(amount.value,'2');assert.equal(items.options.find(option=>option.value==='old-item').disabled,true);
   assert.ok(items.options.some(option=>option.value==='new-item'));assert.equal(submit.disabled,true);
   items.value='new-item';form.dispatchEvent({type:'change'});form.dispatchEvent({type:'submit',preventDefault(){}});
   assert.equal(writes[0][2].item_id,'new-item');assert.equal(writes[0][2].params.amount,2);
+  context.inspection={entity:target,reading:true};form.dispatchEvent({type:'refresh-candidate-preview'});
+  assert.equal(amount.value,'2');assert.equal(submit.disabled,true);
+  assert.ok(form.querySelectorAll('p').some(note=>note.textContent.includes('行动条件待读取')));
+  context.inspection={entity:target,action_options:[{...initial,condition_observation:{known:true,satisfied:false,
+    checks:[{left:{physical:'wetness'},operator:'gte',known:true,actual_left:0,actual_right:10,satisfied:false}]}}]};
+  form.dispatchEvent({type:'refresh-candidate-preview'});
+  assert.equal(form.querySelectorAll('input')[0],amount);assert.equal(amount.value,'2');
+  assert.ok(form.querySelectorAll('p').some(note=>note.textContent.includes('0 ≥ 10')));
+  assert.ok(!form.querySelectorAll('p').some(note=>note.textContent.includes('10 ≥ 10')));
 }
 
 // Rule fuel/charge quantities live at the top level. The preview must describe
@@ -298,6 +315,7 @@ for(const [execution,label,detail,resume] of [
   };
   const context={host:{status:'ready',execution,admission:{goal:{allowed:true},resume:{allowed:!!execution.resume_allowed},extend:{allowed:false,reason:'额度不可追加'}}},playing:true,current:()=>true,goalDirty:true,hostCommandBusy:false,executionReclaimBusy:false,
     actionBusy:false,manualControlRecoveryPending:false,document:{activeElement:null},client:{pending:()=>null},$:element,
+    receiptOutcomeLines:ui.receiptOutcomeLines,executionReadbackLines:ui.executionReadbackLines,
     node:()=>({append(){}})};
   vm.createContext(context);
   vm.runInContext(extract('function agentAdmission(','const point='),context);
@@ -367,6 +385,17 @@ for(const [execution,label,detail,resume] of [
     checks:[{left:{object:{port:'cup',field:'physical.wetness'}},operator:'gte',
       known:true,actual_left:0,actual_right:1,satisfied:false}]},{});
   assert.ok(physical.some(line=>line.includes('槽位 cup · 湿度')));
+  const units=ui.conditionObservationLines({known:true,satisfied:true,
+    facts:[{reference:{physical:'wetness'},known:true,actual:10,
+      semantics:{unit:'%',meaning:'吸收饱和百分值，不是水量u。'}}],
+    checks:[{left:{physical:'wetness'},left_semantics:{unit:'%'},operator:'gte',
+      known:true,actual_left:10,actual_right:10,satisfied:true}]},{});
+  assert.ok(units.some(line=>line.includes('湿度（%）：10 ≥ 10')));
+  assert.ok(units.includes('吸收饱和百分值，不是水量u。'));
+  const historical=ui.ruleRuntimeObservationLines({automatic_field_change:{step:9,
+    before:{lamp:1},after:{lamp:0}},fields:{lamp:0}},{});
+  assert.ok(historical.some(line=>line.includes('1 → 0')&&line.includes('历史后果')&&line.includes('逻辑步 9')));
+  assert.deepEqual(ui.ruleRuntimeObservationLines({automatic_field_change:{step:9,before:{},after:{}},hidden:true},{}),[]);
 }
 
 // A saved waiting declaration record can coexist with actual mechanical motion.
@@ -433,4 +462,20 @@ console.log('Grove presentation: quantities, relationship/action boundaries and 
   assert.equal(ui.visibleWaterQuantity(hidden),0);
   hidden.content_summary.visible=true;
   assert.equal(ui.visibleWaterQuantity(hidden),9);
+}
+
+// The native final may fail while the original operation remains committed.
+{
+  const receipt={status:'confirmed',commit_seq:7,confirmed_outcome:{kind:'server_receipt',
+    changes:['转入完成'],action_result:{transfer:{source_name:'水壶',target_name:'杯',transferred:1,material:'water'}},player:{id:'me',x:2,y:3},
+    entity:{name:'杯',x:2,y:3},same_position_public_objects:[{id:'cup',name:'杯'}]}};
+  const lines=ui.receiptOutcomeLines(receipt);
+  assert.ok(lines.some(line=>line.includes('水壶 → 杯：1u 水')));
+  assert.ok(lines.some(line=>line.includes('同格公开物件：杯')));
+  assert.deepEqual(ui.receiptOutcomeLines({...receipt,status:'unknown'}),[]);
+  assert.ok(ui.executionReadbackLines({readback_actual:false}).some(line=>line.includes('尚未读回')));
+  const facts={readback_actual:true,readback:{clock:{sequence:9},player:{x:4,y:3},selected_inspection:{entity:{name:'木料'}}}};
+  assert.ok(ui.executionReadbackLines(facts).some(line=>line.includes('材料尚未读取')));
+  facts.readback.selected_inspection.entity.matter=[];
+  assert.ok(ui.executionReadbackLines(facts).some(line=>line.includes('没有可见材料')));
 }

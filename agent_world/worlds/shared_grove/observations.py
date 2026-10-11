@@ -7,6 +7,7 @@ from agent_world.errors import PermissionDenied, RuleViolation
 from agent_world.simulation.declarations import has_event
 from agent_world.simulation.programs import evaluate, plan_reaction, MECHANICAL_DEFAULTS
 from agent_world.simulation import matter as sm
+from agent_world.simulation.facts import reference_semantics
 
 from . import model as m
 from .definitions import REGISTRY, registry_for, instance_definition as _type, material_identity as _material, contained_quantities as _quantities, reaction_available_quantities, mixture_capacity
@@ -69,6 +70,9 @@ def condition_observation(expression, context):
             row = {"reference": deepcopy(reference), "known": True, "actual": actual}
         except ValueError:
             row = {"reference": deepcopy(reference), "known": False}
+        semantics = reference_semantics(reference)
+        if semantics is not None:
+            row["semantics"] = semantics
         facts.append(row)
     try:
         satisfied = bool(evaluate(expression, context))
@@ -83,6 +87,10 @@ def condition_observation(expression, context):
         if value.get("op") in {"eq", "ne", "lt", "lte", "gt", "gte"}:
             row = {"path": path, "operator": value["op"],
                    "left": deepcopy(value["left"]), "right": deepcopy(value["right"])}
+            for side in ("left", "right"):
+                semantics = reference_semantics(value[side])
+                if semantics is not None and semantics.get("unit") is not None:
+                    row[side + "_semantics"] = semantics
             try:
                 row.update(known=True, actual_left=evaluate(value["left"], context),
                            actual_right=evaluate(value["right"], context), satisfied=bool(evaluate(value, context)))

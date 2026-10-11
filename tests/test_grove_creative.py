@@ -1083,6 +1083,57 @@ class CreativeWorldTests(unittest.TestCase):
             self.assertEqual([event["sequence"] for event in observed],
                              [journal["value"]["sequence"]+1, journal["value"]["sequence"]+2])
 
+    def test_optional_field_evidence_does_not_block_full_core_combination(self):
+        # This exact existing combination fills the core reservation. Optional
+        # evidence must not reject admission or stop its actual automatic rules.
+        def visit(ctx, args):
+            commit.ensure_chunk(ctx, args["cx"], args["cy"])
+            player = m.get_player(ctx)
+            player.update(x=args["cx"]*16+1, y=args["cy"]*16+1)
+            m.save_player(ctx, player)
+            return FunctionOutcome({})
+        fixture = FunctionSpec("grove.fixture_visit", visit, {"type": "object", "additionalProperties": False,
+            "required": ["cx", "cy"], "properties": {"cx": {"type": "integer"}, "cy": {"type": "integer"}}}, access="write")
+        self.db = self.db.with_name("optional-evidence.sqlite3")
+        self.world = WorldRuntime(self.db)
+        world = make_world()
+        self.world.install_world("w", replace(world, functions=(*world.functions, fixture)))
+        self.roles = {"A": self.world.create_role("A")["role_id"]}
+        self.call("A", "grove.join", {"name": "A"})
+        kind = {"name": "自动信号", "body_material": "wood", "cost": {"wood": 1},
+            "fields": {"ready": {"type": "boolean", "default": False}},
+            "rules": [{"id": "ready", "phase": "after", "when": True,
+                       "effects": [{"op": "set", "field": "ready", "value": True}]}]}
+        recorder = deepcopy(kind); recorder["recorder"] = {"radius": 8, "window_ticks": 3600}
+        reference = self.call("A", "grove.definition_publish", {"definition": {
+            "key": "full_core", "name": "完整核心组合", "version": 1,
+            "types": {"signal": kind, "recorded_signal": recorder}}})["definition_ref"]
+        regions = [(x, y) for y in range(-3, 4) for x in range(-3, 4)
+            if (x, y) != (0, 0) and m.chunk_landscape(x, y) == "willow_grove"][:4]
+        ids = []
+        for cx, cy in regions:
+            self.call("A", "grove.fixture_visit", {"cx": cx, "cy": cy})
+            for _ in range(2):
+                self.time.return_value += 31  # Publication lease only, not play evidence.
+                context = self.call("A", "grove.generation_context", {"kind": "layout", "reason": "user_request"})
+                opportunity = context["opportunity"]
+                specs = [{"definition_ref": reference,
+                          "type_id": "recorded_signal" if len(ids)+index < 14 else "signal", **tile}
+                         for index, tile in enumerate(context["allowed_tiles"][:min(4, 31-len(ids))])]
+                result = self.call("A", "grove.content_submit", {"opportunity_id": opportunity["id"],
+                    "expected_opportunity_version": opportunity["version"],
+                    "content": {"kind": "layout", "objects": specs}})
+                ids.extend(entity["id"] for entity in result["entities"])
+        self.assertEqual(len(ids), 31)
+        # The lease-only clock jumps make the first due timer late; that timer
+        # rearms without catch-up. The next ordinary step must really execute.
+        self.ticks(2)
+        for eid in ids:
+            self.assertTrue(self.entity(eid)["state"]["program"]["fields"]["ready"], self.entity(eid))
+            self.assertFalse(self.world.get_state("w", creative.FIELD_CHANGES, eid)["exists"])
+        self.ticks(1)
+        self.assertTrue(all(self.entity(eid)["state"]["program"]["process"]["status"] != "error" for eid in ids))
+
     def test_full_definition_and_recorder_capacity_keeps_committing(self):
         # Controlled placement removes travel from this capacity regression.
         # Publication still pays real regional stock through content_submit.
@@ -1209,10 +1260,11 @@ class CreativeWorldTests(unittest.TestCase):
             self.assertLessEqual(encoded_size(record), creative.MAX_RECORD_BYTES)
 
     def test_world_upgrade_hands_off_clock_without_advancing_saved_state(self):
-        for old_world_version, old_state_version in ((10, 5), (17, 8), (18, 9), (19, 10)):
-            db = self.db.with_name(f"upgrade-{old_state_version}.sqlite3")
+        for old_world_version, old_state_version in ((10, 5), (17, 8), (18, 9), (19, 10), (28, 19), (29, 19), (30, 20)):
+            db = self.db.with_name(f"upgrade-{old_world_version}-{old_state_version}.sqlite3")
             world = WorldRuntime(db)
-            world.install_world("w", replace(make_world(), version=old_world_version, state_version=old_state_version, migrations={}))
+            initial_version = 28 if old_world_version == 29 else old_world_version
+            world.install_world("w", replace(make_world(), version=initial_version, state_version=old_state_version, migrations={}))
             role = world.create_role("returning")["role_id"]
             world.call_function("w", "grove.join", role, {"name": "returning"}, operation_id="upgrade-join")
             self.time.return_value += 1
@@ -1220,6 +1272,12 @@ class CreativeWorldTests(unittest.TestCase):
             player = world.get_state("w", m.PLAYERS, role)
             clock = world.get_state("w", m.META, "clock")["value"]
             old_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
+            if old_world_version == 29:
+                world.install_world("w", replace(make_world(), version=29, state_version=19, migrations={}))
+                self.time.return_value += 1
+                world.run_due_timers("w")
+                self.assertEqual(world.get_timer("w", old_id)["status"], "blocked")
+                self.assertEqual(world.get_state("w", m.META, "clock")["value"], clock)
             world = WorldRuntime(db)
             world.install_world("w", make_world())
             resumed = world.get_state("w", m.META, "clock")["value"]
@@ -1230,6 +1288,8 @@ class CreativeWorldTests(unittest.TestCase):
             self.assertEqual(world.get_timer("w", old_id)["status"], "cancelled")
             next_id = f"grove.tick.{resumed['epoch']}.{resumed['sequence']}"
             self.assertEqual(world.get_timer("w", next_id)["status"], "pending")
+            with world._conn(readonly=True) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM world_timers WHERE universe='w' AND handler='grove.tick' AND status='pending'").fetchone()[0], 1)
             world.install_world("w", make_world())
             self.assertEqual(world.get_state("w", m.META, "clock")["value"], resumed)
             self.time.return_value += 100  # simulated service outage, not elapsed play

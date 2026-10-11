@@ -62,7 +62,7 @@ class RuntimeViews:
         integer(limit, "limit", 1, 64)
         if not isinstance(after, str) or len(after) > 128 or type(include_schemas) is not bool:
             raise InvalidArguments("invalid view discovery parameters")
-        with self._lock, self._conn(readonly=True) as c:
+        with self._conn(readonly=True, serialized=True) as c:
             c.execute("BEGIN")
             self._admit_viewer_tx(c, universe, role_id, identity_token)
             self._check_world_tx(c, universe)
@@ -97,7 +97,7 @@ class RuntimeViews:
         """Ordered public cues for the authorized, currently visible subjects of one view."""
         import hmac
         integer(limit, "timeline limit", 1, 100)
-        with self._lock, self._conn(readonly=True) as c:
+        with self._conn(readonly=True, serialized=True) as c:
             c.execute("BEGIN")
             identity = self._admit_actor_tx(c, universe, role_id, identity_token)
             credential = identity["token_id"] if identity else "trusted:" + role_id
@@ -152,7 +152,7 @@ class RuntimeViews:
                   "view_version": spec.version, "base_cursor": cursor, "cursor": next_cursor,
                   "events": events, "has_more": more, "expires_at": now + VIEW_TTL_SECONDS}
         json_text(result)
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             self._admit_actor_tx(c, universe, role_id, identity_token)
             self._check_world_tx(c, universe)
@@ -170,7 +170,7 @@ class RuntimeViews:
 
     def _observe_view(self, universe, role_id, view, arguments, *, identity_token, cursor=None):
         # World reads use one read snapshot. Only the bounded derived checkpoint is written afterwards.
-        with self._lock, self._conn(readonly=True) as c:
+        with self._conn(readonly=True, serialized=True) as c:
             c.execute("BEGIN")
             identity = self._admit_viewer_tx(c, universe, role_id, identity_token)
             credential = identity["token_id"] if identity else ("public" if role_id is None else "trusted:" + role_id)
@@ -240,7 +240,7 @@ class RuntimeViews:
         json_text(result)
         if reuse:
             return result
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             self._admit_viewer_tx(c, universe, role_id, identity_token)
             self._check_world_tx(c, universe)

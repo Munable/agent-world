@@ -88,6 +88,46 @@ class ComposableWorldTests(unittest.TestCase):
                       if value["action"] == action)
         return next(value["preview"] for value in option["input"]["candidates"] if value["id"] == item)
 
+    def test_closed_public_lining_does_not_expose_absorption_but_owner_can_read_it(self):
+        from agent_world.grove_agent_observation import _companion_scene_index
+        identifier = self.composition_objects([
+            {"material": "stone", "construction": "vessel", "size": 1, "lining": "cloth"}])[0]
+        original = self.entity(identifier)
+        self.walk("A", original["x"], original["y"])
+        self.walk("B", original["x"], original["y"])
+        bottle = self.item("A", "水壶")["id"]
+        water = next(lot for lot in self.entity(bottle)["matter"]
+                     if lot["material"] == "water" and lot["slot"] == "contained")
+        self.call("A", "grove.interact", {"action": "transfer", "target_id": identifier,
+            "item_id": bottle, "lot_id": water["id"], "amount": 12, "target_slot": "surface",
+            "expected_player_version": self.view("A")["player"]["version"],
+            "expected_target_version": self.entity(identifier)["version"],
+            "expected_item_version": self.entity(bottle)["version"]})
+        self.ticks(1)
+        open_entity = self.inspect("B", identifier)["entity"]
+        self.assertGreater(open_entity["state"]["wetness"], 0)
+        absorbed_ids = {lot["id"] for lot in open_entity["matter"] if lot["slot"] == "absorbed"}
+        self.assertTrue(absorbed_ids)
+        self.act("A", "close", identifier)
+        hidden = self.inspect("B", identifier)["entity"]
+        self.assertIsNone(hidden["state"]["wetness"])
+        self.assertIsNone(hidden["simulation"]["wetness"])
+        self.assertTrue(absorbed_ids.isdisjoint(lot["id"] for lot in hidden["matter"]))
+        self.assertEqual([lot for lot in hidden["matter"] if lot["slot"] == "surface"],
+                         [lot for lot in open_entity["matter"] if lot["slot"] == "surface"])
+        viewport_entity = next(row for row in self.view("B")["entities"] if row["id"] == identifier)
+        self.assertIsNone(viewport_entity["simulation"]["wetness"])
+        indexed = _companion_scene_index({"entities": [viewport_entity]})
+        self.assertNotIn("wetness", indexed["entities"][0]["discovery_state"])
+        self.act("A", "pickup", identifier)
+        owner = self.inspect("A", identifier)["entity"]
+        self.assertEqual(owner["state"]["wetness"], open_entity["state"]["wetness"])
+        self.assertTrue(absorbed_ids <= {lot["id"] for lot in owner["matter"]})
+        self.act("A", "open", identifier)
+        self.act("A", "drop", identifier)
+        self.assertEqual(self.inspect("B", identifier)["entity"]["state"]["wetness"],
+                         open_entity["state"]["wetness"])
+
     def test_full_backpack_reparents_existing_child_without_counting_it_twice(self):
         # Reach the real tree bound using finite public sources, rather than
         # granting objects or modifying the persisted relationship graph.

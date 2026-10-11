@@ -92,7 +92,7 @@ class RuntimeEvents:
     def cleanup_events(self, universe, through_seq):
         identifier(universe, "universe")
         integer(through_seq, "through_seq")
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             candidate = c.execute(
                 "SELECT MAX(seq) FROM events WHERE universe=? AND seq<=?", (universe, through_seq)

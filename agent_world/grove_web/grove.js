@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity} from './grove-world-ui.js?v=terminal-facts-motion';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,ruleSnapshotChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines} from './grove-world-ui.js?v=confirmed-outcomes';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -260,9 +260,9 @@ function renderExecution(){
   if(lastConfirmed)progressNodes.push(node('p','最后已确认行动：'+(functionLabels[lastConfirmed.function]||'世界行动')+(Number.isInteger(lastConfirmed.commit_seq)?' · 记录 '+lastConfirmed.commit_seq:''),'small'));
   $('execution-progress').replaceChildren(...progressNodes);$('execution-progress').hidden=progressNodes.length===0;
   const receipts=Array.isArray(execution.receipts)?execution.receipts:[],receiptLabels={committed:'已保存',confirmed:'已核对',rejected:'已拒绝',unknown:'待核对'};
-  $('execution-actions').replaceChildren(...receipts.slice(-8).map(receipt=>{const row=node('div',undefined,'execution-receipt');row.append(node('strong',(functionLabels[receipt.function]||'世界行动')+' · '+(receiptLabels[receipt.status]||receipt.status||'状态未读')));return row;}));
+  $('execution-actions').replaceChildren(...receipts.slice(-8).map(receipt=>{const row=node('div',undefined,'execution-receipt');row.append(node('strong',(functionLabels[receipt.function]||'世界行动')+' · '+(receiptLabels[receipt.status]||receipt.status||'状态未读')));for(const line of receiptOutcomeLines(receipt))row.append(node('p',line,'small'));if(receipt.confirmed_outcome)row.append(node('p','以上是这次提交时的确认结果'+(Number.isInteger(receipt.commit_seq)?' · 记录 '+receipt.commit_seq:''),'small'));return row;}));
   if(receipts.length>8)$('execution-actions').append(node('p','显示最近 8 个回执，共 '+receipts.length+' 个；它们记录行动，不替代当前现场。','small'));
-  if(execution.readback_actual===true)$('execution-actions').append(node('p','这个目标已有实际世界读回。物件的最新状态仍以地图与详情为准。','small'));
+  for(const line of executionReadbackLines(execution))$('execution-actions').append(node('p',line,'small'));
   applyAdmission('execution-start',goalAdmission);
   const additionalControl=$('execution-additional-requests'),additionalLimit=Math.max(0,8-(execution.max_requests||0));
   additionalControl.max=String(additionalLimit);applyAdmission('execution-additional-requests',extendAdmission);
@@ -344,7 +344,7 @@ function acceptWorld(value){
   if(selectedId){
     const projected=ground().find(entity=>entity.id===selectedId)||inventory().find(entity=>entity.id===selectedId)||(value.public_content?.anchors||[]).find(anchor=>anchor.entity_id===selectedId)?.entity;
     const inaccessible=!projected&&[403,404].includes(inspectionErrorStatus);
-    if(!inaccessible&&inspectionFlight?.id!==selectedId&&(!projected||inspection?.entity?.version!==projected.version||previous&&(previous.x!==value.player.x||previous.y!==value.player.y)||previewVersionsChanged(inspection,[...ground(),...inventory()],value.player))){const captured=selectedId;select(captured,selectedFromBag,true).catch(fail);}
+    if(!inaccessible&&inspectionFlight?.id!==selectedId&&(!projected||inspection?.entity?.version!==projected.version||previous&&(previous.x!==value.player.x||previous.y!==value.player.y)||previewVersionsChanged(inspection,[...ground(),...inventory()],value.player)||ruleSnapshotChanged(inspection,value.clock))){const captured=selectedId;select(captured,selectedFromBag,true).catch(fail);}
   }
   renderInventory();renderSelection();renderActivity();renderPublicContent();renderPending();
 }
@@ -454,11 +454,11 @@ function goTo(x,y,adjacent=false){
   walkPath=path;pathTarget={x,y};if(!path.length){$('movement-feedback').textContent='已经在这里。';return;}$('movement-feedback').textContent='按四方向沿路走动；按键可改向，点击可重选路线。';run(walk);
 }
 async function select(id,fromBag=false,force=false){
-  if(!current()||!world)return;if(selectedId!==id){rememberActionDrafts();activeActionKey=null;}selectedId=id;selectedTile=null;selectedFromBag=fromBag;if(fromBag&&!force)document.querySelector('.inventory-card').open=false;if(!force)openContext();const epoch=++inspectEpoch,sessionEpoch=session;
-  if(!force&&inspection?.entity?.id===id&&!inspection.reading&&!inspectionError){renderSelection();return;}
+  if(!current()||!world)return null;if(selectedId!==id){rememberActionDrafts();activeActionKey=null;}selectedId=id;selectedTile=null;selectedFromBag=fromBag;if(fromBag&&!force)document.querySelector('.inventory-card').open=false;if(!force)openContext();const epoch=++inspectEpoch,sessionEpoch=session;
+  if(!force&&inspection?.entity?.id===id&&!inspection.reading&&!inspectionError){renderSelection();return inspection;}
   const previousEntity=entityById(id),flight={id};inspectionFlight=flight;inspection=previousEntity?{entity:previousEntity,reading:true}:null;inspectionError=null;inspectionErrorStatus=null;renderSelection();
-  try{const result=await client.query('grove.inspect',{entity_id:id});if(epoch!==inspectEpoch||sessionEpoch!==session||selectedId!==id)return;inspection=result;renderSelection();}
-  catch(error){if(epoch===inspectEpoch&&sessionEpoch===session&&selectedId===id){inspectionError=error.message||'这件物件暂不可查看。';inspectionErrorStatus=error.status;renderSelection();}}
+  try{const result=await client.query('grove.inspect',{entity_id:id});if(epoch!==inspectEpoch||sessionEpoch!==session||selectedId!==id)return null;inspection=result;renderSelection();return result;}
+  catch(error){if(epoch===inspectEpoch&&sessionEpoch===session&&selectedId===id){inspectionError=error.message||'这件物件暂不可查看。';inspectionErrorStatus=error.status;renderSelection();}return null;}
   finally{if(inspectionFlight===flight)inspectionFlight=null;}
 }
 function renderInventory(){
@@ -562,7 +562,7 @@ function renderSelection(){
   renderEffects(entity);
   const lots=matterLots(entity),stats=[stat('本体材质',materialLabel(entity.material,entity))];
   if(entity.simulation){stats.push(...simulationStats(entity,point()?.backpack_id).map(([label,value])=>stat(label,value)));stats.push(stat('结构与残材',lifecycleLabel(entity)||'结构完整'),stat('燃烧',lots.some(lot=>lot.burning)||(entity.simulation.burning_lots||[]).length?'有批次正在燃烧':'未燃烧'));}
-  else{if(caps(entity).includes('wettable'))stats.push(stat('湿度',finite(s.wetness)));if(caps(entity).includes('flammable'))stats.push(stat('燃料',finite(s.fuel)));if(caps(entity).includes('flammable'))stats.push(stat('火',s.destroyed?'材料已耗尽':s.burning?'正在燃烧':'未燃烧'));}
+  else{if(caps(entity).includes('wettable'))stats.push(stat('湿度',Number.isFinite(s.wetness)?s.wetness:'未公开'));if(caps(entity).includes('flammable'))stats.push(stat('燃料',finite(s.fuel)));if(caps(entity).includes('flammable'))stats.push(stat('火',s.destroyed?'材料已耗尽':s.burning?'正在燃烧':'未燃烧'));}
   if(s.water_capacity>0)stats.push(stat('存水',Number.isFinite(s.water)?s.water+' / '+s.water_capacity:'未公开'));if(caps(entity).includes('container'))stats.push(stat('物件容量',s.capacity),stat('容器',s.open?'敞开':'合上'));if(caps(entity).includes('water_source'))stats.push(stat('可取水',finite(s.water_remaining)));if(caps(entity).includes('ignition'))stats.push(stat('余下点火',Number.isFinite(s.uses)?s.uses:'待读取'));
   if(s.kind==='resource_node'){stats.push(stat('余下原料',finite(s.stock)+' / '+finite(s.stock_capacity)));if(s.regrowth_tick!==null&&s.regrowth_tick!==undefined)stats.push(stat('正在再生','剩 '+Math.max(0,s.regrowth_tick-finite(world.clock?.sequence))+' 个世界逻辑步'));}
   if(s.recipe==='canopy')stats.push(stat('模式',s.mode==='collect'?'集雨':'遮雨'));
@@ -644,12 +644,12 @@ function appendFacts(parent,value,depth=0,scope='facts',path=[]){
 }
 function renderCreative(entity,previous=false){
   const creative=creativeState(previous?null:inspection,entity);if(!creative)return;
-  const section=node('section',undefined,'creative-state');section.append(node('h4',previous?'规则对象 · 上次已读状态':'规则对象 · 当前事实'),node('p','规则字段、组分、连接与记录来自服务器。逻辑步不是现实经过的秒数，叙述不决定结果。','small'));
+  const section=node('section',undefined,'creative-state');section.append(node('h4',previous?'规则对象 · 上次已读状态':'规则对象 · 本次读取快照'),node('p','规则字段、组分、连接与记录来自服务器。条件属于下方读取步的快照；关联物件可能随后变化，可刷新现场重新核对。逻辑步不是现实经过的秒数，叙述不决定结果。','small'));
   const runtime=previous?entity.creative:(inspection?.creative||entity.creative);
   for(const line of ruleRuntimeObservationLines(runtime,entity))section.append(node('p',line,'small'));
   for(const line of reactionObservationLines(creative,entity))section.append(node('p',line,'small'));
   const runtimeFields=runtime?.mechanical_observation?['mechanical','drive_request','mechanical_last_solved']:[];
-  const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated','contact_process','automatic_rules','deployment','mechanical_observation',...runtimeFields].includes(key)));
+  const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated','contact_process','automatic_rules','deployment','mechanical_observation','fact_semantics','authored_field_units','automatic_field_change','automatic_field_change_status',...runtimeFields].includes(key)));
   appendFacts(section,expanded,0,entity.id);
   if(creative.hidden===true)section.append(node('p','这个公共容器已合上。当前只读到规则引用，内部配料、运行与记录未公开。','small'));
   const ref=creative.definition_ref;
@@ -796,7 +796,7 @@ function renderRuleAction(descriptor,entity,disabled){
   if(descriptor.available===false){$('selection-actions').append(node('p',label+'：'+(descriptor.reason||'当前条件不满足。'),'action-reason'));for(const line of conditionObservationLines(descriptor.condition_observation,entity))$('selection-actions').append(node('p',line,'small'));return;}
   const form=node('form',undefined,'descriptor-action rule-action');form.dataset.action=descriptor.action;form.dataset.actionKey=actionKey(descriptor);form.dataset.entityId=entity.id;form.append(node('p',label,'descriptor-label'));
   if(descriptor.use)form.append(node('p',friendlyInstruction(descriptor.use),'small'));
-  for(const line of conditionObservationLines(descriptor.condition_observation,entity))form.append(node('p',line,'small'));
+  const conditions=node('div',undefined,'rule-action-conditions');form.append(conditions);let lastConditionSignature=null;
   const fields=[],unsupported=[],fixed=descriptor.arguments||{},topSchema=descriptor.input_schema||{type:'object',properties:{},required:[]};
   const candidateKeys={item_id:'items',other_id:'others',material:'materials'};
   const generatedFields=new Set(['action','target_id','expected_target_version','expected_player_version','expected_item_version','expected_other_version','params','delegation']);
@@ -865,6 +865,8 @@ function renderRuleAction(descriptor,entity,disabled){
   }
   function update(){
     const live=liveDescriptor(),reading=!live;
+    const conditionLines=reading?['行动条件待读取；取得当前状态后再核对。']:conditionObservationLines(live.condition_observation,inspection.entity),conditionSignature=JSON.stringify(conditionLines);
+    if(conditionSignature!==lastConditionSignature){conditions.replaceChildren(...conditionLines.map(line=>node('p',line,'small')));lastConditionSignature=conditionSignature;}
     for(const field of fields)if(field.portField){
       const selected=field.control.value,ports=(live||descriptor).input_schema?.properties?.port?.enum||[],empty=node('option','请选择槽位');empty.value='';field.control.replaceChildren(empty);
       for(const port of ports){const option=node('option',port);option.value=port;field.control.append(option);}
@@ -1196,7 +1198,12 @@ $('import-key').addEventListener('change',event=>run(async()=>{
     $('identity-status').textContent='已选中恢复身份。进入后会保存它并接续原角色。';
   }finally{input.value='';}
 }));
-$('refresh').addEventListener('click',()=>run(async()=>{stopWalking();const epoch=session;await refreshWorld(true);if(epoch===session&&playing){if(directoryDefinition&&directoryType)await readFabricationMenu();announce('已读取最新附近现场。');}}));
+$('refresh').addEventListener('click',()=>run(async()=>{
+  stopWalking();const epoch=session,worldRead=await refreshWorld(true);if(epoch!==session||!playing)return;
+  const id=selectedId,selectedRead=id?await select(id,selectedFromBag,true):null;if(directoryDefinition&&directoryType)await readFabricationMenu();if(epoch!==session||!playing)return;
+  const selectedReadCurrent=id&&selectedId===id&&selectedRead===inspection&&inspection?.entity?.id===id&&!inspection.reading&&!inspectionError;
+  if(worldRead===true)announce(selectedReadCurrent?'已读取最新附近现场与所选物件。':'已读取最新附近现场。');else if(selectedReadCurrent)announce('已读取所选物件；附近现场尚未刷新。');
+}));
 $('backup').addEventListener('click',()=>{if(!key)return;const blob=new Blob([JSON.stringify(key,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=node('a');a.href=url;a.download='shared-grove-identity.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);announce('恢复文件包含你的身份密钥，请保存在自己的安全位置。');});
 $('follow-player').addEventListener('click',()=>{if(point()){camera={x:point().x,y:point().y};canvas.focus({preventScroll:true});}});$('dismiss-onboarding').addEventListener('click',()=>{$('onboarding').hidden=true;});
 $('selection-close').addEventListener('click',()=>{rememberActionDrafts();closePanels();canvas.focus({preventScroll:true});});

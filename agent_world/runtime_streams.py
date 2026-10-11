@@ -87,7 +87,7 @@ class RuntimeStreams:
                 'retention_seconds': spec.retention_seconds, 'has_older': head>floor}
 
     def list_streams(self, universe, role_id=None, *, identity_token=None):
-        with self._lock, self._conn(readonly=True) as c:
+        with self._conn(readonly=True, serialized=True) as c:
             c.execute('BEGIN'); self._check_world_tx(c,universe)
             definition = self._worlds.get(universe)
             result=[]
@@ -101,7 +101,7 @@ class RuntimeStreams:
 
     def read_stream(self, universe, name, role_id=None, *, identity_token=None, cursor=None, limit=50):
         integer(limit,'stream page size',1,100)
-        with self._lock, self._conn(readonly=True) as c:
+        with self._conn(readonly=True, serialized=True) as c:
             c.execute('BEGIN')
             definition,spec,credential=self._stream_admit_tx(c,universe,name,role_id,identity_token)
             head,floor=self._head_tx(c,universe,name)
@@ -158,7 +158,7 @@ class RuntimeStreams:
 
     def apply_stream_retention(self, universe, *, limit=500):
         integer(limit,'stream retention batch',1,5000)
-        with self._lock,self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute('BEGIN IMMEDIATE'); self._check_world_tx(c,universe)
             definition=self._worlds.get(universe)
             removed=0

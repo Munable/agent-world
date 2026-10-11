@@ -83,9 +83,14 @@ def create_application(
     @asynccontextmanager
     async def lifespan(app):
         async with mcp_base.router.lifespan_context(mcp_base):
-            async with retention_lifespan(mcp_runtime, universe):
-                async with timer_lifespan(mcp_runtime, universe, enabled=timers_enabled, interval=timer_interval):
-                    yield
+            # Keep this host's WAL handle attached without an open transaction.
+            # Request connections still own their snapshots/transactions; the
+            # handle closes only after maintenance and timer workers stop.
+            with mcp_runtime._conn(readonly=True) as database_lifetime:
+                database_lifetime.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+                async with retention_lifespan(mcp_runtime, universe):
+                    async with timer_lifespan(mcp_runtime, universe, enabled=timers_enabled, interval=timer_interval):
+                        yield
 
     app = Starlette(routes=[Mount("/", app=Dispatch())], lifespan=lifespan)
     app.state.runtime = mcp_runtime

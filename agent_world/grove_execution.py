@@ -21,6 +21,33 @@ from jsonschema import Draft202012Validator
 from .grove_connector_errors import ConnectorError
 
 
+def confirmed_outcome(payload):
+    """A bounded projection of the original authorized server receipt only."""
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        return None
+    facts = {"kind": "server_receipt"}
+    changes = result.get("changes")
+    if isinstance(changes, list):
+        facts["changes"] = [value[:600] for value in changes[:4] if isinstance(value, str)]
+    player = result.get("player")
+    if isinstance(player, dict):
+        facts["player"] = {key: deepcopy(player[key]) for key in ("id", "x", "y") if key in player}
+    entity = result.get("entity")
+    if isinstance(entity, dict):
+        facts["entity"] = {key: deepcopy(entity[key]) for key in
+            ("id", "name", "version", "x", "y", "owner", "container", "physical_parent", "lifecycle") if key in entity}
+    action = result.get("action_result")
+    if isinstance(action, dict):
+        facts["action_result"] = deepcopy(action)
+    viewport = result.get("viewport", {})
+    if isinstance(viewport, dict) and isinstance(player, dict):
+        facts["same_position_public_objects"] = [{key: deepcopy(item[key]) for key in ("id", "name") if key in item}
+            for item in viewport.get("entities", []) if isinstance(item, dict) and item.get("owner") is None
+            and item.get("x") == player.get("x") and item.get("y") == player.get("y")][:8]
+    return facts if len(facts) > 1 else None
+
+
 @dataclass(frozen=True)
 class ExecutionPorts:
     """Narrow adapters; closures may resolve the current transport at call time.
@@ -311,6 +338,8 @@ class ExecutionController:
             segment_id = (existing or {}).get("segment_id", owner.get("segment_id", ""))
         value = {"function": function, "operation_id": operation, "status": status,
             "commit_seq": (payload or {}).get("commit_seq"), "task_id": task_id, "segment_id": segment_id}
+        if status in {"committed", "confirmed"} and (outcome := confirmed_outcome(payload)) is not None:
+            value["confirmed_outcome"] = outcome
         if existing is not None:
             existing.update(value)
         else:
@@ -597,8 +626,10 @@ class ExecutionController:
             raise ConnectorError("ExecutionNotRunning", "当前执行受阻或尚未运行；先读取事实及核对原回执。", 409)
         if not self.delegation or not self.state.get("delegation_active"):
             raise ConnectorError("DelegationRequired", "No active action grant remains; stop writing.", 403)
-        if not segment_id or segment_id != self.state.get("segment_id"):
-            raise ConnectorError("StaleExecutionSegment", "原请求已结束；迟到工具调用没有执行。", 409)
+        if not segment_id:
+            raise ConnectorError("InvalidToolArguments", "缺少execution_segment_id；请原样使用当前执行段标识。", 422)
+        if segment_id != self.state.get("segment_id"):
+            raise ConnectorError("StaleExecutionSegment", "执行段标识不匹配；此调用没有执行，请读取当前执行段状态。", 409)
 
     async def readback(self, *, context_entity_id=None):
         started = time.monotonic()
@@ -653,6 +684,10 @@ class ExecutionController:
             self.phase("mcp_write", started)
             facts = await self.readback()
             projection = deepcopy(result)
+            if (outcome := confirmed_outcome(result)) is not None:
+                projection["confirmed_outcome"] = outcome
+                projection["confirmed_outcome"]["commit_seq"] = result.get("commit_seq")
+                projection["confirmed_outcome"]["meaning"] = "Facts at this original operation's commit; not a new observation, current scene, or free-text goal verdict."
             projection["execution_readback"] = facts
             projection["execution_control"] = {key: self.value(key) for key in
                 ("actions_count", "max_actions", "remaining_actions", "delegation_active", "grant_version")}
@@ -760,7 +795,7 @@ class ExecutionController:
                     self.pause("行动权已收回或原动作额度已用完。")
                     break
                 if failure is not None and not progress:
-                    self.pause("这一段未形成可核对进展；保留原目标，可明确接续。", error={"code": failure.code, "message": failure.message})
+                    self.pause(failure.message, error={"code": failure.code, "message": failure.message})
                     break
                 if failure is not None and failure.code in {"ModelUnavailable", "HostAuthenticationFailed", "SavedSessionMissing"}:
                     self.pause("模型或原会话不可用；保留已确认进展，先解决连接阻塞。", error={"code": failure.code, "message": failure.message})

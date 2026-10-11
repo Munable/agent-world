@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from .grove_connector_errors import ConnectorError
 from .grove_execution import ExecutionController, ExecutionPorts
 from .grove_agent_observation import (AgentObservations, AGENT_WRITE_FUNCTIONS,
-    companion_projection, blueprint_model_input, agent_tool_schema, _checked_agent_tool_text,
+    companion_projection, blueprint_model_input, agent_tool_schema, agent_mcp_schema, _checked_agent_tool_text,
     _companion_scene_index)
 
 DEFAULT_BINARY = Path("/Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode")
@@ -858,6 +858,7 @@ class GroveSession:
                 await self.release_opportunity()
             if self.execution_controller.value("status") in {"completed", "paused"}:
                 self.status = "ready" if self.execution_controller.value("status") == "completed" else "paused"
+                self.error = deepcopy(self.execution_controller.value("error"))
             self.remember()
 
     async def verify_history_recovery(self):
@@ -1421,7 +1422,7 @@ class GroveSession:
             parts = response.get("parts", []) if isinstance(response, dict) else []
             if not isinstance(info, dict) or not isinstance(parts, list):
                 raise ConnectorError("IncompleteResponse", "OpenCode has not completed a real response.", 502)
-            self.raise_if_model_unavailable(info)
+            self.raise_if_native_error(info)
             answer = "\n".join(p["text"] for p in parts if isinstance(p, dict) and p.get("type") == "text"
                 and isinstance(p.get("text"), str) and not p.get("ignored") and not p.get("synthetic"))
             if info.get("finish") == "length":
@@ -1601,19 +1602,24 @@ class GroveSession:
         self.remember()
 
     @staticmethod
-    def raise_if_model_unavailable(info: dict):
+    def raise_if_native_error(info: dict):
         error = info.get("error")
         data = error.get("data") if isinstance(error, dict) else None
         if (isinstance(error, dict) and error.get("name") == "APIError" and isinstance(data, dict) and
                 data.get("message") == "Upstream request failed: Model is unavailable."):
             raise ConnectorError("ModelUnavailable", "所选模型当前不可用；原身份、会话和现场保留。请更换可用模型后重新连接。", 503)
+        if error:
+            diagnostic = safe_response_diagnostics({"info": info, "parts": []})
+            code = diagnostic["error_code"]
+            suffix = f"（HTTP {code}）" if isinstance(code, int) else ""
+            raise ConnectorError("IncompleteResponse", "模型服务返回错误" + suffix + "，没有完成有效回应；已确认行动保留，原目标尚未完成。", 502)
 
     def complete_model_answer(self, response: Any, *, session_id: str | None = None) -> str:
         info = response.get("info", {}) if isinstance(response, dict) else {}
         parts = response.get("parts", []) if isinstance(response, dict) else []
         if not isinstance(info, dict) or not isinstance(parts, list):
             raise ConnectorError("IncompleteResponse", "OpenCode has not completed a real response.", 502)
-        self.raise_if_model_unavailable(info)
+        self.raise_if_native_error(info)
         if info.get("finish") == "length":
             raise ConnectorError("FailedLength", "模型用完本轮输出预算，未完成最终回答；不会发布内容。", 502)
         answer = "\n".join(p["text"] for p in parts if isinstance(p, dict) and p.get("type") == "text"
@@ -2401,21 +2407,9 @@ class GroveSession:
             spec = self.catalog[function]
             if function in AGENT_READ_FUNCTIONS and spec.get("access") != "read":
                 continue
-            schema = agent_tool_schema(spec["input_schema"], function=function)
+            schema = agent_mcp_schema(spec["input_schema"], function=function)
             description = spec.get("description", function)
             if function in AGENT_WRITE_FUNCTIONS:
-                schema.get("properties", {}).pop("delegation", None)
-                if "required" in schema:
-                    schema["required"] = [key for key in schema["required"] if key != "delegation"]
-                schema.setdefault("properties", {})["execution_segment_id"] = {
-                    "type": "string", "minLength": 1, "maxLength": 100,
-                    "description": "Copy the current execution_task.segment_id exactly; stale requests cannot write."}
-                schema.setdefault("required", []).append("execution_segment_id")
-                schema["properties"]["observation_id"] = {
-                    "type": "string", "minLength": 1, "maxLength": 100,
-                    "description": "Use the opaque ID returned with the exact observations you are acting on. "
-                                   "The connector supplies their fixed player/target/item/other, fabrication source entity and opportunity versions."}
-                schema["required"].append("observation_id")
                 description += " Snapshot guards are bound from observation_id; terms_version remains explicit. " \
                     "Store/attach requires this observation's complete matching candidate.preview; its exact combination fingerprint is bound and rechecked by the world."
                 if function == "grove.fabricate":
@@ -2432,11 +2426,6 @@ class GroveSession:
                     description += " " + pour_binding
                     if "target_slot" in schema.get("properties", {}):
                         schema["properties"]["target_slot"]["description"] = pour_binding
-            else:
-                schema.setdefault("properties", {})["base_observation_id"] = {
-                    "type": "string", "minLength": 1, "maxLength": 100,
-                    "description": "Optional previous observation_id to extend with this read only. "
-                                   "Omitted uses the fixed request preflight, never another parallel read."}
             result.append({"name": function.replace(".", "_"), "description": description,
                            "inputSchema": schema})
         return result
@@ -2476,6 +2465,14 @@ class GroveSession:
         if write:
             segment_id = arguments.get("execution_segment_id")
             self.execution_controller.admit_write(segment_id)
+            schema = agent_mcp_schema(self.catalog[function]["input_schema"], function=function)
+            # Diagnose missing semantic choices; binding still owns observation
+            # errors and discards caller-supplied optimistic snapshot guards.
+            errors = [error for error in Draft202012Validator(schema).iter_errors(arguments)
+                      if error.validator == "required" and error.message != "'observation_id' is a required property"]
+            if errors:
+                message = "; ".join(error.message for error in errors[:3])
+                raise ConnectorError("InvalidToolArguments", "输入不符合此工具的参数要求：" + message + "。没有执行动作，也没有产生新观察标识。", 422)
             if self.execution_write_lock.locked():
                 raise ConnectorError("ExecutionWriteBusy", "Wait for the current write and its readback before another action.", 409)
             async with self.execution_write_lock:

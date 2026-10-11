@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, AsyncMock
 
 from agent_world.grove_connector_errors import ConnectorError
-from agent_world.grove_execution import ExecutionController, ExecutionPorts
+from agent_world.grove_execution import ExecutionController, ExecutionPorts, confirmed_outcome
 
 
 GRANT_SCHEMA = {"type": "object", "required": ["goal", "max_actions"],
@@ -330,6 +330,22 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.controller.state["resume_allowed"])
         self.assertEqual(self.replays, [False])
 
+    async def test_native_failure_pause_preserves_actual_error_and_original_goal(self):
+        self.start()
+        original_task = self.controller.state["task_id"]
+        message = "模型服务返回错误（HTTP 400），没有完成有效回应。"
+        async def failed():
+            raise ConnectorError("IncompleteResponse", message, 502)
+        self.native_action = failed
+        await self.controller.execute_goal(self.controller.state["goal"])
+        self.assertEqual(self.controller.state["stop_reason"], message)
+        self.assertEqual(self.controller.state["error"], {"code": "IncompleteResponse", "message": message})
+        self.assertEqual(self.controller.state["status"], "paused")
+        self.assertEqual(self.controller.state["request_status"], "idle_confirmed")
+        self.assertEqual(self.controller.state["task_id"], original_task)
+        self.assertEqual(self.controller.state["requests_used"], 1)
+        self.assertEqual(self.controller.state["actions_count"], 0)
+
     async def test_stale_segment_and_reclaimed_authority_do_not_invoke_world(self):
         self.start()
         task = self.controller.state
@@ -454,3 +470,17 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         for purpose in ("execution", "execution_summary", "generation", "generation_correction"):
             self.assertFalse(self.controller.request_returned(purpose))
             self.assertEqual(self.controller.state, original)
+
+class ConfirmedOutcomeTests(unittest.TestCase):
+    def test_receipt_facts_are_copied_without_model_completion_claim(self):
+        payload={"commit_seq":7,"result":{"changes":["转入1u水"],"player":{"id":"me","x":2,"y":3},
+            "entity":{"id":"cup","name":"杯","version":4,"x":2,"y":3},
+            "action_result":{"transfer":{"source_name":"水壶","target_name":"杯","transferred":1,"material":"water"}},
+            "summary":"模型声称都完成了","viewport":{"entities":[{"id":"cup","name":"杯","owner":None,"x":2,"y":3}]}}}
+        facts=confirmed_outcome(payload)
+        self.assertEqual(facts['action_result']['transfer']['transferred'],1)
+        self.assertNotIn('summary',facts)
+        self.assertEqual(facts['same_position_public_objects'],[{"id":"cup","name":"杯"}])
+        payload['result']['action_result']['transfer']['transferred']=99
+        self.assertEqual(facts['action_result']['transfer']['transferred'],1)
+        self.assertIsNone(confirmed_outcome({"status":"unknown"}))

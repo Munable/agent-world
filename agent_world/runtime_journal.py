@@ -130,7 +130,7 @@ class RuntimeJournal:
         """Explicit privileged retention operation; notifications and current state are independent."""
         identifier(universe, "universe")
         integer(through, "through")
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             latest, floor = self._state_revision_tx(c, universe)
             candidate = c.execute("SELECT MAX(seq) FROM state_changes WHERE universe=? AND seq<=?",

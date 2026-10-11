@@ -1,7 +1,7 @@
 """Finite, typed facts read from supplied physical snapshots; no world access."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from . import matter as sm
 
 
@@ -14,6 +14,8 @@ class FactSpec:
     type: str
     component: str | None = None
     aggregate: bool = False
+    unit: str | None = None
+    meaning: str | None = None
 
 
 PUBLIC_FACTS = {
@@ -22,11 +24,11 @@ PUBLIC_FACTS = {
     "barrier.opened_sequence": FactSpec("integer", "barrier"),
     **{"mechanical." + key: FactSpec("string" if key == "status" else "integer", "mechanical")
        for key in ("position", "speed", "angle", "energy", "status", "available_torque")},
-    "physical.wetness": FactSpec("integer"),
+    "physical.wetness": FactSpec("integer", unit="%", meaning="吸水饱和百分值：已吸附水量除以有效吸水容量，取整数且至多100%；容量为0时为0。不是水量u，不计表面或容纳槽的水。"),
     "physical.burning": FactSpec("boolean"),
-    "physical.surface_water": FactSpec("integer"),
-    "physical.contained_water": FactSpec("integer"),
-    "physical.absorbed_water": FactSpec("integer"),
+    "physical.surface_water": FactSpec("integer", unit="u", meaning="实际表面槽的水量。"),
+    "physical.contained_water": FactSpec("integer", unit="u", meaning="实际容纳槽的水量。"),
+    "physical.absorbed_water": FactSpec("integer", unit="u", meaning="实际吸附槽的水量。"),
     "physical.structure.integrity": FactSpec("integer", "structure"),
     "physical.structure.max_integrity": FactSpec("integer", "structure"),
     **{"physical.load." + key: FactSpec("integer", "structure" if key in {"limit", "overload"} else None,
@@ -38,6 +40,27 @@ PUBLIC_FACTS = {
 FACT_TYPES = {key: spec.type for key, spec in PUBLIC_FACTS.items()}
 PHYSICAL_TYPES = {key.removeprefix("physical."): spec.type for key, spec in PUBLIC_FACTS.items()
                   if key.startswith("physical.")}
+
+
+def fact_catalog():
+    return {name: asdict(spec) for name, spec in PUBLIC_FACTS.items()}
+
+
+def reference_semantics(reference):
+    """Describe a reference without inferring units from an authored field name."""
+    if not isinstance(reference, dict):
+        return None
+    name = ("physical." + reference["physical"] if "physical" in reference else
+            "mechanical." + reference["mechanical"] if "mechanical" in reference else
+            reference.get("object", {}).get("field"))
+    spec = PUBLIC_FACTS.get(name)
+    if spec is not None and spec.unit is not None:
+        return {"unit": spec.unit}
+    if "quantity" in reference:
+        return {"unit": "u"}
+    if "concentration" in reference:
+        return {"unit": "%"}
+    return None
 
 
 def snapshot_facts(registry, entity, objects=None, *, aggregate_known=True):

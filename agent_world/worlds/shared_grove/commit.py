@@ -320,6 +320,8 @@ def transfer_material(ctx, source, target, lot_id, amount, *, target_slot="conta
     matches = [current for current in target["matter"] if current["material"] == lot["material"] and current["slot"] == target_slot
                and current.get("bound_to") == bound_to and (target_slot != "body" or current.get("origin_object") == lot.get("origin_object", source["id"]))]
     return {"transferred": amount, "quantity": amount, "source": source["id"], "target": target["id"],
+            "source_name": source["name"], "target_name": target["name"],
+            "material": lot["material"], "source_lot_id": lot_id, "target_slot": target_slot,
             "lot_id": matches[-1]["id"] if matches else None, "source_version": source["version"], "target_version": target["version"]}
 
 
@@ -356,6 +358,8 @@ def transfer_water(ctx, source, target, amount, *, target_slot="contained", reas
     if target_slot in {"absorbed", "surface"}:
         extinguish(ctx, target)
     return {"transferred": amount, "amount": amount, "source": source["id"], "target": target["id"],
+            "source_name": source["name"], "target_name": target["name"],
+            "material": "water", "target_slot": target_slot,
             "source_id": source["id"], "target_id": target["id"], "source_version": source["version"], "target_version": target["version"]}
 
 

@@ -201,12 +201,13 @@ def _companion_chunk_terrain(chunk):
 
 
 def _companion_creative_summary(creative):
-    """Retain a few authorized runtime facts without expanding declarations."""
+    """Retain authorized current fields and runtime evidence without declarations."""
     summary = {key: deepcopy(creative[key]) for key in
                ("definition_ref", "type_id", "hidden") if key in creative}
     if creative.get("hidden") is True:
         return summary
-    for key in ("automatic_rule_count", "explicit_action_count", "automatic_rules_projection"):
+    for key in ("fields", "world_tick", "automatic_field_change", "automatic_field_change_status",
+                "automatic_rule_count", "explicit_action_count", "automatic_rules_projection"):
         if key in creative:
             summary[key] = deepcopy(creative[key])
     deployment = creative.get("deployment")
@@ -285,6 +286,11 @@ def _companion_scene_index(scene):
                     "entity_ref", "material", "capabilities", "container", "lifecycle", "created_by",
                     "source", "barrier_active", "contents_visibility", "content_summary", "matter_unit",
                     "pour_target_slot") if key in entity}
+                if "container" in entity:
+                    row["parent_container_id"] = entity["container"]
+                kind = entity.get("state", entity.get("discovery_state", {})).get("kind")
+                if isinstance(kind, str):
+                    row["entity_kind"] = kind
                 # Viewport matter is an authorized quantity summary, not a list
                 # of transferable lots. Never manufacture lot IDs from it.
                 if isinstance(entity.get("matter"), list):
@@ -314,10 +320,11 @@ def _companion_scene_index(scene):
                 if not isinstance(state, dict):
                     state = entity.get("discovery_state", {})
                 row["discovery_state"] = {key: deepcopy(state[key]) for key in
-                    ("kind", "resource_kind", "stock", "open", "recipe") if key in state}
+                    ("kind", "resource_kind", "stock", "open", "recipe", "wetness") if key in state}
                 if (entity.get("owner") is None and "container" in entity.get("capabilities", [])
                         and not state.get("open")):
                     row["contents_visibility"] = "hidden"
+                    row["discovery_state"].pop("wetness", None)
                 rows.append(row)
             index[field] = rows
     if "public_content" in scene:
@@ -327,6 +334,8 @@ def _companion_scene_index(scene):
         "meaning": "Actual identity/version/location index, not complete state or an action preview. "
                    "Matter rows are actual authorized slot/quantity summaries, not transferable lot IDs; "
                    "canonical material identity is distinct from its display name and instance creator. "
+                   "discovery_state.wetness is absorption saturation percent (%), not water quantity (u). "
+                   "Null or omitted wetness is unknown, never a zero reading. "
                    "Creative runtime summaries are read snapshots: saved mechanical output is history, "
                    "solver eligibility is not participation, and process.steps counts reactions only. "
                    "last_solved marks output changes, not every solve; a request's earliest step is not confirmation. "
@@ -1004,7 +1013,7 @@ def _bounded_agent_projection(function, payload):
     # This response omits expanded state explicitly and retains the real receipt.
     result = {key: deepcopy(payload[key]) for key in (
         "operation_id", "function_id", "ok", "status", "commit_seq", "actor_role_id",
-        "function_version", "replayed", "execution_control") if key in payload}
+        "function_version", "replayed", "execution_control", "confirmed_outcome") if key in payload}
     operation_result = payload.get("result")
     if isinstance(operation_result, dict):
         receipt_fields = {key: deepcopy(operation_result[key]) for key in
@@ -1109,6 +1118,57 @@ def agent_tool_schema(schema, *, function=None):
     return result
 
 
+def agent_mcp_schema(schema, *, function):
+    """One input projection for tool inventory and presented action menus."""
+    result = agent_tool_schema(schema, function=function)
+    properties = result.setdefault("properties", {})
+    if function in AGENT_WRITE_FUNCTIONS:
+        properties.pop("delegation", None)
+        result["required"] = [key for key in result.get("required", []) if key != "delegation"]
+        properties["execution_segment_id"] = {
+            "type": "string", "minLength": 1, "maxLength": 100,
+            "description": "Copy the current execution_task.segment_id exactly; stale requests cannot write."}
+        properties["observation_id"] = {
+            "type": "string", "minLength": 1, "maxLength": 100,
+            "description": "Copy the opaque observation_id returned with these exact facts. Do not invent an ID."}
+        for key in ("execution_segment_id", "observation_id"):
+            if key not in result["required"]:
+                result["required"].append(key)
+    else:
+        properties["base_observation_id"] = {
+            "type": "string", "minLength": 1, "maxLength": 100,
+            "description": "Optional previous observation_id to extend with this read only; omitted uses the request preflight."}
+    return result
+
+
+def _project_agent_menus(value):
+    """Project only server-generated scene menus before sizing and binding."""
+    if not isinstance(value, dict):
+        return
+    options = value.get("action_options") or []
+    action = value.get("action")
+    if isinstance(action, dict) and action.get("function_id") == "grove.fabricate":
+        options = [*options, action]
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        function = option.get("function_id")
+        if function in AGENT_WRITE_FUNCTIONS and isinstance(option.get("input_schema"), dict):
+            option["mcp_tool"] = function.replace(".", "_")
+            option["input_schema"] = agent_mcp_schema(option["input_schema"], function=function)
+        if isinstance(option.get("arguments"), dict):
+            option["arguments"] = {key: item for key, item in option["arguments"].items() if not _agent_version_field(key)}
+            if function == "grove.fabricate":
+                for source in option["arguments"].get("sources", []):
+                    if isinstance(source, dict):
+                        source.pop("expected_entity_version", None)
+    for key in ("result", "entity", "viewport", "selected_inspection", "execution_readback"):
+        _project_agent_menus(value.get(key))
+    for key in ("entities", "inventory", "contents", "nearby_entities", "resource_nodes", "water_sources"):
+        for item in value.get(key, []) or []:
+            _project_agent_menus(item)
+
+
 class AgentObservations:
     """Keep only observations actually presented by this component.
 
@@ -1168,10 +1228,13 @@ class AgentObservations:
             if function in AGENT_ACTION_FUNCTIONS:
                 result = _companion_action_projection(result, base_id=base_id, versions=bundle["versions"],
                     entity_ids=action_entity_ids, source=payload)
+            _project_agent_menus(result)
             # This is the exact object both MCP representations will deliver.
             # User-message preflights are not native tool output; their complete
             # selected previews have a different transport/input boundary.
             result = _bounded_agent_projection(function, result)
+        else:
+            _project_agent_menus(result)
 
         def remember(kind, value, id_key="id", version_key="version"):
             if isinstance(value, dict) and isinstance(value.get(id_key), str) and type(value.get(version_key)) is int and value[version_key] > 0:
@@ -1209,15 +1272,6 @@ class AgentObservations:
                                 "player_version": bundle["versions"]["player"].get(self.role_id),
                                 "target_version": bundle["versions"]["entity"].get(target),
                                 "item_version": bundle["versions"]["entity"].get(candidate["id"])}
-                if isinstance(option.get("input_schema"), dict):
-                    option["input_schema"] = agent_tool_schema(option["input_schema"], function=option.get("function_id"))
-                if isinstance(option.get("arguments"), dict):
-                    option["arguments"] = {key: value for key, value in option["arguments"].items()
-                                           if not _agent_version_field(key)}
-                    if option.get("function_id") == "grove.fabricate":
-                        for source in rows(option["arguments"].get("sources")):
-                            if isinstance(source, dict):
-                                source.pop("expected_entity_version", None)
 
         def entity(value):
             if isinstance(value, dict):

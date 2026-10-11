@@ -18,7 +18,9 @@ async def retention_lifespan(runtime, universe):
         def run():
             while not stop.is_set():
                 try:
-                    runtime.apply_retention(universe)
+                    current_definition = runtime._worlds.get(universe)
+                    if current_definition is not None and current_definition.retention is not None:
+                        runtime.apply_retention(universe)
                     runtime.apply_stream_retention(universe)
                 except Exception as exc:
                     logger.error("retention sweep failed (%s)", type(exc).__name__)

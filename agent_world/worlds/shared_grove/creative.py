@@ -15,7 +15,7 @@ from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.simulation import matter as sm
 from agent_world.simulation.declarations import declaration_semantics, has_event, phase_applications
 from agent_world.simulation.programs import compile_program, evaluate, plan_reaction, program_material_semantics, solve_mechanical
-from agent_world.simulation.facts import FactUnavailable, PUBLIC_FACTS, snapshot_facts
+from agent_world.simulation.facts import FactUnavailable, PUBLIC_FACTS, fact_catalog, snapshot_facts
 from agent_world.world_streams import StreamEvent
 
 from . import model as m, commit, activity, publication
@@ -27,6 +27,7 @@ from .definitions import BODY_MATERIALS, MAX_CUSTOM_MATERIALS, REGISTRY, registr
 VERSIONS = "grove.creative.versions"
 CONTROL = "grove.creative.control"
 ACCOUNTING = "grove.creative.accounting"
+FIELD_CHANGES = "grove.creative.field_changes"
 MAX_INSTANCES = 32
 MAX_LINKS = 8
 PROGRAM_COMPONENTS = ("structure", "container", "combustion", "absorbent", "buoyant", "attachment")
@@ -53,9 +54,7 @@ def _save(ctx, scope, key, value):
     return ctx.set_state(scope, key, value, expected_version=rec["version"])
 
 
-
-
-def _check_instance_capacity(ctx, ids):
+def _check_instance_capacity(ctx, ids, *, reject=True):
     """Reserve a future full physical step before admitting a new instance.
 
     Definitions are read-only during a step. Only the admitted types' possible
@@ -143,7 +142,10 @@ def _check_instance_capacity(ctx, ids):
     size += len(accounts) * ACCOUNT_HISTORY_BYTES
     if (any(len(keys) > 32 for keys in builtin_accounts.values()) or total_facts > MAX_OUTCOMES_PER_STEP
             or changes > MAX_COMMIT_CHANGES or size > MAX_COMMIT_BYTES):
+        if not reject:
+            return {"changes": 0, "bytes": 0}
         raise RuleViolation("活动物件组合超过完整物理步的提交容量；现有物件继续运行，本次入料或创建未提交。")
+    return {"changes": MAX_COMMIT_CHANGES - changes, "bytes": MAX_COMMIT_BYTES - size}
 
 
 def step(ctx):
@@ -883,6 +885,27 @@ def tick(ctx):
     for entries in pending_accounts.values():
         for key, amount in entries.items():
             sm.accumulate_quantity(accounts, key, amount)
+    history_budget = None
+    for eid, entity in objects.items():
+        program = entity["state"].get("program")
+        previous = persisted[eid]["state"].get("program", {}).get("fields", {})
+        if program is not None:
+            changed_fields = {key: value for key, value in program.get("fields", {}).items() if previous.get(key) != value}
+            if changed_fields:
+                # Optional evidence cannot reduce admission or stall a step.
+                # The core reservation also covers later public outcomes. Only
+                # estimate spare room when an actual field change needs it.
+                if history_budget is None:
+                    try:
+                        history_budget = _check_instance_capacity(ctx, list(objects), reject=False)
+                    except RuleViolation:
+                        history_budget = {"changes": 0, "bytes": 0}
+                transition = {"step": step(ctx), "before": {key: previous[key] for key in changed_fields}, "after": changed_fields}
+                size = sm.encoded_size(ctx.get_state(FIELD_CHANGES, eid, {})) + sm.encoded_size(transition)
+                if history_budget["changes"] > 0 and history_budget["bytes"] >= size:
+                    _save(ctx, FIELD_CHANGES, eid, transition)
+                    history_budget["changes"] -= 1
+                    history_budget["bytes"] -= size
     changed = {eid for eid, entity in objects.items() if entity != persisted[eid]}
     commit.commit_results(ctx, objects, changed, accounts=accounts, tick=step(ctx))
     for eid, action, summary in outcomes:
@@ -996,6 +1019,10 @@ def rule_action(ctx, args):
             commit.record_account(ctx, "sinks", material, amount, "mechanical_fuel")
             _finish_item(ctx, item, entity)
             summary = f"燃料已消耗，储存了{amount}单位有限能源。"
+            result_extra["action_result"] = {"action": action,
+                "costs": [{"entity_id": item["id"], "entity_name": item["name"],
+                           "material": material, "lot_id": lot["id"], "quantity_u": amount}],
+                "stored_energy_after": state["energy"], "target_id": entity["id"], "target_name": entity["name"]}
         else:
             _set_drive(ctx, entity, spec, action == "start", source={"kind": "explicit_action",
                        "action_id": action, "actor_role_id": ctx.actor_role_id})
@@ -1209,6 +1236,11 @@ def projection(ctx, entity, *, detailed=False):
     result = deepcopy(binding)
     result.pop("materials", None)
     result["world_tick"] = step(ctx)
+    transition = ctx.get_state(FIELD_CHANGES, entity["id"])
+    result["automatic_field_change_status"] = {"available": transition is not None,
+        "meaning": "仅最近保存的一次自动字段净变化，可能省略其他变化；无记录不代表未发生。"}
+    if transition is not None:
+        result["automatic_field_change"] = deepcopy(transition)
     if "recorder" in binding:
         record = bounded_record(ctx.get_state(RECORDS, entity["id"], {"history": [], "reads": []}))
         result["history"] = record["history"]
@@ -1217,6 +1249,15 @@ def projection(ctx, entity, *, detailed=False):
     result.update(program_observation(ctx, entity, detailed=detailed))
     if detailed:
         pack, _ = _type(ctx, entity)
+        from .observations import _references
+        names = set()
+        for reference in _references(pack):
+            if "physical" in reference:
+                names.add("physical." + reference["physical"])
+            elif "object" in reference:
+                names.add(reference["object"].get("field"))
+        result["fact_semantics"] = {name: fact_catalog()[name] for name in sorted(name for name in names if name in PUBLIC_FACTS)}
+        result["authored_field_units"] = None
         result["material_semantics"] = program_material_semantics(pack, binding["definition_ref"], materials=REGISTRY.materials,
                                                                  type_id=binding["type_id"])
         result["declaration_semantics"] = declaration_semantics(pack, type_id=binding["type_id"])
@@ -1397,7 +1438,7 @@ def rule_catalog(ctx, args):
             "types": "symbol:{name,body_material:builtin|local|imported solid symbol, exactly one of cost:{wood:0..4,stone:0..4,cloth:0..4} or cost_u:{solid_symbol:1..200} (total<=200u, actual sources required),components?:object matching component_schema,ports?:{name:{fields:[typed public facts],label?}},fields?:{name:{type:integer|boolean,default,min?,max?}},container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[]}"},
         "component_schema": {"type": "object", "additionalProperties": False, "properties": component_schema,
             "meaning": "Only these components and fields are authorable. Fields are optional overrides; instance construction supplies existing defaults. supports is derived from actual formed body lots, never an authored field."},
-        "public_facts": {name: {"type": fact.type, "component": fact.component, "aggregate": fact.aggregate} for name, fact in PUBLIC_FACTS.items()},
+        "public_facts": fact_catalog(),
         "new_semantics": {"fuel_uses": "local materials may declare uses:{hearth_fuel?:boolean,mechanical_fuel?:boolean}; true requires combustible non-liquid. Qualification is read from the original immutable definition, not display names or combustible alone. Builtin wood retains its existing mechanical fuel admission; hearth uses actual dry qualified lots.",
             "material_publication": "Local publication defines a new canonical material identity, properties and optional carried behavior; imports pin an existing identity. Neither publication nor import creates usable inventory or reserves feedstock. A future recipe may be published, but cost_u formation requires already existing eligible lots of each exact canonical input, including body_material. Existing builtin material can carry a newly named object's declared capabilities without declaring a new material.",
             "physical": f"{{physical:{physical_fields}}}; reads real trusted solver state, never program fields or temperature. Names and types come from public_facts keys with the physical. prefix removed. Missing/inapplicable/hidden facts are unknown; total buoyancy includes attached parts even if root has no buoyant component.",
@@ -1455,4 +1496,4 @@ def specs():
 
 
 def state_specs():
-    return (*publication.state_specs(), *tuple(StateRule(scope, "", {}, history="metadata") for scope in (DEFINITIONS, VERSIONS, CONTROL, RECORDS, ACCOUNTING)))
+    return (*publication.state_specs(), *tuple(StateRule(scope, "", {}, history="metadata") for scope in (DEFINITIONS, VERSIONS, CONTROL, RECORDS, ACCOUNTING, FIELD_CHANGES)))

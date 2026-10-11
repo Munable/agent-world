@@ -102,22 +102,44 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         self._init_db()
 
     @contextmanager
-    def _conn(self, *, readonly: bool = False):
+    def _conn(self, *, readonly: bool = False, serialized: bool = False):
         location = Path(self.db_path).as_uri() + "?mode=ro" if readonly else self.db_path
         conn = sqlite3.connect(location, timeout=5, isolation_level=None, uri=readonly, cached_statements=0)
+        closed = False
+
+        @contextmanager
+        def transaction():
+            nonlocal closed
+            try:
+                yield conn
+                if conn.in_transaction:
+                    conn.commit()
+            except BaseException:
+                try:
+                    if conn.in_transaction:
+                        conn.rollback()
+                finally:
+                    # A failed rollback must close the active transaction
+                    # while the caller still holds the transaction lock.
+                    if conn.in_transaction:
+                        closed = True
+                        conn.close()
+                raise
+
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA foreign_keys=ON")
-            yield conn
-            if conn.in_transaction:
-                conn.commit()
-        except BaseException:
-            if conn.in_transaction:
-                conn.rollback()
-            raise
+            if serialized:
+                with self._lock:
+                    with transaction():
+                        yield conn
+            else:
+                with transaction():
+                    yield conn
         finally:
-            conn.close()
+            if not closed:
+                conn.close()
 
     @staticmethod
     def _enable_wal(c):
@@ -1494,7 +1516,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     def describe_world(self, universe, role_id, *, identity_token=None):
         """Return the installed world's stable entry contract for an authorized role."""
         identifier(universe, "universe")
-        with self._lock, self._conn(readonly=True) as c:
+        with self._conn(readonly=True, serialized=True) as c:
             c.execute("BEGIN")
             self._admit_actor_tx(c, universe, role_id, identity_token)
             self._check_world_tx(c, universe)
@@ -1530,7 +1552,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     ):
         if type(include_catalog) is not bool or type(record_presence) is not bool:
             raise InvalidArguments("bootstrap flags must be booleans")
-        with self._lock, self._conn() as c:
+        with self._conn(serialized=True) as c:
             c.execute("BEGIN IMMEDIATE")
             now = time.time()
             identity = self._admit_actor_tx(c, universe, role_id, identity_token)

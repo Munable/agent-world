@@ -22,6 +22,26 @@ from agent_world.worlds.shared_grove.world import INTERACT_ARGS
 
 
 class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
+    def test_scene_summary_preserves_current_fields_and_distinct_recorded_consequence(self):
+        change = {"step": 9, "fields": {"signal": {"before": 1, "after": 0}}}
+        creative = {"definition_ref": "public-definition", "type_id": "sensor",
+            "fields": {"signal": 0}, "world_tick": 12, "automatic_field_change": change,
+            "automatic_field_change_status": {"available": True, "meaning": "A recorded net change, not complete history"}}
+        entity = {"id": "public-object", "version": 4, "state": {"wetness": 0}, "creative": creative}
+        scene = {"clock": {"sequence": 12}, "entities": [entity, {"id": "closed-object",
+            "creative": {**creative, "hidden": True}}]}
+        projected = _companion_scene_index(scene)
+        observed = projected["entities"][0]
+        self.assertEqual(observed["discovery_state"]["wetness"], 0)
+        self.assertEqual(observed["creative"]["fields"], {"signal": 0})
+        self.assertEqual(observed["creative"]["world_tick"], 12)
+        self.assertEqual(observed["creative"]["automatic_field_change"], change)
+        self.assertEqual(_companion_scene_index(projected)["entities"], projected["entities"])
+        hidden = projected["entities"][1]["creative"]
+        self.assertEqual(hidden, {"definition_ref": "public-definition", "type_id": "sensor", "hidden": True})
+        creative["fields"]["signal"] = 7
+        self.assertEqual(observed["creative"]["fields"], {"signal": 0})
+
     def test_agent_terrain_preserves_negative_coordinates_actual_cells_and_unknowns(self):
         tiles=['grass','dirt','water','rock']*64
         chunks=[{"cx":x,"cy":y,"tiles":tiles} for x,y in [(-1,-1),(0,-1),(-1,0),(0,0)]]
@@ -50,6 +70,45 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
                                     "test-private-bearer", "Test", "provider/model")
         self.session.host_url = "http://127.0.0.1:9000"
         self.session.session_id = "test-session"
+
+    async def test_missing_transfer_inputs_report_parameters_without_trying_a_write(self):
+        self.session.status = "thinking"
+        self.session.execution_controller.active = True
+        self.session.execution_controller.delegation = {"fixture": True}
+        self.session.execution_controller.state.update(task_id="task", segment_id="segment", status="running", delegation_active=True)
+        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        self.session.invoke = AsyncMock()
+        with self.assertRaises(ConnectorError) as rejected:
+            await self.session.tool_call("grove_interact", {"action": "transfer", "execution_segment_id": "segment"})
+        self.assertEqual(rejected.exception.code, "InvalidToolArguments")
+        self.assertIn("target_id", str(rejected.exception))
+        self.session.invoke.assert_not_awaited()
+
+    async def test_paused_execution_error_reaches_frontend_without_replacing_session(self):
+        error = {"code": "IncompleteResponse", "message": "模型服务返回错误（HTTP 400）。"}
+        async def paused(*args, **kwargs):
+            self.session.execution_controller.state.update(status="paused", error=error, request_status="idle_confirmed")
+        self.session.execution_controller.execute_goal = AsyncMock(side_effect=paused)
+        self.session.release_opportunity = AsyncMock()
+        await self.session.execute_goal("继续原目标")
+        self.assertEqual(self.session.state()["error"], error)
+        self.assertEqual(self.session.status, "paused")
+        self.assertEqual(self.session.session_id, "test-session")
+        self.assertEqual(self.session.execution["request_status"], "idle_confirmed")
+
+    def test_action_menu_and_inventory_publish_same_observation_and_segment_contract(self):
+        from agent_world.grove_agent_observation import agent_mcp_schema
+        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        inventory = next(row for row in self.session.tools() if row["name"] == "grove_interact")["inputSchema"]
+        delivered = self.session.present_agent_result("grove.inspect", {"entity": {"id": "cup", "version": 2,
+            "action_options": [{"function_id": "grove.interact", "action": "transfer", "input_schema": INTERACT_ARGS}]}})
+        menu = delivered["entity"]["action_options"][0]
+        self.assertEqual(menu["mcp_tool"], "grove_interact")
+        self.assertEqual(menu["input_schema"]["required"], inventory["required"])
+        self.assertEqual(menu["input_schema"]["allOf"], inventory["allOf"])
+        self.assertNotIn("expected_player_version", inventory["properties"])
+        self.assertIn("observation_id", menu["input_schema"]["required"])
+        self.assertIn("execution_segment_id", menu["input_schema"]["required"])
 
     async def test_completed_prose_without_actual_world_read_cannot_enter(self):
         self.session.host = AsyncMock(return_value={"info": {"role": "assistant", "time": {"completed": 1}},
@@ -113,6 +172,8 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectorError) as ordinary:
             self.session.complete_model_answer(response)
         self.assertEqual(ordinary.exception.code, "IncompleteResponse")
+        self.assertIn("HTTP 400", ordinary.exception.message)
+        self.assertNotIn("private provider details", ordinary.exception.message)
         response["info"]["error"]["data"]["message"] = "Upstream request failed: Model is unavailable."
         self.session.current_turn_facts = AsyncMock(return_value={"scene": "current"})
         async def unavailable_native(method, path, body=None, **kwargs):
