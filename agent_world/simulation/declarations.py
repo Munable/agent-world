@@ -6,6 +6,8 @@ Event applications preserve journal order before applying the same id policy.
 This is execution policy, not an additional authored language or stored state.
 """
 
+EXECUTION_SEMANTICS = "grove.program.v1"
+
 PHASE_POLICY = {
     "ordinary_order": "rule_id_ascending",
     "event_order": "journal_order_then_rule_id_ascending",

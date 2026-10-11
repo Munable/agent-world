@@ -159,6 +159,8 @@ def tick(ctx, args):
         if any(p.get("rules_version") != RULES_VERSION or p.get("rule_version") != 1 for p in processes):
             raise RuleViolation("持久过程规则版本不匹配。请使用当前规则的新世界。")
         if not late:
+            from .creative import check_step_capacity
+            check_step_capacity(ctx)
             objects, chunks = activity.physical_closure(ctx)
             original = deepcopy(objects)
             protected = set()

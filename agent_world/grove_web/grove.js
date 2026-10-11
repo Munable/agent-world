@@ -1,14 +1,14 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,ruleSnapshotChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines} from './grove-world-ui.js?v=confirmed-outcomes';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,ruleSnapshotChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,reactionObservationLines,contactObservationLines,installedInteractionDefinition,interactionChoices,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines} from './grove-world-ui.js?v=creation-foundation-v1';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
 const ledger=new EventLedger(100);
 const canvas=$('world-canvas'),ctx=canvas.getContext('2d');
 const directions={w:[0,-1],a:[-1,0],s:[0,1],d:[1,0],ArrowUp:[0,-1],ArrowLeft:[-1,0],ArrowDown:[0,1],ArrowRight:[1,0]};
-const actionNames={pickup:'拿进背包',drop:'放到脚下',open:'打开',close:'合上',store:'存入',retrieve:'取出',fill:'装水',pour:'倒水',ignite:'点燃',harvest:'采集一份',tend:'用水照料',fuel:'添入木料',dismantle:'拆回材料',switch_mode:'切换模式',attach:'绑定部件',detach:'解绑到地面',launch:'下水',transfer:'转移材料'};
+const actionNames={pickup:'拿进背包',drop:'放到脚下',open:'打开',close:'合上',store:'存入',retrieve:'取出',fill:'装水',pour:'倒水',ignite:'点燃',harvest:'采集一份',tend:'用水照料',fuel:'添入木料',dismantle:'拆回材料',switch_mode:'切换模式',attach:'绑定部件',detach:'解绑到地面',launch:'下水',transfer:'转移材料',install_interaction:'安装局部交互',uninstall_interaction:'卸载局部交互'};
 const materialNames={wood:'木',stone:'石',cloth:'布',metal:'金属',water:'水',leather:'皮革'};
 const hostNames={disconnected:'已断开',connecting:'正在连接',ready:'已连接',thinking:'思考中',paused:'已暂停',error:'连接受阻'};
 let key=null,identity=null,world=null,host=null,session=0,readEpoch=0,worldTimer=null,hostTimer=null;
@@ -31,6 +31,7 @@ let directoryEpoch=0,directoryBusy=false,directoryFilters={},directoryInputs={au
 const factDisclosures=new Map();
 let activeActionKey=null,hostCommandKind=null,hostCommandFlight=null;
 const actionDrafts=new Map();
+const interactionSelections=new Map();
 const terrainNames={grass:'草地',dirt:'泥地',water:'浅溪',rock:'岩壁'};
 const readableCandidate=candidate=>({...entityById(candidate?.id),...candidate});
 const actionKey=descriptor=>(descriptor.function_id||'grove.interact')+':'+descriptor.action;
@@ -649,7 +650,7 @@ function renderCreative(entity,previous=false){
   for(const line of ruleRuntimeObservationLines(runtime,entity))section.append(node('p',line,'small'));
   for(const line of reactionObservationLines(creative,entity))section.append(node('p',line,'small'));
   const runtimeFields=runtime?.mechanical_observation?['mechanical','drive_request','mechanical_last_solved']:[];
-  const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated','contact_process','automatic_rules','deployment','mechanical_observation','fact_semantics','authored_field_units','automatic_field_change','automatic_field_change_status',...runtimeFields].includes(key)));
+  const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated','contact_process','automatic_rules','deployment','mechanical_observation','fact_semantics','authored_field_units','automatic_field_change','automatic_field_change_status','published_exports','port_sources','interface_meaning','event_consumer',...runtimeFields].includes(key)));
   appendFacts(section,expanded,0,entity.id);
   if(creative.hidden===true)section.append(node('p','这个公共容器已合上。当前只读到规则引用，内部配料、运行与记录未公开。','small'));
   const ref=creative.definition_ref;
@@ -914,10 +915,65 @@ async function ruleAction(action,entity,values,chosenDescriptor){
     return args;
   },label);
 }
+function renderInteractionEditor(descriptor,entity,disabled){
+  const installing=descriptor.action==='install_interaction',label=descriptorLabel(descriptor);
+  const key=session+':'+entity.id+':'+descriptor.action;
+  let state=interactionSelections.get(key);
+  if(!state){state={page:null,cursors:[null],selected:null,definition:null,busy:false,error:null,epoch:0};interactionSelections.set(key,state);if(interactionSelections.size>32)interactionSelections.delete(interactionSelections.keys().next().value);}
+  const form=node('form',undefined,'descriptor-action');form.dataset.action=descriptor.action;form.dataset.actionKey=actionKey(descriptor);form.dataset.entityId=entity.id;
+  form.append(node('p',label,'descriptor-label'),node('p','只改变这件容器的固定交互；不修改原材料或其他地方的规则。提交仍由世界核验。','small'));
+  const body=node('div',undefined,'interaction-directory'),select=node('select'),choice=node('label',installing?'选择已发表的局部交互':'选择要卸载的交互');select.setAttribute('aria-label',label+'的规则版本');choice.append(select);form.append(body,choice);
+  const details=node('div',undefined,'candidate-preview'),note=node('p',undefined,'small'),submit=button(label,()=>{}, {disabled:true});submit.type='submit';form.append(details,note,submit);
+  const liveDescriptor=()=>inspection?.entity?.id===entity.id&&!inspection.reading?actionDescriptors(inspection).find(option=>option.action===descriptor.action&&option.function_id!=='grove.rule_action'):null;
+  const applicable=()=>installing?state.definition?.definition_ref===state.selected&&installedInteractionDefinition(state.definition):interactionChoices(liveDescriptor()).some(row=>row.definition_ref===state.selected);
+  function update(){
+    const live=liveDescriptor(),rows=installing?state.page?.definitions||[]:interactionChoices(live),empty=node('option','请选择规则版本');empty.value='';select.replaceChildren(empty);
+    for(const row of rows){const option=node('option',(row.name||row.key||'已发表交互')+(Number.isInteger(row.version)?' · 版本 '+row.version:''));option.value=row.definition_ref;select.append(option);}
+    if(installing&&state.selected&&!rows.some(row=>row.definition_ref===state.selected)){const selected=node('option','已选 · '+(state.definition?.definition?.name||'规则版本'));selected.value=state.selected;select.append(selected);}
+    select.value=state.selected||'';select.disabled=disabled||state.busy||actionBusy;
+    body.replaceChildren();
+    if(installing){
+      body.append(node('p',state.page?'第 '+state.cursors.length+' 页 · '+rows.length+' 份定义'+(state.page.has_more?' · 后面还有内容':' · 当前查询已到末页'):'目录按页读取；选择一个版本后再读取其安装资格。','small'));
+      body.append(button(state.busy?'正在读取…':state.page?'重新读取本页':'读取定义目录',()=>run(()=>readPage(state.cursors.at(-1))),{disabled:disabled||state.busy||actionBusy,secondary:true}));
+      if(state.page){const pages=node('div',undefined,'content-pagination');pages.append(button('上一页',()=>run(()=>readPage(state.cursors.at(-2),'previous')),{disabled:disabled||state.busy||actionBusy||state.cursors.length<2,secondary:true}),button('下一页',()=>run(()=>readPage(state.page.next_cursor,'next')),{disabled:disabled||state.busy||actionBusy||!state.page.has_more||!state.page.next_cursor,secondary:true}));body.append(pages);}
+    }
+    details.replaceChildren();
+    if(state.definition&&installing){
+      details.append(node('p',state.definition.definition.name||'所选规则','descriptor-label'));
+      const rules=state.definition.definition.contact_reactions||[],installed=rules.filter(rule=>rule.activation==='installed');
+      details.append(node('p',installed.length?'这份固定版本含 '+installed.length+' 项可安装局部交互；仅作用于本容器实际配料。':'这份定义没有可安装局部交互，请选择其他版本。','small'));
+      if(installed.length){const detail=node('details',undefined,'rule-definition');detail.append(node('summary','查看所选交互的条件和配比'));appendFacts(detail,installed,0,state.selected);details.append(detail);}
+    }
+    const waiting=!live||inspection.reading;
+    submit.disabled=disabled||state.busy||actionBusy||!!client.pending()||waiting||live.available===false||!state.selected||!applicable();
+    note.textContent=state.error||(!live?'当前操作资格待读取。':live.available===false?live.reason||'当前无法执行。':state.busy?'正在读取原始规则版本…':installing&&!state.page?'先读取一页目录，再选择要安装的固定版本。':!state.selected?'请选择一个规则版本。':!applicable()?installing?'这份规则尚未核实为可安装交互。':'这份交互当前已不在容器上，请重选。':'只安装或卸载所选版本；已有材料与已发生后果保留。');
+  }
+  async function readPage(after,direction){
+    if(state.busy||disabled||actionBusy)return;
+    const epoch=session,reading=++state.epoch;state.busy=true;state.error=null;update();
+    const cursors=direction==='next'?[...state.cursors,after]:direction==='previous'?state.cursors.slice(0,-1):[...state.cursors];
+    try{const page=await client.query('grove.definition_list',{limit:8,...(after?{after}:{})});if(epoch!==session||reading!==state.epoch)return;state.page=page;state.cursors=cursors;}
+    catch(error){if(epoch===session&&reading===state.epoch)state.error=error.message||'目录尚未读到，原页和选择保留。';}
+    finally{if(epoch===session&&reading===state.epoch){state.busy=false;update();}}
+  }
+  async function readSelected(ref){
+    const epoch=session,reading=++state.epoch;state.selected=ref;state.definition=null;state.error=null;
+    if(!ref){state.busy=false;update();return;}
+    state.busy=true;update();
+    try{const value=await client.query('grove.definition_read',{definition_ref:ref});if(epoch!==session||reading!==state.epoch)return;if(value.definition_ref!==ref)throw new Error('读回的定义不属于所选固定版本。');state.definition=value;}
+    catch(error){if(epoch===session&&reading===state.epoch)state.error=error.message||'这个版本尚未读到。';}
+    finally{if(epoch===session&&reading===state.epoch){state.busy=false;update();}}
+  }
+  select.addEventListener('change',()=>{if(installing)run(()=>readSelected(select.value));else{state.selected=select.value;state.error=null;update();}});
+  form.addEventListener('refresh-candidate-preview',update);
+  form.addEventListener('submit',event=>{event.preventDefault();update();if(submit.disabled)return;run(()=>interact(descriptor.action,entity,undefined,undefined,{definition_ref:state.selected}));});
+  update();$('selection-actions').append(form);
+  if(installing&&!state.page&&!state.busy&&!state.error&&!disabled)run(()=>readPage(null));
+}
 function renderDescriptorAction(descriptor,entity,disabled){
   if(descriptor.available===false)return;
   const generated=['action','target_id','expected_target_version','expected_player_version','expected_item_version','expected_other_version','params','delegation','terms_version'];
-  const needsInput=!!descriptor.input||descriptor.function_id==='grove.rule_action'&&(Object.keys(descriptor.choices||{}).some(key=>(descriptor.choices[key]||[]).length)||Object.keys(descriptor.params_schema?.properties||{}).length||Object.keys(descriptor.input_schema?.properties||{}).some(key=>!generated.includes(key)));
+  const needsInput=['install_interaction','uninstall_interaction'].includes(descriptor.action)||!!descriptor.input||descriptor.function_id==='grove.rule_action'&&(Object.keys(descriptor.choices||{}).some(key=>(descriptor.choices[key]||[]).length)||Object.keys(descriptor.params_schema?.properties||{}).length||Object.keys(descriptor.input_schema?.properties||{}).some(key=>!generated.includes(key)));
   const choose=()=>{rememberActionDrafts();activeActionKey=actionKey(descriptor);lastSelectionSignature='';renderSelection();};
   if(needsInput){const option=button(descriptorLabel(descriptor)+'…',choose,{disabled,secondary:true});option.classList.add('action-option');$('selection-actions').append(option);return;}
   if(descriptor.function_id==='grove.rule_action'){$('selection-actions').append(button(descriptorLabel(descriptor),()=>run(()=>ruleAction(descriptor.action,entity,{},descriptor)),{disabled}));return;}
@@ -927,6 +983,7 @@ function renderDescriptorEditor(descriptor,entity,disabled){
   if(descriptor.function_id==='grove.rule_action'){renderRuleAction(descriptor,entity,disabled);return;}
   const available=descriptor.available!==false&&actionIds(inspection.available_actions).includes(descriptor.action),label=descriptorLabel(descriptor);
   if(!available){if(descriptor.reason)$('selection-actions').append(node('p',label+'：'+descriptor.reason,'action-reason'));return;}
+  if(['install_interaction','uninstall_interaction'].includes(descriptor.action)){renderInteractionEditor(descriptor,entity,disabled);return;}
   const input=descriptor.input;
   if(!input){$('selection-actions').append(button(label,()=>interact(descriptor.action,entity),{disabled,secondary:descriptor.action==='close'}));return;}
   const form=node('form',undefined,'descriptor-action'),caption=node('p',label,'descriptor-label');form.dataset.action=descriptor.action;form.dataset.actionKey=actionKey(descriptor);form.dataset.entityId=entity.id;if(['store','attach'].includes(descriptor.action))form.dataset.combination='true';form.append(caption);
@@ -1011,6 +1068,11 @@ async function interact(action,entity,itemId,amount,extra={},combination){
     if(selectedId===entity.id){inspection=latest;renderSelection();}
     const descriptor=actionDescriptors(latest).find(option=>option.action===action&&option.function_id!=='grove.rule_action'),label=descriptor?descriptorLabel(descriptor):actionNames[action]||action;
     if(!actionIds(latest.available_actions).includes(action)||descriptor?.available===false)throw new Error('这件物件现在不能'+label+'。'+(descriptor?.reason||'已读取最新状态，请重新选择。'));
+    if(action==='install_interaction'){
+      if(typeof extra.definition_ref!=='string'||!extra.definition_ref)throw new Error('尚未选择固定的交互版本。');
+      const definition=await client.query('grove.definition_read',{definition_ref:extra.definition_ref});if(!isCurrent())return null;
+      if(definition.definition_ref!==extra.definition_ref||!installedInteractionDefinition(definition))throw new Error('原选择不是可安装的局部交互，尚未提交。');
+    }else if(action==='uninstall_interaction'&&!interactionChoices(descriptor).some(row=>row.definition_ref===extra.definition_ref))throw new Error('原选择的交互已不在当前容器上，尚未提交。请重新选择。');
     if(itemId&&descriptor?.input&&['entity','entity_quantity'].includes(descriptor.input.kind)){const candidate=descriptorCandidates(descriptor).find(candidate=>candidate.id===itemId);if(!candidate||candidate.preview?.available===false)throw new Error(candidate?.preview?.reason||'所选物件的条件已经改变。请按当前现场重新选择。');}
     let item;
     if(itemId){const inspectedItem=await readInteractionEntity(itemId,'所选物件');if(!isCurrent()||!inspectedItem)return null;item=inspectedItem.entity;}

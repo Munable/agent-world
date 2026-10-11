@@ -48,7 +48,7 @@ MECHANICAL_RANGES = {
 PROGRAM_KEYS = ("key", "name", "version", "materials", "material_imports", "types", "contact_reactions")
 PROGRAM_REQUIRED_KEYS = ("key", "name", "version", "types")
 TYPE_KEYS = ("name", "body_material", "cost", "cost_u", "components", "ports", "fields",
-             "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions")
+             "exports", "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions")
 TYPE_REQUIRED_KEYS = ("name", "body_material")
 _RESERVED_ACTIONS = {
     "charge", "fuel", "connect", "disconnect", "start_recording", "stop_recording",
@@ -126,7 +126,47 @@ def _fields(definitions, path):
     return result
 
 
-def _expression(expr, fields, params, materials, path, expected=None, object_ids=None, ports=None, *, fact_catalog=None):
+def exported_interface(spec):
+    """Derive typed public fields from one immutable type, without changing it."""
+    fields = _mapping(spec.get("fields", {}), "type.fields")
+    exports = _list(spec.get("exports", []), "type.exports", 8)
+    if any(not isinstance(name, str) or name not in fields for name in exports) or len(set(exports)) != len(exports):
+        _fail("type.exports", "requires distinct declared field names")
+    return {"authored." + name: _interface_field({key: value for key, value in fields[name].items()
+            if key in {"type", "min", "max"}}, "type.exports." + name) for name in exports}
+
+
+def _interface_field(value, path):
+    _mapping(value, path, {"type", "min", "max"}, {"type"})
+    if value["type"] == "boolean":
+        if set(value) != {"type"}:
+            _fail(path, "boolean public fields cannot have ranges")
+        return {"type": "boolean"}
+    if value["type"] != "integer":
+        _fail(path + ".type", "authored public fields must be integer or boolean")
+    _mapping(value, path, {"type", "min", "max"}, {"type", "min", "max"})
+    minimum = _integer(value["min"], path + ".min", -MAX_INTEGER, MAX_INTEGER)
+    maximum = _integer(value["max"], path + ".max", minimum, MAX_INTEGER)
+    return {"type": "integer", "min": minimum, "max": maximum}
+
+
+def _source_interface(source, interfaces, path):
+    _mapping(source, path, {"definition_ref", "type_id"}, {"definition_ref", "type_id"})
+    reference = _text(source["definition_ref"], path + ".definition_ref", 128)
+    type_id = _text(source["type_id"], path + ".type_id", 48, _SYMBOL)
+    if interfaces is None or reference not in interfaces or type_id not in interfaces[reference]:
+        _fail(path, "requires an existing immutable published source type interface")
+    interface = _mapping(interfaces[reference][type_id], path + ".resolved")
+    if len(interface) > 8:
+        _fail(path + ".resolved", "source type exports at most 8 fields")
+    for name, value in interface.items():
+        if not name.startswith("authored.") or not _SYMBOL.fullmatch(name.removeprefix("authored.")):
+            _fail(path + ".resolved", "public interface paths must name authored fields")
+        _interface_field(value, path + ".resolved." + name)
+    return interface
+
+
+def _expression(expr, fields, params, materials, path, expected=None, object_ids=None, ports=None, *, fact_catalog=None, interface_catalog=None):
     """Validate and infer one expression; string literals support event matching."""
     count = 0
     object_fields = FACT_TYPES if fact_catalog is None else fact_catalog
@@ -157,15 +197,22 @@ def _expression(expr, fields, params, materials, path, expected=None, object_ids
                 if ("id" in binding) == ("port" in binding):
                     _fail(at + ".object", "requires exactly one id or declared port")
                 public_field = binding["field"]
-                if not isinstance(public_field, str) or public_field not in object_fields:
+                if not isinstance(public_field, str):
                     _fail(at + ".object.field", "must reference a supported public object field")
                 if "port" in binding:
                     port = _text(binding["port"], at + ".object.port", 48, _SYMBOL)
                     if port not in (ports or {}) or public_field not in ports[port]["fields"]:
                         _fail(at + ".object.port", "requires a declared port and one of its typed fields")
+                    if public_field.startswith("authored."):
+                        interface = _source_interface(ports[port].get("source"), interface_catalog, at + ".object.port.source")
+                        if public_field not in interface:
+                            _fail(at + ".object.field", "source type does not export this authored field")
+                        return interface[public_field]["type"]
                 else:
                     entity_id = _text(binding["id"], at + ".object.id", 128)
                     object_ids.add(entity_id)
+                if public_field not in object_fields:
+                    _fail(at + ".object.field", "must reference a supported public object field; authored fields require a pinned source port")
                 if len(object_ids) > 8:
                     _fail(at + ".object.id", "at most 8 distinct object bindings are allowed per program")
                 return object_fields[public_field]
@@ -245,7 +292,7 @@ def _reaction(effect, materials, path):
             "channel": _text(effect.get("channel", "chemistry"), path + ".channel", 80, _KEY), "mode": mode}
 
 
-def _effects(effects, fields, params, materials, path, object_ids, ports=None, *, fact_catalog=None):
+def _effects(effects, fields, params, materials, path, object_ids, ports=None, *, fact_catalog=None, interface_catalog=None):
     result = []
     for index, effect in enumerate(_list(effects, path, 8)):
         at = f"{path}[{index}]"
@@ -256,10 +303,10 @@ def _effects(effects, fields, params, materials, path, object_ids, ports=None, *
             name = effect["field"]
             if not isinstance(name, str) or name not in fields:
                 _fail(at + ".field", "set may only write a declared program field")
-            result.append({"op": "set", "field": name, "value": _expression(effect["value"], fields, params, materials, at + ".value", fields[name]["type"], object_ids, ports, fact_catalog=fact_catalog)})
+            result.append({"op": "set", "field": name, "value": _expression(effect["value"], fields, params, materials, at + ".value", fields[name]["type"], object_ids, ports, fact_catalog=fact_catalog, interface_catalog=interface_catalog)})
         elif op == "drive":
             _mapping(effect, at, {"op", "enabled"}, {"op", "enabled"})
-            result.append({"op": "drive", "enabled": _expression(effect["enabled"], fields, params, materials, at + ".enabled", "boolean", object_ids, ports, fact_catalog=fact_catalog)})
+            result.append({"op": "drive", "enabled": _expression(effect["enabled"], fields, params, materials, at + ".enabled", "boolean", object_ids, ports, fact_catalog=fact_catalog, interface_catalog=interface_catalog)})
         elif op == "react":
             result.append(_reaction(effect, materials, at))
         elif op == "emit":
@@ -305,14 +352,18 @@ def _literal_ids(value):
     return set()
 
 
-def compile_program(definition, *, materials, body_materials, max_custom_materials, imported_materials=None, component_catalog=None, fact_catalog=None):
+def compile_program(definition, *, materials, body_materials, max_custom_materials, imported_materials=None, component_catalog=None, fact_catalog=None, imported_interfaces=None):
     """Return a validated canonical deep copy; invalid declarations raise ValueError."""
     from functools import partial
     fact_catalog = dict(FACT_TYPES if fact_catalog is None else fact_catalog)
     if any(not isinstance(name, str) or kind not in {"boolean", "integer", "string"} for name, kind in fact_catalog.items()):
         _fail("fact_catalog", "trusted facts require names and boolean/integer/string types")
-    expression = partial(_expression, fact_catalog=fact_catalog)
-    effects = partial(_effects, fact_catalog=fact_catalog)
+    if imported_interfaces is not None:
+        _mapping(imported_interfaces, "imported_interfaces")
+        for reference, interfaces in imported_interfaces.items():
+            _mapping(interfaces, "imported_interfaces." + reference)
+    expression = partial(_expression, fact_catalog=fact_catalog, interface_catalog=imported_interfaces)
+    effects = partial(_effects, fact_catalog=fact_catalog, interface_catalog=imported_interfaces)
     _mapping(definition, "program", PROGRAM_KEYS, PROGRAM_REQUIRED_KEYS)
     result = {"key": _text(definition["key"], "program.key", 80, _KEY),
               "name": _text(definition["name"], "program.name"),
@@ -394,6 +445,9 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             _fail(at, "requires exactly one cost (builtin pieces) or cost_u (actual material units)")
         canonical = {"name": _text(spec["name"], at + ".name"), "body_material": spec["body_material"],
                      "fields": _fields(spec.get("fields", {}), at + ".fields"), "rules": [], "actions": []}
+        if "exports" in spec:
+            canonical["exports"] = deepcopy(_list(spec["exports"], at + ".exports", 8))
+            exported_interface(canonical)
         if not isinstance(spec["body_material"], str) or spec["body_material"] not in materials:
             _fail(at + ".body_material", "must name an existing local, imported or builtin material")
         if "cost" in spec:
@@ -430,11 +484,15 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
                 _fail(at + ".ports", "at most 8 read-only ports")
             for port, value in spec["ports"].items():
                 _text(port, at + ".ports", 48, _SYMBOL)
-                _mapping(value, at + ".ports." + port, {"label", "fields"}, {"fields"})
+                pp = at + ".ports." + port
+                _mapping(value, pp, {"label", "fields", "source"}, {"fields"})
+                interface = _source_interface(value["source"], imported_interfaces, pp + ".source") if "source" in value else {}
                 fields_list = _list(value["fields"], at + ".ports." + port + ".fields", 8)
-                if not fields_list or any(not isinstance(field, str) or field not in fact_catalog for field in fields_list) or len(set(fields_list)) != len(fields_list):
+                if not fields_list or any(not isinstance(field, str) or field not in fact_catalog and field not in interface for field in fields_list) or len(set(fields_list)) != len(fields_list):
                     _fail(at + ".ports." + port, "fields require 1..8 distinct typed public facts")
                 ports[port] = {"fields": deepcopy(fields_list)}
+                if "source" in value:
+                    ports[port]["source"] = deepcopy(value["source"])
                 if "label" in value:
                     ports[port]["label"] = _text(value["label"], at + ".ports." + port + ".label", 80)
             canonical["ports"] = ports
@@ -511,7 +569,10 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
         reaction_ids = set()
         for index, rule in enumerate(_list(definition["contact_reactions"], "program.contact_reactions", 8)):
             at = f"program.contact_reactions[{index}]"
-            _mapping(rule, at, {"id", "when", "reaction"}, {"id", "when", "reaction"})
+            _mapping(rule, at, {"id", "when", "reaction", "activation"}, {"id", "when", "reaction"})
+            activation = rule.get("activation", "material")
+            if not isinstance(activation, str) or activation not in {"material", "installed"}:
+                _fail(at + ".activation", "must be material or installed")
             rid = _text(rule["id"], at + ".id", 80, _KEY)
             if rid in reaction_ids:
                 _fail(at + ".id", "duplicate contact reaction id")
@@ -528,11 +589,14 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
                         check_refs(child)
             check_refs(condition)
             effect = _reaction(rule["reaction"], materials, at + ".reaction")
-            if not set(effect["inputs"]).intersection(result["materials"]):
+            if activation == "material" and not set(effect["inputs"]).intersection(result["materials"]):
                 _fail(at + ".reaction.inputs", "contact must consume at least one material locally declared by this program")
             if effect["heat"]:
                 _fail(at + ".reaction.heat", "ordinary containers have no temperature field; contact heat must be zero")
-            result["contact_reactions"].append({"id": rid, "when": condition, "reaction": effect})
+            compiled = {"id": rid, "when": condition, "reaction": effect}
+            if "activation" in rule:
+                compiled["activation"] = activation
+            result["contact_reactions"].append(compiled)
     return result
 
 
@@ -578,7 +642,7 @@ def program_material_semantics(definition, definition_ref, *, materials, type_id
         effect = rule["reaction"]
         symbols.update(effect["inputs"])
         symbols.update(effect["outputs"])
-        contacts.append({"rule_id": rule["id"], "when": deepcopy(rule["when"]),
+        contacts.append({"rule_id": rule["id"], "activation": rule.get("activation", "material"), "when": deepcopy(rule["when"]),
             "inputs_per_extent": deepcopy(effect["inputs"]), "outputs_per_extent": deepcopy(effect["outputs"]),
             "max_extent": effect["rate"], "channel": effect["channel"], "mode": effect["mode"]})
     preparations = {}
@@ -650,7 +714,16 @@ def evaluate(expr, context, *, fact_catalog=None):
                 else:
                     entity_id = _text(binding["id"], "expression.object.id", 128)
                 public_field = binding["field"]
-                if not isinstance(public_field, str) or public_field not in object_fields:
+                interface_field = None
+                if isinstance(public_field, str) and public_field.startswith("authored."):
+                    if "port" not in binding:
+                        _fail("expression.object.field", "authored fields require a pinned source port")
+                    interfaces = _mapping(context.get("port_interfaces", {}), "context.port_interfaces")
+                    interface = _mapping(interfaces.get(port, {}), "context.port_interfaces." + port)
+                    if public_field not in interface:
+                        raise FactUnavailable("绑定来源没有可读公开接口：" + public_field)
+                    interface_field = _interface_field(interface[public_field], "context.port_interfaces." + port + "." + public_field)
+                elif not isinstance(public_field, str) or public_field not in object_fields:
                     _fail("expression.object.field", "must reference a supported public object field")
                 objects = _mapping(context.get("objects", {}), "context.objects")
                 if entity_id not in objects:
@@ -662,7 +735,11 @@ def evaluate(expr, context, *, fact_catalog=None):
                     if "port" in binding or public_field.startswith("physical."):
                         raise FactUnavailable("绑定对象不具备可读事实：" + public_field)
                     _fail("expression", f"missing public object fact {entity_id!r}.{public_field}")
-                return public_fact(source[public_field], object_fields[public_field], f"object {entity_id!r}.{public_field}")
+                kind = interface_field["type"] if interface_field else object_fields[public_field]
+                result = public_fact(source[public_field], kind, f"object {entity_id!r}.{public_field}")
+                if interface_field and kind == "integer":
+                    _integer(result, "expression.object." + public_field, interface_field["min"], interface_field["max"])
+                return result
             if ref == "physical":
                 if not isinstance(name, str) or name not in physical_fields:
                     _fail("expression.physical", "must name a typed physical fact")

@@ -8,6 +8,7 @@ import re
 from agent_world.errors import RuleViolation
 from agent_world.simulation.registry import ComponentDef, MaterialDef, Registry
 from agent_world.simulation.compiler import compile_composition
+from agent_world.simulation.declarations import EXECUTION_SEMANTICS as PROGRAM_EXECUTION_SEMANTICS
 
 RULES_VERSION = "grove-matter-1"
 COMBUSTION_CADENCE_TICKS = 3
@@ -83,6 +84,8 @@ def material_uses(ctx, identity):
         return {}
     reference, symbol = identity.split("#", 1)
     record = ctx.get_state(DEFINITIONS, reference)
+    if record:
+        execution_semantics(record)
     material = record["definition"]["materials"].get(symbol) if record else None
     return dict(material.get("uses", {})) if material else {}
 
@@ -315,6 +318,18 @@ register_material_rules(REGISTRY, combustion_cadence=COMBUSTION_CADENCE_TICKS)
 DEFINITIONS = "grove.creative.definitions"
 
 
+def execution_semantics(record):
+    """Pin execution policy outside the immutable authored definition payload.
+
+    Records published before the policy marker use the same original policy;
+    neither reading nor installing them changes their definition or hash.
+    """
+    semantics = record.get("execution_semantics", PROGRAM_EXECUTION_SEMANTICS)
+    if semantics != PROGRAM_EXECUTION_SEMANTICS:
+        raise RuleViolation("已发表规则的执行语义不受当前世界支持；原定义与物件保留。")
+    return semantics
+
+
 def instance_definition(ctx, entity):
     binding = entity["state"].get("program", {})
     if not binding.get("definition_ref"):
@@ -322,6 +337,7 @@ def instance_definition(ctx, entity):
     pack = ctx.get_state(DEFINITIONS, binding["definition_ref"])
     if not pack or binding["type_id"] not in pack["definition"]["types"]:
         raise RuleViolation("物件引用的已发布规则版本缺失。")
+    execution_semantics(pack)
     return pack["definition"], pack["definition"]["types"][binding["type_id"]]
 
 

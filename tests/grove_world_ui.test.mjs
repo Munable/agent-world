@@ -6,6 +6,24 @@ const source=readFileSync(new URL('../agent_world/grove_web/grove-world-ui.js',i
 const ui=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 {
+  assert.equal(ui.installedInteractionDefinition({definition:{contact_reactions:[{activation:'material'}]}}),false);
+  assert.equal(ui.installedInteractionDefinition({definition:{contact_reactions:[{}]}}),false);
+  assert.equal(ui.installedInteractionDefinition({definition:{contact_reactions:[{activation:'installed'}]}}),true);
+  assert.deepEqual(ui.interactionChoices({choices:{interactions:[null,{name:'缺少引用'},{definition_ref:'fixed',name:'已有交互'}]}}),[{definition_ref:'fixed',name:'已有交互'}]);
+  const lines=ui.ruleRuntimeObservationLines({deployment:{admitted:true,activity_state:'sleeping',ordinary_rules_enabled:true},
+    published_exports:{'authored.temperature':{type:'integer',known:true,actual:12},'authored.ready':{type:'boolean',known:false}},
+    port_sources:[{port:'signal',label:'输入信号',source:{definition_ref:'immutable',type_id:'sensor'},bound_entity_name:'现场传感器',facts:{'authored.ready':{known:true,actual:false}}}],
+    event_consumer:{pending_count:3,paused:true,gap:{from_sequence:20,reason:'overflow'}}},{});
+  assert.ok(lines.some(line=>line.includes('休眠不是未获准运行')));
+  assert.ok(lines.some(line=>line.includes('temperature（整数）：12')));
+  assert.ok(!lines.some(line=>line.includes('°C')));
+  assert.ok(lines.some(line=>line.includes('固定引用')&&line.includes('sensor')));
+  assert.ok(lines.some(line=>line.includes('3 条实际事件未消费')));
+  assert.ok(lines.some(line=>line.includes('事件消费已暂停')));
+  assert.ok(lines.some(line=>line.includes('明确断档')));
+}
+
+{
   const menu={cost_u:{wood:3,cloth:2},action:{choices:{sources:[
     {id:'wood',version:4,lots:[{id:'wood-lot',material:'wood',quantity:8,slot:'body'}]},
     {id:'cloth',version:5,lots:[{id:'cloth-lot',material:'cloth',quantity:2,slot:'body'}]}]}}};
@@ -111,6 +129,50 @@ function formNode(tag,text,className){
     addEventListener(type,handler){listeners.set(type,[...(listeners.get(type)||[]),handler]);},
     dispatchEvent(event){for(const handler of listeners.get(event.type)||[])handler(event);},
     querySelectorAll(selector){const tags=selector.toUpperCase().split(',');return this.children.flatMap(child=>[...(tags.includes(child.tagName)?[child]:[]),...child.querySelectorAll(selector)]);}};
+}
+
+// Opening the real install menu reads one page only; the person's selected
+// immutable definition must be read before it can be submitted.
+{
+  const target={id:'shared-vessel',name:'公共容器'},actions=formNode('section'),queries=[],writes=[],tasks=[];
+  const descriptor={action:'install_interaction',available:true,choices:{}};
+  const allowed={definition_ref:'installed-ref',definition:{name:'局部组合',contact_reactions:[{activation:'installed',id:'combine'}]}};
+  const context={session:1,inspection:{entity:target,available_actions:['install_interaction'],action_options:[descriptor]},
+    actionBusy:false,interactionSelections:new Map(),node:formNode,$:()=>actions,actionKey:option=>option.action,
+    actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,
+    interactionChoices:ui.interactionChoices,installedInteractionDefinition:ui.installedInteractionDefinition,
+    appendFacts:(parent,value)=>parent.append(formNode('p',JSON.stringify(value))),
+    interact:(...args)=>writes.push(args),run:fn=>{const task=Promise.resolve().then(fn);tasks.push(task);return task;},
+    client:{pending:()=>null,query:async(name,args)=>{queries.push([name,args]);
+      if(name==='grove.definition_read')return allowed;
+      return args.after?{definitions:[{definition_ref:'second-ref',name:'另一份定义'}],has_more:false,next_cursor:null}:
+        {definitions:[{definition_ref:'installed-ref',name:'局部组合'}],has_more:true,next_cursor:'next-page'};}}};
+  vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('function renderInteractionEditor(','function renderDescriptorAction('),context);
+  context.renderInteractionEditor(descriptor,target,false);await tasks.at(-1);
+  assert.deepEqual(queries.map(([name])=>name),['grove.definition_list']);
+  assert.equal(queries[0][1].limit,8);
+  const form=actions.children[0],select=form.querySelectorAll('select')[0],submit=form.querySelectorAll('button').find(button=>button.type==='submit');
+  assert.equal(submit.disabled,true);select.value='installed-ref';select.dispatchEvent({type:'change'});await tasks.at(-1);
+  assert.equal(queries[1][0],'grove.definition_read');assert.equal(queries[1][1].definition_ref,'installed-ref');assert.equal(submit.disabled,false);
+  form.querySelectorAll('button').find(button=>button.textContent==='下一页').dispatchEvent({type:'click'});await tasks.at(-1);
+  assert.equal(queries[2][1].after,'next-page');assert.equal(select.value,'installed-ref');assert.equal(submit.disabled,false);
+  form.dispatchEvent({type:'submit',preventDefault(){}});await tasks.at(-1);
+  assert.equal(writes.length,1);assert.equal(writes[0][0],'install_interaction');assert.equal(writes[0][4].definition_ref,'installed-ref');
+}
+
+{
+  const target={id:'vessel',name:'容器'},actions=formNode('section'),writes=[];
+  const descriptor={action:'uninstall_interaction',available:true,choices:{interactions:[{definition_ref:'old-ref',name:'固定交互'}]}};
+  const context={session:1,inspection:{entity:target,available_actions:['uninstall_interaction'],action_options:[descriptor]},actionBusy:false,
+    interactionSelections:new Map(),node:formNode,$:()=>actions,actionKey:option=>option.action,actionDescriptors:ui.actionDescriptors,
+    descriptorLabel:ui.descriptorLabel,interactionChoices:ui.interactionChoices,installedInteractionDefinition:ui.installedInteractionDefinition,
+    interact:(...args)=>writes.push(args),run:fn=>fn(),client:{pending:()=>null,query:()=>{throw new Error('卸载不应读全局目录');}}};
+  vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('function renderInteractionEditor(','function renderDescriptorAction('),context);
+  context.renderInteractionEditor(descriptor,target,false);const form=actions.children[0],select=form.querySelectorAll('select')[0],submit=form.querySelectorAll('button').find(button=>button.type==='submit');
+  select.value='old-ref';select.dispatchEvent({type:'change'});assert.equal(submit.disabled,false);
+  context.inspection={entity:target,available_actions:['uninstall_interaction'],action_options:[{...descriptor,choices:{interactions:[]}}]};
+  form.dispatchEvent({type:'refresh-candidate-preview'});assert.equal(submit.disabled,true);
+  form.dispatchEvent({type:'submit',preventDefault(){}});assert.equal(writes.length,0);
 }
 {
   const target={id:'target',name:'器皿'},actions=formNode('section'),writes=[];

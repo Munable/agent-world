@@ -28,10 +28,21 @@ export function materialLabel(value,entity){
 }
 export const slotLabel=value=>slotLabels[value]||String(value||'未标明');
 
+export function installedInteractionDefinition(value){
+  const definition=value?.definition;
+  if(!definition||!Array.isArray(definition.contact_reactions))return false;
+  return definition.contact_reactions.some(rule=>rule?.activation==='installed');
+}
+export function interactionChoices(descriptor){
+  return (Array.isArray(descriptor?.choices?.interactions)?descriptor.choices.interactions:[])
+    .filter(value=>value&&typeof value.definition_ref==='string');
+}
+
 export function contactObservationLines(entity){
   const contact=entity?.simulation?.contact;if(!contact)return [];
   const process=contact.process||{},lines=['材料接触 · '+({running:'已发生反应',waiting:'等待材料或条件',error:'上次反应未成立'}[process.status]||'等待材料或条件')+' · 已成立 '+(process.steps||0)+' 步'];
   if(process.error)lines.push('上次失败：'+process.error);
+  for(const interaction of contact.installed_interactions||[])lines.push('本容器已安装：'+readableText(interaction.name,'局部交互')+'；按固定版本在本容器内生效。');
   for(const reaction of contact.reactions||[]){
     const names=Object.fromEntries(Object.values(reaction.material_bindings||{}).map(binding=>[binding.material_id,binding.name]));
     const label=id=>names[id]||materialLabel(id,entity);
@@ -159,9 +170,29 @@ export function ruleRuntimeObservationLines(creative,entity){
     lines.push(counts.join('，')+'。自动声明按世界逻辑步或实际公开事件评估；显式行动由人或获准 Agent 提交。');
   }
   if(deployment&&typeof deployment==='object'){
+    if(deployment.activity_state==='sleeping')lines.push('规则对象已保存，当前休眠；仍可操作，相关输入变化会重新进入评估。休眠不是未获准运行。');
+    else if(deployment.activity_state==='active')lines.push('规则对象当前列入活动执行；仍以已保存后果判断实际发生了什么。');
     if(typeof deployment.publicly_placed==='boolean')lines.push('这次观察的公开部署：'+(deployment.publicly_placed?'有公开位置。':'没有公开位置。'));
     if(typeof deployment.ordinary_rules_enabled==='boolean')lines.push(deployment.ordinary_rules_enabled?'普通自身声明当前具备评估资格，随身携带也可评估；资格不证明已执行。':'当前没有可评估的普通自身声明；这不判断显式行动是否可用。');
     if(typeof deployment.public_event_input_available==='boolean')lines.push(deployment.public_event_input_available?'这次观察具备公开事件读取资格；仍须有实际日志输入，资格不证明本次发生事件。':'这次观察不具备公开事件读取资格；条件不能以虚构事件补足。');
+  }
+  const typeLabels={integer:'整数',boolean:'布尔值',string:'文字'};
+  for(const [name,source] of Object.entries(creative.published_exports||{})){
+    lines.push('公开属性 '+readableSymbol(name.replace(/^authored\./,''))+'（'+(typeLabels[source.type]||factValue(source.type))+'）：'+(source.known===true?factValue(source.actual):'当前不可观察')+'。作者字段不自动代表物理量。');
+  }
+  for(const port of creative.port_sources||[]){
+    const label=readableText(port.label||port.port,'来源槽位');
+    if(port.source)lines.push('来源槽位 '+label+'：固定引用所选定义的 '+readableSymbol(port.source.type_id)+' 类型，版本不能被同名对象替换。');
+    if(port.bound_entity_name)lines.push('当前关联：'+readableText(port.bound_entity_name,'关联物件')+'。');
+    else if(!port.bound_entity_id)lines.push('来源槽位 '+label+' 尚未绑定实际物件。');
+    if(port.source_matches===false)lines.push('当前来源与固定类型不符，不能读取为有效输入。');
+    for(const [name,value] of Object.entries(port.facts||{}))lines.push(label+' · '+readableSymbol(name.replace(/^authored\./,''))+'：'+(value.known===true?factValue(value.actual):'当前未公开或不可观察')+'。');
+  }
+  const consumer=creative.event_consumer;
+  if(consumer&&typeof consumer==='object'){
+    if(Number.isInteger(consumer.pending_count)&&consumer.pending_count>0)lines.push('仍有 '+consumer.pending_count+' 条实际事件未消费；这些事件尚未形成规则后果。');
+    if(consumer.status==='error'||consumer.paused===true)lines.push('事件消费已暂停：'+readableText(consumer.error,'需要处理当前消费问题')+'。保留的队列与游标不表示成功完成。');
+    if(consumer.gap)lines.push('事件输入存在明确断档；缺少的事件不能补写为已发生或已消费。');
   }
   const rules=Array.isArray(creative.automatic_rules)?creative.automatic_rules:[];
   const phaseLabel=phase=>phase==='reaction'?'材料反应阶段':phase==='after'?'反应与机械之后':factValue(phase);
@@ -234,7 +265,7 @@ export function actionIds(actions){return (actions||[]).map(action=>typeof actio
 export function actionDescriptors(inspection){
   return (inspection?.action_options||[]).filter(value=>value&&typeof value==='object'&&typeof value.action==='string');
 }
-const operationLabels={pickup:'拿进背包',drop:'放到脚下',open:'打开',close:'合上',store:'整件放入',retrieve:'取出整件物品',fill:'从这里装水',pour:'向这里倒水',ignite:'用火种点燃',harvest:'采集',tend:'用水养护',fuel:'添入燃料',dismantle:'拆回材料',switch_mode:'切换用途',attach:'绑定部件',detach:'解绑到地面',launch:'放入水中',transfer:'转入材料'};
+const operationLabels={pickup:'拿进背包',drop:'放到脚下',open:'打开',close:'合上',store:'整件放入',retrieve:'取出整件物品',fill:'从这里装水',pour:'向这里倒水',ignite:'用火种点燃',harvest:'采集',tend:'用水养护',fuel:'添入燃料',dismantle:'拆回材料',switch_mode:'切换用途',attach:'绑定部件',detach:'解绑到地面',launch:'放入水中',transfer:'转入材料',install_interaction:'安装局部交互',uninstall_interaction:'卸载局部交互'};
 export function descriptorLabel(descriptor){
   if(descriptor?.function_id!=='grove.rule_action'&&operationLabels[descriptor?.action])return operationLabels[descriptor.action];
   return readableText(descriptor?.label||descriptor?.use||readableSymbol(descriptor?.action),'使用');

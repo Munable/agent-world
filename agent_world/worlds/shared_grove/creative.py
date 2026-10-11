@@ -16,9 +16,10 @@ from agent_world.simulation import matter as sm
 from agent_world.simulation.declarations import declaration_semantics, has_event, phase_applications
 from agent_world.simulation.programs import compile_program, evaluate, plan_reaction, program_material_semantics, solve_mechanical
 from agent_world.simulation.facts import FactUnavailable, PUBLIC_FACTS, fact_catalog, snapshot_facts
+from agent_world.simulation.execution import EXECUTION_SEMANTICS, execution_plan
 from agent_world.world_streams import StreamEvent
 
-from . import model as m, commit, activity, publication
+from . import model as m, commit, activity, publication, execution
 from .model import public_location as _public_location
 from .commit import public_event, physical_contract_failure
 from .events import bounded_record, RECORDS, MAX_RECORDS, MAX_EVENTS, MAX_RECORD_BYTES, MAX_EVENT_BYTES, MAX_EVENT_JOURNAL_BYTES
@@ -54,12 +55,36 @@ def _save(ctx, scope, key, value):
     return ctx.set_state(scope, key, value, expected_version=rec["version"])
 
 
-def _check_instance_capacity(ctx, ids, *, reject=True):
-    """Reserve a future full physical step before admitting a new instance.
+def _capacity_domain(ctx, ids):
+    """Close possible source wakeups over their real bounded forests; no solve."""
+    admitted = {eid: entity for eid in ids if (entity := m.get_entity(ctx, eid, required=False))
+                and entity["lifecycle"] == "intact" and not entity["state"].get("retired")
+                and _type(ctx, entity)[1] is not None}
+    while True:
+        objects, chunks = activity.physical_closure(ctx, list(admitted.values()))
+        members = execution.potential_members(ctx, ids, source_ids=objects)
+        additions = set(members) - set(admitted)
+        if not additions:
+            return objects, set(chunks), members, admitted
+        for eid in additions:
+            entity = m.get_entity(ctx, eid)
+            if _type(ctx, entity)[1] is None:
+                raise RuleViolation("潜在执行成员缺少原不可变定义；本步未提交。")
+            admitted[eid] = entity
+
+
+def _instance_capacity_budget(ctx, ids):
+    """Bound the complete next step at the current persisted chunk snapshot.
 
     Definitions are read-only during a step. Only the admitted types' possible
     results, distinct material accounts and bounded observer histories add to
     the existing physical reservation; sharing a material account counts once.
+
+    Retain that established combination policy separately from the complete
+    new transaction estimate. The latter includes execution indexes/queues;
+    existing chunk BEFORE values come from the bounded step domain rather
+    than treating every old chunk as a full16KiB record. Both gates must fit
+    the same512-row/2MiB limit; neither increases the physical64-object bound.
     """
     from . import activity as physical
     from .definitions import MAX_CUSTOM_MATERIALS
@@ -78,6 +103,8 @@ def _check_instance_capacity(ctx, ids, *, reject=True):
     # lots have their own accounting rows rather than a shared built-in index.
     physical_facts = sm.MAX_FRAME_OBJECTS + physical.MAX_EVENTS
     total_facts = physical_facts
+    public_facts = 0
+    additional_facts = 0
     burning_accounts = physical.MAX_BURNING_ENTITIES * MAX_CUSTOM_MATERIALS
     changes += physical.MAX_FRAME_CHUNKS + physical_facts + burning_accounts + 2
     journal = ctx.get_state(m.META, "creative_events", {"sequence": 0, "events": []})
@@ -90,8 +117,13 @@ def _check_instance_capacity(ctx, ids, *, reject=True):
     builtin_accounts = {category: set(activity.meta_get(ctx, "matter_accounting", {}).get(category, {}))
                         for category in ("sinks", "sources")}
     authored_outputs = {}
-    admitted = {}
-    for eid in ids:
+    # Physical commits reconcile their actual sources before creative.tick
+    # takes its snapshot. A sleeping watcher can therefore run in this same
+    # step; its rule/result cost belongs here even though it is not a physics
+    # participant. Its ancestors/children and their own dependencies also enter
+    # the real later closure, so one pass of merely adding its ID is insufficient.
+    objects, chunk_domain, step_ids, admitted = _capacity_domain(ctx, ids)
+    for eid in step_ids:
         entity = m.get_entity(ctx, eid, required=False)
         if not entity or entity["lifecycle"] != "intact" or entity["state"].get("retired"):
             continue
@@ -114,14 +146,19 @@ def _check_instance_capacity(ctx, ids, *, reject=True):
         contract = int("contract" in spec)
         facts = max(int(reactions) + int("mechanical" in spec) + contract,
                     int(bool(spec["rules"]) or "barrier" in spec) + contract)
+        # An after-phase failure retains an already solved mechanical outcome
+        # and adds its own error; a contract may expire in that same step.
+        actual_facts = max(facts, int("mechanical" in spec)
+                           + int(bool(spec["rules"]) or "barrier" in spec) + contract)
+        additional_facts += actual_facts - facts
         changes += facts
         total_facts += facts
+        public_facts += facts
         size += facts * MAX_OUTCOME_BYTES
         if "recorder" in spec:
             record = ctx.get_state(RECORDS, eid, {"history": [], "reads": []})
             changes += 1
             size += max(sm.encoded_size(record), MAX_RECORD_BYTES) + MAX_RECORD_BYTES
-    objects, _ = physical.physical_closure(ctx, list(admitted.values()))
     contact_reservations = contact.reserve_forest(ctx, objects, authored_outputs=authored_outputs)
     for entity in objects.values():
         rows = contact_reservations[entity["id"]]
@@ -129,6 +166,7 @@ def _check_instance_capacity(ctx, ids, *, reject=True):
             continue
         # One container fact carries all of its at-most-eight applications.
         total_facts += 1
+        public_facts += 1
         changes += 1
         size += MAX_OUTCOME_BYTES
         for row in rows:
@@ -140,12 +178,84 @@ def _check_instance_capacity(ctx, ids, *, reject=True):
                         builtin_accounts[category].add(identity + ":contact_reaction")
     changes += len(accounts)
     size += len(accounts) * ACCOUNT_HISTORY_BYTES
-    if (any(len(keys) > 32 for keys in builtin_accounts.values()) or total_facts > MAX_OUTCOMES_PER_STEP
-            or changes > MAX_COMMIT_CHANGES or size > MAX_COMMIT_BYTES):
+    # The original coarse reservation is also an established combination
+    # policy: eight independent full-capability instances fit exactly, the
+    # ninth does not. Preserve that policy instead of relaxing it incidentally
+    # when the complete new transaction estimate becomes more precise.
+    combination_changes, combination_size = changes, size
+    total_facts += additional_facts
+    public_facts += additional_facts
+    changes += additional_facts
+    size += additional_facts * MAX_OUTCOME_BYTES
+    batch = getattr(ctx, "_grove_batch", None)
+    chunk_domain = set(chunk_domain) | (batch.dirty_chunks if batch is not None else set())
+    for entity in admitted.values():
+        location = m.public_location(ctx, entity)
+        if location is not None:
+            chunk_domain.add(m.chunk_id(*m.chunk_for(*location)))
+    if len(chunk_domain) > physical.MAX_FRAME_CHUNKS:
+        raise RuleViolation("完整物理步的地块提交范围超过8个；本次变化未提交。")
+    # A tick cannot generate arbitrary terrain: start_rain/start_drift ensure
+    # their complete routes before admission; physical_closure includes those
+    # routes, spills, break recipients and fire neighbours. Finished processes
+    # only offer regional opportunities. Keep all eight AFTER maxima and all
+    #64 object BEFORE/AFTER maxima, including possible later fire expansion.
+    # Already-dirty chunks retain their transaction's real persisted BEFORE.
+    chunk_before = sum(sm.encoded_size(record["value"]) for cid in chunk_domain
+                       if (record := ctx.get_state_record(m.CHUNKS, cid))["exists"])
+    # Physical content outcomes do not enter the public causal event queue.
+    # Authored/contact outcomes do; retained facts still reserve bounded GC.
+    consumers = set(step_ids)
+    if public_facts:
+        # All routes/release/fire/contact regions are already in this bounded
+        # step domain. Include their sleeping/error subscribers; no world scan.
+        for cid in chunk_domain:
+            _, cx, cy = cid.split("_")
+            consumers.update(execution.local_subscribers(ctx, int(cx)*16, int(cy)*16))
+    metadata = execution.reservation(ctx, step_ids, max_facts=public_facts,
+                                     consumer_ids=sorted(consumers))
+    if set(metadata["possible_members"]) - set(step_ids):
+        # Tail events wake next-step participants after this step's declarations.
+        # Their exact forest must still satisfy wake's existing admission before
+        # publication, without executing a second physical or declarative pass.
+        _capacity_domain(ctx, metadata["possible_members"])
+    # Error/recorder writes outside the frame share the existing64-entity
+    # transaction pool; they do not receive a second physics pass or a second
+    # fictitious64-object byte allowance. Same-step watchers also save here.
+    entity_writes = (set(objects) | set(step_ids) | set(metadata["entity_writes"])
+                     | (batch.dirty_entities if batch is not None else set()))
+    if len(entity_writes) > sm.MAX_FRAME_OBJECTS:
+        raise RuleViolation("本步物理、规则及局部消费者保存并集超过64个对象；本步未推进或消费事件。")
+    changes += metadata["changes"]
+    size += metadata["size"] + chunk_before - physical.MAX_FRAME_CHUNKS * m.MAX_CHUNK_BYTES
+    valid = not (any(len(keys) > 32 for keys in builtin_accounts.values()) or total_facts > MAX_OUTCOMES_PER_STEP
+            or combination_changes > MAX_COMMIT_CHANGES or combination_size > MAX_COMMIT_BYTES
+            or changes > MAX_COMMIT_CHANGES or size > MAX_COMMIT_BYTES)
+    return {"valid": valid, "changes": MAX_COMMIT_CHANGES - max(changes, combination_changes),
+            "bytes": MAX_COMMIT_BYTES - max(size, combination_size)}
+
+
+def _check_instance_capacity(ctx, ids, *, reject=True):
+    try:
+        budget = _instance_capacity_budget(ctx, ids)
+    except RuleViolation:
+        if reject:
+            raise
+        return {"changes": 0, "bytes": 0}
+    if not budget["valid"]:
         if not reject:
             return {"changes": 0, "bytes": 0}
         raise RuleViolation("活动物件组合超过完整物理步的提交容量；现有物件继续运行，本次入料或创建未提交。")
-    return {"changes": MAX_COMMIT_CHANGES - changes, "bytes": MAX_COMMIT_BYTES - size}
+    return {key: budget[key] for key in ("changes", "bytes")}
+
+
+def check_step_capacity(ctx):
+    # Unrelated player actions can grow chunk contents between ticks. Check
+    # today's BEFORE values; old admission is not a future commit permission.
+    # Optional histories use their own forward-capacity check independently.
+    ids = activity.meta_get(ctx, "creative_instances", [])
+    if not _instance_capacity_budget(ctx, ids)["valid"]:
+        raise RuleViolation("当前完整规则步超过提交容量；未推进时间或消费事件。")
 
 
 def step(ctx):
@@ -202,6 +312,34 @@ def check_delegation(ctx, args):
     _save(ctx, CONTROL, ctx.actor_role_id, value)
 
 
+def _imported_interfaces(ctx, proposed):
+    """Resolve only explicitly pinned immutable port types, before compiling."""
+    from agent_world.simulation.programs import exported_interface
+    from .definitions import execution_semantics
+    interfaces = {}
+    if not isinstance(proposed, dict) or not isinstance(proposed.get("types"), dict):
+        return interfaces
+    for spec in proposed["types"].values():
+        if not isinstance(spec, dict) or not isinstance(spec.get("ports", {}), dict):
+            continue
+        for port in spec.get("ports", {}).values():
+            source = port.get("source") if isinstance(port, dict) else None
+            if not isinstance(source, dict) or not isinstance(source.get("definition_ref"), str):
+                continue  # The compiler owns shape diagnostics.
+            reference = source["definition_ref"]
+            if reference in interfaces:
+                continue
+            if len(interfaces) >= 8:
+                raise RuleViolation("端口最多引用8份不同的不可变接口来源。")
+            record = ctx.get_state(DEFINITIONS, reference)
+            if not record:
+                raise RuleViolation("端口接口来源未发表；使用真实definition_ref。")
+            execution_semantics(record)
+            interfaces[reference] = {key: exported_interface(kind)
+                                     for key, kind in record["definition"]["types"].items()}
+    return interfaces
+
+
 def definition_publish(ctx, args):
     check_delegation(ctx, args)
     try:
@@ -216,10 +354,12 @@ def definition_publish(ctx, args):
                 reference, symbol, material = _resolve_material(ctx, binding["definition_ref"], binding["symbol"])
                 proposed["material_imports"][alias] = {"definition_ref": reference, "symbol": symbol}
                 resolved[alias] = material
+        interfaces = _imported_interfaces(ctx, proposed)
         definition = compile_program(proposed, materials=REGISTRY.materials, body_materials=BODY_MATERIALS,
                                      max_custom_materials=MAX_CUSTOM_MATERIALS, imported_materials=resolved,
                                      fact_catalog={key: fact.type for key, fact in PUBLIC_FACTS.items()},
-                                     component_catalog={key: REGISTRY.components[key] for key in PROGRAM_COMPONENTS})
+                                     component_catalog={key: REGISTRY.components[key] for key in PROGRAM_COMPONENTS},
+                                     imported_interfaces=interfaces)
     except ValueError as exc:
         raise RuleViolation("定义未发表，世界没有改变：" + str(exc)) from exc
     encoded = json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -236,17 +376,21 @@ def definition_publish(ctx, args):
         return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": True,
                                 "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition)})
     publication.publish(ctx, ref, version_key, {"definition": definition, "author": ctx.actor_role_id, "hash": digest,
-                                               "published_tick": step(ctx), "published_at": ctx.now})
+                                               "published_tick": step(ctx), "published_at": ctx.now,
+                                               "execution_semantics": EXECUTION_SEMANTICS})
     return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": False,
                             "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition),
                             "instantiate": "cost_u: grove.fabrication_options then grove.fabricate with actual lot sources; cost: grove.content_submit with existing opportunity and builtin piece costs"})
 
 
 def definition_read(ctx, args):
+    from .definitions import execution_semantics
     value = ctx.get_state(DEFINITIONS, args["definition_ref"])
     if not value:
         raise RuleViolation("规则版本不存在；先发布并使用返回的definition_ref。")
     return FunctionOutcome({"definition_ref": args["definition_ref"], **value,
+        "execution_semantics": execution_semantics(value),
+        "execution_plan": execution_plan(value["definition"]),
         "material_semantics": program_material_semantics(value["definition"], args["definition_ref"], materials=REGISTRY.materials),
         "declaration_semantics": declaration_semantics(value["definition"])})
 
@@ -255,9 +399,11 @@ def definition_read(ctx, args):
 
 def _resolve_material(ctx, reference, symbol):
     """Pin imports to the original immutable definition, never a display name."""
+    from .definitions import execution_semantics
     record = ctx.get_state(DEFINITIONS, reference)
     if not record:
         raise RuleViolation("导入材料引用不存在；使用已发表definition_ref与材料symbol。")
+    execution_semantics(record)
     pack = record["definition"]
     if symbol in pack["materials"]:
         return reference, symbol, deepcopy(pack["materials"][symbol])
@@ -265,6 +411,8 @@ def _resolve_material(ctx, reference, symbol):
     if binding:
         # Publication canonicalizes every import to its original material.
         source = ctx.get_state(DEFINITIONS, binding["definition_ref"])
+        if source:
+            execution_semantics(source)
         if source and binding["symbol"] in source["definition"]["materials"]:
             return binding["definition_ref"], binding["symbol"], deepcopy(source["definition"]["materials"][binding["symbol"]])
     raise RuleViolation("导入symbol不是该不可变规则包声明或导入的材料。")
@@ -351,14 +499,7 @@ def object_definition(ctx, spec, *, formation=False):
 def register_instance(ctx, entity):
     if not entity["state"].get("program", {}).get("definition_ref"):
         return
-    ids = activity.meta_get(ctx, "creative_instances", [])
-    if entity["id"] not in ids:
-        if len(ids) >= MAX_INSTANCES:
-            raise RuleViolation("同时最多32个声明程序物件；已耗尽／退役物件会在下一步释放执行位。")
-        proposed = [*ids, entity["id"]]
-        _check_instance_capacity(ctx, proposed)
-        activity.meta_set(ctx, "creative_instances", proposed)
-        activity.physical_closure(ctx)
+    execution.register(ctx, entity)
 
 
 def _bound_ids(value):
@@ -375,25 +516,44 @@ def _bound_ids(value):
 def _context(entity, params=None, event=None, *, ctx=None, objects=None, definition=None):
     from . import world_facts
     program = entity["state"]["program"]
-    observed = {}
+    observed, port_interfaces = {}, {}
+    readable_bindings = deepcopy(program.get("port_bindings", {}))
     if ctx is not None:
         definition = definition if definition is not None else _type(ctx, entity)[0]
         if objects is None:
             anchor = entity if entity.get("id") else {"id": "candidate", **entity}
             objects = world_facts.freeze(ctx, {anchor["id"]: anchor})
         location = world_facts.public_location(entity, objects)
+        _, own_type = _type(ctx, entity) if program.get("definition_ref") else (None, None)
+        if own_type is None and definition is not None:
+            own_type = definition.get("types", {}).get(program.get("type_id"), {})
+        declarations = (own_type or {}).get("ports", {})
+        for name, declaration in declarations.items():
+            source = declaration.get("source")
+            if source:
+                port_interfaces[name] = world_facts.interface_schema(ctx, source)
+                target = objects.get(readable_bindings.get(name))
+                if target is None or not world_facts.validate_port_source(ctx, target, declaration):
+                    readable_bindings.pop(name, None)
         for eid in sorted(world_facts.bound_ids(entity, definition)):
             target = objects.get(eid)
             target_location = world_facts.public_location(target, objects) if target else None
             if (location is None or None in location or target_location is None or
                     max(abs(location[0]-target_location[0]), abs(location[1]-target_location[1])) > 8):
                 continue
-            observed[eid] = world_facts.facts(target, objects, external=True)
+            values = world_facts.facts(target, objects, external=True, ctx=ctx)
+            # Authored facts are available only through the pinned port whose
+            # source definition/type has been checked, never an arbitrary path.
+            matching = any(program.get("port_bindings", {}).get(name) == eid
+                           and world_facts.validate_port_source(ctx, target, declaration)
+                           for name, declaration in declarations.items() if declaration.get("source"))
+            observed[eid] = {key: value for key, value in values.items()
+                             if not key.startswith("authored.") or matching}
     contract = program.get("contract", {})
     physical = world_facts.facts((objects or {}).get(entity.get("id"), entity), objects or {})
     return {"fields": program["fields"], "params": params or {}, "quantities": _quantities(entity), "objects": observed,
             "physical": {key.removeprefix("physical."): value for key, value in physical.items() if key.startswith("physical.")},
-            "ports": deepcopy(program.get("port_bindings", {})),
+            "ports": readable_bindings, "port_interfaces": port_interfaces,
             "contract": {"status": contract.get("status", "none"), "started_event_sequence": contract.get("started_event_sequence", 0),
                          "deadline_tick": contract.get("deadline_tick") or 0, "delivered": contract.get("delivered", 0), "quantity": contract.get("quantity", 0)},
             "mechanical": program.get("mechanical", {"position": 0, "angle": 0, "speed": 0, "energy": 0, "status": "none", "available_torque": 0}),
@@ -492,13 +652,8 @@ def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=No
 
 
 def _relevant_events(ctx, entity, since):
-    location = _public_location(ctx, entity)
-    if location is None:
-        return []
-    _, spec = _type(ctx, entity)
-    radius = spec.get("recorder", {}).get("radius", 1)
-    events = ctx.get_state(m.META, "creative_events", {"events": []})["events"]
-    return [event for event in events if event["sequence"] > since and max(abs(event["x"]-location[0]), abs(event["y"]-location[1])) <= radius]
+    from . import events
+    return events.pending_events(ctx, entity["id"], since)
 
 
 def _set_drive(ctx, entity, spec, enabled, *, source):
@@ -548,8 +703,10 @@ def _port_candidates(ctx, player, entity, spec):
         if target["id"] == entity["id"] or max(abs(target["x"]-player["x"]), abs(target["y"]-player["y"])) > 8:
             continue
         forest = world_facts.freeze(ctx, {target["id"]: target})
-        facts = world_facts.facts(target, forest, external=True)
-        eligible = [name for name, port in spec.get("ports", {}).items() if all(field in facts for field in port["fields"])]
+        facts = world_facts.facts(target, forest, external=True, ctx=ctx)
+        eligible = [name for name, port in spec.get("ports", {}).items()
+                    if world_facts.validate_port_source(ctx, target, port)
+                    and all(field in facts for field in port["fields"])]
         if eligible:
             result.append({"id": target["id"], "name": target["name"], "version": target["version"], "kind": "entity", "eligible_ports": eligible})
     return result
@@ -650,6 +807,7 @@ def tick(ctx):
     unbounded same-step chain; independent reactions share one updated balance.
     """
     ids = activity.meta_get(ctx, "creative_instances", [])
+    execution.begin_step(ctx, ids)
     # Logical-step facts and recorder histories are one commit, not one state
     # write per event/observer pair. Instance admission reserves their complete
     # combination with physics; history growth cannot exceed that reservation.
@@ -671,7 +829,6 @@ def tick(ctx):
     physical_objects, _ = activity.physical_closure(ctx)
     contact_original = {eid: deepcopy(entity) for eid, entity in physical_objects.items()
                         if contact.candidates(ctx, entity)}
-    journal_sequence = ctx.get_state(m.META, "creative_events", {"sequence": 0})["sequence"]
     events, pending_accounts, phase_supply = {}, {}, {}
     outcomes = []
     blocked_events, solved_mechanical, solved_markers = set(), {}, {}
@@ -867,7 +1024,10 @@ def tick(ctx):
             entity["state"]["program"]["contract"]["condition_error"] = str(exc)[:180]
             _barrier(entity, spec, events[eid][-1] if events[eid] else None, ctx=ctx, objects=after_objects, allow_unknown=True)
         if has_event(spec) and eid not in blocked_events and entity["state"]["program"]["process"]["status"] != "error":
-            entity["state"]["program"]["event_cursor"] = journal_sequence
+            # A hidden/carried anchor may still have previously queued input.
+            # Advance only over the actual input evaluated in this snapshot.
+            if events[eid]:
+                entity["state"]["program"]["event_cursor"] = events[eid][-1]["sequence"]
     # Existing authored stages retain their order and frozen views. Contact
     # comes last, sharing their remaining original inputs, never their products.
     for eid, snapshot in sorted(contact_original.items()):
@@ -910,6 +1070,7 @@ def tick(ctx):
     commit.commit_results(ctx, objects, changed, accounts=accounts, tick=step(ctx))
     for eid, action, summary in outcomes:
         public_event(ctx, action=action, entity_id=eid, kind="process", actor="system:rules")
+    execution.after_step(ctx, ids)
     return outcomes
 
 
@@ -1216,6 +1377,9 @@ def rule_action(ctx, args):
     if entity["lifecycle"] == "intact":
         _barrier(entity, spec, ctx=ctx, allow_unknown=True)
     commit.save_entity(ctx, entity)
+    # A valid action can repair a process without changing an input value.
+    # Bookkeeping is deliberately excluded from automatic wake fingerprints.
+    execution.wake(ctx, [entity["id"]], reason="action")
     location = _public_location(ctx, entity)
     events = ()
     if location is not None:
@@ -1404,7 +1568,7 @@ def rule_catalog(ctx, args):
                               for field, (kind, minimum, maximum) in REGISTRY.components[name].fields.items()
                               if field != "supports"}}
         for name in PROGRAM_COMPONENTS}
-    return FunctionOutcome({"language_version": 3, "definition_directory": {"function_id": "grove.definition_list",
+    return FunctionOutcome({"language_version": 4, "execution_semantics": EXECUTION_SEMANTICS, "definition_directory": {"function_id": "grove.definition_list",
         "read_function_id": "grove.definition_read", "seek_paged": True}, "world_tick": step(ctx),
         "builtin_materials": {key: {"name": value.name, "load_per_u": value.load_per_u,
             "combustible": value.combustible, "liquid": value.liquid} for key, value in REGISTRY.materials.items()},
@@ -1415,16 +1579,20 @@ def rule_catalog(ctx, args):
             "manual_actions": "types[].actions and reserved rule_action operations run only when a person or an explicitly granted Agent invokes them. Setup, fuel, binding and a successful manual action do not prove an automatic rule ran.",
             "conditions": "when=false skips that rule; it neither undoes earlier effects nor stops an already enabled source. An unavailable rule input produces no new effect and waits, retaining existing control rather than becoming false/zero or automatically switching targets. Other independently valid rules retain their normal semantics. Error status is distinct from recoverable unknown facts.",
             "event_rules": "Rules using event references consume actual nearby public journal inputs in sequence, not a synthetic current event. A carried/private anchor receives no public events; the default event radius is1, or the declared recorder radius when present.",
+            "scheduling": "Stored instances have a persistent membership row; only the bounded active frontier is evaluated. Derived read dependencies wake settled field rules on actual input or visibility changes. Stateful solvers and feedback remain conservatively active. Sleeping never removes the object, its permission or its result.",
+            "event_consumers": "Local consumers retain their own actual pending sequences backed by shared immutable event facts. Unavailable input retains unread events without blocking unrelated publication. Queue overflow pauses that consumer with an explicit gap and preserves already queued facts; it never invents successful consumption.",
             "deployment": "Self rules do not all require ground placement. Mechanical solve requires public reachable objects: carried/private nodes and closed-contained nodes do not participate. Finite qualified fuel energy, enabled source, actual reciprocal connections within2 tiles and feasible network load determine real motion.",
             "fact_ports": "A fact port reads a bound public source within8 tiles of the public anchor; binding requires both actor and anchor range. Binding supplies no motion or permission. Mechanical connect establishes a different relation within2 tiles. Missing/private/closed-contained/distant source facts are unknown; the original binding is retained.",
             "drive": "drive controls only this instance's existing source. A changed request applies from the following logical step; the current mechanical solve uses the step-start control and fuel snapshot. Neither drive nor start writes energy, speed or position. when=false is not an implicit stop request.",
             "readback": "Inspect current automatic conditions, bindings and actual fields/matter/mechanical state. A satisfied snapshot condition is not execution evidence; a saved control request records a past change, not repeated activity. Read actual state after the request's applies_from_step. process.steps counts reaction steps only, not all rule execution or goal progress. Another person may change public inputs; re-read the same instance and continue from its real shared consequences."},
         "limits": {"publication_bytes": 24576, "new_publications_per_author_step": publication.MAX_PUBLISH_PER_STEP,
                    "publication_storage": "no small lifetime package/byte cap; metered JSON payloads and actual host storage remain separate",
-                   "instances": MAX_INSTANCES, "types_per_package": 8, "materials_per_package": 4, "rules_per_type": 8,
+                   "active_instances": MAX_INSTANCES, "stored_instances": "stored membership is independent of the active frontier; no global32 lifetime instance limit. Active simulation and local subscriber budgets still apply",
+                   "types_per_package": 8, "materials_per_package": 4, "rules_per_type": 8,
                    "effects_per_rule": 8, "expression_depth": 8, "expression_nodes": 64, "links_per_object": MAX_LINKS, "records_per_object": MAX_RECORDS,
                    "record_bytes_per_object": MAX_RECORD_BYTES, "event_bytes": MAX_EVENT_BYTES,
                    "event_journal_bytes": MAX_EVENT_JOURNAL_BYTES,
+                   "exports_per_type": 8, "installed_definitions_per_container": 2,
                    "contact_candidates_per_container": 8, "process_facts_per_step": 164,
                    "instance_admission": "all admitted authored and contact future records must fit 512 changes, 2MiB and164 facts before creating an instance or receiving reactive material; future snapshots/slots/results also fit4 custom materials,8 lots,8KiB"},
         "definition_fields": {"allowed": list(PROGRAM_KEYS), "required": list(PROGRAM_REQUIRED_KEYS),
@@ -1434,8 +1602,8 @@ def rule_catalog(ctx, args):
             "meaning": "Each type requires name and body_material, plus exactly one cost path. cost_u must include a positive quantity of body_material; all input symbols must be actual eligible solid materials at formation."},
         "definition_shape": {"key": "lowercase_key", "name": "public name", "version": "positive integer; top-level only", "materials": "optional, default {}; local symbol:{name,feedstock:wood|stone|cloth|water,load_per_u:equal feedstock,combustible:boolean,liquid:boolean}; local and imported materials combined at most4. A new object name, appearance or capability does not require a new material; builtin materials can directly name body_material and cost/cost_u inputs",
             "material_imports": "optional alias:{definition_ref:actual immutable published program reference,symbol:declared or imported material symbol}. Pins original identity/physical properties; same display names do not match. References provide neither matter nor permission; consume/produce only actual lots with mass-balanced reactions. Cannot charge imported material.",
-            "contact_reactions": "optional top-level [{id,when:boolean_expression,reaction:{op:react,inputs,outputs,rate?:1..10,channel?,mode?:exclusive|independent,heat?:0}}], at most8. Each consumes at least one material declared in this package's materials; conditions only use quantity/concentration of local, imported or builtin symbols. Travels with original canonical material identity into any ordinary container; only its own positive non-burning contained lots minus escrow. Personal backpack itself never reacts; closed internal containers may. Conditions freeze before authored rules; contact runs after authored stages on shared remaining inputs, products next step. Exclusive channels are per definition_ref. Outputs preserve canonical identity and mass. A name, metadata, whole child object, surface lot or imported-only rule does not activate contact.",
-            "types": "symbol:{name,body_material:builtin|local|imported solid symbol, exactly one of cost:{wood:0..4,stone:0..4,cloth:0..4} or cost_u:{solid_symbol:1..200} (total<=200u, actual sources required),components?:object matching component_schema,ports?:{name:{fields:[typed public facts],label?}},fields?:{name:{type:integer|boolean,default,min?,max?}},container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[]}"},
+            "contact_reactions": "optional top-level [{id,activation?:material|installed,when:boolean_expression,reaction:{op:react,inputs,outputs,rate?:1..10,channel?,mode?:exclusive|independent,heat?:0}}], at most8. Default material activation consumes at least one locally declared material and travels with its canonical identity. installed activation may combine builtin/explicitly imported identities and requires grove.interact install_interaction on an eligible actual container; publishing alone activates nothing. At most2 installed definition references and8 reachable candidates per container. Only actual positive non-burning contained lots minus escrow are inputs; personal backpacks never react, closed internal containers may. Conditions freeze before authored rules; contact runs after authored stages on shared remaining inputs, products next step. Exclusive channels are per definition_ref. Outputs preserve canonical identity and mass; installation creates no matter and changes no global rules.",
+            "types": "symbol:{name,body_material:builtin|local|imported solid symbol, exactly one of cost:{wood:0..4,stone:0..4,cloth:0..4} or cost_u:{solid_symbol:1..200} (total<=200u, actual sources required),components?:object matching component_schema,ports?:{name:{fields:[typed public facts or authored.exported_field],source?:{definition_ref,type_id},label?}},fields?:{name:{type:integer|boolean,default,min?,max?}},exports?:[declared_field_name],container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[]}"},
         "component_schema": {"type": "object", "additionalProperties": False, "properties": component_schema,
             "meaning": "Only these components and fields are authorable. Fields are optional overrides; instance construction supplies existing defaults. supports is derived from actual formed body lots, never an authored field."},
         "public_facts": fact_catalog(),
@@ -1468,7 +1636,7 @@ def rule_catalog(ctx, args):
         "expressions": {"literals": "boolean|bounded integer|short string", "references": ["{field:name}", "{param:name}", "{quantity:material_symbol}", "{concentration:material_symbol}", "{mechanical:position|speed|angle|status|available_torque|energy}", "{event:kind|action|entity_id|actor|mechanical_position|passable}", "{contract:status|started_event_sequence|deadline_tick|delivered|quantity}",
             f"{{physical:{physical_fields}}}", f"{{object:{{id:actual_entity_id,field:{object_fields}}}}}",
             f"{{object:{{port:declared_port,field:{object_fields}}}}}"],
-            "field_catalog": "public_facts is the shared typed catalog for both object sources. Physical self references use its physical.* keys with the physical. prefix removed; they do not introduce a separate fact catalog.",
+            "field_catalog": "public_facts is the shared built-in typed catalog. A type may explicitly export declared integer/boolean self fields; consumers use authored.field only through a port pinned to source definition_ref/type_id. definition_read supplies the immutable export schema and derived execution plan. Hidden, wrong-type or wrong-source values are unavailable, never coerced to false/zero. Physical self references use the physical.* keys with that prefix removed.",
             "object_bindings": "Use exactly one id or port. Literal IDs are immutable definition bindings, at most 8 distinct IDs. Port references require a declared port and a field listed in that port's typed fields. Only actual public objects within 8 tiles of this instance can supply facts; missing, private, closed-contained, distant objects or unsupported capabilities fail explicitly, never default false/zero. Mechanical numbers use integer projection as self references do. barrier.opened_sequence is the server public-event sequence of the actual last blocked-to-passable transition; initially 0. Compare it with this contract's started_event_sequence to require opening after bilateral acceptance.",
             "binary": "{op:eq|ne|lt|lte|gt|gte|add|sub|mul|div|min|max,left:expr,right:expr}", "boolean": "{op:all|any,args:[expr,...]} or {op:not,value:expr}", "concentration": "simplified volume shares percentage of real contained u, not physical chemical units"},
         "rule": "{id,phase:reaction|after,when:boolean_expression,effects:[...]}; phase predicates use snapshot; non-event rules once by id, then events by sequence and rule id within each event; products enter input supply next step, bounded execution",
@@ -1485,10 +1653,10 @@ def specs():
     return (
         *publication.specs(),
         *fabrication.specs(),
-        FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=4, access="read", description="Discover the bounded creation language and shared physical facts. For immutable publications page definition_list, then definition_read; this static catalog contains no full-history index."),
-        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=2, access="read", description="Read one immutable definition and its author/hash, with compiled canonical material bindings and consumption/production coefficients; existing instances pin this reference."),
-        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=5, authorize=_member, description="Compile immutable definitions with cost_u actual-source bodies, bounded components/ports/physical conditions and self drive control, or the existing piece cost. Optional local material uses qualifies fuel; material_imports pins original identities. Publication creates no matter, permission or consent. Discover precise shape and bounds with rule_catalog."),
-        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=8, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Bindings need same-observation target/other versions and do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
+        FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=5, access="read", description="Discover the bounded creation language and shared physical facts. For immutable publications page definition_list, then definition_read; this static catalog contains no full-history index."),
+        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=3, access="read", description="Read one immutable definition and its author/hash, with compiled canonical material bindings and consumption/production coefficients; existing instances pin this reference."),
+        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=6, authorize=_member, description="Compile immutable definitions with cost_u actual-source bodies, bounded components/ports/physical conditions and self drive control, or the existing piece cost. Optional local material uses qualifies fuel; material_imports pins original identities. Publication creates no matter, permission or consent. Discover precise shape and bounds with rule_catalog."),
+        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=9, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Bindings need same-observation target/other versions and do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
         FunctionSpec("grove.control_status", control_status, EMPTY, authorize=_member, access="read", description="Read own current goal and committed action count, without exposing grant token."),
@@ -1496,4 +1664,5 @@ def specs():
 
 
 def state_specs():
-    return (*publication.state_specs(), *tuple(StateRule(scope, "", {}, history="metadata") for scope in (DEFINITIONS, VERSIONS, CONTROL, RECORDS, ACCOUNTING, FIELD_CHANGES)))
+    return (*publication.state_specs(), *execution.state_specs(),
+            *tuple(StateRule(scope, "", {}, history="metadata") for scope in (DEFINITIONS, VERSIONS, CONTROL, RECORDS, ACCOUNTING, FIELD_CHANGES)))

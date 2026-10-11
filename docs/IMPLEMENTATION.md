@@ -4,7 +4,9 @@
 
 ## 版本与运行形态
 
-- Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，候选版本0.26.0。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
+持续创生轮候选为0.31.0／world32／state22。`simulation.execution`从原canonical定义推导读写与休眠计划；`shared_grove.execution`只维护持久成员、依赖索引和活动前沿，`events`保存局部消费者待处理序列与共享事件事实，`commit`仍是同一事务中统一落库的拥有者。`world_facts`提供固定定义来源的公开字段，`interactions`处理正式容器安装／卸载，`contact`沿有限安装引用和真实材料身份发现候选；不扫描所有发表定义。运行中的原世界尚未因此自动升级，新源码的验收范围见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
+
+- Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，候选版本0.31.0。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。

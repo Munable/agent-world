@@ -5,7 +5,7 @@ from copy import deepcopy
 
 from agent_world.errors import PermissionDenied, RuleViolation
 from agent_world.simulation.declarations import has_event
-from agent_world.simulation.programs import evaluate, plan_reaction, MECHANICAL_DEFAULTS
+from agent_world.simulation.programs import evaluate, plan_reaction, MECHANICAL_DEFAULTS, exported_interface
 from agent_world.simulation import matter as sm
 from agent_world.simulation.facts import reference_semantics
 
@@ -140,9 +140,10 @@ def _location_objects(ctx, entity):
 
 
 def _deployment_observation(ctx, entity, spec, objects):
-    from . import activity, world_facts
+    from . import execution, world_facts
 
-    admitted = entity["id"] in activity.meta_get(ctx, "creative_instances", [])
+    member = execution.get_member(ctx, entity["id"])
+    admitted = member is not None
     intact = entity["lifecycle"] == "intact" and not entity["state"].get("retired")
     errored = entity["state"]["program"]["process"]["status"] == "error"
     runnable = admitted and intact and not errored
@@ -155,11 +156,44 @@ def _deployment_observation(ctx, entity, spec, objects):
         if blocked:
             blockers.append(reason)
     return {"publicly_placed": public, "admitted": admitted,
+            "activity_state": member.get("status") if member is not None else "not_admitted",
+            "active_this_step": member is not None and member.get("status") == "active",
             "ordinary_rules_enabled": runnable and any(not has_event(rule) for rule in spec["rules"]),
             "public_event_input_available": runnable and public,
             "mechanical_solver_eligible": runnable and public and mechanical,
             "mechanical_blockers": blockers,
             "meaning": "自身规则可随身评估；事件／机械需公开。资格非事件或运动证据。"}
+
+
+def _interface_observation(ctx, entity, spec, context, objects):
+    """Describe pinned source types and actual authorized values, never defaults."""
+    from . import world_facts
+
+    binding = entity["state"]["program"]
+    actual = world_facts.interface_facts(ctx, entity)
+    exports = {name: {**deepcopy(schema), "known": name in actual,
+                      **({"actual": actual[name]} if name in actual else {})}
+               for name, schema in exported_interface(spec).items()}
+    ports = []
+    for name, declaration in spec.get("ports", {}).items():
+        row = {"port": name, "label": declaration.get("label", name),
+               "source": deepcopy(declaration.get("source")), "facts": {}}
+        eid = binding.get("port_bindings", {}).get(name)
+        if eid is not None:
+            row["bound_entity_id"] = eid
+        target = objects.get(eid)
+        if target is not None and eid in context["objects"]:
+            row["bound_entity_name"] = target["name"]
+            row["source_matches"] = world_facts.validate_port_source(ctx, target, declaration)
+        for field in declaration["fields"]:
+            try:
+                value = evaluate({"object": {"port": name, "field": field}}, context)
+                row["facts"][field] = {"known": True, "actual": value}
+            except ValueError:
+                row["facts"][field] = {"known": False}
+        ports.append(row)
+    return {"published_exports": exports, "port_sources": ports,
+            "interface_meaning": "显式公开字段来自实际状态；作者字段名不赋予物理语义，端口固定引用不可变定义与类型。"}
 
 
 def _mechanical_observation(binding, spec, deployment, observed_tick):
@@ -257,6 +291,12 @@ def program_observation(ctx, entity, *, detailed=False, player=None):
         result["reaction_observations_projection"] = "当前contained与反应历史；inspect读取条件／缺口。"
         result["automatic_rules_projection"] = "inspect读取自动声明条件／动力输入；显式actions另提交。"
         return result
+
+    result.update(_interface_observation(ctx, entity, spec, context, objects))
+    from .events import consumer_status
+    consumer = consumer_status(ctx, entity["id"])
+    if consumer is not None:
+        result["event_consumer"] = consumer
 
     result["automatic_rules"] = _automatic_rule_observations(spec, context)
     result["automatic_rules_truncated"] = len(spec["rules"]) > MAX_AUTOMATIC_RULE_OBSERVATIONS

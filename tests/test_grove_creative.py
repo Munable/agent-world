@@ -43,6 +43,17 @@ def package():
                 "contract": {"material": "wood", "quantity": 2, "duration_ticks": 5}}}}
 
 
+def event_counter_package():
+    return {'key': 'event-budget', 'name': '公开动作计数', 'version': 1, 'types': {'counter': {
+        'name': '计数石', 'body_material': 'stone', 'cost': {'stone': 1},
+        'fields': {'count': {'type': 'integer', 'default': 0, 'min': 0, 'max': 1000}},
+        'recorder': {'radius': 8, 'window_ticks': 50},
+        'rules': [{'id': 'moves', 'phase': 'after',
+            'when': {'op': 'eq', 'left': {'event': 'action'}, 'right': 'move'},
+            'effects': [{'op': 'set', 'field': 'count',
+                'value': {'op': 'add', 'left': {'field': 'count'}, 'right': 1}}]}]}}}
+
+
 class CreativeWorldTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix="creative-world-")
@@ -222,8 +233,8 @@ class CreativeWorldTests(unittest.TestCase):
         for _ in range(count):
             self.time.return_value += 1
             result = self.world.run_due_timers("w")
-            self.assertEqual(result.get("failed", 0), 0, result)
             self.assertEqual(result["count"], 1, result)
+            self.assertEqual([row["status"] for row in result["processed"]], ["completed"], result)
 
     def _assert_after_phase_reads(self, gate_id, observer_id):
         gate_definition = {"key": "phase_gate", "name": "按步开门", "version": 1, "types": {"gate": {
@@ -857,16 +868,9 @@ class CreativeWorldTests(unittest.TestCase):
                 self.assertEqual(current[field], before[key][field])
         self.assertEqual(self.world.get_state('w', m.META, 'matter_accounting'), material_before)
 
-    def test_authoritative_event_backpressure_refuses_without_losing_unconsumed_facts(self):
-        definition = {'key': 'event-budget', 'name': '公开动作计数', 'version': 1, 'types': {'counter': {
-            'name': '计数石', 'body_material': 'stone', 'cost': {'stone': 1},
-            'fields': {'count': {'type': 'integer', 'default': 0, 'min': 0, 'max': 1000}},
-            'recorder': {'radius': 8, 'window_ticks': 50},
-            'rules': [{'id': 'moves', 'phase': 'after',
-                'when': {'op': 'eq', 'left': {'event': 'action'}, 'right': 'move'},
-                'effects': [{'op': 'set', 'field': 'count',
-                    'value': {'op': 'add', 'left': {'field': 'count'}, 'right': 1}}]}]}}}
-        _, objects = self.publish('A', definition, ['counter'])
+    def test_event_backpressure_isolates_consumer_without_losing_unconsumed_facts(self):
+        from agent_world.worlds.shared_grove import events
+        _, objects = self.publish('A', event_counter_package(), ['counter'])
         target = objects['counter']
         self.approach('A', target)
         self.ticks(1)
@@ -874,25 +878,66 @@ class CreativeWorldTests(unittest.TestCase):
         player = self.view()['player']
         direction = next((dx, dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
                          if (player['x']+dx, player['y']+dy) != (self.entity(target)['x'], self.entity(target)['y']))
-        for index in range(creative.MAX_EVENTS - 164):
+        cursor = self.entity(target)['state']['program']['event_cursor']
+        for index in range(creative.MAX_EVENTS + 1):
             delta = 1 if index % 2 == 0 else -1
-            player = self.view()['player']
-            self.call('A', 'grove.move', {'dx': direction[0]*delta, 'dy': direction[1]*delta,
-                                        'expected_player_version': player['version']})
+            result = self.call('A', 'grove.move', {'dx': direction[0]*delta, 'dy': direction[1]*delta,
+                                                 'expected_player_version': player['version']})
+            player = result['player']
+            pending = self.world.get_state('w', events.PENDING, target)['value']
+            if pending['paused']:
+                break
+        self.assertTrue(pending['paused'])
+        self.assertGreater(len(pending['sequences']), 0)
+        self.assertEqual(pending['consumed_through'], cursor)
+        prefix = deepcopy(pending)
+        original_facts = {str(sequence): self.world.get_state('w', events.FACTS, str(sequence))['value']
+                          for sequence in pending['sequences']}
         journal = self.world.get_state('w', m.META, 'creative_events')
-        player = self.view()['player']
-        with self.assertRaises(StateConflict):
-            self.call('A', 'grove.move', {'dx': direction[0], 'dy': direction[1],
-                                        'expected_player_version': player['version']})
-        self.assertEqual(self.view()['player'], player)
-        self.assertEqual(self.world.get_state('w', m.META, 'creative_events'), journal)
+        # Public actions remain available to another identity. The failed
+        # subscriber cannot hold the world's shared source journal open.
+        player = self.view('B')['player']
+        self.call('B', 'grove.move', {'dx': 1, 'dy': 0, 'expected_player_version': player['version']})
+        self.assertGreater(self.world.get_state('w', m.META, 'creative_events')['value']['sequence'],
+                           journal['value']['sequence'])
         self.ticks(1)
         state = self.entity(target)['state']['program']
-        self.assertEqual(state['fields']['count'], count_before + creative.MAX_EVENTS - 164)
-        self.assertEqual(state['event_cursor'], journal['value']['sequence'])
-        self.call('A', 'grove.move', {'dx': direction[0], 'dy': direction[1],
-                                    'expected_player_version': self.view()['player']['version']})
-        self.assertEqual(self.world.get_state('w', m.META, 'creative_events')['value']['sequence'], journal['value']['sequence']+1)
+        self.assertEqual(state['fields']['count'], count_before)
+        self.assertEqual(state['event_cursor'], cursor)
+        self.assertEqual(state['process']['status'], 'error')
+        self.assertEqual(self.world.get_state('w', events.PENDING, target)['value'], prefix)
+        for sequence, fact in original_facts.items():
+            self.assertEqual(self.world.get_state('w', events.FACTS, sequence)['value'], fact)
+
+    def test_legal_event_backlog_advances_and_deferred_gc_does_not_replay(self):
+        from agent_world.worlds.shared_grove import events
+        _, objects = self.publish('A', event_counter_package(), ['counter'])
+        target = objects['counter']
+        self.approach('A', target)
+        self.ticks(1)
+        count_before = self.entity(target)['state']['program']['fields']['count']
+        player = self.view()['player']
+        direction = next((dx, dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                         if (player['x']+dx, player['y']+dy) != (self.entity(target)['x'], self.entity(target)['y']))
+        for index in range(200):
+            delta = 1 if index % 2 == 0 else -1
+            player = self.call('A', 'grove.move', {
+                'dx': direction[0]*delta, 'dy': direction[1]*delta,
+                'expected_player_version': player['version']})['player']
+        before = self.world.get_state('w', events.PENDING, target)['value']
+        self.assertFalse(before['paused'])
+        self.assertEqual(len(before['sequences']), 200)
+        self.assertLess(before['payload_bytes'], events.MAX_PENDING_BYTES)
+        self.ticks(1)
+        state = self.entity(target)['state']['program']
+        self.assertEqual(state['fields']['count'], count_before + 200)
+        self.assertEqual(state['event_cursor'], before['sequences'][-1])
+        pending = self.world.get_state('w', events.PENDING, target)['value']
+        self.assertEqual(pending['consumed_through'], state['event_cursor'])
+        self.assertGreater(len(pending['sequences']), 0)  # bounded GC is deferred
+        self.ticks(1)
+        self.assertEqual(self.entity(target)['state']['program']['fields']['count'], count_before + 200)
+        self.assertEqual(self.world.get_state('w', events.PENDING, target)['value']['sequences'], [])
 
 
     def test_capacity_limits_positive_reaction_without_reporting_a_blocker(self):

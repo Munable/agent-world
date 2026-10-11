@@ -62,6 +62,8 @@ class CandidateBatch:
     event_journal: dict | None = None
     contact_admission: bool = False
     records: dict[str, dict] = field(default_factory=dict)
+    execution_rows: dict[tuple[str, str], object] = field(default_factory=dict)
+    dirty_execution: set[tuple[str, str]] = field(default_factory=set)
 
 
 def liquid_quantity(entity, slot="contained", registry=None):

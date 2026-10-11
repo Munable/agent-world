@@ -1,6 +1,7 @@
 """Current automatic inputs and saved mechanical evidence through real reads."""
 from copy import deepcopy
 import unittest
+from unittest.mock import patch
 
 from agent_world.errors import PermissionDenied, RuleViolation
 from agent_world.worlds.shared_grove import observations
@@ -8,6 +9,40 @@ import test_grove_creative as fixtures
 
 
 class AutomaticRuleObservationTests(unittest.TestCase):
+    def test_sleeping_membership_remains_admitted_and_rules_eligible(self):
+        entity = {"id": "saved", "lifecycle": "intact", "owner": None, "x": 0, "y": 0,
+                  "state": {"program": {"process": {"status": "idle"}}}}
+        spec = {"rules": [{"when": True, "effects": []}]}
+        with patch("agent_world.worlds.shared_grove.execution.get_member", return_value={"status": "sleeping"}):
+            observed = observations._deployment_observation(None, entity, spec, {"saved": entity})
+        self.assertTrue(observed["admitted"])
+        self.assertTrue(observed["ordinary_rules_enabled"])
+        self.assertEqual(observed["activity_state"], "sleeping")
+        self.assertFalse(observed["active_this_step"])
+        self.assertNotIn("not_admitted", observed["mechanical_blockers"])
+
+    def test_pinned_interface_projection_uses_actual_typed_fields_and_hides_unread_source(self):
+        source = {"id": "source", "name": "温度标签", "state": {"program": {"fields": {"temperature": 12}}}}
+        entity = {"id": "target", "state": {"program": {"fields": {"ready": False}, "port_bindings": {"signal": "source"}}}}
+        spec = {"fields": {"ready": {"type": "boolean", "default": True}}, "exports": ["ready"],
+                "ports": {"signal": {"source": {"definition_ref": "fixed", "type_id": "sensor"},
+                                    "fields": ["authored.temperature"]}}}
+        context = {"ports": {"signal": "source"}, "objects": {"source": {"authored.temperature": 12}},
+                   "port_interfaces": {"signal": {"authored.temperature": {"type": "integer", "min": 0, "max": 20}}}}
+        with patch("agent_world.worlds.shared_grove.world_facts.interface_facts", return_value={"authored.ready": False}), \
+                patch("agent_world.worlds.shared_grove.world_facts.validate_port_source", return_value=True):
+            result = observations._interface_observation(None, entity, spec, context, {"source": source})
+            hidden = observations._interface_observation(None, entity, spec, {**context, "objects": {}}, {"source": source})
+        self.assertIs(result["published_exports"]["authored.ready"]["actual"], False)
+        port = result["port_sources"][0]
+        self.assertEqual(port["source"], {"definition_ref": "fixed", "type_id": "sensor"})
+        self.assertEqual(port["facts"]["authored.temperature"], {"known": True, "actual": 12})
+        self.assertNotIn("unit", port["facts"]["authored.temperature"])
+        self.assertNotIn("bound_entity_name", hidden["port_sources"][0])
+        self.assertEqual(hidden["port_sources"][0]["facts"]["authored.temperature"], {"known": False})
+        port["source"]["type_id"] = "changed"
+        self.assertEqual(spec["ports"]["signal"]["source"]["type_id"], "sensor")
+
     def test_wetness_percentage_and_water_quantity_have_distinct_shared_units(self):
         from agent_world.simulation.facts import fact_catalog, snapshot_facts
         from agent_world.worlds.shared_grove.definitions import REGISTRY
@@ -101,6 +136,27 @@ class AutomaticWorldObservationTests(unittest.TestCase):
 
     def inspect(self, target, actor="A"):
         return self.h.read(actor, "grove.inspect", {"entity_id": target})["entity"]["creative"]
+
+    def test_step_preflight_rejects_without_advancing_clock_or_consuming_events(self):
+        from agent_world.worlds.shared_grove import model as m, events
+        from unittest.mock import patch
+        h = self.h
+        target = self.source()
+        clock = h.world.get_state("w", m.META, "clock")
+        entity = h.entity(target)
+        journal = h.world.get_state("w", m.META, "creative_events")
+        queue = h.world.get_state("w", events.PENDING, target)
+        h.time.return_value += 1
+        with patch("agent_world.worlds.shared_grove.creative._instance_capacity_budget",
+                   return_value={"valid": False}):
+            result = h.world.run_due_timers("w")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual([row["status"] for row in result["processed"]], ["rejected"])
+        self.assertEqual([row["error_code"] for row in result["processed"]], ["RuleViolation"])
+        self.assertEqual(h.world.get_state("w", m.META, "clock"), clock)
+        self.assertEqual(h.entity(target), entity)
+        self.assertEqual(h.world.get_state("w", m.META, "creative_events"), journal)
+        self.assertEqual(h.world.get_state("w", events.PENDING, target), queue)
 
     def test_recent_automatic_net_change_survives_return_to_initial_state_and_restart(self):
         from agent_world import WorldRuntime

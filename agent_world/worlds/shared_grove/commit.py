@@ -24,6 +24,8 @@ def save_entity(ctx, entity, expected_version=None):
     prepare_materials(ctx, entity)
     result, changed = m.store_entity(ctx, entity, expected_version=expected_version)
     if changed:
+        from . import execution
+        execution.reconcile(ctx, result)
         from .contact import reserve, may_contact, authored_outputs
         contacts = reserve(ctx, result)
         activity.reconcile_entity(ctx, result)
@@ -571,6 +573,8 @@ def _flush_batch(ctx, batch):
         events._save(ctx, m.META, "creative_events", batch.event_journal)
     for eid, record in sorted(batch.records.items()):
         events._save(ctx, events.RECORDS, eid, record)
+    from . import execution
+    execution.flush(ctx, batch)
 
 
 def commit_results(ctx, objects, dirty, *, accounts=None, spills=None, chunks=(), tick=None):

@@ -1,4 +1,4 @@
-"""Material-carried, bounded local reactions; no object-name or global rule pool."""
+"""Bounded material-carried or explicitly installed local contact reactions."""
 from copy import deepcopy
 
 from agent_world.errors import RuleViolation
@@ -7,9 +7,11 @@ from agent_world.simulation.programs import evaluate, plan_reaction
 from agent_world.simulation.registry import MaterialDef
 from . import model as m
 from .definitions import (DEFINITIONS, REGISTRY, bind_material, registry_for, retain_material_snapshots,
-                          contained_quantities, reaction_available_quantities, mixture_capacity)
+                          contained_quantities, reaction_available_quantities, mixture_capacity,
+                          execution_semantics)
 
 MAX_CANDIDATES = 8
+MAX_INSTALLED_DEFINITIONS = 2
 PROCESS_RESERVE_BYTES = 2048
 
 
@@ -27,6 +29,7 @@ def _material(ctx, identity):
     source = ctx.get_state(DEFINITIONS, reference)
     if not source or symbol not in source["definition"]["materials"]:
         raise RuleViolation("接触反应引用的原始材料定义缺失。")
+    execution_semantics(source)
     spec = source["definition"]["materials"][symbol]
     return MaterialDef(identity, spec["name"], spec["load_per_u"], 4,
                        spec["combustible"], liquid=spec["liquid"])
@@ -54,6 +57,46 @@ def may_contact(ctx, entity, outputs=()):
     return bool(candidates(ctx, entity, possible=possible))
 
 
+def installed_references(entity):
+    """Only server-committed local installations activate installed rules."""
+    references = entity.get("state", {}).get("interaction_definitions", [])
+    if (not isinstance(references, list) or len(references) > MAX_INSTALLED_DEFINITIONS
+            or any(not isinstance(ref, str) or not 1 <= len(ref) <= 128 for ref in references)
+            or len(set(references)) != len(references)):
+        raise RuleViolation("容器的已安装交互定义无效；最多2份不同不可变定义。")
+    return references
+
+
+def _candidate(pack, reference, rule):
+    bindings = {key: _identity(pack, reference, key) for key in
+                set(REGISTRY.materials) | set(pack["materials"]) | set(pack.get("material_imports", {}))}
+    effect = {**rule["reaction"], **{group: {bindings[key]: amount for key, amount in
+               rule["reaction"][group].items()} for group in ("inputs", "outputs")}}
+    return {"definition_ref": reference, "rule_id": rule["id"], "when": rule["when"],
+            "bindings": bindings, "reaction": effect,
+            "activation": rule.get("activation", "material")}
+
+
+def installed_candidates(ctx, entity):
+    """Check all configured declarations independently of present input matter.
+
+    Empty installations can sleep, but cannot evade the installation budget.
+    Lookups remain bounded by the container's explicit immutable references.
+    """
+    found = {}
+    for reference in installed_references(entity):
+        record = ctx.get_state(DEFINITIONS, reference)
+        if not record:
+            raise RuleViolation("已安装交互的不可变定义缺失；原材料保留。")
+        execution_semantics(record)
+        for rule in record["definition"].get("contact_reactions", []):
+            if rule.get("activation", "material") == "installed":
+                found[reference, rule["id"]] = _candidate(record["definition"], reference, rule)
+    if len(found) > MAX_CANDIDATES:
+        raise RuleViolation("已安装交互候选超过8条；本次安装未提交。")
+    return [found[key] for key in sorted(found)]
+
+
 def candidates(ctx, entity, *, possible=None):
     if (entity["lifecycle"] != "intact" or entity["state"].get("retired")
             or "container" not in entity["components"] or "personal" in entity["components"]):
@@ -63,23 +106,28 @@ def candidates(ctx, entity, *, possible=None):
     found = {}
     # Resolve only references carried by real local materials (or their bounded
     # prospective outputs during admission), never all world definitions.
+    carried = {}
     for identity in sorted(held):
         if "#" not in identity:
             continue
         reference, symbol = identity.split("#", 1)
+        carried.setdefault(reference, set()).add(symbol)
+    for reference, symbols in carried.items():
         record = ctx.get_state(DEFINITIONS, reference)
-        if not record or symbol not in record["definition"]["materials"]:
+        if not record:
             continue
+        execution_semantics(record)
         pack = record["definition"]
+        symbols.intersection_update(pack["materials"])
         for rule in pack.get("contact_reactions", []):
-            if symbol not in rule["reaction"]["inputs"]:
+            if rule.get("activation", "material") != "material":
                 continue
-            bindings = {key: _identity(pack, reference, key) for key in
-                        set(REGISTRY.materials) | set(pack["materials"]) | set(pack.get("material_imports", {}))}
-            effect = {**rule["reaction"], **{group: {bindings[key]: amount for key, amount in
-                       rule["reaction"][group].items()} for group in ("inputs", "outputs")}}
-            found[reference, rule["id"]] = {"definition_ref": reference, "rule_id": rule["id"],
-                "when": rule["when"], "bindings": bindings, "reaction": effect}
+            if not symbols.intersection(rule["reaction"]["inputs"]):
+                continue
+            found[reference, rule["id"]] = _candidate(pack, reference, rule)
+    for row in installed_candidates(ctx, entity):
+        if set(row["reaction"]["inputs"]).intersection(held):
+            found[row["definition_ref"], row["rule_id"]] = row
     if len(found) > MAX_CANDIDATES:
         raise RuleViolation("同槽材料的接触候选超过8条；本次入料未提交。")
     return [found[key] for key in sorted(found)]
@@ -269,12 +317,16 @@ def settle(ctx, entity, snapshot, supply, tick):
 
 def projection(ctx, entity, *, detailed=False):
     rows = candidates(ctx, entity)
+    references = installed_references(entity)
     process = deepcopy(entity["state"].get("program", {}).get("contact_process"))
-    if not rows and not process:
+    if not rows and not process and not references:
         return None
     result = {"scope": "own_contained_only", "candidate_count": len(rows), "process": process,
               "products_available": "next_logical_step", "unit": "u",
-              "process_is_history": True}
+              "process_is_history": True, "installed_definitions": list(references)}
+    result["installed_interactions"] = [{"definition_ref": ref,
+        "name": ctx.get_state(DEFINITIONS, ref)["definition"]["name"]}
+        for ref in references]
     if detailed:
         available = reaction_available_quantities(entity, symbolic=False)
         reactions = []
@@ -286,6 +338,7 @@ def projection(ctx, entity, *, detailed=False):
             except ValueError as exc:
                 condition = {"known": False, "satisfied": None, "error": str(exc)[:180]}
             reactions.append({"definition_ref": row["definition_ref"], "rule_id": row["rule_id"],
+                "activation": row["activation"],
                 "reaction_id": row["definition_ref"] + "#" + row["rule_id"], "channel_scope": "definition_ref",
                 "when": deepcopy(row["when"]), "condition": condition,
                 "material_bindings": {symbol: {"material_id": identity, "name": _material(ctx, identity).name}

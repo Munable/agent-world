@@ -42,20 +42,23 @@ BUILD_ARGS = {"type": "object", "properties": {
     "required": ["recipe", "x", "y", "expected_player_version"], "additionalProperties": False}
 INTERACT_ARGS = {"type": "object", "properties": {
     "action": {"enum": ["pickup", "drop", "open", "close", "store", "retrieve", "fill", "pour", "ignite",
-                         "harvest", "tend", "fuel", "dismantle", "switch_mode", "attach", "detach", "launch", "transfer"]},
+                         "harvest", "tend", "fuel", "dismantle", "switch_mode", "attach", "detach", "launch", "transfer",
+                         "install_interaction", "uninstall_interaction"]},
     "target_id": ID, "item_id": ID, "expected_player_version": VERSION,
     "expected_target_version": VERSION, "expected_item_version": VERSION,
     "expected_combination_fingerprint": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
     "amount": {"type": "integer", "minimum": 1, "maximum": 10000}, "lot_id": LOT_ID,
     "target_slot": {"enum": ["contained", "surface"]},
-    "mode": {"enum": ["shelter", "collect"]}},
+    "mode": {"enum": ["shelter", "collect"]}, "definition_ref": ID},
     "required": ["action", "expected_player_version"], "additionalProperties": False,
     "allOf": [{"if": {"properties": {"action": {"const": "transfer"}}, "required": ["action"]},
                "then": {"required": ["target_id", "item_id", "lot_id", "amount"]}},
               {"if": {"properties": {"action": {"enum": ["store", "retrieve", "fill", "pour", "ignite", "attach", "tend", "fuel"]}}, "required": ["action"]},
                "then": {"required": ["item_id"]}},
               {"if": {"properties": {"action": {"const": "switch_mode"}}, "required": ["action"]},
-               "then": {"required": ["mode"]}}]}
+               "then": {"required": ["mode"]}},
+              {"if": {"properties": {"action": {"enum": ["install_interaction", "uninstall_interaction"]}}, "required": ["action"]},
+               "then": {"required": ["target_id", "expected_target_version", "definition_ref"]}}]}
 VIEW_ARGS = {"type": "object", "properties": {"cx": COORD, "cy": COORD,
     "radius": {"type": "integer", "minimum": 1, "maximum": 8}, "inventory_after": ID,
     "inventory_limit": {"type": "integer", "minimum": 1, "maximum": 16}}, "additionalProperties": False}
@@ -184,6 +187,8 @@ def initialize(ctx):
     ctx.set_state(m.META, "changes", [])
     from .publication import migrate_catalog
     migrate_catalog(ctx)
+    from .execution import migrate
+    migrate(ctx)
     commit.ensure_chunk(ctx, 0, 0)
     commit.ensure_chunk(ctx, -1, 0)
     ctx.schedule_timer(f"grove.tick.{epoch}.0", "grove.tick", {"epoch": epoch, "sequence": 0}, due_at=ctx.now+1)
@@ -752,7 +757,8 @@ def _action_options(ctx, player, entity):
         option["input_schema"]["properties"]["action"] = {"const": action}
         if action == "pour":
             option["input_schema"]["properties"]["target_slot"] = {"const": option["target_slot"]}
-    return options
+    from . import interactions
+    return [*options, *interactions.options(ctx, player, entity)]
 
 
 def available_actions(ctx, player, entity):
@@ -905,6 +911,10 @@ def interact(ctx, args):
         affected_ids.add(args["item_id"])
     if action in {"harvest", "tend", "fuel", "dismantle", "switch_mode"}:
         summary = building.interact_structure(ctx, player, args, target)
+    elif action in {"install_interaction", "uninstall_interaction"}:
+        from . import interactions
+        summary, installed = interactions.apply(ctx, player, target, args)
+        action_result.update(installed)
     elif action == "pickup":
         _store(ctx, player, target, m.get_entity(ctx, player["backpack_id"]))
         summary = f"拿起了{target['name']}。"
@@ -1318,7 +1328,9 @@ def make_world():
     from . import creative
     def migrate_creation(ctx):
         from .publication import migrate_catalog
+        from . import execution
         migrate_catalog(ctx)
+        execution.migrate(ctx)
         resume_clock(ctx)
     def with_delegation(schema):
         schema = deepcopy(schema)
@@ -1327,19 +1339,19 @@ def make_world():
     return WorldDefinition("shared-grove","溪源",(
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
-        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=12,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
-        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=9,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。pour提供固定amount与target_slot时重验当前合法性；燃料或湿度改变版本不单独阻塞，去向改变、来源不足、容量不足或权限/距离改变仍原子拒绝，不换量、来源、目标或槽。"),
+        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=13,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
+        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=10,authorize=member,description="按实际能力与归属操作物件。install_interaction/uninstall_interaction使用明确definition_ref在实际合法容器安装/卸载局部交互，安装不生产材料、不改全世界规则；读取inspect菜单与固定版本后提交。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。pour提供固定amount与target_slot时重验当前合法性；燃料或湿度改变版本不单独阻塞，去向改变、来源不足、容量不足或权限/距离改变仍原子拒绝，不换量、来源、目标或槽。"),
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
-        FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=2,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=31,state_version=21,
+        FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=3,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
+        *generation_specs(), *creative.specs()),version=32,state_version=22,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
-        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: lambda ctx: None, 13: lambda ctx: None, 14: lambda ctx: None, 15: lambda ctx: None, 16: lambda ctx: None, 17: lambda ctx: None, 18: lambda ctx: None, 19: lambda ctx: None, 20: lambda ctx: None, 21: migrate_creation},
+        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: lambda ctx: None, 13: lambda ctx: None, 14: lambda ctx: None, 15: lambda ctx: None, 16: lambda ctx: None, 17: lambda ctx: None, 18: lambda ctx: None, 19: lambda ctx: None, 20: lambda ctx: None, 21: lambda ctx: None, 22: migrate_creation},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),
