@@ -232,7 +232,9 @@ def handbook(ctx, args):
         "material_operations": {
             "store": "搬入完整子物件，保留其身份与自身材料；子物件的本体不变成目标的contained配料。",
             "transfer": "按来源item_id、lot_id和amount转移已有材料批次到目标target_slot；材料身份不变，来源余量保留。本人个人背包中已有的自身contained散料可转出；不取背包本体、衬层或完整子物件，不能取他人的保护内容。个人背包不接收散料。",
-            "charge": "grove.rule_action只消耗定义的feedstock并等量制备包内声明材料symbol，不是转移已有批次，也不证明反应发生。"},
+            "charge": "grove.rule_action只消耗定义的feedstock并等量制备包内声明材料symbol，不是转移已有批次，也不证明反应发生。",
+            "ignite": "点火就地消耗可燃材料，可能损伤作品和传播火；不生成木炭或可投喂散料，也不为机械补能。",
+            "fuel": "只投喂当前菜单中的合格散料批次，等量增加有限机械能源。成型作品本体不合格；能源随实际逻辑步消耗，最终结果应再次读取。"},
         "combination_preview": {"actions": ["store", "attach"], "location": "action_options[].input.candidates[].preview",
             "availability": "available/reason 表示当前行动资格，与 physics.known/overloaded 分开。",
             "physics": "before/after 为目标载荷汇总；affected 为可见或本人的受影响承载者，含其当前版本。",
@@ -607,7 +609,7 @@ def _action_options(ctx, player, entity):
     own = building._owned_available(ctx, player, lambda e: e["owner"] == player["id"] and "personal" not in e["capabilities"])
     options = building.action_options(ctx, player, entity)
     labels = {"pickup": "拿起", "drop": "放下并公开", "open": "打开", "close": "关闭", "store": "装入物件", "retrieve": "取出物件",
-              "fill": "装水", "pour": "倒水", "ignite": "点燃实际燃料", "harvest": "采集", "tend": "用水养护", "fuel": "装入木料",
+              "fill": "装水", "pour": "倒水", "ignite": "点燃并消耗可燃材料", "harvest": "采集", "tend": "用水养护", "fuel": "装入木料",
               "dismantle": "拆回剩余材料", "switch_mode": "切换用途", "attach": "附着部件", "detach": "解除附着并放下",
               "launch": "放入水中漂流", "transfer": "转移材料批次"}
     def add(action, reason, use, input=None, **kwargs):
@@ -665,7 +667,7 @@ def _action_options(ctx, player, entity):
         reason = reason or ("目标已经燃烧。" if state["burning"] else None)
         reason = reason or ("没有可用点火工具。" if not tools else None)
         reason = reason or ("火或内容释放容量不足。" if not activity.can_ignite(ctx, entity) else None)
-        add("ignite", reason, "只燃烧物件中真实可燃批次；石壳本身不会变成燃料。", _input(tools))
+        add("ignite", reason, "就地消耗真实可燃批次，损伤可燃本体并可能蔓延；不会生成散料、焦料或机械能源。给动力源储能请读它的fuel合格候选。", _input(tools))
     if "structure" in components and entity.get("lifecycle") == "intact":
         parts = [e for e in own if _movable(ctx, player, e) and "attachment" in e.get("components", {}) and not _attach_reason(ctx, e, entity)]
         candidates = [_combination_candidate(ctx, player, entity, e, "attach", base) for e in parts]
@@ -874,7 +876,7 @@ def interact(ctx, args):
         if "blocking" in item["capabilities"] and len(m.public_players_near(ctx, player["x"], player["y"], radius=0)) > 1:
             raise RuleViolation("不能把障碍放在其他人的位置。")
         commit.detach(ctx, item, owner=None, x=player["x"], y=player["y"])
-        summary = f"{'解除附着并' if action == 'detach' else ''}放下了{item['name']}，现在公开可用。"
+        summary = f"{'解除附着并' if action == 'detach' else ''}放下了{item['name']}，现在公开；可拿取和其他动作仍按当前状态与资格判断。"
     elif action in {"open", "close"}:
         target["components"]["container"]["open"] = action == "open"
         commit.save_entity(ctx, target)
@@ -1264,19 +1266,19 @@ def make_world():
     return WorldDefinition("shared-grove","溪源",(
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
-        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=10,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
-        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=7,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。pour提供固定amount与target_slot时重验当前合法性；燃料或湿度改变版本不单独阻塞，去向改变、来源不足、容量不足或权限/距离改变仍原子拒绝，不换量、来源、目标或槽。"),
+        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=11,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
+        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=8,authorize=member,description="按实际能力与归属操作物件。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。pour提供固定amount与target_slot时重验当前合法性；燃料或湿度改变版本不单独阻塞，去向改变、来源不足、容量不足或权限/距离改变仍原子拒绝，不换量、来源、目标或槽。"),
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=2,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=27,state_version=18,
+        *generation_specs(), *creative.specs()),version=28,state_version=19,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
         state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
-        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: lambda ctx: None, 13: lambda ctx: None, 14: lambda ctx: None, 15: lambda ctx: None, 16: lambda ctx: None, 17: lambda ctx: None, 18: migrate_creation},
+        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: lambda ctx: None, 13: lambda ctx: None, 14: lambda ctx: None, 15: lambda ctx: None, 16: lambda ctx: None, 17: lambda ctx: None, 18: lambda ctx: None, 19: migrate_creation},
         timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),

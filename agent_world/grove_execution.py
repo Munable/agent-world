@@ -587,13 +587,23 @@ class ExecutionController:
         self._persist()
 
     def admit_write(self, segment_id: str | None):
-        if self.stopped or self.reclaiming or not self.active or not self.delegation or self.state.get("status") != "running" or not self.state.get("delegation_active"):
+        if self.stopped or self.reclaiming:
             raise ConnectorError("DelegationRequired", "The person reclaimed control; stop writing.", 403)
+        if self.state.get("status") == "idle" and not self.state.get("task_id"):
+            raise ConnectorError("DelegationRequired", "No active action grant remains; stop writing.", 403)
+        if not self.active or self.state.get("checkpoint"):
+            raise ConnectorError("ExecutionSegmentFinished", "这一段已结束；可以读取当前事实，不能继续写入。", 409)
+        if self.state.get("status") != "running":
+            raise ConnectorError("ExecutionNotRunning", "当前执行受阻或尚未运行；先读取事实及核对原回执。", 409)
+        if not self.delegation or not self.state.get("delegation_active"):
+            raise ConnectorError("DelegationRequired", "No active action grant remains; stop writing.", 403)
         if not segment_id or segment_id != self.state.get("segment_id"):
             raise ConnectorError("StaleExecutionSegment", "原请求已结束；迟到工具调用没有执行。", 409)
 
     async def readback(self, *, context_entity_id=None):
         started = time.monotonic()
+        # A previous successful read is history while this new read is pending.
+        self.state["readback_actual"] = False
         for item in list(self.state["receipts"]):
             if item.get("status") == "committed":
                 receipt = await self.ports.read("receipt", operation_id=item["operation_id"])
@@ -631,21 +641,37 @@ class ExecutionController:
         started = time.monotonic()
         try:
             result = await self.ports.invoke(function, deepcopy(arguments) | {"delegation": self.delegation}, model_write=True)
-        except BaseException:
-            self.phase("mcp_write", started, status="failed_or_unknown")
-            raise
-        self.phase("mcp_write", started)
+        except BaseException as exc:
+            if isinstance(exc, ConnectorError) and (exc.execution_outcome or {}).get("world_action_committed") is True:
+                self.state.update(status="error", readback_actual=False,
+                    error={"code": exc.code, "message": "原操作已提交；先核对原记录及现场，不能继续写入。"})
+            try:
+                self.phase("mcp_write", started, status="failed_or_unknown")
+            finally:
+                raise exc
         try:
+            self.phase("mcp_write", started)
             facts = await self.readback()
-        except ConnectorError as exc:
+            projection = deepcopy(result)
+            projection["execution_readback"] = facts
+            projection["execution_control"] = {key: self.value(key) for key in
+                ("actions_count", "max_actions", "remaining_actions", "delegation_active", "grant_version")}
+        except Exception as exc:
+            code = exc.code if isinstance(exc, ConnectorError) else type(exc).__name__
             self.state.update(status="error", readback_actual=False,
-                error={"code": exc.code, "message": "动作已提交，但当前结果未能核对；请恢复后查看。"})
-            self._persist()
-            raise
-        projection = deepcopy(result)
-        projection["execution_readback"] = facts
-        projection["execution_control"] = {key: self.value(key) for key in
-            ("actions_count", "max_actions", "remaining_actions", "delegation_active", "grant_version")}
+                error={"code": code, "message": "动作已提交，但当前结果未能核对；请恢复后查看。"})
+            operation = result.get("operation_id")
+            error = ConnectorError("ReadbackPending", "动作已经提交；后续现场读取失败，不代表动作未发生。先读取当前事实并核对原操作，不要重做。", 409,
+                execution_outcome={"stage": "committed_readback_pending", "operation_id": operation,
+                    "function_id": function, "commit_seq": result.get("commit_seq"),
+                    "world_action_committed": True,
+                    "receipt_confirmed": any(row.get("operation_id") == operation and row.get("status") == "confirmed"
+                                             for row in self.state["receipts"]),
+                    "current_facts_available": False, "readback_error": code})
+            try:
+                self._persist()
+            finally:
+                raise error from exc
         return projection
 
     async def execute_goal(self, goal: str, *, context_entity_id=None, resume=False):
@@ -821,10 +847,22 @@ class ExecutionController:
         if any(operation not in confirmed for operation in evidence):
             raise ConnectorError("UnconfirmedEvidence", "报告引用必须属于本任务实际已确认的原操作。", 409)
         if arguments["status"] == "completed":
-            if not evidence or not self.state.get("readback_actual"):
-                raise ConnectorError("ReadbackRequired", "真实行动和结果尚未核对，不能提交完成声明。", 409)
-            await self.readback(context_entity_id=self.state.get("context_entity_id"))
-            if self.stopped or self.reclaiming or self.state.get("readback_actions_count") != self.state["actions_count"] or self.state.get("control_status") not in {"active", "exhausted"}:
+            if not evidence:
+                raise ConnectorError("ReadbackRequired", "没有本任务已确认的真实行动，不能提交完成声明。", 409)
+        # All terminal reports need the same current facts. The adapter holds
+        # the existing write lock while this read and segment closure complete.
+        try:
+            facts = await self.readback(context_entity_id=self.state.get("context_entity_id"))
+        except Exception as exc:
+            raise ConnectorError("CheckpointReadbackPending", "检查点尚未记录；最新现场未能读取。先核对当前事实及原回执，不要把旧读回当作本次结果。", 409,
+                execution_outcome={"stage": "checkpoint_readback_pending", "task_id": self.state["task_id"],
+                    "segment_id": arguments["execution_segment_id"], "checkpoint_recorded": False,
+                    "segment_finished": False, "current_facts_available": False,
+                    "readback_error": exc.code if isinstance(exc, ConnectorError) else type(exc).__name__}) from exc
+        if self.stopped or self.reclaiming:
+            raise ConnectorError("NoActiveExecution", "控制已收回；这份迟到报告没有记录为检查点。", 409)
+        if arguments["status"] == "completed":
+            if not self.state.get("readback_actual") or self.state.get("readback_actions_count") != self.state["actions_count"] or self.state.get("control_status") not in {"active", "exhausted"}:
                 raise ConnectorError("ReadbackRequired", "最新行动结果尚未核对，不能提交完成声明。", 409)
         world_results = self.world_results(self.state.get("readback"))
         self.state["world_results"] = world_results
@@ -839,9 +877,20 @@ class ExecutionController:
                 "source": "Agent completion claim after confirmed operations and world readback; no natural-language adjudication"}
             self.state["status"] = "completed"
         self.active = False
-        self._persist()
+        try:
+            self._persist()
+        except Exception as exc:
+            raise ConnectorError("CheckpointFeedbackUnavailable", "本机已经封闭这一段写入；检查点保存失败。恢复后核对原记录，可以读取现场，不能重做行动。", 409,
+                execution_outcome={"stage": "checkpoint_persistence_failed", "task_id": self.state["task_id"],
+                    "segment_id": arguments["execution_segment_id"], "checkpoint_status": arguments["status"],
+                    "checkpoint_recorded": True, "checkpoint_persisted": False,
+                    "segment_finished": True, "current_facts_available": False,
+                    "world_action_committed": False, "readback_error": type(exc).__name__}) from exc
         result = {"task_id": self.state["task_id"], "status": arguments["status"], "segment_finished": True,
-            "world_facts_changed": False, "world_results": deepcopy(world_results)}
+            "world_facts_changed": False, "world_results": deepcopy(world_results),
+            "world_facts_changed_meaning": "This checkpoint writes no world facts. The readback can include changes since prior observations.",
+            "execution_readback": deepcopy(facts),
+            "report_meaning": "summary is the Agent's claim; execution_readback is the latest authorized read. Use its observed tick and values in your final response. Future effects remain conditional, not observed completion."}
         if arguments["status"] == "completed":
             result["goal_result"] = deepcopy(self.state["goal_result"])
         return result

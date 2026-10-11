@@ -18,6 +18,64 @@ from agent_world.grove_connector import (ConnectorError, ConnectorManager, Grove
 
 
 class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_postcommit_journal_save_failure_blocks_current_segment_writes(self):
+        self.session.execution_controller.state["max_requests"] = 1
+        original_world = self.session.world
+        async def world(method, path, body=None):
+            result = await original_world(method, path, body)
+            if method == "POST" and "/grove.move/" in path:
+                self.session.remember = Mock(side_effect=OSError("storage unavailable"))
+            return result
+        async def segment(number):
+            self.session.world = world
+            original_remember = self.session.remember
+            try:
+                with self.assertRaises(ConnectorError) as failed:
+                    await self.move()
+                self.assertTrue(failed.exception.execution_outcome["world_action_committed"])
+                self.assertEqual(failed.exception.execution_outcome["operation_id"], self.attempts[0])
+                with self.assertRaises(ConnectorError) as denied:
+                    self.session.execution_controller.admit_write(self.session.execution["segment_id"])
+                self.assertEqual(denied.exception.code, "ExecutionNotRunning")
+                self.assertFalse(self.session.execution["readback_actual"])
+            finally:
+                self.session.remember = original_remember
+        self.model_segment = segment
+        await self.session.execute_goal(self.session.execution["goal"])
+        self.assertEqual(len(self.attempts), 1)
+
+    async def test_confirmed_action_projection_failure_preserves_commit_and_does_not_repeat(self):
+        async def segment(number):
+            observed = self.session.present_agent_result("map.viewport", await self.session.current_turn_facts())
+            with patch.object(self.session, "present_agent_result", side_effect=OSError("observation persistence unavailable")):
+                with self.assertRaises(ConnectorError) as failed:
+                    await self.session.tool_call("grove_move", {"dx": 1, "dy": 0,
+                        "observation_id": observed["observation_id"], "execution_segment_id": self.session.execution["segment_id"]})
+            outcome = failed.exception.execution_outcome
+            self.assertTrue(outcome["world_action_committed"])
+            self.assertTrue(outcome["receipt_confirmed"])
+            self.assertEqual(outcome["operation_id"], self.attempts[0])
+            await self.checkpoint("blocked")
+        self.model_segment = segment
+        await self.session.execute_goal(self.session.execution["goal"])
+        self.assertEqual(len(self.attempts), 1)
+
+    async def test_checkpoint_projection_failure_is_sealed_and_readable(self):
+        async def segment(number):
+            await self.move()
+            with patch.object(self.session, "present_agent_result", side_effect=OSError("observation save failed")):
+                with self.assertRaises(ConnectorError) as failed:
+                    await self.checkpoint("completed")
+            self.assertTrue(failed.exception.execution_outcome["segment_finished"])
+            self.assertTrue(failed.exception.execution_outcome["checkpoint_recorded"])
+            self.assertFalse(self.session.execution_controller.active)
+            with self.assertRaises(ConnectorError) as sealed:
+                await self.move()
+            self.assertEqual(sealed.exception.code, "ExecutionSegmentFinished")
+        self.model_segment = segment
+        await self.session.execute_goal(self.session.execution["goal"])
+        self.assertEqual(len(self.attempts), 1)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="grove-execution-")
         self.addCleanup(temporary.cleanup)

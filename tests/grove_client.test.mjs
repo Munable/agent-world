@@ -43,3 +43,28 @@ await assert.rejects(conflict.mutate('grove.interact',{action:'pour',expected_pl
 assert.equal(conflict.pending().rejection.code,'StateConflict');
 await conflict.releaseRejected();assert.equal(conflict.pending(),null);
 console.log('Grove client: cancellation, original receipt/replay and material conflict recovery passed');
+
+// All read stages are bounded; cancelled/late replies cannot restore a view.
+{
+  const {WorldClient}=await import(world);
+  for(const stage of ['token','fetch','json']){
+    let resolveLate;
+    const hangs=new Promise(resolve=>{resolveLate=resolve;});
+    const reader=new WorldClient('',()=>stage==='token'?hangs:'token',async()=>stage==='fetch'?hangs:{ok:true,status:200,json:()=>hangs});
+    reader.readTimeoutMs=10;
+    await assert.rejects(reader.query('read',{}),error=>error.code==='ReadInterrupted');
+    resolveLate(stage==='token'?'late-token':stage==='fetch'?reply({}):{});
+  }
+  let finish,calls=0;
+  const writer=new WorldClient('',()=> 'token',async(_path,options)=>{calls++;assert.equal(options.signal,undefined);return {ok:true,status:200,json:()=>new Promise(resolve=>{finish=resolve;})};});
+  writer.readTimeoutMs=1;
+  const operation=writer.act('write',{},'same-original');
+  await new Promise(resolve=>setTimeout(resolve,10));writer.cancelReads();
+  assert.equal(calls,1);finish({operation_id:'same-original'});
+  assert.equal((await operation).operation_id,'same-original');
+  const snapshot={kind:'snapshot',view:'map',cursor:'late',viewer_role_id:'A',world_version:1,view_version:1,snapshot:{entities:{},resources:{},meta:{}}};
+  let deliver;
+  const reader=new WorldClient('',()=> 'token',async()=>({ok:true,status:200,json:()=>new Promise(resolve=>{deliver=resolve;})}));
+  const pendingRead=reader.loadView('map');await new Promise(resolve=>setImmediate(resolve));reader.cancelReads();
+  await assert.rejects(pendingRead);deliver(snapshot);await new Promise(resolve=>setImmediate(resolve));assert.equal(reader.view,null);
+}

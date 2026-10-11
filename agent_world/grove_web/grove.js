@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel,fabricationSources,fabricationPlan} from './grove-world-ui.js?v=automatic-process-readback';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,reactionObservationLines,contactObservationLines,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity} from './grove-world-ui.js?v=terminal-facts-motion';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -13,6 +13,8 @@ const materialNames={wood:'木',stone:'石',cloth:'布',metal:'金属',water:'�
 const hostNames={disconnected:'已断开',connecting:'正在连接',ready:'已连接',thinking:'思考中',paused:'已暂停',error:'连接受阻'};
 let key=null,identity=null,world=null,host=null,session=0,readEpoch=0,worldTimer=null,hostTimer=null;
 let entering=false,playing=false,actionBusy=false,refreshFlight=null,streamCursor=null,lastWorldRead=0;
+let worldFresh=false;
+const mechanicalMotion=createMechanicalMotion();
 let selectedId=null,selectedTile=null,inspection=null,inspectionError=null,inspectEpoch=0,selectedFromBag=false,held=null,walkPath=[],pathTarget=null,walkTimer=null;
 let tileSize=40,canvasWidth=600,canvasHeight=600,camera={x:0,y:0},motion=null,hoverTile=null,lastChatSignature='',lastHostSignature='',lastSelectionSignature='',lastInventorySignature='',lastAction='';
 let importedKey=null;
@@ -132,6 +134,7 @@ async function authenticate(candidate){
 }
 async function enter(){
   if(entering)return;
+  worldFresh=false;mechanicalMotion.reset();client.world.cancelReads();++readEpoch;
   ++session;entering=true;const epoch=session;lastHostSignature='';
   announce('');$('error').hidden=true;$('enter').disabled=true;$('entry-cancel').hidden=false;$('entry-progress').replaceChildren(node('p','正在用密钥连接世界…'));
   try{
@@ -319,15 +322,18 @@ async function refreshWorld(reset=false,options={}){
     }catch(error){if(epoch!==session||reading!==readEpoch)return;
       if(['StreamResetRequired','CursorExpired','CursorInvalid'].includes(error.code)){streamCursor=null;return readAccepted;}
       $('world-status').textContent='现场连接中断';$('freshness').textContent='上次读取 '+(lastWorldRead?new Date(lastWorldRead).toLocaleTimeString():'尚未成功');if(error.status===401||error.status===403)fail(error);else $('movement-feedback').textContent='世界暂不可达；显示上次现场。刷新后继续。';
+      worldFresh=false;mechanicalMotion.reset();
       return readAccepted;
     }
   })();refreshFlight=task;try{return await task;}finally{if(refreshFlight===task)refreshFlight=null;}
 }
-function scheduleWorld(delay=1200){clearTimeout(worldTimer);if(playing&&current())worldTimer=setTimeout(async()=>{if(!actionBusy&&!document.hidden)await refreshWorld();scheduleWorld();},delay);}
+function scheduleWorld(delay=1200){clearTimeout(worldTimer);if(playing&&current())worldTimer=setTimeout(async()=>{try{if(!actionBusy&&!document.hidden)await refreshWorld();}finally{scheduleWorld();}},delay);}
 function acceptWorld(value){
+  if(lastWorldRead&&Date.now()-lastWorldRead>8000)mechanicalMotion.reset();
   if($('movement-feedback').textContent==='世界暂不可达；显示上次现场。刷新后继续。')$('movement-feedback').textContent='已重新读取现场，可以继续。';
   if(client.inventoryWasReset){inventoryPageCursors=[null];client.inventoryWasReset=false;announce('背包清单已改变，已重新读取第一页。原操作与身份保留。');}
   const previous=world?.player;world=value;
+  worldFresh=true;lastWorldRead=Date.now();mechanicalMotion.accept(value.entities,value.clock,performance.now());
   activeRainChunks=new Set((value.processes||[]).filter(p=>p.kind==='rain'&&p.status==='active'&&p.start_tick<=finite(value.clock?.sequence)).flatMap(p=>p.chunk_ids||[]));
   if(previous&&(previous.x!==value.player.x||previous.y!==value.player.y))motion={from:{x:previous.x,y:previous.y},to:{x:value.player.x,y:value.player.y},start:performance.now(),duration:160};
   if(!previous){camera.x=value.player.x;camera.y=value.player.y;}
@@ -1127,7 +1133,23 @@ function drawEntity(e,now){
   ctx.shadowBlur=0;ctx.shadowOffsetY=0;
   if(e.lifecycle==='broken'||state.broken){ctx.strokeStyle='#513c31';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(-s*.12,-s*.25);ctx.lineTo(s*.05,-s*.06);ctx.lineTo(-s*.03,s*.12);ctx.lineTo(s*.14,s*.3);ctx.stroke();}
   if(state.wetness>0&&!state.destroyed){ctx.fillStyle='#c3eff0cc';ctx.beginPath();ctx.moveTo(s*.29,-s*.35);ctx.bezierCurveTo(s*.05,-s*.05,s*.4,s*.08,s*.48,-s*.08);ctx.bezierCurveTo(s*.47,-s*.18,s*.35,-s*.29,s*.29,-s*.35);ctx.fill();}
-  if((state.burning||state.recipe==='hearth'&&state.lit)&&!state.destroyed){const f=1+Math.sin(now/90+e.x)*.08;ctx.fillStyle='#f5a852';ctx.beginPath();ctx.moveTo(-s*.28,s*.1);ctx.quadraticCurveTo(-s*.36,-s*.27,-s*.05,-s*.66*f);ctx.quadraticCurveTo(s*.03,-s*.18,s*.22,-s*.42);ctx.quadraticCurveTo(s*.41,-s*.04,s*.2,s*.15);ctx.closePath();ctx.fill();ctx.fillStyle='#ffe6a1';ctx.beginPath();ctx.moveTo(-s*.12,s*.12);ctx.quadraticCurveTo(-s*.17,-s*.16,s*.03,-s*.35*f);ctx.quadraticCurveTo(s*.24,0,s*.1,s*.14);ctx.fill();}
+  const mechanical=mechanicalMotion.read(e,now,worldFresh);
+  if(mechanical){
+    ctx.save();ctx.shadowBlur=0;ctx.lineWidth=2;ctx.strokeStyle=mechanical.replaying?'#ffe4a0':'#526858';
+    if(mechanical.role==='actuator'){
+      const fraction=Number.isFinite(mechanical.travel)&&mechanical.travel>0?Math.min(1,Math.max(0,mechanical.position/mechanical.travel)):0;
+      roundRect(-s*.45,s*.2,s*.9,s*.2,2,'#2e443a','#c6d2ba');roundRect(-s*.41+fraction*s*.62,s*.16,s*.2,s*.28,2,'#ffe4a0','#526858');
+      ctx.translate(-s*.24,-s*.15);ctx.rotate(mechanical.angle*Math.PI*2);ctx.beginPath();ctx.arc(0,0,s*.18,0,Math.PI*2);ctx.stroke();ctx.fillStyle='#ffe4a0';ctx.beginPath();ctx.arc(s*.18,0,3,0,Math.PI*2);ctx.fill();
+    }else{
+      ctx.rotate(mechanical.angle*Math.PI*2);ctx.beginPath();ctx.arc(0,0,s*.43,0,Math.PI*2);ctx.stroke();
+      for(let i=0;i<5;i++){const angle=i*Math.PI*2/5;ctx.beginPath();ctx.moveTo(Math.cos(angle)*s*.13,Math.sin(angle)*s*.13);ctx.lineTo(Math.cos(angle)*s*.4,Math.sin(angle)*s*.4);ctx.stroke();}
+      ctx.fillStyle='#ffe4a0';ctx.beginPath();ctx.arc(s*.43,0,3,0,Math.PI*2);ctx.fill();
+    }
+    ctx.restore();
+  }
+  const water=visibleWaterQuantity(e),wetness=Number.isFinite(e.simulation?.wetness)?e.simulation.wetness:0;
+  if(water>0||wetness>0){ctx.fillStyle=water>0?'#74d4ee':'#8bbbdc';ctx.strokeStyle='#e0f4ff';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(s*.38,-s*.48);ctx.quadraticCurveTo(s*.2,-s*.2,s*.38,-s*.18);ctx.quadraticCurveTo(s*.57,-s*.2,s*.38,-s*.48);ctx.fill();ctx.stroke();if(water>0){ctx.font='600 10px system-ui';ctx.textAlign='center';ctx.fillStyle='#f0fbff';ctx.fillText(String(water)+'u',s*.39,-s*.55);}}
+  if((state.burning||state.recipe==='hearth'&&state.lit)&&!state.destroyed){const f=1+Math.sin((worldFresh?now:0)/90+e.x)*.08;ctx.fillStyle='#f5a852';ctx.beginPath();ctx.moveTo(-s*.28,s*.1);ctx.quadraticCurveTo(-s*.36,-s*.27,-s*.05,-s*.66*f);ctx.quadraticCurveTo(s*.03,-s*.18,s*.22,-s*.42);ctx.quadraticCurveTo(s*.41,-s*.04,s*.2,s*.15);ctx.closePath();ctx.fill();ctx.fillStyle='#ffe6a1';ctx.beginPath();ctx.moveTo(-s*.12,s*.12);ctx.quadraticCurveTo(-s*.17,-s*.16,s*.03,-s*.35*f);ctx.quadraticCurveTo(s*.24,0,s*.1,s*.14);ctx.fill();}
   if(blocks(e)){ctx.strokeStyle='#624633';ctx.lineWidth=2;ctx.setLineDash([4,3]);ctx.strokeRect(-tileSize*.45,-tileSize*.42,tileSize*.9,tileSize*.84);ctx.setLineDash([]);}
   if(selectedId===e.id){ctx.strokeStyle='#fff0bd';ctx.lineWidth=2.5;ctx.beginPath();ctx.ellipse(0,s*.25,s*.66,s*.35,0,0,Math.PI*2);ctx.stroke();}
   ctx.restore();
@@ -1142,6 +1164,7 @@ function drawPlayer(p,own,now){
 }
 function draw(now){
   if(!playing||document.hidden){requestAnimationFrame(draw);return;}
+  if(worldFresh&&lastWorldRead&&Date.now()-lastWorldRead>8000){worldFresh=false;mechanicalMotion.reset();$('freshness').textContent='现场已过时 · 显示上次读取，等待恢复';}
   ctx.clearRect(0,0,canvasWidth,canvasHeight);ctx.fillStyle='#65795b';ctx.fillRect(0,0,canvasWidth,canvasHeight);
   if(world?.player){const p=point();camera.x+=(p.x-camera.x)*.14;camera.y+=(p.y-camera.y)*.14;const halfX=Math.ceil(canvasWidth/tileSize/2)+1,halfY=Math.ceil(canvasHeight/tileSize/2)+1;
     for(let y=Math.floor(camera.y)-halfY;y<=camera.y+halfY;y++)for(let x=Math.floor(camera.x)-halfX;x<=camera.x+halfX;x++){const t=terrain(x,y);if(t){drawTerrain(x,y,t,now);if(rainsAt(x,y)){const at=screen(x,y);ctx.fillStyle='#8bc8e51c';ctx.fillRect(at.x-tileSize/2,at.y-tileSize/2,tileSize+1,tileSize+1);}}else{const at=screen(x,y);ctx.fillStyle='#334a3a';ctx.fillRect(at.x-tileSize/2,at.y-tileSize/2,tileSize+1,tileSize+1);}}
@@ -1228,6 +1251,7 @@ $('agent-cancel').addEventListener('click',()=>run(async()=>{if(await hostComman
 $('generation-cancel').addEventListener('click',()=>run(async()=>{if(await hostCommand('cancel',{}))announce('已请求中止创作；已经发表的内容保留，结果以世界读回为准。');}));
 $('agent-disconnect').addEventListener('click',()=>run(async()=>{if(await hostCommand('disconnect',{})){clearTimeout(hostTimer);announce('Agent 已断开。仍可以亲手走动和操作。');}}));$('agent-reconnect').addEventListener('click',()=>run(restartHost));
 $('leave').addEventListener('click',()=>{
+  worldFresh=false;mechanicalMotion.reset();lastWorldRead=0;
   saveFabricationDraft();stopWalking();++session;++readEpoch;++hostReadEpoch;++inspectEpoch;++hostCommandEpoch;++definitionReadEpoch;++directoryEpoch;
   playing=false;entering=false;actionBusy=false;hostCommandBusy=false;executionReclaimBusy=false;
   chosenBuildMaterials.clear();touchedBuildChoices.clear();activeRainChunks.clear();factDisclosures.clear();actionDrafts.clear();activeActionKey=null;hostCommandKind=null;hostCommandFlight=null;
@@ -1238,6 +1262,7 @@ $('leave').addEventListener('click',()=>{
   closePanels();document.body.classList.remove('playing');$('game').hidden=true;$('entry').hidden=false;$('world-status').textContent='已离开 · 可接续';$('entry-progress').replaceChildren();$('enter').disabled=false;
   announce('已离开网页。身份、目标进度与变化保留；已委托行动仍受这个目标的总额度约束。离开网页不等于收回行动权。');
 });
-window.addEventListener('resize',resize);window.addEventListener('pagehide',()=>{saveFabricationDraft();stopWalking();client.cancel();});document.addEventListener('visibilitychange',()=>{if(document.hidden)stopWalking();else if(playing){run(()=>refreshWorld());scheduleHost(250);}});
+function suspendScene(){worldFresh=false;mechanicalMotion.reset();++readEpoch;client.world.cancelReads();refreshFlight=null;stopWalking();}
+window.addEventListener('resize',resize);window.addEventListener('pagehide',()=>{saveFabricationDraft();suspendScene();client.cancel();});document.addEventListener('visibilitychange',()=>{if(document.hidden)suspendScene();else if(playing){run(()=>refreshWorld(true));scheduleHost(250);}});
 window.addEventListener('pageshow',event=>{if(event.persisted&&playing){run(()=>refreshWorld(true));scheduleWorld();scheduleHost(250);}});
 new ResizeObserver(resize).observe(canvas);requestAnimationFrame(draw);readIdentity();

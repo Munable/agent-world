@@ -111,38 +111,53 @@ def fuel_lots(ctx, entity, use, *, include_burning=False, require_dry=True):
     return result
 
 
-def usable_fuel_lots(ctx, player, entity, use):
+def usable_fuel_lots(ctx, player, entity, use, *, with_reason=False):
     """Source admission is separate from stored-fuel qualification."""
     from .creative import guard_ordinary_action
     from .world import _accessible
     from agent_world.errors import PermissionDenied
+    def result(lots, reason=None):
+        return (lots, reason) if with_reason else lots
     try:
         _accessible(ctx, player, entity, subject="item")
         guard_ordinary_action(ctx, "fuel", entity)
-    except (RuleViolation, PermissionDenied):
-        return []
-    if (entity.get("owner") != player["id"] or entity["lifecycle"] != "intact"
-            or entity["state"].get("retired") or entity["state"]["burning"]
-            or "personal" in entity["capabilities"]):
-        return []
+    except (RuleViolation, PermissionDenied) as exc:
+        return result([], str(exc))
+    if entity.get("owner") != player["id"]:
+        return result([], "燃料来源须由本人持有；公共可拿取不等于已持有，也不保证燃料资格。")
+    if entity["lifecycle"] != "intact":
+        return result([], f"燃料来源须完整；此物件当前生命周期为{entity['lifecycle']}，拿取或放下不会修复它。")
+    if entity["state"].get("retired"):
+        return result([], "此燃料来源已耗尽或投入其他用途。")
+    if entity["state"]["burning"]:
+        return result([], "此燃料来源正在燃烧，不能投喂。")
+    if "personal" in entity["capabilities"]:
+        return result([], "私人物件本身不能作为燃料来源；读取本人实际材料物件。")
     from .building import material_status
     raw = (material_status(ctx, player, entity)["eligible"] and not entity["state"].get("program", {}).get("definition_ref")
            and entity.get("source") != "fabrication")
-    return [lot for lot in fuel_lots(ctx, entity, use)
+    lots = [lot for lot in fuel_lots(ctx, entity, use)
             if use == "mechanical_fuel" and lot["material"] == "wood" and not (entity.get("source") == "fabrication" and lot["slot"] == "body")
             or not lot.get("bound_to") and (lot["slot"] == "body" and raw
                                            or lot["slot"] == "contained" and entity["state"]["open"])]
+    reason = None
+    if not lots:
+        if entity.get("source") == "fabrication" and any(lot["slot"] == "body" for lot in entity.get("matter", [])):
+            reason = "成型作品的本体不是可投喂散料；就地可燃不代表机械燃料资格，点火只会消耗材料，不会生成散料。"
+        else:
+            reason = "没有当前可取用的合格批次；读取实际材料用途、位置、开口及燃烧状态，再另作选择。"
+    return result(lots, reason)
 
 
 def select_fuel(ctx, player, entity, use, lot_id=None):
-    lots = usable_fuel_lots(ctx, player, entity, use)
+    lots, reason = usable_fuel_lots(ctx, player, entity, use, with_reason=True)
     if lot_id is None:
         if len(lots) != 1:
-            raise RuleViolation("请选择一个明确可用的实际燃料lot_id；没有自动替换来源批次。")
+            raise RuleViolation("请选择一个明确可用的实际燃料lot_id；没有自动替换来源批次。" + (reason or ""))
         return lots[0]
     lot = next((lot for lot in lots if lot["id"] == lot_id), None)
     if lot is None:
-        raise RuleViolation("所选实际燃料批次不可用；须有原定义用途资格，且满足来源状态。")
+        raise RuleViolation("所选实际燃料批次不可用；" + (reason or "此批次不在当前合格候选内；请重新读取来源及动力源的正式选项。"))
     return lot
 
 

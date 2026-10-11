@@ -239,6 +239,9 @@ EXECUTION_INSTRUCTIONS = (
     "ending this request: report continue, completed or blocked, a short observed "
     "summary, the next intention and original confirmed operation IDs supporting "
     "your report. Completed records your completion claim and stops execution; "
+    "The checkpoint returns a new observation_id and current execution_readback. "
+    "Use those latest observed values and tick in your final response, not the earlier write's values. "
+    "Its report seals writes; read tools remain available. Predicted future effects are conditional. "
     "confirmed receipts and readback do not verify a free-text goal. Report only "
     "observed effects. Server-verified object or contract results remain separate "
     "from your claim. The task ID is "
@@ -736,12 +739,19 @@ class GroveSession:
             # Persist publication/claim authority before clearing its recovery
             # journal. A restart between the HTTP reply and caller cannot lose
             # an actual committed publication and replace it with a new one.
-            self.observe_outcome(function, payload, operation_record=record)
-            if model_write:
-                self.execution_controller.receipt(function, envelope["operation_id"], payload, status="committed", operation_record=record)
-            if record in self.unknown:
-                self.unknown.remove(record)
-            self.remember()
+            try:
+                self.observe_outcome(function, payload, operation_record=record)
+                if model_write:
+                    self.execution_controller.receipt(function, envelope["operation_id"], payload, status="committed", operation_record=record)
+                if record in self.unknown:
+                    self.unknown.remove(record)
+                self.remember()
+            except Exception as exc:
+                raise ConnectorError("ReadbackPending", "世界已经提交原操作；本机保存或反馈失败。核对原回执和现场，不能创建替代操作。", 409,
+                    execution_outcome={"stage": "committed_receipt_feedback_pending", "operation_id": envelope["operation_id"],
+                        "function_id": function, "commit_seq": payload.get("commit_seq"), "world_action_committed": True,
+                        "receipt_confirmed": False, "current_facts_available": False,
+                        "readback_error": exc.code if isinstance(exc, ConnectorError) else type(exc).__name__}) from exc
         return payload
 
     async def recover_receipts(self, *, replay: bool = True):
@@ -2381,7 +2391,9 @@ class GroveSession:
             "description": "Finish this bounded execution segment. Report observed progress and next intention, "
                 "or claim completion after real readback, referencing this task's confirmed operation IDs. "
                 "Completed stops execution and records an Agent claim; it does not verify the free-text goal. "
-                "Server-verified bound world results are reported separately. This checkpoint changes no world facts or permissions.",
+                "Returns the latest authorized execution_readback and observation_id; use those values in your final response. "
+                "The segment closes writes but allows reads. Server-verified bound world results are reported separately. "
+                "This checkpoint changes no world facts or permissions.",
             "inputSchema": deepcopy(EXECUTION_CHECKPOINT_SCHEMA)})
         # Inventory must be stable when OpenCode connects the MCP server. Write
         # admission is scoped to an explicit execution, never this static list.
@@ -2474,13 +2486,22 @@ class GroveSession:
                 # The controller checks the segment again inside the write lock;
                 # version binding cannot open authority or replace an operation.
                 projection = await self.execution_controller.write(function, bound, segment_id=segment_id)
-                self.request_milestone("first_confirmed_action_seconds", source="receipt_and_world_readback")
-                action_entity_ids = [bound.get(key) for key in ("target_id", "item_id", "other_id")]
-                if function == "grove.fabricate":
-                    action_entity_ids.extend(source.get("entity_id") for source in bound.get("sources", [])
-                                             if isinstance(source, dict))
-                return self.present_agent_result(function, projection, base_id=observation_id,
-                    action_entity_ids=action_entity_ids)
+                try:
+                    self.request_milestone("first_confirmed_action_seconds", source="receipt_and_world_readback")
+                    action_entity_ids = [bound.get(key) for key in ("target_id", "item_id", "other_id")]
+                    if function == "grove.fabricate":
+                        action_entity_ids.extend(source.get("entity_id") for source in bound.get("sources", [])
+                                                 if isinstance(source, dict))
+                    delivered = self.present_agent_result(function, projection, base_id=observation_id,
+                        action_entity_ids=action_entity_ids)
+                    _checked_agent_tool_text(delivered)
+                    return delivered
+                except Exception as exc:
+                    raise ConnectorError("ReadbackPending", "原动作及回执已经确认；最新反馈未能交付。先读取现场及原回执，不能重做这个动作。", 409,
+                        execution_outcome={"stage": "confirmed_feedback_unavailable", "operation_id": projection.get("operation_id"),
+                            "function_id": function, "commit_seq": projection.get("commit_seq"), "world_action_committed": True,
+                            "receipt_confirmed": True, "current_facts_available": False,
+                            "readback_error": exc.code if isinstance(exc, ConnectorError) else type(exc).__name__}) from exc
         elif self.catalog[function].get("access") != "read":
             raise ConnectorError("ToolDenied", "The declared read tool is not read-only.", 403)
         clean = deepcopy(arguments)
@@ -2496,8 +2517,25 @@ class GroveSession:
         return self.present_agent_result(function, result, base_id=base_id)
 
     async def execution_checkpoint(self, arguments):
-        return await self.execution_controller.checkpoint(arguments, schema=EXECUTION_CHECKPOINT_SCHEMA,
-            write_busy=self.execution_write_lock.locked())
+        if self.execution_write_lock.locked():
+            raise ConnectorError("UnconfirmedAction", "先等待当前行动及读回完成，再结束这一段。", 409)
+        async with self.execution_write_lock:
+            result = await self.execution_controller.checkpoint(arguments, schema=EXECUTION_CHECKPOINT_SCHEMA)
+            try:
+                delivered = self.present_agent_result("execution_checkpoint", result,
+                    base_id=self.observations.preflight_id)
+                # Include the newly assigned opaque handle in this final size
+                # check, before the outer MCP encoder can lose stage evidence.
+                _checked_agent_tool_text(delivered)
+                return delivered
+            except Exception as exc:
+                raise ConnectorError("CheckpointFeedbackUnavailable", "检查点已经记录，这一段已封闭写入；最新反馈未能交付。可以读取现场，不能继续写或重复提交检查点。", 409,
+                    execution_outcome={"stage": "checkpoint_recorded_feedback_unavailable",
+                        "task_id": result["task_id"], "segment_id": arguments["execution_segment_id"],
+                        "checkpoint_status": result["status"], "checkpoint_recorded": True,
+                        "segment_finished": True, "current_facts_available": False,
+                        "world_action_committed": False,
+                        "readback_error": exc.code if isinstance(exc, ConnectorError) else type(exc).__name__}) from exc
 
 
 class ConnectorManager:
@@ -2819,12 +2857,31 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
                     "error": "UnknownWorldResult", "message": "World request disconnected. Stop; recover the original receipt before another write."}
                 if isinstance(exc, ConnectorError) and exc.world_details is not None:
                     error["details"] = exc.world_details
+                if isinstance(exc, ConnectorError) and exc.execution_outcome is not None:
+                    error["execution_outcome"] = exc.execution_outcome
+                if isinstance(exc, ConnectorError) and exc.code in {
+                        "ObservationRequired", "StateConflict", "RuleViolation", "PermissionDenied", "ReadbackPending", "CheckpointFeedbackUnavailable", "CheckpointReadbackPending"}:
+                    # These are new reads, never a replacement observation or
+                    # replay of the rejected/committed action. Do not chain an
+                    # unknown handle into the recovery read itself.
+                    args = params.get("arguments", {})
+                    requests = [{"tool": "map_viewport", "arguments": {}}]
+                    for key in ("entity_id", "target_id", "item_id", "other_id"):
+                        identity = args.get(key)
+                        request = {"tool": "grove_inspect", "arguments": {"entity_id": identity}}
+                        if isinstance(identity, str) and len(identity) <= 100 and request not in requests:
+                            requests.append(request)
+                    error["read_requests"] = requests
+                    error["recovery_meaning"] = "This error creates no new observation_id. Call a suggested read, then use its returned observation_id. These reads do not retry, replace parameters or prove a previous write did not happen."
                 try:
                     error_text = _checked_agent_tool_text(error)
                 except ConnectorError:
+                    outcome = error.get("execution_outcome")
                     error = {"error": "ToolOutputTooLarge", "original_error": error["error"],
                         "message": "The world error's expanded details exceed the native output limit and were not provided. "
                                    "Do not infer a completed inspection or retry an unresolved write; recover its original receipt."}
+                    if outcome is not None:
+                        error["execution_outcome"] = outcome
                     error_text = _checked_agent_tool_text(error)
                 result = {"content": [{"type": "text", "text": error_text}], "structuredContent": error, "isError": True}
         else:

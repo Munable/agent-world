@@ -49,32 +49,57 @@ export class WorldClient {
     this.selector = null;
     this.timelineCursor = null;
     this.viewGeneration = 0;
+    this.readTimeoutMs = 15000;
+    this.readControllers = new Set();
   }
-  async request(path, body) {
-    const response = await this.fetcher(this.baseUrl + path, {
-      method: body === undefined ? "GET" : "POST",
-      credentials: "omit",
-      headers: {Authorization: "Bearer " + await this.tokenProvider(), "Content-Type": "application/json"},
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const result = await response.json().catch(() => ({error: "InvalidResponse", message: "World returned invalid JSON"}));
-    if (!response.ok) {
-      if ([401, 403].includes(response.status)) {
-        this.view = null;
-        this.timelineCursor = null;
-        ++this.viewGeneration; // A late successful load must not restore a revoked view.
-      }
-      throw new WorldRequestError(response.status, result);
+  cancelReads() {
+    ++this.viewGeneration;
+    for (const controller of this.readControllers) controller.abort();
+  }
+  async request(path, body, {readOnly = body === undefined} = {}) {
+    const controller = readOnly ? new AbortController() : null;
+    let deadline, interrupted;
+    if (controller) {
+      this.readControllers.add(controller);
+      interrupted = new Promise((_resolve, reject) => controller.signal.addEventListener('abort', () => {
+        const error = new WorldRequestError(408, {error: 'ReadInterrupted', message: '现场读取中断；请重新读取。'});
+        error.cancelled = true;
+        reject(error);
+      }, {once: true}));
+      deadline = setTimeout(() => controller.abort(), this.readTimeoutMs);
     }
-    if (result.error === "InvalidResponse") throw new WorldRequestError(502, result);
-    return result;
+    const load = async () => {
+      const token = await this.tokenProvider();
+      if (controller?.signal.aborted) throw new WorldRequestError(408, {error: 'ReadInterrupted', message: '现场读取已中断。'});
+      const response = await this.fetcher(this.baseUrl + path, {
+        method: body === undefined ? "GET" : "POST",
+        credentials: "omit",
+        headers: {Authorization: "Bearer " + token, "Content-Type": "application/json"},
+        body: body === undefined ? undefined : JSON.stringify(body),
+        ...(controller ? {signal: controller.signal} : {}),
+      });
+      const result = await response.json().catch(() => ({error: "InvalidResponse", message: "World returned invalid JSON"}));
+      if (controller?.signal.aborted) throw new WorldRequestError(408, {error: 'ReadInterrupted', message: '过时读取未应用。'});
+      if (!response.ok) {
+        if ([401, 403].includes(response.status)) {
+          this.view = null;
+          this.timelineCursor = null;
+          ++this.viewGeneration; // A late successful load must not restore a revoked view.
+        }
+        throw new WorldRequestError(response.status, result);
+      }
+      if (result.error === "InvalidResponse") throw new WorldRequestError(502, result);
+      return result;
+    };
+    try { return controller ? await Promise.race([load(), interrupted]) : await load(); }
+    finally { if (controller) { clearTimeout(deadline); this.readControllers.delete(controller); } }
   }
   async loadView(name, argumentsObject = {}) {
     const generation = ++this.viewGeneration;
     this.selector = {name, argumentsObject: structuredClone(argumentsObject)};
     this.timelineCursor = null;
     this.view = null;
-    const update = await this.request("/v1/views/" + encodeURIComponent(name) + "/snapshot", {arguments: argumentsObject});
+    const update = await this.request("/v1/views/" + encodeURIComponent(name) + "/snapshot", {arguments: argumentsObject}, {readOnly: true});
     if (generation === this.viewGeneration) {
       this.view = applyViewUpdate(null, update);
       this.timelineCursor = update.timeline_cursor || null;
@@ -86,9 +111,9 @@ export class WorldClient {
     const cursor = this.view.cursor;
     const generation = this.viewGeneration;
     try {
-      const update = await this.request("/v1/views/sync", {cursor});
+      const update = await this.request("/v1/views/sync", {cursor}, {readOnly: true});
       // A concurrent newer reply may have already replaced our base.
-      if (this.view && this.view.cursor === cursor) this.view = applyViewUpdate(this.view, update);
+      if (generation === this.viewGeneration && this.view && this.view.cursor === cursor) this.view = applyViewUpdate(this.view, update);
     } catch (error) {
       if (error.code === "ViewResetRequired") {
         if (generation !== this.viewGeneration || this.view?.cursor !== cursor) return this.view;
@@ -103,7 +128,7 @@ export class WorldClient {
     const cursor = this.timelineCursor;
     const generation = this.viewGeneration;
     try {
-      const result = await this.request("/v1/views/timeline", {cursor, limit});
+      const result = await this.request("/v1/views/timeline", {cursor, limit}, {readOnly: true});
       if (generation !== this.viewGeneration || cursor !== this.timelineCursor) return {events: [], has_more: false};
       if (result.base_cursor !== cursor || result.view !== this.view.view || result.viewer_role_id !== this.view.viewer_role_id ||
           result.world_version !== this.view.world_version || result.view_version !== this.view.view_version) {
@@ -120,7 +145,7 @@ export class WorldClient {
     }
   }
   query(name, argumentsObject = {}) {
-    return this.request("/v1/functions/" + encodeURIComponent(name) + "/invoke", {arguments: argumentsObject});
+    return this.request("/v1/functions/" + encodeURIComponent(name) + "/invoke", {arguments: argumentsObject}, {readOnly: true});
   }
   act(name, argumentsObject, operationId, {expectedVersion, activityClaim} = {}) {
     if (typeof operationId !== "string" || !operationId.trim()) throw new Error("A stable operation ID is required");

@@ -29,7 +29,7 @@ export class GroveClient extends CommonsClient {
       throw error;
     }finally{clearTimeout(deadline);signal?.removeEventListener('abort',stop);this.controllers.delete(controller);}
   }
-  cancel(){for(const controller of this.controllers){this.cancelledControllers.add(controller);controller.abort();}this.world.view=null;this.inventoryAfter=null;this.inventoryWasReset=false;}
+  cancel(){for(const controller of this.controllers){this.cancelledControllers.add(controller);controller.abort();}this.world.cancelReads();this.world.view=null;this.inventoryAfter=null;this.inventoryWasReset=false;}
   async retry() {
     const key=this.pendingKey, original=this.pending();
     try{return await super.retry();}

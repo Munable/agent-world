@@ -17,6 +17,21 @@ INTERACT_SCHEMA = {
 
 
 class AgentObservationsTests(unittest.TestCase):
+    def test_checkpoint_supplies_new_opaque_observation_with_current_mechanical_facts(self):
+        old = self.observations.present("map.viewport", self.scene(), preflight=True)["observation_id"]
+        facts = self.scene()
+        facts["clock"] = {"sequence": 91}
+        facts["entities"][0].update(version=23, creative={"mechanical_observation": {
+            "role": "source", "angle_unit": "logical_turns", "stored_state": {"angle": 36, "energy": 4}}})
+        result = self.observations.present("execution_checkpoint", {"status": "completed", "segment_finished": True,
+            "execution_readback": facts}, base_id=old)
+        self.assertNotEqual(result["observation_id"], old)
+        self.assertEqual(result["execution_readback"]["clock"]["sequence"], 91)
+        current = result["execution_readback"]["entities"][0]["creative"]["mechanical_observation"]
+        self.assertEqual(current["stored_state"], {"angle": 36, "energy": 4})
+        self.assertEqual(current["angle_unit"], "logical_turns")
+        self.assertEqual(self.observations.get(old)["versions"]["entity"]["target"], 22)
+
     def setUp(self):
         self.observations = AgentObservations("person")
 

@@ -174,6 +174,14 @@ class AutomaticWorldObservationTests(unittest.TestCase):
         source = h.read("A", "grove.definition_read", request["arguments"])
         self.assertEqual(source["definition"]["types"]["device"]["rules"][0]["when"], condition)
         self.assertEqual(payload, before)
+        from agent_world.grove_agent_observation import AgentObservations, _checked_agent_tool_text
+        checkpoint = AgentObservations(h.roles["A"]).present("execution_checkpoint", {
+            "segment_finished": True, "status": "blocked", "execution_readback": {
+                **h.view("A"), "selected_inspection": payload["result"]}})
+        _checked_agent_tool_text(checkpoint)
+        current = checkpoint["execution_readback"]["selected_inspection"]["entity"]["creative"]
+        self.assertEqual(len(current["automatic_rules"]), 8)
+        self.assertTrue(all(row["condition"]["satisfied"] for row in current["automatic_rules"]))
 
     def test_backpack_marks_saved_speed_historical_and_closed_projection_hides_details(self):
         h = self.h

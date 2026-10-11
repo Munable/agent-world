@@ -1,5 +1,6 @@
 """Creation and linked continuation through formal world calls, no model claims."""
 from copy import deepcopy
+import json
 import unittest
 
 from agent_world import WorldRuntime
@@ -18,6 +19,53 @@ def formation_definition(key="formed"):
 
 
 class CreationTests(unittest.TestCase):
+    def test_fuel_menu_matches_real_loose_matter_and_body_rejection(self):
+        from agent_world.worlds.shared_grove.creative import ACTION_ARGS
+        original_schema = deepcopy(ACTION_ARGS)
+        ref = self.publish({"key": "actual_fuel", "name": "真实补能", "version": 1, "types": {
+            "source": {"name": "有限动力", "body_material": "wood", "cost_u": {"wood": 1}, "mechanical": {"role": "source"}},
+            "carrier": {"name": "成型木盒", "body_material": "wood", "cost_u": {"wood": 3}}}})
+        source, carrier = self.form(ref, "source"), self.form(ref, "carrier")
+        self.place(source)
+        h = self.h
+        menu = next(row for row in h.read("A", "grove.inspect", {"entity_id": source})["action_options"] if row["action"] == "fuel")
+        candidates = menu["choices"]["items"]
+        self.assertNotIn(carrier, [row["id"] for row in candidates])
+        maximum = max(lot["quantity"] for row in candidates for lot in row["lots"])
+        self.assertEqual(menu["input"]["quantity"]["max"], maximum)
+        self.assertEqual(menu["input_schema"]["properties"]["amount"]["maximum"], maximum)
+        self.assertEqual(ACTION_ARGS, original_schema)
+        body_lot = next(lot for lot in h.entity(carrier)["matter"] if lot["material"] == "wood")
+        before = deepcopy(h.entity(carrier))
+        with self.assertRaisesRegex(RuleViolation, "成型作品的本体"):
+            h.action("A", source, "fuel", item_id=carrier, lot_id=body_lot["id"], amount=1)
+        self.assertEqual(h.entity(carrier), before)
+
+        wood = h.item("A", "木柴")["id"]
+        lot = next(lot for lot in h.entity(wood)["matter"] if lot["material"] == "wood")
+        h.interact("A", wood, "drop")
+        ground = deepcopy(h.entity(wood))
+        source_before = deepcopy(h.entity(source))
+        with self.assertRaisesRegex(PermissionDenied, "须由本人持有"):
+            h.action("A", source, "fuel", item_id=wood, lot_id=lot["id"], amount=1)
+        self.assertEqual(h.entity(wood), ground)
+        self.assertEqual(h.entity(source), source_before)
+        h.interact("A", wood, "pickup")
+        h.action("A", source, "fuel", item_id=wood, lot_id=lot["id"], amount=1)
+        self.assertEqual(h.entity(source)["state"]["program"]["mechanical"]["energy"], 1)
+        # Represent a previously persisted broken loose item in this isolated
+        # fixture. Taking ownership must not repair or qualify its material.
+        broken = h.world.get_state("w", m.ENTITIES, wood)["value"]
+        broken["lifecycle"] = "broken"
+        with h.world._conn() as connection:
+            connection.execute("UPDATE world_state SET value_json=? WHERE universe=? AND scope=? AND state_key=?",
+                (json.dumps(broken), "w", m.ENTITIES, wood))
+        before = deepcopy(h.entity(wood))
+        with self.assertRaisesRegex(RuleViolation, "当前生命周期为broken"):
+            h.action("A", source, "fuel", item_id=wood, lot_id=lot["id"], amount=1)
+        self.assertEqual(h.entity(wood), before)
+        self.assertEqual(h.entity(source)["state"]["program"]["mechanical"]["energy"], 1)
+
     def setUp(self):
         self.h = fixtures.CreativeWorldTests(methodName="runTest")
         self.h.setUp()

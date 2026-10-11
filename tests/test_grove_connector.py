@@ -739,6 +739,35 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-diagnostic", json.dumps(result))
         self.assertEqual(self.session.observations.sequence, 0)
 
+    async def test_permission_recovery_requires_actual_registered_read(self):
+        original_call = self.session.tool_call
+        self.session.tool_call = AsyncMock(side_effect=ConnectorError("PermissionDenied", "Source must be held", 403))
+        self.session.catalog = {"map.viewport": {"access": "read", "input_schema": {
+            "type": "object", "properties": {}, "additionalProperties": False}}}
+        app = create_connector_app(storage=self.manager.storage, wrapper=None)
+        app.state.connector.capability_session = Mock(return_value=self.session)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8891") as client:
+            body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "grove_rule_action", "arguments": {"target_id": "wheel", "item_id": "wood"}}}
+            result = (await client.post("/connector/mcp", json=body,
+                headers={"Authorization": "Bearer test-capability"})).json()["result"]
+            error = result["structuredContent"]
+            self.assertTrue(result["isError"])
+            self.assertNotIn("observation_id", error)
+            self.assertEqual(self.session.observations.sequence, 0)
+            read = error["read_requests"][0]
+            self.assertIn(read["tool"], {tool["name"] for tool in self.session.tools()})
+            self.session.tool_call = original_call
+            self.session.status = "thinking"
+            self.session.invoke = AsyncMock(return_value={"player": {"id": "test-user", "version": 7}, "entities": []})
+            body["params"] = {"name": read["tool"], "arguments": read["arguments"]}
+            current = (await client.post("/connector/mcp", json=body,
+                headers={"Authorization": "Bearer test-capability"})).json()["result"]
+        self.assertFalse(current["isError"])
+        observation = current["structuredContent"]["observation_id"]
+        self.assertEqual(self.session.agent_observation(observation)["versions"]["player"]["test-user"], 7)
+        self.session.invoke.assert_awaited_once_with("map.viewport", {})
+
     def test_pour_slot_is_retained_in_final_indexes_but_never_bound_from_omitted_payload(self):
         visible = {"id": "selected", "version": 5, "pour_target_slot": "surface"}
         supplied = self.session.present_agent_result("grove.interact", {

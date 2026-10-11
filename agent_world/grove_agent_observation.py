@@ -233,7 +233,7 @@ def _companion_creative_summary(creative):
     mechanical = creative.get("mechanical_observation")
     if isinstance(mechanical, dict):
         observation = {key: deepcopy(mechanical[key]) for key in (
-            "role", "solver_eligible", "stored_output_is_history", "pending_next_step", "observed_tick")
+            "role", "role_meaning", "angle_unit", "travel", "pitch", "solver_eligible", "stored_output_is_history", "pending_next_step", "observed_tick")
             if key in mechanical}
         stored = mechanical.get("stored_state")
         if isinstance(stored, dict):
@@ -386,6 +386,15 @@ def _companion_repair_viewport_references(payload):
 def companion_projection(function: str, payload: dict) -> dict:
     """Own one mutable copy of an authorized response, then compact its facts."""
     result = deepcopy(payload)
+    if function == "execution_checkpoint":
+        facts = result.get("execution_readback")
+        if isinstance(facts, dict):
+            current = _companion_scene_index(facts)
+            if isinstance(facts.get("selected_inspection"), dict):
+                selected = _companion_inspection_index(facts["selected_inspection"])
+                current["selected_inspection"] = _companion_selected_state_summary(selected or facts["selected_inspection"])
+            result["execution_readback"] = current
+        return result
     if function in {"grove.definition_list", "grove.fabrication_options"}:
         # The list's page/cursor contract and selected recipe's complete source
         # lots are already bounded world reads, not expandable scene indexes.
@@ -919,6 +928,21 @@ def _bounded_agent_projection(function, payload):
     """Run before observation binding; oversized reads never imply full inspect."""
     if _agent_tool_text_fits(_agent_tool_text(payload)):
         return payload
+    if function == "execution_checkpoint":
+        # A dense scene may fit independently, as may the selected state, while
+        # their combined terminal response does not. Keep that state's current
+        # facts whole and explicitly leave discovery to an ordinary map read.
+        result = deepcopy(payload)
+        facts = result.get("execution_readback", {})
+        retained = {key: deepcopy(facts[key]) for key in (
+            "player", "clock", "selected_inspection", "selected_inspection_unavailable", "world_results") if key in facts}
+        retained["projection"] = {"scope": "checkpoint_current_selected_facts", "complete_scene": False,
+            "omitted_sections": [key for key in facts if key not in retained and key != "projection"],
+            "read_request": {"tool": "map_viewport", "arguments": {}},
+            "meaning": "Current selected facts, player and clock are retained whole. Scene discovery was not supplied or bound; read the map separately. This does not reopen writes."}
+        result["execution_readback"] = retained
+        if _agent_tool_text_fits(_agent_tool_text(result)):
+            return result
     if function in {"grove.definition_read", "grove.definition_publish"}:
         complete = deepcopy(payload)
         value = complete.get("result", complete)

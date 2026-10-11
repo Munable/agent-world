@@ -907,8 +907,10 @@ def _item(ctx, player, args, *, allow_container=True):
     _accessible(ctx, player, entity, subject="item")
     if entity["version"] != args["expected_item_version"]:
         raise StateConflict("材料或接收物件已变化，请重新读取。")
-    if entity.get("owner") != player["id"] or "personal" in entity["capabilities"] and not allow_container:
-        raise PermissionDenied("必须使用本人可操作的真实物件。")
+    if entity.get("owner") != player["id"]:
+        raise PermissionDenied("此动作的材料来源或接收物件须由本人持有；公共物件的拿取资格与当前材料资格须分别读取。")
+    if "personal" in entity["capabilities"] and not allow_container:
+        raise PermissionDenied("此动作不能使用私人物件本身作为材料来源。")
     if entity["state"]["burning"]:
         raise RuleViolation("燃烧中的材料不能投入此动作。")
     guard_ordinary_action(ctx, "transfer", entity)
@@ -1256,7 +1258,7 @@ def action_options(ctx, player, entity):
                     fields[vkey] = VERSION
                     required.append(vkey)
         if amount:
-            fields["amount"] = ACTION_ARGS["properties"]["amount"]
+            fields["amount"] = deepcopy(ACTION_ARGS["properties"]["amount"])
             required.append("amount")
             args["amount"] = 1
         if any(item.get("lots") for item in choices.get("items", [])):
@@ -1309,7 +1311,14 @@ def action_options(ctx, player, entity):
                       "lots": [{key: lot[key] for key in ("id", "material", "quantity", "slot")} for lot in lots]}
                      for item in candidates if (lots := usable_fuel_lots(ctx, player, item, "mechanical_fuel"))]
             add("fuel", "消耗合格燃料储能", {"items": fuels}, amount=True,
-                use="按lot_id消耗实际燃料；原材料定义须声明mechanical_fuel资格。设置启停请求后，下一模拟步才参与原始输入求解。")
+                reason=None if fuels else "没有本人当前合格燃料批次；成型作品的本体不能投喂，点火不会生成散料。读取现场可采集原料和本人实际库存。",
+                use="只消耗候选lot_id储存有限能源，不是点火；来源须本人持有、完整、未燃烧且为非私人物件，材料须有mechanical_fuel资格。公共可拿取不保证投喂资格。按实际数量选料，能源在成功求解步中消耗；下一步的事实须重新读取。")
+            room = max(0, 10000 - entity["state"]["program"]["mechanical"]["energy"])
+            maximum = min(room, max((lot["quantity"] for item in fuels for lot in item["lots"]), default=0))
+            options[-1]["input_schema"]["properties"]["amount"]["maximum"] = max(1, maximum)
+            options[-1]["input"] = {"quantity": {"min": 1, "max": maximum, "default": 1, "label": "实际燃料u"}}
+            if maximum == 0:
+                options[-1].update(available=False, reason=options[-1]["reason"] or "有限能源存储已满。")
             add("start", "启用动力")
             add("stop", "停止动力")
     if "recorder" in spec:
@@ -1438,7 +1447,7 @@ def specs():
         FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=4, access="read", description="Discover the bounded creation language and shared physical facts. For immutable publications page definition_list, then definition_read; this static catalog contains no full-history index."),
         FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=2, access="read", description="Read one immutable definition and its author/hash, with compiled canonical material bindings and consumption/production coefficients; existing instances pin this reference."),
         FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=5, authorize=_member, description="Compile immutable definitions with cost_u actual-source bodies, bounded components/ports/physical conditions and self drive control, or the existing piece cost. Optional local material uses qualifies fuel; material_imports pins original identities. Publication creates no matter, permission or consent. Discover precise shape and bounds with rule_catalog."),
-        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=7, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Bindings need same-observation target/other versions and do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
+        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=8, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Bindings need same-observation target/other versions and do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
         FunctionSpec("grove.control_status", control_status, EMPTY, authorize=_member, access="read", description="Read own current goal and committed action count, without exposing grant token."),

@@ -47,7 +47,19 @@ def public_world_error_details(value):
 
 
 class ConnectorError(Exception):
-    def __init__(self, code: str, message: str, status: int = 400, *, world_details=None):
+    def __init__(self, code: str, message: str, status: int = 400, *, world_details=None, execution_outcome=None):
         self.code, self.message, self.status = code, message, status
         self.world_details = public_world_error_details(world_details)
+        # This is adapter-owned stage evidence, never a substitute world result.
+        self.execution_outcome = None
+        if isinstance(execution_outcome, dict):
+            safe = {key: value for key, value in execution_outcome.items()
+                    if key in {"stage", "operation_id", "function_id", "task_id", "segment_id", "checkpoint_status", "readback_error"}
+                    and isinstance(value, str) and len(value) <= 180}
+            safe.update({key: value for key, value in execution_outcome.items()
+                         if key in {"world_action_committed", "receipt_confirmed", "checkpoint_recorded", "checkpoint_persisted", "segment_finished", "current_facts_available"}
+                         and type(value) is bool})
+            if type(execution_outcome.get("commit_seq")) is int and execution_outcome["commit_seq"] >= 0:
+                safe["commit_seq"] = execution_outcome["commit_seq"]
+            self.execution_outcome = safe or None
         super().__init__(message)

@@ -406,3 +406,31 @@ for(const [execution,label,detail,resume] of [
 }
 
 console.log('Grove presentation: quantities, relationship/action boundaries and truthful goal/resume outcomes passed');
+
+// A confirmed full turn must be visible between identical modulo endpoints.
+{
+  const entity=(angle,version,status='running',energy=2,role='source')=>({id:'actual',version,x:0,y:1,lifecycle:'intact',creative:{mechanical_observation:{
+    role,angle_unit:'logical_turns',observed_tick:version,solver_eligible:true,travel:5,
+    stored_state:{angle,status,energy,speed:status==='insufficient_energy'?0:1,position:5}}}});
+  const motion=ui.createMechanicalMotion();
+  motion.accept([entity(0,1)],{epoch:'same'},0);
+  motion.accept([entity(1,2,'insufficient_energy',0)],{epoch:'same'},100);
+  assert.equal(motion.read(entity(1,2,'insufficient_energy',0),260).angle,.5);
+  assert.equal(motion.read(entity(1,2,'insufficient_energy',0),10000).angle,1);
+  motion.accept([entity(2,3,'travel_limit',0,'actuator')],{epoch:'same'},10100);
+  assert.equal(motion.read(entity(2,3,'travel_limit',0,'actuator'),10260).angle,1.5);
+  assert.equal(motion.read(entity(2,3,'travel_limit',0,'actuator'),10260,false).angle,2);
+  motion.accept([entity(3,4,'stopped',2)],{epoch:'same'},10300);
+  assert.equal(motion.read(entity(3,4,'stopped',2),10310).angle,3);
+  motion.reset();motion.accept([entity(6,7)],{epoch:'same'},10400);
+  assert.equal(motion.read(entity(6,7),10401).angle,6);
+  motion.accept([entity(26,8)],{epoch:'same'},10500);
+  assert.equal(motion.read(entity(26,8),10950).angle,16);
+  assert.equal(motion.read(entity(26,8),11500).angle,26);
+  const privateEntity=entity(6,7);privateEntity.creative.mechanical_observation.solver_eligible=false;
+  assert.equal(motion.read(privateEntity,10402),null);
+  const hidden={content_summary:{visible:false,materials:[{material:'water',quantity:9}]},state:{water:99}};
+  assert.equal(ui.visibleWaterQuantity(hidden),0);
+  hidden.content_summary.visible=true;
+  assert.equal(ui.visibleWaterQuantity(hidden),9);
+}

@@ -5,7 +5,7 @@ from copy import deepcopy
 
 from agent_world.errors import PermissionDenied, RuleViolation
 from agent_world.simulation.declarations import has_event
-from agent_world.simulation.programs import evaluate, plan_reaction
+from agent_world.simulation.programs import evaluate, plan_reaction, MECHANICAL_DEFAULTS
 from agent_world.simulation import matter as sm
 
 from . import model as m
@@ -162,12 +162,20 @@ def _mechanical_observation(binding, spec, deployment, observed_tick):
         last_solved.update(historical=True,
             meaning="最近求解输出变化的保存步；非每步记录。")
     request = deepcopy(binding.get("drive_request"))
-    return {"role": spec["mechanical"]["role"], "stored_state": deepcopy(binding["mechanical"]),
+    role = spec["mechanical"]["role"]
+    result = {"role": role, "stored_state": deepcopy(binding["mechanical"]),
+            "angle_unit": "logical_turns",
+            "role_meaning": {"source": "动力源只提供角动力，不产生直线行程。", "gear": "齿轮只传递角动力，不产生直线行程。",
+                             "actuator": "执行器把角动力转换成有限直线行程。"}[role],
             "last_solved": last_solved, "drive_request": request,
             "solver_eligible": deployment["mechanical_solver_eligible"],
             "stored_output_is_history": True, "observed_tick": observed_tick,
             "pending_next_step": request is not None and request["applies_from_step"] > observed_tick,
             "meaning": "保存状态非实时运动；空标记非未求解证据，请求生效步已到非已求解证据。"}
+    if role == "actuator":
+        result["travel"] = spec["mechanical"].get("travel", MECHANICAL_DEFAULTS["travel"])
+        result["pitch"] = spec["mechanical"].get("pitch", MECHANICAL_DEFAULTS["pitch"])
+    return result
 
 
 def _automatic_rule_observations(spec, context):

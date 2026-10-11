@@ -5,8 +5,9 @@ semantics. They do not claim a model or player completed the world experience.
 """
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, AsyncMock
 
 from agent_world.grove_connector_errors import ConnectorError
 from agent_world.grove_execution import ExecutionController, ExecutionPorts
@@ -26,6 +27,80 @@ CHECKPOINT_SCHEMA = {"type": "object", "required": ["task_id", "execution_segmen
 
 
 class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def running(self):
+        self.start()
+        await self.invoke("grove.control_grant", {"goal": self.controller.state["goal"], "max_actions": 4})
+        self.controller.state.update(status="running", segment_id="current-segment")
+        self.controller.active = True
+
+    async def test_each_checkpoint_returns_latest_facts_and_seals_only_its_segment(self):
+        for status in ("continue", "blocked", "completed"):
+            with self.subTest(status=status):
+                self.setUp()
+                await self.running()
+                action = await self.controller.write("grove.move", {"dx": 1}, segment_id="current-segment")
+                fresh = {"player": {"id": "same-role", "version": 9}, "clock": {"sequence": 91},
+                         "entities": [{"id": "wheel", "version": 8, "angle": 36, "energy": 4}]}
+                original_read = self.read
+                async def read(kind, **kwargs):
+                    return deepcopy(fresh) if kind == "facts" else await original_read(kind, **kwargs)
+                self.controller.ports = replace(self.controller.ports, read=read)
+                result = await self.controller.checkpoint({"task_id": self.controller.state["task_id"],
+                    "execution_segment_id": "current-segment", "status": status, "summary": "old fuel 16",
+                    "next_intent": "", "evidence_operation_ids": [action["operation_id"]]}, schema=CHECKPOINT_SCHEMA)
+                self.assertEqual(result["execution_readback"], fresh)
+                self.assertFalse(result["world_facts_changed"])
+                self.assertFalse(self.controller.active)
+                with self.assertRaises(ConnectorError) as sealed:
+                    self.controller.admit_write("current-segment")
+                self.assertEqual(sealed.exception.code, "ExecutionSegmentFinished")
+                await self.controller.revoke()
+                with self.assertRaises(ConnectorError) as revoked:
+                    self.controller.admit_write("current-segment")
+                self.assertNotIn("person reclaimed", revoked.exception.message)
+                if status == "completed":
+                    self.assertEqual(result["goal_result"]["verification"]["status"], "unverified")
+
+    async def test_failed_checkpoint_read_does_not_reuse_old_freshness_or_seal(self):
+        await self.running()
+        action = await self.controller.write("grove.move", {}, segment_id="current-segment")
+        self.controller.ports = replace(self.controller.ports, read=AsyncMock(side_effect=OSError("read unavailable")))
+        with self.assertRaises(ConnectorError) as failed:
+            await self.controller.checkpoint({"task_id": self.controller.state["task_id"],
+                "execution_segment_id": "current-segment", "status": "completed", "summary": "claim",
+                "next_intent": "", "evidence_operation_ids": [action["operation_id"]]}, schema=CHECKPOINT_SCHEMA)
+        self.assertFalse(self.controller.state["readback_actual"])
+        self.assertFalse(failed.exception.execution_outcome["checkpoint_recorded"])
+        self.assertIsNone(self.controller.state.get("checkpoint"))
+        self.assertTrue(self.controller.active)
+        self.controller.ports = replace(self.controller.ports, read=self.read)
+        result = await self.controller.checkpoint({"task_id": self.controller.state["task_id"],
+            "execution_segment_id": "current-segment", "status": "completed", "summary": "claim",
+            "next_intent": "", "evidence_operation_ids": [action["operation_id"]]}, schema=CHECKPOINT_SCHEMA)
+        self.assertTrue(result["segment_finished"])
+
+    async def test_postcommit_read_or_persist_failure_keeps_original_receipt(self):
+        for failure in ("read", "persist"):
+            with self.subTest(failure=failure):
+                self.setUp()
+                await self.running()
+                if failure == "read":
+                    import httpx
+                    self.controller.ports = replace(self.controller.ports, read=AsyncMock(side_effect=httpx.ReadError("disconnected")))
+                else:
+                    async def invoke(*args, **kwargs):
+                        result = await self.invoke(*args, **kwargs)
+                        self.persist.side_effect = OSError("storage unavailable")
+                        return result
+                    self.controller.ports = replace(self.controller.ports, invoke=invoke)
+                with self.assertRaises(ConnectorError) as failed:
+                    await self.controller.write("grove.move", {}, segment_id="current-segment")
+                outcome = failed.exception.execution_outcome
+                self.assertTrue(outcome["world_action_committed"])
+                self.assertIn(outcome["operation_id"], self.receipts)
+                self.assertEqual(outcome["commit_seq"], self.receipts[outcome["operation_id"]]["commit_seq"])
+                self.assertEqual(sum(function == "grove.move" for function, _ in self.calls), 1)
+
     def test_snapshot_and_unsettled_admission_keep_task_authority(self):
         self.start()
         self.controller.state.update(status="paused", request_status="unsettled", readback={"nested": {"x": 1}})

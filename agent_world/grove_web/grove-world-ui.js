@@ -178,6 +178,8 @@ export function ruleRuntimeObservationLines(creative,entity){
   if(creative.automatic_rules_truncated)lines.push('这里最多展示 8 项自动声明；其余声明须读取完整规则。');
   if(mechanical&&typeof mechanical==='object'){
     if(typeof mechanical.role==='string')lines.push('机械用途：'+({source:'动力源',gear:'齿轮传递',actuator:'执行器'}[mechanical.role]||factValue(mechanical.role))+'。');
+    if(mechanical.role_meaning)lines.push(mechanical.role_meaning);
+    if(mechanical.angle_unit==='logical_turns')lines.push('角度按累计圈数记录；速度是每个世界逻辑步的圈数。地图只播放两次确认读取之间的变化。');
     const stored=mechanical.stored_state||{},values=[];
     for(const key of ['position','angle','speed','energy','available_torque'])if(Number.isFinite(stored[key]))values.push(factLabel(key)+' '+stored[key]);
     if(typeof stored.enabled==='boolean')values.push('保存启用值 '+factValue(stored.enabled));
@@ -381,4 +383,51 @@ export function quantityBounds(descriptor,lot){
   const max=Math.min(declaredMax,Number.isInteger(lot?.quantity)?lot.quantity:Infinity);
   const proposed=Number.isInteger(quantity.default)?quantity.default:min;
   return {min,max,value:Math.max(min,Math.min(proposed,max)),label:String(quantity.label||'数量')};
+}
+
+export function mechanicalRenderSample(entity){
+  const observation=entity?.creative?.mechanical_observation,state=observation?.stored_state;
+  if(!state||observation.angle_unit!=='logical_turns'||!observation.solver_eligible||entity.lifecycle!=='intact'||
+     !Number.isFinite(entity.x)||!Number.isFinite(entity.y)||!Number.isFinite(state.angle))return null;
+  const role=observation.role;if(!['source','gear','actuator'].includes(role))return null;
+  return {id:entity.id,version:entity.version,tick:observation.observed_tick,role,angle:state.angle,
+    position:state.position,travel:observation.travel,status:state.status,
+    replayAllowed:['running','travel_limit','insufficient_energy'].includes(state.status)};
+}
+
+// Replay only the bounded difference between two received snapshots. Neither
+// speed nor wall time can create another turn after the confirmed destination.
+export function createMechanicalMotion(){
+  const samples=new Map();let epoch=null;
+  return {
+    reset(){samples.clear();epoch=null;},
+    accept(entities,clock,now){
+      if(epoch!==clock?.epoch){samples.clear();epoch=clock?.epoch;}
+      const seen=new Set();
+      for(const entity of entities||[]){const value=mechanicalRenderSample(entity);if(!value)continue;seen.add(value.id);
+        const previous=samples.get(value.id);
+        if(previous&&(value.version<previous.value.version||value.tick<previous.value.tick))continue;
+        if(previous&&value.version===previous.value.version&&value.angle===previous.value.angle&&value.status===previous.value.status&&value.position===previous.value.position)continue;
+        const delta=previous?value.angle-previous.value.angle:0;
+        const animate=!!previous&&value.replayAllowed&&Number.isFinite(delta)&&delta!==0;
+        samples.set(value.id,{value,from:animate?previous.value.angle:value.angle,start:now,
+          duration:animate?Math.min(900,Math.max(240,Math.abs(delta)*320)):0});
+      }
+      for(const id of samples.keys())if(!seen.has(id))samples.delete(id);
+    },
+    read(entity,now,fresh=true){
+      const value=mechanicalRenderSample(entity);if(!value)return null;
+      const sample=samples.get(value.id);
+      if(!fresh||!value.replayAllowed||!sample||sample.value.version!==value.version)return {...value,angle:value.angle,replaying:false};
+      const fraction=sample.duration?Math.min(1,Math.max(0,(now-sample.start)/sample.duration)):1;
+      return {...value,angle:sample.from+(value.angle-sample.from)*fraction,replaying:sample.duration>0&&fraction<1};
+    }
+  };
+}
+
+export function visibleWaterQuantity(entity){
+  const summary=entity?.content_summary;
+  if(summary?.visible!==true)return 0;
+  return (summary.materials||[]).filter(row=>row.material==='water').reduce((total,row)=>
+    total+(Number.isFinite(row.quantity)?Math.max(0,row.quantity):0),0);
 }
