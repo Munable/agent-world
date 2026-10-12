@@ -101,7 +101,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
         inventory = next(row for row in self.session.tools() if row["name"] == "grove_interact")["inputSchema"]
         delivered = self.session.present_agent_result("grove.inspect", {"entity": {"id": "cup", "version": 2,
-            "action_options": [{"function_id": "grove.interact", "action": "transfer", "input_schema": INTERACT_ARGS}]}})
+            "action_options": [{"function_id": "grove.interact", "action": "transfer", "input_schema": INTERACT_ARGS}]},
+            "action_options_projection": {"scope": "selected_declared_action", "action": "transfer",
+                                          "expanded_actions": ["transfer"]}})
         menu = delivered["entity"]["action_options"][0]
         self.assertEqual(menu["mcp_tool"], "grove_interact")
         self.assertEqual(menu["input_schema"]["required"], inventory["required"])
@@ -463,7 +465,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             "version_fingerprint": "a"*64, "physics": {"known": True, "overloaded": True}}}]}}]
         original = {"result": {"entity": {"id": "box", "version": 7, "simulation": {"total": 160},
             "action_options": options, "available_actions": ["store"]}, "action_options": options,
-            "available_actions": ["store"], "contents": [], "public_content": {"version": 8}}}
+            "available_actions": ["store"], "contents": [], "public_content": {"version": 8},
+            "action_options_projection": {"scope": "selected_declared_action", "action": "store",
+                                          "expanded_actions": ["store"]}}}
         result = companion_projection("grove.inspect", original)["result"]
         self.assertNotIn("action_options", result["entity"])
         self.assertEqual(result["entity"]["field_references"]["action_options"], "#/action_options")
@@ -488,7 +492,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             "history":{"cursor":"older-page", "outcome_count":22},
             "anchors":[{"entity_id":"box","version":7,"entity":entity}],
             "contributions":[{"id":"source","text":"historical text"}], "outcome_refs":[{"id":"receipt"}]}
-        original = {"result":{"entity":entity,"action_options":options,"available_actions":[],"public_content":public}}
+        original = {"result":{"entity":entity,"action_options":options,"available_actions":[],"public_content":public,
+            "action_options_projection": {"scope": "selected_declared_action", "action": "store",
+                                          "expanded_actions": ["store"]}}}
         actual = companion_projection("grove.inspect", original)["result"]
         self.assertEqual(actual["entity"],entity)
         self.assertEqual(actual["action_options"],options)
@@ -516,7 +522,14 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             "finish": "stop", "time": {"completed": 1}}, "parts": [{"type": "text", "text": "先看组合载荷。"}]})
         await self.session.turn("能装吗？", context_entity_id="box")
         facts = json.loads(self.session.host.await_args.args[2]["parts"][1]["text"].rsplit("\n", 1)[1])
-        self.assertEqual(facts["selected_inspection"]["action_options"][0]["input"]["candidates"][0]["preview"], preview)
+        inspection = facts["selected_inspection"]
+        self.assertEqual(inspection["entity"], selected["entity"])
+        self.assertEqual(inspection["contents"], [])
+        self.assertTrue(inspection["projection"]["complete_object_state"])
+        option = inspection["action_options"][0]
+        self.assertNotIn("input", option)
+        self.assertEqual(option["candidates_index"][0]["read_request"]["arguments"],
+                         {"entity_id": "box", "action": "store", "candidate_id": "item"})
 
         self.session.invoke.assert_any_await("grove.inspect", {"entity_id": "box"})
         self.assertEqual(self.session.inference_count, 1)
@@ -606,7 +619,11 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("simulation", indexed)
         self.assertNotIn("reaction_observations", indexed["creative"])
         self.assertEqual(facts["inventory_next"], "next-page")
-        self.assertEqual(facts["selected_inspection"]["action_options"][0]["input"]["candidates"][0]["preview"], preview)
+        self.assertEqual(facts["selected_inspection"]["entity"], source)
+        selected_option = facts["selected_inspection"]["action_options"][0]
+        self.assertNotIn("input", selected_option)
+        self.assertEqual(selected_option["candidates_index"][0]["read_request"]["arguments"],
+                         {"entity_id": "foreign-source", "action": "store", "candidate_id": "tool"})
 
         # Write receipts re-project this already compact readback. Current
         # stock/open state and the selected fresh versions must survive it.
@@ -620,6 +637,88 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("action_options", readback["selected_inspection"])
         self.assertEqual(readback["selected_inspection"]["read_request"]["arguments"], {"entity_id": "foreign-source"})
         self.assertEqual(readback["entities"][0]["matter"], facts["entities"][0]["matter"])
+
+    async def test_preflight_defers_details_without_changing_selected_preview_or_readback(self):
+        self.session.entered = True
+        self.session.catalog = {name: {"access": "read"} for name in ("map.viewport", "grove.inspect")}
+        self.session.world = AsyncMock(return_value={"events": [], "observed_at": 12})
+        objects = [{"id": f"public-{number}", "version": number + 3, "name": f"装置 {number}",
+            "created_by": f"author-{number}", "x": number, "y": 0, "owner": None,
+            "state": {"open": True, "wetness": None}, "capabilities": ["container"],
+            "matter": [{"id": "not-a-presented-lot", "material": "wood", "slot": "body", "quantity": 4}],
+            "creative": {"definition_ref": f"definition-{number}", "type_id": "mechanism",
+                "fields": {"signal": False, "level": None}, "world_tick": 12,
+                "automatic_rule_count": 2, "explicit_action_count": 1,
+                "mechanical_observation": {"stored_state": {"position": number, "energy": 0},
+                    "role_meaning": "A stored observation, not an executed action. " * 20,
+                    "last_solved": {"step": 11, "historical": True}},
+                "automatic_field_change": {"step": 11, "fields": {"signal": {"before": True, "after": False}}}},
+            "simulation": {"local": 4, "total": 4, "supported": 0, "limit": 8}}
+            for number in range(6)]
+        scene = {"player": {"id": "test-user", "version": 2, "x": 0, "y": 0},
+            "entities": objects, "inventory": [], "inventory_total": 3, "inventory_next": "page-2",
+            "chunks": [{"cx": -1, "cy": 0, "tiles": ["grass", "unknown"]}], "clock": {"sequence": 12},
+            "construction": {"material_totals": {"wood": 4}, "unit": "logical_matter",
+                "recipes": [{"id": f"recipe-{n}", "cost": {"wood": 1}, "material_cost_u": {"wood": 4},
+                    "use": "真实材料消耗。" * 50} for n in range(8)]},
+            "public_content": {"id": "content:0:0", "region": "0:0", "version": 5,
+                "anchors": [{"entity_id": "outside-view", "version": 999, "name": "另一件作品"}],
+                "history": {"cursor": "past-latest"}, "contribution_count": 7},
+            "processes": [{"phase": "old-record", "data": "x" * 1000}]}
+        preview = {"version_fingerprint": "a" * 64, "physics": {"known": True, "overloaded": False}}
+        selected = {"player": scene["player"], "entity": objects[0], "action_options": [{
+            "action": "store", "input": {"candidates": [{"id": "selected-source", "version": 7,
+                "preview": preview}]}}], "action_options_projection": {
+                    "scope": "selected_declared_action", "action": "store", "expanded_actions": ["store"]}}
+        async def invoke(function, arguments):
+            return deepcopy(selected if function == "grove.inspect" else scene)
+        self.session.invoke = AsyncMock(side_effect=invoke)
+        preflight = await self.session.current_turn_facts(context_entity_id="public-0", preflight=True)
+        normal = await self.session.current_turn_facts(context_entity_id="public-0")
+        self.assertLess(len(json.dumps(preflight, ensure_ascii=False)),
+                        len(json.dumps(normal, ensure_ascii=False)) * 0.65)
+        for source, row in zip(objects, preflight["entities"]):
+            for field in ("id", "version", "name", "created_by", "x", "y", "owner"):
+                self.assertEqual(row[field], source[field])
+            self.assertEqual(row["creative"]["fields"], source["creative"]["fields"])
+            self.assertEqual(row["discovery_state"]["wetness"], None)
+            self.assertNotIn("mechanical_observation", row["creative"])
+            self.assertNotIn("id", row["matter"][0])
+            self.assertEqual(row["read_request"]["arguments"], {"entity_id": source["id"]})
+        self.assertEqual(preflight["inventory_next"], "page-2")
+        self.assertFalse(preflight["chunks"][0]["terrain"]["complete"])
+        self.assertNotIn("recipes", preflight["construction"])
+        self.assertNotIn("anchors", preflight["public_content"])
+        self.assertEqual(preflight["public_content"]["read_request"]["arguments"], {"content_id": "content:0:0"})
+        self.assertIn("unknown", preflight["discovery_projection"]["meaning"])
+        delivered = self.session.present_agent_result("map.viewport", preflight, preflight=True)
+        self.assertEqual(delivered["selected_inspection"], normal["selected_inspection"])
+        self.assertEqual(delivered["selected_inspection"]["action_options"][0]["input"]["candidates"][0]["preview"], preview)
+        self.assertIn("mechanical_observation", normal["entities"][0]["creative"])
+        self.assertEqual(normal["construction"], scene["construction"])
+        self.assertEqual(normal["processes"], scene["processes"])
+        normal_map = companion_projection("map.viewport", scene)
+        self.assertEqual(normal_map["entities"][0]["simulation"], objects[0]["simulation"])
+        self.assertIn("anchors", normal_map["public_content"])
+        self.assertEqual(normal_map["construction"], scene["construction"])
+
+    async def test_preflight_binds_only_displayed_discovery_and_explicit_selected_details(self):
+        self.session.entered = True
+        self.session.catalog = {"map.viewport": {"access": "read"}}
+        self.session.world = AsyncMock(return_value={"events": []})
+        self.session.invoke = AsyncMock(return_value={
+            "player": {"id": "test-user", "version": 2, "x": 0, "y": 0},
+            "entities": [{"id": "target", "version": 3, "state": {"wetness": None},
+                "action_options": [{"action": "store", "input": {"candidates": [{
+                    "id": "hidden-candidate", "version": 8, "preview": {"version_fingerprint": "a" * 64}}]}}]}],
+            "public_content": {"id": "content:0:0", "version": 5,
+                "anchors": [{"entity_id": "hidden-anchor", "version": 9}]}})
+        facts = await self.session.current_turn_facts(preflight=True)
+        presented = self.session.present_agent_result("map.viewport", facts, preflight=True)
+        bound = self.session.agent_observation(presented["observation_id"])
+        self.assertEqual(bound["versions"]["entity"], {"target": 3})
+        self.assertEqual(bound["versions"]["content"], {"content:0:0": 5})
+        self.assertFalse(bound.get("combination_previews"))
 
     def test_movement_receipt_defers_repeated_scene_but_keeps_actor_and_resource_page(self):
         entities = [{"id": f"nearby-{index}", "version": 3, "name": "公开物件" * 20,
@@ -716,7 +815,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             "entity": {"id": "hearth", "version": 22, "state": {"temperature": 8}, "pour_target_slot": "surface"},
             "action_options": [{"action": "pour", "arguments": {
                 "action": "pour", "target_id": "hearth", "target_slot": "surface"},
-                "input_schema": {"type": "object", "properties": {"amount": {"type": "integer"}}}}]}
+                "input_schema": {"type": "object", "properties": {"amount": {"type": "integer"}}}}],
+            "action_options_projection": {"scope": "selected_declared_action", "action": "pour",
+                                          "expanded_actions": ["pour"]}}
         explicit = self.session.present_agent_result("grove.inspect", inspection)
         self.assertEqual(explicit["action_options"][0]["arguments"]["target_slot"], "surface")
         delivered = self.session.present_agent_result("grove.interact", {"result": {},

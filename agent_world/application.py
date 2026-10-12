@@ -47,54 +47,60 @@ def create_application(
     mcp_app, _, mcp_runtime = create_mcp_app(
         db_path, universe, auth_required=True, installer=installer, host=parsed.hostname
     )
-    # One host uses one installed Runtime and its existing transaction lock.
-    # Separate processes still coordinate through SQLite as before.
-    http_app = create_http_app(db_path, universe, auth_required=True, runtime=mcp_runtime)
-    web_app = create_product_app(
-        db_path,
-        universe,
-        mcp_url=public_base_url + "/mcp",
-        public_base_url=public_base_url,
-        web_user=web_user,
-        web_password=web_password,
-        commons_ui=world_profile == "commons",
-        # Public key entry must satisfy the bounded session contract of the
-        # portable connection helper, independently of the selected UI/world.
-        identity_ttl_seconds=86400,
-        runtime=mcp_runtime,
-    )
-    mcp_base = mcp_app.app if isinstance(mcp_app, BearerIdentityMiddleware) else mcp_app
+    try:
+        # One host uses one installed Runtime and its existing transaction lock.
+        # Separate processes still coordinate through SQLite as before.
+        http_app = create_http_app(db_path, universe, auth_required=True, runtime=mcp_runtime)
+        web_app = create_product_app(
+            db_path,
+            universe,
+            mcp_url=public_base_url + "/mcp",
+            public_base_url=public_base_url,
+            web_user=web_user,
+            web_password=web_password,
+            commons_ui=world_profile == "commons",
+            # Public key entry must satisfy the bounded session contract of the
+            # portable connection helper, independently of the selected UI/world.
+            identity_ttl_seconds=86400,
+            runtime=mcp_runtime,
+        )
+        mcp_base = mcp_app.app if isinstance(mcp_app, BearerIdentityMiddleware) else mcp_app
 
-    class Dispatch:
-        async def __call__(self, scope, receive, send):
-            path = scope.get("path", "")
-            if path == "/mcp" or path.startswith("/mcp/"):
-                target = mcp_app
-            elif (
-                path == "/"
-                or path.startswith(("/api/", "/static/", "/v1/key-identities/"))
-                or path == "/v1/join/exchange"
-            ):
-                target = web_app
-            else:
-                target = http_app
-            await target(scope, receive, send)
+        class Dispatch:
+            async def __call__(self, scope, receive, send):
+                path = scope.get("path", "")
+                if path == "/mcp" or path.startswith("/mcp/"):
+                    target = mcp_app
+                elif (
+                    path == "/"
+                    or path.startswith(("/api/", "/static/", "/v1/key-identities/"))
+                    or path == "/v1/join/exchange"
+                ):
+                    target = web_app
+                else:
+                    target = http_app
+                await target(scope, receive, send)
 
-    @asynccontextmanager
-    async def lifespan(app):
-        async with mcp_base.router.lifespan_context(mcp_base):
-            # Keep this host's WAL handle attached without an open transaction.
-            # Request connections still own their snapshots/transactions; the
-            # handle closes only after maintenance and timer workers stop.
-            with mcp_runtime._conn(readonly=True) as database_lifetime:
-                database_lifetime.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
-                async with retention_lifespan(mcp_runtime, universe):
-                    async with timer_lifespan(mcp_runtime, universe, enabled=timers_enabled, interval=timer_interval):
-                        yield
+        @asynccontextmanager
+        async def lifespan(app):
+            try:
+                async with mcp_base.router.lifespan_context(mcp_base):
+                    # Request leases own their snapshots; this idle WAL anchor has
+                    # no transaction and outlives both background workers.
+                    with mcp_runtime._conn(readonly=True) as database_lifetime:
+                        database_lifetime.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+                        async with retention_lifespan(mcp_runtime, universe):
+                            async with timer_lifespan(mcp_runtime, universe, enabled=timers_enabled, interval=timer_interval):
+                                yield
+            finally:
+                mcp_runtime.close()
 
-    app = Starlette(routes=[Mount("/", app=Dispatch())], lifespan=lifespan)
-    app.state.runtime = mcp_runtime
-    return app
+        app = Starlette(routes=[Mount("/", app=Dispatch())], lifespan=lifespan)
+        app.state.runtime = mcp_runtime
+        return app
+    except BaseException:
+        mcp_runtime.close()
+        raise
 
 
 def main():

@@ -329,7 +329,9 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         inspection = {"entity": {"id": "target", "version": 21},
             "action_options": [{"action": "store", "input": {"candidates": [
                 {"id": "item", "version": 31, "preview": {"version_fingerprint": "a"*64,
-                    "physics": {"known": True, "overloaded": False}}}]}}]}
+                    "physics": {"known": True, "overloaded": False}}}]}}],
+            "action_options_projection": {"scope": "selected_declared_action", "action": "store",
+                                          "expanded_actions": ["store"]}}
         read = self.session.present_agent_result("grove.inspect", inspection, base_id=indexed)["observation_id"]
         bound = self.session.bind_agent_versions("grove.interact", arguments, read)
         self.assertEqual(bound["expected_combination_fingerprint"], "a"*64)
@@ -389,7 +391,9 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         inspection = {"player": {"id": self.role, "version": 11},
             "entity": {"id": "target", "version": 21}, "action_options": [
                 {"action": "attach", "input": {"candidates": [{"id": "item", "version": 31,
-                    "preview": {"version_fingerprint": "a"*64}}]}}]}
+                    "preview": {"version_fingerprint": "a"*64}}]}}],
+            "action_options_projection": {"scope": "selected_declared_action", "action": "attach",
+                                          "expanded_actions": ["attach"]}}
         read = self.session.present_agent_result("grove.inspect", inspection)["observation_id"]
         original = self.session.agent_observation(read)
         summary = {"player": {"id": self.role, "version": 12}, "entities": [

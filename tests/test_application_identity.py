@@ -1,5 +1,6 @@
 """A non-Commons consumer must be connectable through the portable identity helper."""
 from pathlib import Path
+from contextlib import closing
 import json
 import os
 import tempfile
@@ -14,6 +15,7 @@ from agent_world.application import create_application
 from agent_world.connect import connect_world
 from agent_world import WorldDefinition, FunctionSpec, FunctionOutcome, StateRule, TimerSpec
 from agent_world.world_sdk import install_world
+from agent_world.runtime_core import WorldRuntime
 
 
 @unittest.skipUnless(os.name == "posix", "The connection helper requires POSIX private-file permissions")
@@ -87,9 +89,13 @@ class ApplicationIdentityTests(unittest.TestCase):
                 worker.join(15)
             self.assertFalse(worker.is_alive())
             self.assertEqual(failures, [])
-            self.assertEqual(runtime.get_state('u', 'values', 'counter')['value'], {'timer': 1, 'human': 1})
-            self.assertEqual(runtime.get_receipt('u', role, 'human-action', identity_token=token)['result'],
-                             {'timer': 1, 'human': 1})
+            # The app releases its Runtime on shutdown. Recover through a new
+            # handle to the same database, retaining the state/Receipt checks.
+            with closing(WorldRuntime(runtime.db_path)) as recovered:
+                self.assertEqual(recovered.get_state('u', 'values', 'counter')['value'],
+                                 {'timer': 1, 'human': 1})
+                self.assertEqual(recovered.get_receipt('u', role, 'human-action', identity_token=token)['result'],
+                                 {'timer': 1, 'human': 1})
 
     def test_external_world_connection_is_bounded_and_same_key_recovers(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -14,7 +14,9 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 
 from agent_world.grove_connector import (ConnectorError, ConnectorManager, GroveSession, CURRENT_FACTS_INSTRUCTIONS,
-    HISTORY_RECOVERY_INSTRUCTIONS, EXECUTION_INSTRUCTIONS, EXECUTOR_AGENT, MCP_NAME, create_connector_app)
+    HISTORY_RECOVERY_INSTRUCTIONS, EXECUTION_INSTRUCTIONS, EXECUTOR_AGENT, MCP_NAME, create_connector_app,
+    _PREVIOUS_CURRENT_FACTS_INSTRUCTIONS, _CURRENT_CONTEXT_PREFIXES)
+from agent_world.grove_native_history import NativeToolHistory
 
 
 class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
@@ -453,7 +455,11 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
             {"id":"claim", "sessionID":"test-session", "messageID":"a", "type":"tool", "tool":"grove_world_grove_generation_context",
              "state":{"status":"completed", "input":{"entity_id":"original"},
                       "output":"{\"opportunity\":{\"opportunity_id\":\"original-claim\",\"version\":3}}",
-                      "time":{"start":1,"end":2}}}]
+                      "time":{"start":1,"end":2}}},
+            {"id":"old-facts", "sessionID":"test-session", "messageID":"u", "type":"text",
+             "text":_PREVIOUS_CURRENT_FACTS_INSTRUCTIONS+"\n{\"old\":\"unchanged audit\"}"},
+            {"id":"ordinary", "sessionID":"test-session", "messageID":"u", "type":"text",
+             "text":"下列现场事实是连接器在本次提问后刚用本人权限读取的。请解释这句话是什么意思。"}]
         original = deepcopy(parts)
         records = [{"info":{"id":mid,"sessionID":"test-session","role":role},"parts":[p for p in parts if p["messageID"]==mid]}
                    for mid,role in (("u","user"),("a","assistant"))]
@@ -467,7 +473,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.session.host = native
         self.session.execution_controller.state["request_status"] = "idle_confirmed"
         await self.session.compact_execution_context()
-        self.assertEqual([p["id"] for p in patches],["facts","read"])
+        self.assertEqual([p["id"] for p in patches],["facts","old-facts","read"])
         self.assertEqual(parts[0]["text"],original[0]["text"])
         self.assertTrue(parts[0]["ignored"])
         self.assertEqual(parts[1],original[1])
@@ -478,12 +484,21 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         # The next segment can submit its existing claim without spending
         # another delegated action to rediscover the original id/version.
         self.assertEqual(parts[4],original[4])
+        self.assertTrue(parts[5]["ignored"])
+        self.assertEqual(parts[5]["text"],original[5]["text"])
+        self.assertEqual(parts[6],original[6])
+        # Both generated headers are excluded from recovered user goals, but
+        # a person's ordinary words sharing the opening sentence remain.
+        reader = NativeToolHistory(role_id="test-user", session_id="test-session",
+            read_page=AsyncMock(), read_message=AsyncMock(), formal_tools={},
+            prompt_prefixes=_CURRENT_CONTEXT_PREFIXES)
+        self.assertEqual(reader._goal(records[0]), task["goal"]+"\n"+parts[6]["text"])
         self.assertEqual((self.session.execution["task_id"],self.session.execution["requests_used"]),(task["task_id"],task["requests_used"]))
         await self.session.compact_execution_context()
-        self.assertEqual(len(patches),2)
+        self.assertEqual(len(patches),3)
         self.session.execution_controller.state["request_status"] = "running"
         with self.assertRaises(ConnectorError): await self.session.compact_execution_context()
-        self.assertEqual(len(patches),2)
+        self.assertEqual(len(patches),3)
 
     async def test_early_confirmed_progress_remains_usable_after_many_rejected_attempts(self):
         self.session.execution_controller.receipt("grove.move", "original-confirmed-action", {"commit_seq":7}, status="confirmed")

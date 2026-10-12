@@ -256,7 +256,7 @@ def _companion_creative_summary(creative):
     return summary
 
 
-def _companion_scene_index(scene):
+def _companion_scene_index(scene, *, preflight=False):
     """An authorized discovery index; detailed physics remains an explicit read."""
     if not isinstance(scene, dict):
         return scene
@@ -270,7 +270,10 @@ def _companion_scene_index(scene):
     if isinstance(construction, dict):
         index["construction"] = {key: deepcopy(construction[key]) for key in
                                  ("material_totals", "unit", "radius_metric", "limits") if key in construction}
-        if isinstance(construction.get("recipes"), list):
+        if preflight:
+            index["construction"]["material_source"] = "Eligible owned bare lots; totals are u, not regional stock."
+            index["construction"]["read_request"] = {"tool": "map_viewport", "arguments": {}}
+        elif isinstance(construction.get("recipes"), list):
             index["construction"]["recipes"] = [{key: deepcopy(recipe[key]) for key in
                 ("id", "name", "terrain", "cost", "material_cost_u", "unit", "use") if key in recipe}
                 for recipe in construction["recipes"] if isinstance(recipe, dict)]
@@ -313,7 +316,15 @@ def _companion_scene_index(scene):
                 if isinstance(creative, dict):
                     # Only the world's authorized creative projection can
                     # supply runtime observations; raw program storage cannot.
-                    row["creative"] = _companion_creative_summary(creative)
+                    if preflight:
+                        row["creative"] = {key: deepcopy(creative[key]) for key in
+                            ("definition_ref", "type_id", "hidden", "fields", "world_tick",
+                             "automatic_rule_count", "explicit_action_count") if key in creative}
+                        if creative.get("hidden") is True:
+                            row["creative"] = {key: row["creative"][key] for key in
+                                ("definition_ref", "type_id", "hidden") if key in row["creative"]}
+                    else:
+                        row["creative"] = _companion_creative_summary(creative)
                 if isinstance(entity.get("id"), str):
                     row["read_request"] = {"tool": "grove_inspect", "arguments": {"entity_id": entity["id"]}}
                 state = entity.get("state")
@@ -328,7 +339,25 @@ def _companion_scene_index(scene):
                 rows.append(row)
             index[field] = rows
     if "public_content" in scene:
-        index["public_content"] = _companion_public_content_index(scene["public_content"])
+        public = scene["public_content"]
+        if preflight and isinstance(public, dict):
+            index["public_content"] = {key: deepcopy(public[key]) for key in
+                ("id", "region", "version", "contribution_count", "outcome_count") if key in public}
+            if isinstance(public.get("id"), str):
+                index["public_content"]["read_request"] = {
+                    "tool": "grove_content_history", "arguments": {"content_id": public["id"]}}
+        else:
+            index["public_content"] = _companion_public_content_index(public)
+    if preflight:
+        index["projection"] = {
+            "scope": "authorized_preflight_discovery", "complete_scene": False,
+            "omitted_sections": ["full object state/actions/previews/lots", "construction recipes",
+                "mechanical history", "regional anchors and history", "process details"],
+            "meaning": "Actual identities, versions, locations, current fields and authorized material quantities. "
+                "Omitted/null facts are unknown, not absent or zero; matter rows have no transferable lot IDs. "
+                "wetness is saturation (%), not water quantity (u). Inspect for current details; map for recipes/discovery. "
+                "History is available on demand; this index grants no action permission."}
+        return index
     index["projection"] = {
         "scope": "authorized_scene_index",
         "meaning": "Actual identity/version/location index, not complete state or an action preview. "
@@ -412,6 +441,11 @@ def companion_projection(function: str, payload: dict) -> dict:
         return result
     value = result.get("result", result)
     if not isinstance(value, dict):
+        return result
+    if (function == "map.viewport" and
+            (value.get("discovery_projection") or {}).get("scope") == "authorized_preflight_discovery"):
+        # The connector already projected this fresh preflight. Do not expand
+        # its regional reference or reduce its selected authorized inspection.
         return result
     if function == "grove.rule_catalog":
         value["definitions_projection"] = "Page actual immutable definitions with grove_definition_list, " \
@@ -499,6 +533,15 @@ def companion_projection(function: str, payload: dict) -> dict:
                     if isinstance(references, dict):
                         references[field] = "#/" + field
                         entity.pop(field)
+        projection = value.get("action_options_projection") or {}
+        if (projection.get("scope") not in {"selected_declared_action", "authorized_action_index"}
+                and not (projection.get("candidate_selection") or {}).get("candidate_id")):
+            # A default look supplies complete authorized object facts, not
+            # every possible action's parameters and combination calculation.
+            # Only an explicitly selected action/candidate supplies a preview.
+            index = _companion_inspection_index(result, preserve_facts=True)
+            if index is not None:
+                return index
         return result
     def compact_entity(entity):
         if not isinstance(entity, dict):
@@ -866,8 +909,12 @@ def _agent_tool_text_fits(text, *, native=False):
     return len(text.encode("utf-8")) <= byte_limit and text.count("\n") + 1 <= line_limit
 
 
-def _companion_inspection_index(payload):
-    """Keep actual state and discovery when expanded action inputs do not fit."""
+def _companion_inspection_index(payload, *, preserve_facts=False):
+    """Index action choices without presenting or binding expanded previews.
+
+    Default inspection preserves all authorized facts. The transport-limit
+    fallback retains its existing, explicitly incomplete state projection.
+    """
     value = payload.get("result", payload)
     if not isinstance(value, dict) or not isinstance(value.get("entity"), dict):
         return None
@@ -875,12 +922,14 @@ def _companion_inspection_index(payload):
     projection = value.get("action_options_projection") or {}
     if (projection.get("candidate_selection") or {}).get("candidate_id"):
         return None  # A single complete candidate must never become a fake preview.
-    options = value.get("action_options", entity.get("action_options", []))
+    options = value.get("action_options", entity.get("action_options"))
     if not isinstance(options, list):
         return None
-    state = _companion_selected_state_summary({"entity": entity})["entity"]
+    state = (deepcopy(entity) if preserve_facts else
+             _companion_selected_state_summary({"entity": entity})["entity"])
+    state.pop("action_options", None)
     creative = state.get("creative")
-    if isinstance(creative, dict) and isinstance(creative.get("automatic_rules"), list):
+    if not preserve_facts and isinstance(creative, dict) and isinstance(creative.get("automatic_rules"), list):
         # The pinned definition is independently readable. Keep every current
         # fact/comparison, omitting only the duplicate immutable expressions.
         omitted = False
@@ -904,31 +953,54 @@ def _companion_inspection_index(payload):
         if not isinstance(option, dict) or not isinstance(option.get("action"), str):
             continue
         outline = {key: deepcopy(option[key]) for key in
-            ("action", "label", "function_id", "available", "reason", "use", "preconditions") if key in option}
+            ("action", "label", "function_id", "available", "reason", "use", "preconditions", "condition_observation")
+            if key in option}
         request = {"tool": "grove_inspect", "arguments": {"entity_id": entity["id"], "action": option["action"]}}
         outline["read_request"] = request
         candidates = (option.get("input") or {}).get("candidates", [])
         choices = option.get("choices") or {}
-        candidates = [*candidates, *choices.get("items", []), *choices.get("others", []),
-                      *choices.get("sources", [])]
+        candidates = [*candidates, *choices.get("items", []), *choices.get("others", [])]
         if candidates:
             outline["candidates_index"] = [{key: deepcopy(candidate[key]) for key in
-                ("id", "name", "kind") if key in candidate} | {"read_request": {
+                ("id", "name", "kind", "available", "reason") if key in candidate} | {"read_request": {
                     "tool": "grove_inspect", "arguments": request["arguments"] | {"candidate_id": candidate["id"]}}}
                 for candidate in candidates if isinstance(candidate, dict) and isinstance(candidate.get("id"), str)]
+        elif isinstance(option.get("candidates_index"), list):
+            # A transport-limit fallback can receive an already indexed read.
+            # Keep its genuine paths; omission must not erase discovery.
+            outline["candidates_index"] = deepcopy(option["candidates_index"])
+        sources = choices.get("sources", [])
+        if sources:
+            # inspect candidate_id selects input.candidates and items/others,
+            # not fabrication source groups. Their complete lots require the
+            # action read, rather than an unsupported candidate route.
+            outline["sources_index"] = [{key: deepcopy(source[key]) for key in
+                ("id", "name", "kind", "available", "reason") if key in source} |
+                {"read_request": deepcopy(request)} for source in sources
+                if isinstance(source, dict) and isinstance(source.get("id"), str)]
+        elif isinstance(option.get("sources_index"), list):
+            outline["sources_index"] = deepcopy(option["sources_index"])
         outlines.append(outline)
-    index = {"player": deepcopy(value.get("player")), "entity": state,
-        "action_options": outlines, "available_actions": deepcopy(value.get("available_actions", [])),
+    index = deepcopy(value) if preserve_facts else {"player": deepcopy(value.get("player"))}
+    index.update({"entity": state,
+        "action_options": outlines,
+        "available_actions": deepcopy(value.get("available_actions", entity.get("available_actions", []))),
         "action_options_projection": {"scope": "authorized_action_index", "expanded_actions": [],
             "requested_projection": deepcopy(projection),
-            "meaning": "Actual state and action outlines only. Expanded inputs, candidate versions, conditions and "
-                       "previews were not supplied or bound; use each action/candidate read_request before relying on them."},
+            "meaning": "Index, not permission/safety/success. Inputs, candidate versions/conditions and previews "
+                       "unprovided/unbound; use read_request."},
         "projection": {"scope": "object_state_and_action_index", "complete_inspection": False,
-            "omitted_sections": ["expanded action inputs and previews", "child snapshots", "public content history"]}}
+            "complete_object_state": preserve_facts,
+            "omitted_sections": ["expanded action inputs and previews"] + ([] if preserve_facts else
+                ["child snapshots", "public content history"])}})
     if "explanation" in value:
         index["explanation"] = deepcopy(value["explanation"])
     if "result" not in payload:
         return index
+    if preserve_facts:
+        result = deepcopy(payload)
+        result["result"] = index
+        return result
     return {key: deepcopy(payload[key]) for key in
         ("world_id", "function_id", "function_version", "snapshot_seq") if key in payload} | {"result": index}
 

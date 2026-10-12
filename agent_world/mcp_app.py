@@ -6,6 +6,7 @@ import logging
 import os
 import pathlib
 import time
+from contextlib import asynccontextmanager
 
 from mcp import types
 from mcp.server import Server
@@ -176,94 +177,117 @@ def _function_tool(desc, universe, auth_required=False):
 
 def create_mcp_server(db_path: str | pathlib.Path, universe="demo", *, auth_required=False, installer=None):
     runtime = WorldRuntime(db_path)
-    (installer or get_universe_installer("demo"))(runtime, universe)
-    gateway = WorldGateway(runtime, universe, auth_required=auth_required)
+    try:
+        (installer or get_universe_installer("demo"))(runtime, universe)
+    except BaseException:
+        runtime.close()
+        raise
+    try:
+        gateway = WorldGateway(runtime, universe, auth_required=auth_required)
 
-    def request_authorization(ctx):
-        # The SDK attaches HTTP headers to EACH inbound message. A session/task ContextVar
-        # is not an authorization boundary and may retain the initialize request's identity.
-        request = getattr(ctx, "request", None)
-        headers = getattr(request, "headers", None)
-        if headers is None:
-            headers = getattr(getattr(ctx, "transport", None), "headers", None)
-        authorization = headers.get("authorization") if headers else None
-        if auth_required and not authorization:
-            raise AuthenticationRequired("authenticated MCP request headers are required")
-        return authorization
+        def request_authorization(ctx):
+            # The SDK attaches HTTP headers to EACH inbound message. A session/task ContextVar
+            # is not an authorization boundary and may retain the initialize request's identity.
+            request = getattr(ctx, "request", None)
+            headers = getattr(request, "headers", None)
+            if headers is None:
+                headers = getattr(getattr(ctx, "transport", None), "headers", None)
+            authorization = headers.get("authorization") if headers else None
+            if auth_required and not authorization:
+                raise AuthenticationRequired("authenticated MCP request headers are required")
+            return authorization
 
-    async def list_tools(ctx, params):
-        authorization = request_authorization(ctx)
-        identity, token = await asyncio.to_thread(gateway.identity, authorization)
-        descs = await asyncio.to_thread(
-            runtime.list_functions,
-            universe,
-            actor_role_id=identity["role_id"] if identity else None,
-            identity_token=token,
-        )
-        core = _core_tools(auth_required)
-        if identity and identity["access_mode"] == "observe":
-            core = [t for t in core if CORE[t.name][3] or t.name == "world.bootstrap"]
-        tools = core + [_function_tool(desc, universe, auth_required) for desc in descs]
-        tools.sort(key=lambda tool: tool.name)
-        cursor = getattr(params, "cursor", None) or ""
-        if not isinstance(cursor, str) or len(cursor) > 128:
-            from .runtime_errors import InvalidArguments
-
-            raise InvalidArguments("invalid tool discovery cursor")
-        tools = [tool for tool in tools if tool.name > cursor]
-        page = tools[:100]
-        return types.ListToolsResult(tools=page, nextCursor=page[-1].name if len(tools) > 100 else None)
-
-    async def call_tool(ctx, params):
-        try:
+        async def list_tools(ctx, params):
             authorization = request_authorization(ctx)
-            args = params.arguments if params.arguments is not None else {}
-            if params.name == "world.wait_stream":
-                event = getattr(ctx, "cancel_requested", None)
-                result = await gateway.wait_stream(args, authorization, cancelled=event.is_set if event else None)
-            elif params.name == "world.wait_changes":
-                event = getattr(ctx, "cancel_requested", None)
-                result = await gateway.wait(args, authorization, cancelled=event.is_set if event else None)
-            else:
-                result = await asyncio.to_thread(gateway.call, params.name, args, authorization)
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json_text(result))],
-                structuredContent=result,
-                isError=False,
+            identity, token = await asyncio.to_thread(gateway.identity, authorization)
+            descs = await asyncio.to_thread(
+                runtime.list_functions,
+                universe,
+                actor_role_id=identity["role_id"] if identity else None,
+                identity_token=token,
             )
-        except Exception as exc:
-            status, payload = error_response(exc)
-            if status == 500:
-                logger.error("MCP world request failed: %s", type(exc).__name__)
-            payload["tool"] = params.name
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=json_text(payload))],
-                structuredContent=payload,
-                isError=True,
-            )
+            core = _core_tools(auth_required)
+            if identity and identity["access_mode"] == "observe":
+                core = [t for t in core if CORE[t.name][3] or t.name == "world.bootstrap"]
+            tools = core + [_function_tool(desc, universe, auth_required) for desc in descs]
+            tools.sort(key=lambda tool: tool.name)
+            cursor = getattr(params, "cursor", None) or ""
+            if not isinstance(cursor, str) or len(cursor) > 128:
+                from .runtime_errors import InvalidArguments
 
-    return Server(
-        "agent-world",
-        version=PROTOCOL_VERSION,
-        description="World functions backed by persistent, authenticated state.",
-        on_list_tools=list_tools,
-        on_call_tool=call_tool,
-    ), runtime
+                raise InvalidArguments("invalid tool discovery cursor")
+            tools = [tool for tool in tools if tool.name > cursor]
+            page = tools[:100]
+            return types.ListToolsResult(tools=page, nextCursor=page[-1].name if len(tools) > 100 else None)
+
+        async def call_tool(ctx, params):
+            try:
+                authorization = request_authorization(ctx)
+                args = params.arguments if params.arguments is not None else {}
+                if params.name == "world.wait_stream":
+                    event = getattr(ctx, "cancel_requested", None)
+                    result = await gateway.wait_stream(args, authorization, cancelled=event.is_set if event else None)
+                elif params.name == "world.wait_changes":
+                    event = getattr(ctx, "cancel_requested", None)
+                    result = await gateway.wait(args, authorization, cancelled=event.is_set if event else None)
+                else:
+                    result = await asyncio.to_thread(gateway.call, params.name, args, authorization)
+                return types.CallToolResult(
+                    content=[types.TextContent(type="text", text=json_text(result))],
+                    structuredContent=result,
+                    isError=False,
+                )
+            except Exception as exc:
+                status, payload = error_response(exc)
+                if status == 500:
+                    logger.error("MCP world request failed: %s", type(exc).__name__)
+                payload["tool"] = params.name
+                return types.CallToolResult(
+                    content=[types.TextContent(type="text", text=json_text(payload))],
+                    structuredContent=payload,
+                    isError=True,
+                )
+
+        return Server(
+            "agent-world",
+            version=PROTOCOL_VERSION,
+            description="World functions backed by persistent, authenticated state.",
+            on_list_tools=list_tools,
+            on_call_tool=call_tool,
+        ), runtime
+    except BaseException:
+        runtime.close()
+        raise
 
 
 def create_mcp_app(db_path, universe="demo", *, auth_required=True, installer=None, host="127.0.0.1"):
     server, runtime = create_mcp_server(db_path, universe, auth_required=auth_required, installer=installer)
-    base = server.streamable_http_app(
-        streamable_http_path="/mcp",
-        json_response=True,
-        stateless_http=False,
-        max_request_body_size=262144,
-        session_idle_timeout=1800,
-        max_sessions=10000,
-        host=host,
-    )
-    app = BearerIdentityMiddleware(base, runtime, universe) if auth_required else base
-    return app, server, runtime
+    try:
+        base = server.streamable_http_app(
+            streamable_http_path="/mcp",
+            json_response=True,
+            stateless_http=False,
+            max_request_body_size=262144,
+            session_idle_timeout=1800,
+            max_sessions=10000,
+            host=host,
+        )
+        original_lifespan = base.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app):
+            try:
+                async with original_lifespan(app) as state:
+                    yield state
+            finally:
+                runtime.close()
+
+        base.router.lifespan_context = lifespan
+        app = BearerIdentityMiddleware(base, runtime, universe) if auth_required else base
+        return app, server, runtime
+    except BaseException:
+        runtime.close()
+        raise
 
 
 from .asgi_lifecycle import LazyASGI

@@ -52,6 +52,7 @@ class FoundationTests(unittest.TestCase):
         self.role = self.w.create_role("A")["role_id"]
 
     def tearDown(self):
+        self.w.close()
         gc.collect()
         self.temp.cleanup()  # Do not hide leaked Windows handles.
 
@@ -71,9 +72,14 @@ class FoundationTests(unittest.TestCase):
                 for table in ("world_state", "events", "operations")
             )
 
-    def test_connection_context_closes_handle(self):
+    def test_connection_context_returns_exclusive_lease_and_runtime_closes_handle(self):
         with self.w._conn() as connection:
             connection.execute("SELECT 1")
+        with self.w._conn() as reused:
+            self.assertIs(reused, connection)
+            self.assertFalse(reused.in_transaction)
+            self.assertEqual(reused.execute("SELECT 1").fetchone()[0], 1)
+        self.w.close()
         with self.assertRaises(sqlite3.ProgrammingError):
             connection.execute("SELECT 1")
 

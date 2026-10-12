@@ -80,8 +80,8 @@ def initialize_local(db: Path, universe: str = UNIVERSE) -> dict:
         private_directory(db.parent)
         with db.open("xb") as stream:
             os.fchmod(stream.fileno(), 0o600)
-        runtime = WorldRuntime(db)
-        install_world(runtime, universe, make_world())
+        with closing(WorldRuntime(db)) as runtime:
+            install_world(runtime, universe, make_world())
         os.chmod(db, 0o600)
         return {"database": str(db), "universe": universe, "world_id": WORLD_ID,
                 "world_profile": PROFILE}
@@ -97,32 +97,36 @@ def create_grove_application(db: Path, *, universe: str = UNIVERSE, port: int = 
     inner = create_application(db, world_profile=PROFILE, universe=universe,
                                public_base_url=f"http://127.0.0.1:{port}",
                                timers_enabled=timers_enabled, timer_interval=0.2)
-    web = files("agent_world").joinpath("grove_web")
+    try:
+        web = files("agent_world").joinpath("grove_web")
 
-    async def home(request):
-        return HTMLResponse(
-            '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            '<title>溪源 · 共享世界</title><body><main><h1>溪源已启动</h1>'
-            '<p>通过自己的本机 OpenCode 连接器进入，亲自探索、试验和改变同一个世界。</p>'
-            '<p><a href="http://127.0.0.1:8891/">打开本机游玩入口</a></p>'
-            '<p>世界会保存位置、物件和变化。个人助手的模型与记忆留在你的工具里。</p>'
-            '</main></body></html>',
-            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-                     "Referrer-Policy": "no-referrer"},
-        )
+        async def home(request):
+            return HTMLResponse(
+                '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                '<title>溪源 · 共享世界</title><body><main><h1>溪源已启动</h1>'
+                '<p>通过自己的本机 OpenCode 连接器进入，亲自探索、试验和改变同一个世界。</p>'
+                '<p><a href="http://127.0.0.1:8891/">打开本机游玩入口</a></p>'
+                '<p>世界会保存位置、物件和变化。个人助手的模型与记忆留在你的工具里。</p>'
+                '</main></body></html>',
+                headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                         "Referrer-Policy": "no-referrer"},
+            )
 
-    @asynccontextmanager
-    async def lifespan(app):
-        async with inner.router.lifespan_context(inner):
-            yield
+        @asynccontextmanager
+        async def lifespan(app):
+            async with inner.router.lifespan_context(inner):
+                yield
 
-    app = Starlette(routes=[Route("/", home),
-                            Mount("/grove-static", StaticFiles(directory=str(web))),
-                            Mount("/", inner)], lifespan=lifespan)
-    app.state.runtime = inner.state.runtime
-    app.state.universe = universe
-    return app
+        app = Starlette(routes=[Route("/", home),
+                                Mount("/grove-static", StaticFiles(directory=str(web))),
+                                Mount("/", inner)], lifespan=lifespan)
+        app.state.runtime = inner.state.runtime
+        app.state.universe = universe
+        return app
+    except BaseException:
+        inner.state.runtime.close()
+        raise
 
 
 def main():

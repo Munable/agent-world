@@ -79,6 +79,7 @@ def initialize_local(db: Path, private_dir: Path, universe: str = UNIVERSE) -> d
     if world.world_id != WORLD_ID:
         raise ValueError("Unexpected world package identity.")
     previous = os.umask(0o077)
+    runtime = None
     try:
         db.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         private_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -119,7 +120,11 @@ def initialize_local(db: Path, private_dir: Path, universe: str = UNIVERSE) -> d
         os.chmod(db, 0o600)
         return result
     finally:
-        os.umask(previous)
+        try:
+            if runtime is not None:
+                runtime.close()
+        finally:
+            os.umask(previous)
 
 
 def create_frontier_application(db: Path, *, universe: str = UNIVERSE, port: int = 8805):
@@ -130,28 +135,32 @@ def create_frontier_application(db: Path, *, universe: str = UNIVERSE, port: int
         db, world_profile=PROFILE, universe=universe,
         public_base_url=f"http://127.0.0.1:{port}", timers_enabled=False,
     )
-    web = files("examples").joinpath("frontier_web")
+    try:
+        web = files("examples").joinpath("frontier_web")
 
-    async def home(request):
-        return FileResponse(web.joinpath("index.html"), headers={
-            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer",
-        })
+        async def home(request):
+            return FileResponse(web.joinpath("index.html"), headers={
+                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            })
 
-    @asynccontextmanager
-    async def lifespan(app):
-        async with inner.router.lifespan_context(inner):
-            yield
+        @asynccontextmanager
+        async def lifespan(app):
+            async with inner.router.lifespan_context(inner):
+                yield
 
-    # Existing authenticated HTTP/MCP, key entry, credential management and the
-    # shared browser client remain in the composition application underneath.
-    app = Starlette(routes=[
-        Route("/", home),
-        Mount("/frontier-static", StaticFiles(directory=str(web))),
-        Mount("/", inner),
-    ], lifespan=lifespan)
-    app.state.runtime = inner.state.runtime
-    return app
+        # Existing authenticated HTTP/MCP, key entry, credential management and the
+        # shared browser client remain in the composition application underneath.
+        app = Starlette(routes=[
+            Route("/", home),
+            Mount("/frontier-static", StaticFiles(directory=str(web))),
+            Mount("/", inner),
+        ], lifespan=lifespan)
+        app.state.runtime = inner.state.runtime
+        return app
+    except BaseException:
+        inner.state.runtime.close()
+        raise
 
 
 def main():

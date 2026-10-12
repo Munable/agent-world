@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import closing
 import asyncio
+import gc
 import json
 import io
 import os
@@ -167,6 +168,48 @@ class RiverCampAppTests(unittest.TestCase):
                               for path in paths}, original)
             added = set(path for path in self.root.rglob("*") if path.is_file()) - original_files
             self.assertLessEqual(added, {Path(str(self.db) + "-wal"), Path(str(self.db) + "-shm")})
+
+    def test_provisioning_closes_owned_pool_before_return_and_on_failure(self):
+        owned = []
+        def open_runtime(path):
+            runtime = WorldRuntime(path)
+            owned.append(runtime)
+            return runtime
+        with patch("examples.river_camp_app.WorldRuntime", side_effect=open_runtime):
+            self.provision()
+        self.assertEqual(len(owned), 1)
+        self.assertTrue(owned[0]._connections_closed)
+        self.assertEqual(owned[0]._idle_connections, {False: [], True: []})
+        original = (self.db.read_bytes(), self.db.stat().st_mtime_ns, stat.S_IMODE(self.db.stat().st_mode))
+        gc.collect()
+        self.assertEqual((self.db.read_bytes(), self.db.stat().st_mtime_ns,
+                          stat.S_IMODE(self.db.stat().st_mode)), original)
+        with patch("examples.river_camp_app.WorldRuntime", side_effect=open_runtime), \
+                patch("examples.river_camp_app.load_identity", side_effect=ValueError("identity setup failed")), \
+                self.assertRaisesRegex(ValueError, "identity setup failed"):
+            initialize_local(self.root / "failed" / "camp.sqlite3", self.root / "failed-private")
+        self.assertEqual(len(owned), 2)
+        self.assertTrue(owned[1]._connections_closed)
+        self.assertEqual(owned[1]._idle_connections, {False: [], True: []})
+
+    def test_rejected_profile_keeps_active_pool_and_authoritative_files_untouched(self):
+        self.provision()
+        with closing(WorldRuntime(self.db)) as active, active._conn() as connection:
+            paths = [self.db, *(path for path in self.private.rglob("*") if path.is_file())]
+            original = {path: (path.read_bytes(), path.stat().st_mtime_ns, stat.S_IMODE(path.stat().st_mode))
+                        for path in paths}
+            with patch("examples.river_camp_app.create_application") as create, \
+                    patch("examples.river_camp_app.get_world_definition") as load, self.assertRaises(ValueError):
+                create_camp_application(self.db, universe="local-camp", mode="campaign")
+            create.assert_not_called()
+            load.assert_not_called()
+            gc.collect()
+            self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns, stat.S_IMODE(path.stat().st_mode))
+                              for path in paths}, original)
+            self.assertFalse(active._connections_closed)
+            self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
     def test_unknown_mode_refuses_before_provisioning_or_runtime_construction(self):
         with patch("examples.river_camp_app.create_application") as create:

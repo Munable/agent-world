@@ -6,7 +6,7 @@ import asyncio
 import logging
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 
 from .runtime_contracts import duration, integer
 
@@ -119,19 +119,21 @@ def main():
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--interval", type=float, default=1.0)
     args = parser.parse_args()
-    runtime = WorldRuntime(args.db)
-    get_universe_installer(args.world)(runtime, args.universe)
-    if args.once:
-        import json
-        print(json.dumps(runtime.run_due_timers(args.universe, limit=args.limit)))
-        return
-    worker = TimerWorker(runtime, args.universe, interval=args.interval, batch_size=args.limit).start()
-    try:
-        while worker._thread.is_alive():
-            worker._thread.join(timeout=1)
-        raise RuntimeError("timer worker terminated; pending work retained")
-    except KeyboardInterrupt:
-        worker.stop()
+    with closing(WorldRuntime(args.db)) as runtime:
+        get_universe_installer(args.world)(runtime, args.universe)
+        if args.once:
+            import json
+            print(json.dumps(runtime.run_due_timers(args.universe, limit=args.limit)))
+            return
+        worker = TimerWorker(runtime, args.universe, interval=args.interval, batch_size=args.limit).start()
+        try:
+            while worker._thread.is_alive():
+                worker._thread.join(timeout=1)
+            raise RuntimeError("timer worker terminated; pending work retained")
+        except KeyboardInterrupt:
+            pass
+        finally:
+            worker.stop()
 
 
 if __name__ == "__main__":

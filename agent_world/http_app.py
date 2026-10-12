@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import pathlib
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request, Query, Header
@@ -38,239 +39,258 @@ def create_app(
     runtime: WorldRuntime | None = None,
 ) -> FastAPI:
     """Use an already installed Runtime when composing multiple transports."""
-    if runtime is None:
+    owns_runtime = runtime is None
+    if owns_runtime:
         runtime = WorldRuntime(db_path)
-        (installer or get_universe_installer("demo"))(runtime, universe)
+        try:
+            (installer or get_universe_installer("demo"))(runtime, universe)
+        except BaseException:
+            runtime.close()
+            raise
     elif pathlib.Path(db_path).expanduser().resolve() != pathlib.Path(runtime.db_path).resolve():
         raise ValueError("injected runtime must use the requested database path")
-    gateway = WorldGateway(runtime, universe, auth_required=auth_required)
-    app = FastAPI(title="Agent World HTTP", version=PROTOCOL_VERSION)
-    app.state.runtime, app.state.universe = runtime, universe
-    app.state.auth_required, app.state.test_mode = auth_required, test_mode
+    try:
+        gateway = WorldGateway(runtime, universe, auth_required=auth_required)
 
-    @app.middleware("http")
-    async def no_store(request: Request, call_next):
-        if len(request.headers.getlist("authorization")) > 1:
-            _, payload = error_response(InvalidArguments("duplicate authentication or session header"))
-            response = JSONResponse(payload, status_code=400)
-        else:
-            response = await call_next(request)
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        return response
+        @asynccontextmanager
+        async def lifespan(app):
+            try:
+                yield
+            finally:
+                if owns_runtime:
+                    runtime.close()
 
-    @app.exception_handler(WorldRuntimeError)
-    async def world_error_handler(request: Request, exc: WorldRuntimeError):
-        status, payload = error_response(exc)
-        return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
+        app = FastAPI(title="Agent World HTTP", version=PROTOCOL_VERSION, lifespan=lifespan)
+        app.state.runtime, app.state.universe = runtime, universe
+        app.state.auth_required, app.state.test_mode = auth_required, test_mode
 
-    @app.exception_handler(RequestValidationError)
-    async def request_error_handler(request: Request, exc: RequestValidationError):
-        status, payload = error_response(
-            InvalidArguments("invalid request shape", recovery="fix_request")
-        )
-        return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
+        @app.middleware("http")
+        async def no_store(request: Request, call_next):
+            if len(request.headers.getlist("authorization")) > 1:
+                _, payload = error_response(InvalidArguments("duplicate authentication or session header"))
+                response = JSONResponse(payload, status_code=400)
+            else:
+                response = await call_next(request)
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            return response
 
-    async def call(name, args, request):
-        try:
-            return await asyncio.to_thread(gateway.call, name, args, request.headers.get("authorization"))
-        except Exception as exc:
+        @app.exception_handler(WorldRuntimeError)
+        async def world_error_handler(request: Request, exc: WorldRuntimeError):
             status, payload = error_response(exc)
-            if status == 500:
-                logger.error("world request failed: %s", type(exc).__name__)
             return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
 
-    def role_args(role_id):
-        return {} if role_id is None else {"role_id": role_id}
-
-    @app.get("/health")
-    def health():
-        return {"ok": True, "version": PROTOCOL_VERSION, "universe": universe, "auth_required": auth_required}
-
-    @app.get("/v1/whoami")
-    async def whoami(request: Request):
-        from .runtime_errors import AuthenticationRequired
-
-        identity, _ = await asyncio.to_thread(gateway.identity, request.headers.get("authorization"))
-        if identity is None:
-            raise AuthenticationRequired("identity endpoint requires authentication")
-        return identity
-
-    @app.get("/v1/functions")
-    async def functions(request: Request, role_id: str | None = None):
-        # Full catalog endpoint; discover provides bounded, compact retrieval.
-        identity, token = await asyncio.to_thread(gateway.identity, request.headers.get("authorization"))
-        if identity is not None:
-            from .identity_auth import bound_role
-
-            resolved_role = bound_role(identity, role_id, auth_required=True)
-            if role_id is not None:
-                raise InvalidArguments("authenticated requests must omit role_id")
-            role_id = resolved_role
-        functions = await asyncio.to_thread(
-            runtime.list_functions, universe, actor_role_id=role_id, identity_token=token
-        )
-        return {"universe": universe, "functions": functions}
-
-    @app.get("/v1/discover")
-    async def discover(
-        request: Request,
-        role_id: str | None = None,
-        prefix: str = "",
-        after: str = "",
-        limit: int = Query(default=50, ge=1, le=200),
-        include_schemas: bool = False,
-    ):
-        return await call(
-            "world.discover",
-            {
-                **role_args(role_id),
-                "prefix": prefix,
-                "after": after,
-                "limit": limit,
-                "include_schemas": include_schemas,
-            },
-            request,
-        )
-
-    @app.get("/v1/describe")
-    async def describe(request: Request, role_id: str | None = None):
-        return await call("world.describe", role_args(role_id), request)
-
-    @app.get("/v1/bootstrap")
-    async def bootstrap(request: Request, role_id: str | None = None, include_catalog: bool = False):
-        return await call(
-            "world.bootstrap", {**role_args(role_id), "include_catalog": include_catalog}, request
-        )
-
-    @app.get("/v1/views")
-    async def views(request: Request, role_id: str | None = None, after: str = "",
-                    limit: int = Query(default=50, ge=1, le=64), include_schemas: bool = False):
-        return await call("world.list_views", {**role_args(role_id), "after": after,
-                          "limit": limit, "include_schemas": include_schemas}, request)
-
-    @app.post("/v1/views/timeline")
-    async def view_timeline(body: dict[str, Any], request: Request):
-        return await call("world.view_timeline", body, request)
-
-    @app.post("/v1/views/sync")
-    async def sync_view(body: dict[str, Any], request: Request):
-        return await call("world.view_sync", body, request)
-
-    @app.post("/v1/views/{view}/snapshot")
-    async def snapshot_view(view: str, body: dict[str, Any], request: Request):
-        return await call("world.view_snapshot", {**body, "view": view}, request)
-
-    @app.get("/v1/streams")
-    async def streams(request: Request, role_id: str | None = None):
-        return await call("world.list_streams", role_args(role_id), request)
-
-    @app.post("/v1/streams/{stream}/read")
-    async def read_stream(stream: str, body: dict[str, Any], request: Request):
-        return await call("world.read_stream", {**body, "stream":stream}, request)
-
-    @app.post("/v1/streams/{stream}/wait")
-    async def wait_stream(stream: str, body: dict[str, Any], request: Request):
-        try:
-            return await gateway.wait_stream({**body,"stream":stream},request.headers.get('authorization'),
-                                             disconnected=request.is_disconnected)
-        except Exception as exc:
-            status,payload=error_response(exc)
-            return JSONResponse(payload,status_code=status,headers=_error_headers(status,payload))
-
-    async def public_call(method, *args, **kwargs):
-        try:
-            return await asyncio.to_thread(method,*args,**kwargs)
-        except Exception as exc:
-            status,payload=error_response(exc)
-            return JSONResponse(payload,status_code=status,headers=_error_headers(status,payload))
-
-    @app.get("/v1/public/views")
-    async def public_views():
-        return await public_call(runtime.list_views,universe,None)
-
-    @app.post("/v1/public/views/sync")
-    async def public_view_sync(body: dict[str, Any]):
-        from .runtime_contracts import validate
-        validate({"type":"object","properties":{"cursor":{"type":"string","maxLength":128}},
-                  "required":["cursor"],"additionalProperties":False},body)
-        return await public_call(runtime.public_view_sync,universe,body['cursor'])
-
-    @app.post("/v1/public/views/{view}/snapshot")
-    async def public_view_snapshot(view: str, body: dict[str, Any]):
-        from .runtime_contracts import validate
-        validate({"type":"object","properties":{"arguments":{"type":"object"}},"additionalProperties":False},body)
-        return await public_call(runtime.public_view_snapshot,universe,view,body.get('arguments',{}))
-
-    @app.post("/v1/public/streams/{stream}/read")
-    async def public_read_stream(stream: str, body: dict[str, Any]):
-        from .runtime_contracts import validate
-        validate({"type":"object","properties":{"cursor":{"type":"string","maxLength":2048},
-                  "limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":False},body)
-        return await public_call(runtime.read_stream,universe,stream,cursor=body.get('cursor'),limit=body.get('limit',50))
-
-    @app.get("/v1/receipts/{operation_id}")
-    async def receipt(operation_id: str, request: Request, role_id: str | None = None):
-        return await call("world.get_receipt", {**role_args(role_id), "operation_id": operation_id}, request)
-
-    @app.post("/v1/activities")
-    async def start_activity(body: dict[str, Any], request: Request):
-        return await call("world.start_activity", body, request)
-
-    @app.post("/v1/activities/{activity_id}/claim")
-    async def claim_activity(activity_id: str, body: dict[str, Any], request: Request):
-        return await call("world.claim_activity", {**body, "activity_id": activity_id}, request)
-
-    @app.post("/v1/activities/renew")
-    async def renew(body: dict[str, Any], request: Request):
-        return await call("world.renew_claim", body, request)
-
-    @app.post("/v1/activities/finish")
-    async def finish(body: dict[str, Any], request: Request):
-        return await call("world.finish_activity", body, request)
-
-    @app.post("/v1/functions/{function_id}/invoke")
-    async def invoke(
-        function_id: str,
-        body: dict[str, Any],
-        request: Request,
-        x_test_response_delay_ms: int | None = Header(default=None, alias="X-Test-Response-Delay-Ms"),
-    ):
-        result = await call(function_id, body, request)
-        if test_mode and x_test_response_delay_ms:
-            await asyncio.sleep(max(0, min(x_test_response_delay_ms, 5000)) / 1000)
-        return result
-
-    @app.get("/v1/changes")
-    async def changes(
-        request: Request,
-        role_id: str | None = None,
-        after: int = Query(default=0, ge=0),
-        limit: int = Query(default=50, ge=1, le=200),
-    ):
-        return await call(
-            "world.get_changes", {**role_args(role_id), "after": after, "limit": limit}, request
-        )
-
-    @app.get("/v1/changes/wait")
-    async def wait(
-        request: Request,
-        role_id: str | None = None,
-        after: int = Query(default=0, ge=0),
-        limit: int = Query(default=50, ge=1, le=200),
-        timeout: float = Query(default=5, ge=0, le=30),
-    ):
-        try:
-            return await gateway.wait(
-                {**role_args(role_id), "after": after, "limit": limit, "timeout": timeout},
-                request.headers.get("authorization"),
-                disconnected=request.is_disconnected,
+        @app.exception_handler(RequestValidationError)
+        async def request_error_handler(request: Request, exc: RequestValidationError):
+            status, payload = error_response(
+                InvalidArguments("invalid request shape", recovery="fix_request")
             )
-        except Exception as exc:
-            status, payload = error_response(exc)
             return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
 
-    return app
+        async def call(name, args, request):
+            try:
+                return await asyncio.to_thread(gateway.call, name, args, request.headers.get("authorization"))
+            except Exception as exc:
+                status, payload = error_response(exc)
+                if status == 500:
+                    logger.error("world request failed: %s", type(exc).__name__)
+                return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
+
+        def role_args(role_id):
+            return {} if role_id is None else {"role_id": role_id}
+
+        @app.get("/health")
+        def health():
+            return {"ok": True, "version": PROTOCOL_VERSION, "universe": universe, "auth_required": auth_required}
+
+        @app.get("/v1/whoami")
+        async def whoami(request: Request):
+            from .runtime_errors import AuthenticationRequired
+
+            identity, _ = await asyncio.to_thread(gateway.identity, request.headers.get("authorization"))
+            if identity is None:
+                raise AuthenticationRequired("identity endpoint requires authentication")
+            return identity
+
+        @app.get("/v1/functions")
+        async def functions(request: Request, role_id: str | None = None):
+            # Full catalog endpoint; discover provides bounded, compact retrieval.
+            identity, token = await asyncio.to_thread(gateway.identity, request.headers.get("authorization"))
+            if identity is not None:
+                from .identity_auth import bound_role
+
+                resolved_role = bound_role(identity, role_id, auth_required=True)
+                if role_id is not None:
+                    raise InvalidArguments("authenticated requests must omit role_id")
+                role_id = resolved_role
+            functions = await asyncio.to_thread(
+                runtime.list_functions, universe, actor_role_id=role_id, identity_token=token
+            )
+            return {"universe": universe, "functions": functions}
+
+        @app.get("/v1/discover")
+        async def discover(
+            request: Request,
+            role_id: str | None = None,
+            prefix: str = "",
+            after: str = "",
+            limit: int = Query(default=50, ge=1, le=200),
+            include_schemas: bool = False,
+        ):
+            return await call(
+                "world.discover",
+                {
+                    **role_args(role_id),
+                    "prefix": prefix,
+                    "after": after,
+                    "limit": limit,
+                    "include_schemas": include_schemas,
+                },
+                request,
+            )
+
+        @app.get("/v1/describe")
+        async def describe(request: Request, role_id: str | None = None):
+            return await call("world.describe", role_args(role_id), request)
+
+        @app.get("/v1/bootstrap")
+        async def bootstrap(request: Request, role_id: str | None = None, include_catalog: bool = False):
+            return await call(
+                "world.bootstrap", {**role_args(role_id), "include_catalog": include_catalog}, request
+            )
+
+        @app.get("/v1/views")
+        async def views(request: Request, role_id: str | None = None, after: str = "",
+                        limit: int = Query(default=50, ge=1, le=64), include_schemas: bool = False):
+            return await call("world.list_views", {**role_args(role_id), "after": after,
+                              "limit": limit, "include_schemas": include_schemas}, request)
+
+        @app.post("/v1/views/timeline")
+        async def view_timeline(body: dict[str, Any], request: Request):
+            return await call("world.view_timeline", body, request)
+
+        @app.post("/v1/views/sync")
+        async def sync_view(body: dict[str, Any], request: Request):
+            return await call("world.view_sync", body, request)
+
+        @app.post("/v1/views/{view}/snapshot")
+        async def snapshot_view(view: str, body: dict[str, Any], request: Request):
+            return await call("world.view_snapshot", {**body, "view": view}, request)
+
+        @app.get("/v1/streams")
+        async def streams(request: Request, role_id: str | None = None):
+            return await call("world.list_streams", role_args(role_id), request)
+
+        @app.post("/v1/streams/{stream}/read")
+        async def read_stream(stream: str, body: dict[str, Any], request: Request):
+            return await call("world.read_stream", {**body, "stream":stream}, request)
+
+        @app.post("/v1/streams/{stream}/wait")
+        async def wait_stream(stream: str, body: dict[str, Any], request: Request):
+            try:
+                return await gateway.wait_stream({**body,"stream":stream},request.headers.get('authorization'),
+                                                 disconnected=request.is_disconnected)
+            except Exception as exc:
+                status,payload=error_response(exc)
+                return JSONResponse(payload,status_code=status,headers=_error_headers(status,payload))
+
+        async def public_call(method, *args, **kwargs):
+            try:
+                return await asyncio.to_thread(method,*args,**kwargs)
+            except Exception as exc:
+                status,payload=error_response(exc)
+                return JSONResponse(payload,status_code=status,headers=_error_headers(status,payload))
+
+        @app.get("/v1/public/views")
+        async def public_views():
+            return await public_call(runtime.list_views,universe,None)
+
+        @app.post("/v1/public/views/sync")
+        async def public_view_sync(body: dict[str, Any]):
+            from .runtime_contracts import validate
+            validate({"type":"object","properties":{"cursor":{"type":"string","maxLength":128}},
+                      "required":["cursor"],"additionalProperties":False},body)
+            return await public_call(runtime.public_view_sync,universe,body['cursor'])
+
+        @app.post("/v1/public/views/{view}/snapshot")
+        async def public_view_snapshot(view: str, body: dict[str, Any]):
+            from .runtime_contracts import validate
+            validate({"type":"object","properties":{"arguments":{"type":"object"}},"additionalProperties":False},body)
+            return await public_call(runtime.public_view_snapshot,universe,view,body.get('arguments',{}))
+
+        @app.post("/v1/public/streams/{stream}/read")
+        async def public_read_stream(stream: str, body: dict[str, Any]):
+            from .runtime_contracts import validate
+            validate({"type":"object","properties":{"cursor":{"type":"string","maxLength":2048},
+                      "limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":False},body)
+            return await public_call(runtime.read_stream,universe,stream,cursor=body.get('cursor'),limit=body.get('limit',50))
+
+        @app.get("/v1/receipts/{operation_id}")
+        async def receipt(operation_id: str, request: Request, role_id: str | None = None):
+            return await call("world.get_receipt", {**role_args(role_id), "operation_id": operation_id}, request)
+
+        @app.post("/v1/activities")
+        async def start_activity(body: dict[str, Any], request: Request):
+            return await call("world.start_activity", body, request)
+
+        @app.post("/v1/activities/{activity_id}/claim")
+        async def claim_activity(activity_id: str, body: dict[str, Any], request: Request):
+            return await call("world.claim_activity", {**body, "activity_id": activity_id}, request)
+
+        @app.post("/v1/activities/renew")
+        async def renew(body: dict[str, Any], request: Request):
+            return await call("world.renew_claim", body, request)
+
+        @app.post("/v1/activities/finish")
+        async def finish(body: dict[str, Any], request: Request):
+            return await call("world.finish_activity", body, request)
+
+        @app.post("/v1/functions/{function_id}/invoke")
+        async def invoke(
+            function_id: str,
+            body: dict[str, Any],
+            request: Request,
+            x_test_response_delay_ms: int | None = Header(default=None, alias="X-Test-Response-Delay-Ms"),
+        ):
+            result = await call(function_id, body, request)
+            if test_mode and x_test_response_delay_ms:
+                await asyncio.sleep(max(0, min(x_test_response_delay_ms, 5000)) / 1000)
+            return result
+
+        @app.get("/v1/changes")
+        async def changes(
+            request: Request,
+            role_id: str | None = None,
+            after: int = Query(default=0, ge=0),
+            limit: int = Query(default=50, ge=1, le=200),
+        ):
+            return await call(
+                "world.get_changes", {**role_args(role_id), "after": after, "limit": limit}, request
+            )
+
+        @app.get("/v1/changes/wait")
+        async def wait(
+            request: Request,
+            role_id: str | None = None,
+            after: int = Query(default=0, ge=0),
+            limit: int = Query(default=50, ge=1, le=200),
+            timeout: float = Query(default=5, ge=0, le=30),
+        ):
+            try:
+                return await gateway.wait(
+                    {**role_args(role_id), "after": after, "limit": limit, "timeout": timeout},
+                    request.headers.get("authorization"),
+                    disconnected=request.is_disconnected,
+                )
+            except Exception as exc:
+                status, payload = error_response(exc)
+                return JSONResponse(payload, status_code=status, headers=_error_headers(status, payload))
+
+        return app
+    except BaseException:
+        if owns_runtime:
+            runtime.close()
+        raise
 
 
 from .asgi_lifecycle import LazyASGI

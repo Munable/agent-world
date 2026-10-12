@@ -2,7 +2,7 @@
 from __future__ import annotations
 import argparse
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 import logging
 import threading
 
@@ -45,9 +45,9 @@ def main():
     parser.add_argument("--db", required=True)
     parser.add_argument("--limit", type=int, default=500)
     args = parser.parse_args()
-    runtime = WorldRuntime(args.db)
-    get_universe_installer(args.world)(runtime, args.universe)
-    print(json.dumps(runtime.apply_retention(args.universe, limit=args.limit)))
+    with closing(WorldRuntime(args.db)) as runtime:
+        get_universe_installer(args.world)(runtime, args.universe)
+        print(json.dumps(runtime.apply_retention(args.universe, limit=args.limit)))
 
 
 if __name__ == "__main__":

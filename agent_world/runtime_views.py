@@ -49,8 +49,8 @@ class RuntimeViews:
             raise ViewResetRequired("unknown observation checkpoint; take a new snapshot")
         return hashlib.sha256(cursor.encode()).hexdigest()
 
-    def _get_view_spec(self, universe, name):
-        definition = self._worlds.get(universe)
+    def _get_view_spec(self, universe, name, *, registry=None):
+        definition = registry.definition if registry is not None else self._worlds.get(universe)
         if definition is None:
             raise ViewNotFound("world does not declare observation views")
         for spec in definition.views:
@@ -62,18 +62,19 @@ class RuntimeViews:
         integer(limit, "limit", 1, 64)
         if not isinstance(after, str) or len(after) > 128 or type(include_schemas) is not bool:
             raise InvalidArguments("invalid view discovery parameters")
-        with self._conn(readonly=True, serialized=True) as c:
-            c.execute("BEGIN")
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True) as c:
+            self._begin_registry_read(c, universe, registry)
             self._admit_viewer_tx(c, universe, role_id, identity_token)
-            self._check_world_tx(c, universe)
-            definition = self._worlds.get(universe)
+            self._check_world_tx(c, universe, registry=registry)
+            definition = registry.definition
             items = []
             for spec in sorted(definition.views if definition else (), key=lambda item: item.name):
                 if role_id is None and not spec.public:
                     continue
                 if spec.name <= after:
                     continue
-                ctx = self._context_tx(c, universe, role_id, "view:" + spec.name, spec.version)
+                ctx = self._context_tx(c, universe, role_id, "view:" + spec.name, spec.version, registry=registry)
                 if spec.visible_to is not None and self._run_user_code(c, spec.visible_to, ctx, read_only=True) is not True:
                     continue
                 item = spec.contract()
@@ -97,24 +98,25 @@ class RuntimeViews:
         """Ordered public cues for the authorized, currently visible subjects of one view."""
         import hmac
         integer(limit, "timeline limit", 1, 100)
-        with self._conn(readonly=True, serialized=True) as c:
-            c.execute("BEGIN")
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True) as c:
+            self._begin_registry_read(c, universe, registry)
             identity = self._admit_actor_tx(c, universe, role_id, identity_token)
             credential = identity["token_id"] if identity else "trusted:" + role_id
-            self._check_world_tx(c, universe)
+            self._check_world_tx(c, universe, registry=registry)
             previous = c.execute("SELECT * FROM view_checkpoints WHERE cursor_hash=?",
                                  (self._view_cursor_hash(cursor),)).fetchone()
             if (previous is None or previous["universe"] != universe or previous["role_id"] != role_id
                     or previous["credential_id"] != credential or previous["expires_at"] <= time.time()
                     or previous["event_seq"] is None):
                 raise ViewResetRequired("timeline checkpoint unavailable; reset the view")
-            definition = self._worlds.get(universe)
+            definition = registry.definition
             if definition is None or definition.version != previous["world_version"]:
                 raise ViewResetRequired("world changed; reset the view")
-            definition, spec = self._get_view_spec(universe, previous["view_name"])
+            definition, spec = self._get_view_spec(universe, previous["view_name"], registry=registry)
             if not spec.timeline or spec.version != previous["view_version"]:
                 raise ViewResetRequired("view does not provide this timeline")
-            ctx = self._context_tx(c, universe, role_id, "view:" + spec.name, spec.version)
+            ctx = self._context_tx(c, universe, role_id, "view:" + spec.name, spec.version, registry=registry)
             args = json.loads(previous["selector_json"])
             if spec.visible_to is not None and self._run_user_code(c, spec.visible_to, ctx, read_only=True) is not True:
                 raise PermissionDenied("view is no longer visible; clear it")
@@ -156,6 +158,15 @@ class RuntimeViews:
             c.execute("BEGIN IMMEDIATE")
             self._admit_actor_tx(c, universe, role_id, identity_token)
             self._check_world_tx(c, universe)
+            if self._worlds.get(universe) is not definition:
+                raise ViewResetRequired("world projection code changed during observation; take a new snapshot")
+            fresh = self._context_tx(c, universe, role_id, "view:" + spec.name, spec.version)
+            if spec.visible_to is not None and self._run_user_code(c, spec.visible_to, fresh, read_only=True) is not True:
+                raise PermissionDenied("view is no longer visible; clear it")
+            if spec.authorize is not None and self._run_user_code(c, spec.authorize, fresh,
+                    json.loads(previous["selector_json"]), read_only=True) is not True:
+                raise PermissionDenied("view access changed; clear it")
+            self._admit_actor_tx(c, universe, role_id, identity_token)
             c.execute("DELETE FROM view_checkpoints WHERE expires_at<=?", (now,))
             c.execute("INSERT INTO view_checkpoints VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                       (self._view_cursor_hash(next_cursor), universe, role_id, credential, spec.name,
@@ -170,42 +181,40 @@ class RuntimeViews:
 
     def _observe_view(self, universe, role_id, view, arguments, *, identity_token, cursor=None):
         # World reads use one read snapshot. Only the bounded derived checkpoint is written afterwards.
+        registry = self._capture_registry(universe)
         with self._conn(readonly=True) as c:
-            c.execute("BEGIN")
-            # Fix code, state authorization and stream specs together, then let
-            # SQLite retain the read snapshot without blocking world writers.
-            with self._lock:
-                identity = self._admit_viewer_tx(c, universe, role_id, identity_token)
-                credential = identity["token_id"] if identity else ("public" if role_id is None else "trusted:" + role_id)
-                self._check_world_tx(c, universe)
-                previous = None
-                if cursor is not None:
-                    digest = self._view_cursor_hash(cursor)
-                    previous = c.execute("SELECT * FROM view_checkpoints WHERE cursor_hash=?", (digest,)).fetchone()
-                    if (previous is None or previous["universe"] != universe or previous["role_id"] != (role_id or "")
-                            or previous["credential_id"] != credential or previous["expires_at"] <= time.time()):
-                        raise ViewResetRequired("observation checkpoint expired or has a different viewer; reset the view")
-                    view, arguments = previous["view_name"], json.loads(previous["selector_json"])
-                identifier(view, "view name")
-                arguments_object(arguments)
-                if previous is not None:
-                    loaded = self._worlds.get(universe)
-                    if loaded is None or loaded.version != previous["world_version"]:
-                        raise ViewResetRequired("world projection changed; take a new snapshot")
-                definition, spec = self._get_view_spec(universe, view)
-                if role_id is None and not spec.public:
-                    raise PermissionDenied("view is not public")
-                if previous is not None and (previous["world_version"] != definition.version or previous["view_version"] != spec.version):
-                    raise ViewResetRequired("view contract changed; take a new snapshot")
-                validate(spec.input_schema, arguments)
-                selector_json = json_text(arguments)
-                ctx = self._context_tx(c, universe, role_id, "view:" + view, spec.version)
-                streams = {}
-                for name in spec.streams:
-                    try:
-                        streams[name] = self._stream_anchor_tx(c, universe, name, role_id, identity_token)
-                    except PermissionDenied:
-                        continue
+            self._begin_registry_read(c, universe, registry)
+            identity = self._admit_viewer_tx(c, universe, role_id, identity_token)
+            credential = identity["token_id"] if identity else ("public" if role_id is None else "trusted:" + role_id)
+            self._check_world_tx(c, universe, registry=registry)
+            previous = None
+            if cursor is not None:
+                digest = self._view_cursor_hash(cursor)
+                previous = c.execute("SELECT * FROM view_checkpoints WHERE cursor_hash=?", (digest,)).fetchone()
+                if (previous is None or previous["universe"] != universe or previous["role_id"] != (role_id or "")
+                        or previous["credential_id"] != credential or previous["expires_at"] <= time.time()):
+                    raise ViewResetRequired("observation checkpoint expired or has a different viewer; reset the view")
+                view, arguments = previous["view_name"], json.loads(previous["selector_json"])
+            identifier(view, "view name")
+            arguments_object(arguments)
+            if previous is not None:
+                loaded = registry.definition
+                if loaded is None or loaded.version != previous["world_version"]:
+                    raise ViewResetRequired("world projection changed; take a new snapshot")
+            definition, spec = self._get_view_spec(universe, view, registry=registry)
+            if role_id is None and not spec.public:
+                raise PermissionDenied("view is not public")
+            if previous is not None and (previous["world_version"] != definition.version or previous["view_version"] != spec.version):
+                raise ViewResetRequired("view contract changed; take a new snapshot")
+            validate(spec.input_schema, arguments)
+            selector_json = json_text(arguments)
+            ctx = self._context_tx(c, universe, role_id, "view:" + view, spec.version, registry=registry)
+            streams = {}
+            for name in spec.streams:
+                try:
+                    streams[name] = self._stream_anchor_tx(c, universe, name, role_id, identity_token, registry=registry)
+                except PermissionDenied:
+                    continue
             if spec.visible_to is not None and self._run_user_code(c, spec.visible_to, ctx, read_only=True) is not True:
                 raise PermissionDenied("view is not available to this viewer; clear it")
             if spec.authorize is not None and self._run_user_code(c, spec.authorize, ctx, json.loads(selector_json), read_only=True) is not True:
@@ -241,15 +250,20 @@ class RuntimeViews:
         else:
             result.update(kind="delta", base_cursor=cursor, delta=diff_view(base, body))
         json_text(result)
-        with self._conn(readonly=reuse, serialized=True) as c:
-            c.execute("BEGIN" if reuse else "BEGIN IMMEDIATE")
+        fresh_registry = self._capture_registry(universe) if reuse else None
+        with self._conn(readonly=reuse, serialized=not reuse) as c:
+            if reuse:
+                self._begin_registry_read(c, universe, fresh_registry)
+            else:
+                c.execute("BEGIN IMMEDIATE")
             self._admit_viewer_tx(c, universe, role_id, identity_token)
-            self._check_world_tx(c, universe)
-            if self._worlds.get(universe) is not definition:
+            self._check_world_tx(c, universe, registry=fresh_registry)
+            loaded = fresh_registry.definition if fresh_registry is not None else self._worlds.get(universe)
+            if loaded is not definition:
                 raise ViewResetRequired("world projection code changed during observation; take a new snapshot")
             # Revocation or a changed view gate must also reject the unchanged
             # cursor path. This is a fresh transaction, not the old read snapshot.
-            fresh = self._context_tx(c, universe, role_id, "view:" + view, spec.version)
+            fresh = self._context_tx(c, universe, role_id, "view:" + view, spec.version, registry=fresh_registry)
             if spec.visible_to is not None and self._run_user_code(c, spec.visible_to, fresh, read_only=True) is not True:
                 raise PermissionDenied("view is no longer available; clear it")
             if spec.authorize is not None and self._run_user_code(c, spec.authorize, fresh, json.loads(selector_json), read_only=True) is not True:

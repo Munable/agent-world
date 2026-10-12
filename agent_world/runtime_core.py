@@ -98,15 +98,63 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         self._worlds: dict[str, Any] = {}
         self._function_options: dict[tuple[str, str, int], dict[str, Any]] = {}
         self._lock = threading.RLock()
-        self._changed = threading.Condition(self._lock)
+        self._registry_lock = threading.RLock()
+        self._read_registries = {}
+        self._changed = threading.Condition()
         self._handlers: dict[tuple[str, str, int], FunctionHandler] = {}
         self._checkpoint_first: dict[str, bool] = {}
-        self._init_db()
+        self._connection_lock = threading.Lock()
+        self._idle_connections = {False: [], True: []}
+        self._connection_idle_limit = 4
+        self._connections_closed = False
+        try:
+            self._init_db()
+        except BaseException:
+            self.close()
+            raise
+
+    def _open_connection(self, readonly):
+        location = Path(self.db_path).as_uri() + "?mode=ro" if readonly else self.db_path
+        conn = sqlite3.connect(location, timeout=5, isolation_level=None, uri=readonly,
+                               cached_statements=0, check_same_thread=False)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            if not readonly:
+                conn.execute("PRAGMA synchronous=FULL")
+            return conn
+        except BaseException:
+            conn.close()
+            raise
+
+    def close(self):
+        """Release idle handles; checked-out handles close when their requests finish."""
+        with self._connection_lock:
+            self._connections_closed = True
+            idle = [conn for pool in self._idle_connections.values() for conn in pool]
+            for pool in self._idle_connections.values():
+                pool.clear()
+        # Closing a WAL handle can perform SQLite IO. Never hold the pool lock
+        # across it, including during shutdown or an overflowing idle return.
+        for conn in idle:
+            conn.close()
 
     @contextmanager
     def _conn(self, *, readonly: bool = False, serialized: bool = False):
-        location = Path(self.db_path).as_uri() + "?mode=ro" if readonly else self.db_path
-        conn = sqlite3.connect(location, timeout=5, isolation_level=None, uri=readonly, cached_statements=0)
+        with self._connection_lock:
+            if self._connections_closed:
+                raise RuntimeError("WorldRuntime is closed")
+            pool = self._idle_connections[readonly]
+            conn = pool.pop() if pool else None
+        if conn is None:
+            conn = self._open_connection(readonly)
+            # close() may run while opening the handle outside the pool lock.
+            with self._connection_lock:
+                shutdown = self._connections_closed
+            if shutdown:
+                conn.close()
+                raise RuntimeError("WorldRuntime is closed")
         closed = False
 
         @contextmanager
@@ -129,9 +177,6 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 raise
 
         try:
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA foreign_keys=ON")
             if serialized:
                 with self._lock:
                     with transaction():
@@ -141,7 +186,22 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                     yield conn
         finally:
             if not closed:
-                conn.close()
+                try:
+                    # Handlers install per-call authorizers. A lease never
+                    # retains them, or an open snapshot, for the next caller.
+                    conn.set_authorizer(None)
+                    if conn.in_transaction:
+                        conn.rollback()
+                except BaseException:
+                    conn.close()
+                    raise
+                with self._connection_lock:
+                    pool = self._idle_connections[readonly]
+                    reusable = not self._connections_closed and len(pool) < self._connection_idle_limit
+                    if reusable:
+                        pool.append(conn)
+                if not reusable:
+                    conn.close()
 
     @staticmethod
     def _enable_wal(c):
@@ -1525,10 +1585,11 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     def describe_world(self, universe, role_id, *, identity_token=None):
         """Return the installed world's stable entry contract for an authorized role."""
         identifier(universe, "universe")
-        with self._conn(readonly=True, serialized=True) as c:
-            c.execute("BEGIN")
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True) as c:
+            self._begin_registry_read(c, universe, registry)
             self._admit_actor_tx(c, universe, role_id, identity_token)
-            self._check_world_tx(c, universe)
+            self._check_world_tx(c, universe, registry=registry)
             row = c.execute(
                 "SELECT manifest_json FROM world_definitions WHERE universe=?", (universe,)
             ).fetchone()

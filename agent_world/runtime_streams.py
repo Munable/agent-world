@@ -23,18 +23,18 @@ class RuntimeStreams:
             PRIMARY KEY(universe,stream,seq), UNIQUE(universe,stream,event_id),
             FOREIGN KEY(commit_seq) REFERENCES world_commits(seq))""")
 
-    def _stream_spec(self, universe, name):
+    def _stream_spec(self, universe, name, *, registry=None):
         identifier(universe, 'universe'); identifier(name, 'stream', 64)
-        definition = self._worlds.get(universe)
+        definition = registry.definition if registry is not None else self._worlds.get(universe)
         if definition is not None:
             for spec in definition.streams:
                 if spec.name == name:
                     return definition, spec
         raise StreamNotFound('stream not declared by this world')
 
-    def _stream_admit_tx(self, c, universe, name, role_id, token):
-        self._check_world_tx(c, universe)
-        definition, spec = self._stream_spec(universe, name)
+    def _stream_admit_tx(self, c, universe, name, role_id, token, *, registry=None):
+        self._check_world_tx(c, universe, registry=registry)
+        definition, spec = self._stream_spec(universe, name, registry=registry)
         if role_id is None:
             if token is not None or not spec.public:
                 raise PermissionDenied('stream requires an authorized viewer')
@@ -43,7 +43,7 @@ class RuntimeStreams:
             identity = self._admit_actor_tx(c, universe, role_id, token)
             credential = identity['token_id'] if identity else 'trusted:' + role_id
         if spec.authorize is not None:
-            ctx = self._context_tx(c, universe, role_id, 'stream:' + name, 1)
+            ctx = self._context_tx(c, universe, role_id, 'stream:' + name, 1, registry=registry)
             if self._run_user_code(c, spec.authorize, ctx, read_only=True) is not True:
                 raise PermissionDenied('stream is not visible to this viewer')
         return definition, spec, credential
@@ -79,21 +79,22 @@ class RuntimeStreams:
         except Exception:
             raise StreamResetRequired('stream cursor expired or does not match viewer/world; reload recent history') from None
 
-    def _stream_anchor_tx(self, c, universe, name, role_id, identity_token):
-        definition, spec, credential = self._stream_admit_tx(c, universe, name, role_id, identity_token)
+    def _stream_anchor_tx(self, c, universe, name, role_id, identity_token, *, registry=None):
+        definition, spec, credential = self._stream_admit_tx(c, universe, name, role_id, identity_token, registry=registry)
         head, floor = self._head_tx(c, universe, name)
         make = lambda seq, mode: self._stream_cursor_tx(c,universe,name,role_id,credential,definition.version,seq,mode)
         return {'cursor': make(head,'live'), 'history_cursor': make(head+1,'history'),
                 'retention_seconds': spec.retention_seconds, 'has_older': head>floor}
 
     def list_streams(self, universe, role_id=None, *, identity_token=None):
-        with self._conn(readonly=True, serialized=True) as c:
-            c.execute('BEGIN'); self._check_world_tx(c,universe)
-            definition = self._worlds.get(universe)
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True) as c:
+            self._begin_registry_read(c,universe,registry); self._check_world_tx(c,universe,registry=registry)
+            definition = registry.definition
             result=[]
             for spec in definition.streams if definition else ():
                 try:
-                    self._stream_admit_tx(c,universe,spec.name,role_id,identity_token)
+                    self._stream_admit_tx(c,universe,spec.name,role_id,identity_token,registry=registry)
                 except PermissionDenied:
                     continue
                 result.append(spec.contract())
@@ -101,9 +102,10 @@ class RuntimeStreams:
 
     def read_stream(self, universe, name, role_id=None, *, identity_token=None, cursor=None, limit=50):
         integer(limit,'stream page size',1,100)
-        with self._conn(readonly=True, serialized=True) as c:
-            c.execute('BEGIN')
-            definition,spec,credential=self._stream_admit_tx(c,universe,name,role_id,identity_token)
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True) as c:
+            self._begin_registry_read(c,universe,registry)
+            definition,spec,credential=self._stream_admit_tx(c,universe,name,role_id,identity_token,registry=registry)
             head,floor=self._head_tx(c,universe,name)
             seq,mode=(head+1,'recent') if cursor is None else self._parse_stream_cursor_tx(c,cursor,universe,name,role_id,credential,definition.version)
             if mode=='live' and (seq<floor or seq>head):
@@ -135,7 +137,7 @@ class RuntimeStreams:
                     'has_older':more if reverse else history_pos>floor+1,
                     'history_truncated': bool(floor and reverse and not more),
                     'observed_at':time.time(), 'delivery':'returned_by_server_not_proof_of_reading'}
-            self._stream_admit_tx(c,universe,name,role_id,identity_token)
+            self._stream_admit_tx(c,universe,name,role_id,identity_token,registry=registry)
             json_text(result)
             return result
 

@@ -74,6 +74,7 @@ def initialize_local(db: Path, private_dir: Path, universe: str = UNIVERSE) -> d
     if world.world_id != WORLD_ID:
         raise ValueError("Unexpected world package identity.")
     previous = os.umask(0o077)
+    runtime = None
     try:
         db.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         private_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -108,7 +109,11 @@ def initialize_local(db: Path, private_dir: Path, universe: str = UNIVERSE) -> d
         os.chmod(db, 0o600)
         return result
     finally:
-        os.umask(previous)
+        try:
+            if runtime is not None:
+                runtime.close()
+        finally:
+            os.umask(previous)
 
 
 def create_participant_application(db: Path, *, universe: str = UNIVERSE, port: int = 8802):

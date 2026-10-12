@@ -131,7 +131,9 @@ class AgentObservationsTests(unittest.TestCase):
         inspection = {"player": {"id": "person", "version": 11},
             "entity": {"id": "target", "version": 21}, "action_options": [
                 {"action": "attach", "input": {"candidates": [{"id": "source", "version": 31,
-                    "preview": {"version_fingerprint": "a" * 64}}]}}]}
+                    "preview": {"version_fingerprint": "a" * 64}}]}}],
+            "action_options_projection": {"scope": "selected_declared_action", "action": "attach",
+                                          "expanded_actions": ["attach"]}}
         read = self.observations.present("grove.inspect", inspection)["observation_id"]
         original = self.observations.get(read)
         changed = self.observations.present("grove.interact", {"result": {}, "execution_readback": {

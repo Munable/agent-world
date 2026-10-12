@@ -5,6 +5,8 @@ import json
 import re
 import sqlite3
 import time
+from dataclasses import dataclass
+from types import MappingProxyType
 
 from .runtime_contracts import (
     identifier,
@@ -40,7 +42,62 @@ from .world_streams import StreamEvent
 from .presentation import PRESENTATION_KIND, validate_cue
 
 
+@dataclass(frozen=True)
+class _ReadRegistry:
+    definition: object
+    handlers: object
+    options: object
+
+
+_EMPTY_READ_REGISTRY = _ReadRegistry(None, MappingProxyType({}), MappingProxyType({}))
+
+
 class RuntimeFunctions:
+    def _capture_registry(self, universe):
+        """Borrow one published code/policy generation without the writer lock."""
+        with self._registry_lock:
+            return self._read_registries.get(universe, _EMPTY_READ_REGISTRY)
+
+    def _begin_registry_read(self, c, universe, registry):
+        """Fix the WAL snapshot before accepting this published code generation.
+
+        Registry changes hold their own lock through SQL commit and publication.
+        The short fence therefore also covers the commit-to-publication window.
+        After this point a reader retains its old complete snapshot, even when a
+        later installation publishes new callbacks with the same contract version.
+        """
+        c.execute("BEGIN")
+        c.execute("SELECT world_id FROM world_definitions WHERE universe=?", (universe,)).fetchone()
+        with self._registry_lock:
+            if self._read_registries.get(universe, _EMPTY_READ_REGISTRY) is not registry:
+                raise WorldVersionMismatch("world code changed while starting the read snapshot; retry with its published package")
+
+    def _publish_registry(self, universe, *, definition=None, specs=None, function=None):
+        """Publish after SQL commit; readers retain the previous complete bundle.
+
+        Callers hold the writer lock and registry fence from SQL commit through
+        publication. Ordinary world writes and user reads do not hold that
+        fence for their handlers or durable commits.
+        """
+        with self._registry_lock:
+            if specs is not None:
+                handlers = {k: v for k, v in self._handlers.items() if k[0] != universe}
+                options = {k: v for k, v in self._function_options.items() if k[0] != universe}
+                for spec in specs:
+                    key = (universe, spec.name, spec.version)
+                    handlers[key] = spec.handler
+                    options[key] = {"authorize": spec.authorize, "visible_to": spec.visible_to}
+                self._handlers, self._function_options = handlers, options
+                self._worlds = {**self._worlds, universe: definition}
+            else:
+                key, handler, policies = function
+                self._handlers = {**self._handlers, key: handler}
+                self._function_options = {**self._function_options, key: policies}
+            snapshot = _ReadRegistry(self._worlds.get(universe),
+                MappingProxyType({k: v for k, v in self._handlers.items() if k[0] == universe}),
+                MappingProxyType({k: MappingProxyType(dict(v)) for k, v in self._function_options.items() if k[0] == universe}))
+            self._read_registries = {**self._read_registries, universe: snapshot}
+
     def _register_function_tx(
         self,
         c,
@@ -135,7 +192,7 @@ class RuntimeFunctions:
         authorize=None,
         visible_to=None,
     ):
-        with self._lock:
+        with self._lock, self._registry_lock:
             with self._conn(serialized=True) as c:
                 c.execute("BEGIN IMMEDIATE")
                 if c.execute("SELECT 1 FROM world_definitions WHERE universe=?", (universe,)).fetchone():
@@ -158,8 +215,8 @@ class RuntimeFunctions:
                     visible_to=visible_to,
                 )
             key = (universe, function_id, version)
-            self._handlers[key] = handler
-            self._function_options[key] = {"authorize": authorize, "visible_to": visible_to}
+            self._publish_registry(universe, function=(key, handler,
+                {"authorize": authorize, "visible_to": visible_to}))
         return desc
 
     def _row_to_descriptor(self, row):
@@ -176,12 +233,16 @@ class RuntimeFunctions:
             desc["output_schema"] = json.loads(row["output_schema_json"])
         return desc
 
-    def _check_world_tx(self, c, universe):
-        definition = self._worlds.get(universe)
-        if definition is not None:
+    def _check_world_tx(self, c, universe, *, registry=None):
+        definition = registry.definition if registry is not None else self._worlds.get(universe)
+        if definition is not None or registry is not None:
             row = c.execute(
                 "SELECT world_id,version FROM world_definitions WHERE universe=?", (universe,)
             ).fetchone()
+            if definition is None:
+                if row is not None:
+                    raise WorldVersionMismatch("loaded function code predates the installed world; rediscover with its published package")
+                return
             if row is None or row["world_id"] != definition.world_id or row["version"] != definition.version:
                 raise WorldVersionMismatch(
                     "loaded world code does not match persisted world version; restart with the matching package"
@@ -199,9 +260,10 @@ class RuntimeFunctions:
         activity_id=None,
         operation_id=None,
         now=None,
+        registry=None,
     ):
-        definition = self._worlds.get(universe)
-        return FunctionContext(
+        definition = registry.definition if registry is not None else self._worlds.get(universe)
+        ctx = FunctionContext(
             c,
             universe,
             role_id,
@@ -218,6 +280,9 @@ class RuntimeFunctions:
             checkpoints_enabled=definition is not None,
             checkpoint_specs=definition.checkpoints if definition else (),
         )
+        if registry is not None:
+            ctx._function_policies = registry.options.get((universe, function_id, version), {})
+        return ctx
 
     def _run_user_code(self, c, callback, *args, read_only=False):
         def guard(action, arg1, arg2, database, trigger):
@@ -329,7 +394,9 @@ class RuntimeFunctions:
                     raise PermissionDenied("world state access denied")
 
     def _authorize_function_tx(self, c, ctx, arguments):
-        options = self._function_options.get((ctx.universe, ctx.function_id, ctx.function_version), {})
+        options = getattr(ctx, "_function_policies", None)
+        if options is None:
+            options = self._function_options.get((ctx.universe, ctx.function_id, ctx.function_version), {})
         policy = options.get("authorize")
         if policy is not None:
             old_access = ctx.access
@@ -343,27 +410,30 @@ class RuntimeFunctions:
 
     def list_functions(self, universe, *, actor_role_id=None, identity_token=None):
         identifier(universe, "universe")
-        with self._conn(readonly=True, serialized=True) as c:
-            c.execute("BEGIN")
-            self._check_world_tx(c, universe)
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True) as c:
+            self._begin_registry_read(c, universe, registry)
+            self._check_world_tx(c, universe, registry=registry)
             identity = None
             if actor_role_id is not None:
                 identity = self._admit_actor_tx(c, universe, actor_role_id, identity_token)
-            catalog = self._catalog_tx(c, universe, actor_role_id)
+            catalog = self._catalog_tx(c, universe, actor_role_id, registry=registry)
             return [d for d in catalog if d["access"] == "read"] if identity and identity["access_mode"] == "observe" else catalog
 
-    def _catalog_tx(self, c, universe, actor_role_id):
+    def _catalog_tx(self, c, universe, actor_role_id, *, registry=None):
+        handlers = registry.handlers if registry is not None else self._handlers
+        policies = registry.options if registry is not None else self._function_options
         rows = c.execute(
             "SELECT * FROM function_registry WHERE universe=? ORDER BY function_id", (universe,)
         ).fetchall()
         result = []
         for row in rows:
             key = (universe, row["function_id"], int(row["version"]))
-            if key not in self._handlers or row["availability"] != "available":
+            if key not in handlers or row["availability"] != "available":
                 continue
-            visible = self._function_options.get(key, {}).get("visible_to")
+            visible = policies.get(key, {}).get("visible_to")
             if actor_role_id is not None and visible is not None:
-                ctx = self._context_tx(c, universe, actor_role_id, key[1], key[2])
+                ctx = self._context_tx(c, universe, actor_role_id, key[1], key[2], registry=registry)
                 if self._run_user_code(c, visible, ctx, read_only=True) is not True:
                     continue
             result.append(self._row_to_descriptor(row))
@@ -457,10 +527,11 @@ class RuntimeFunctions:
         identifier(function_id, "function_id")
         if expected_version is not None:
             integer(expected_version, "expected_version", 1)
-        with self._conn(readonly=True, serialized=True) as c:
-            c.execute("BEGIN")
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True) as c:
+            self._begin_registry_read(c, universe, registry)
             self._admit_actor_tx(c, universe, actor_role_id, identity_token)
-            self._check_world_tx(c, universe)
+            self._check_world_tx(c, universe, registry=registry)
             row = c.execute(
                 "SELECT * FROM function_registry WHERE universe=? AND function_id=?", (universe, function_id)
             ).fetchone()
@@ -477,10 +548,10 @@ class RuntimeFunctions:
             if desc["availability"] != "available":
                 raise FunctionNotFound("function is unavailable")
             validate(desc["input_schema"], arguments)
-            handler = self._handlers.get((universe, function_id, version))
+            handler = registry.handlers.get((universe, function_id, version))
             if handler is None:
                 raise FunctionNotFound("handler is not loaded in this process")
-            ctx = self._context_tx(c, universe, actor_role_id, function_id, version)
+            ctx = self._context_tx(c, universe, actor_role_id, function_id, version, registry=registry)
             self._authorize_function_tx(c, ctx, arguments)
             outcome = self._run_user_code(c, handler, ctx, arguments, read_only=True)
             self._validate_outcome(outcome, desc, read_only=True)

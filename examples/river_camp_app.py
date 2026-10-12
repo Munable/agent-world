@@ -126,41 +126,41 @@ def _provision_local(db_path: Path, private_dir: Path, universe: str, profile: _
     _check_private_directory(db_path.parent)
     private_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     _check_private_directory(private_dir)
-    runtime = WorldRuntime(db_path)
-    participants = {}
-    for label, display in (
-        ("Founder", "Local world steward"), ("GM", "Camp referee"),
-        ("A", "Safety explorer"), ("B", "Material keeper"), ("C", "Route explorer"),
-    ):
-        folder = private_dir / label
-        folder.mkdir(mode=0o700)
-        key_path = folder / "identity.json"
-        key = load_identity(key_path, new_identity=True)
-        challenge = runtime.issue_identity_key_challenge(universe, key.public_key)
-        message = base64.urlsafe_b64decode(challenge["message"] + "=" * (-len(challenge["message"]) % 4))
-        signature = base64.urlsafe_b64encode(key.private.sign(message)).rstrip(b"=").decode("ascii")
-        joined = runtime.exchange_identity_key_challenge(
-            challenge["challenge_id"], signature, expected_universe=universe,
+    with closing(WorldRuntime(db_path)) as runtime:
+        participants = {}
+        for label, display in (
+            ("Founder", "Local world steward"), ("GM", "Camp referee"),
+            ("A", "Safety explorer"), ("B", "Material keeper"), ("C", "Route explorer"),
+        ):
+            folder = private_dir / label
+            folder.mkdir(mode=0o700)
+            key_path = folder / "identity.json"
+            key = load_identity(key_path, new_identity=True)
+            challenge = runtime.issue_identity_key_challenge(universe, key.public_key)
+            message = base64.urlsafe_b64decode(challenge["message"] + "=" * (-len(challenge["message"]) % 4))
+            signature = base64.urlsafe_b64encode(key.private.sign(message)).rstrip(b"=").decode("ascii")
+            joined = runtime.exchange_identity_key_challenge(
+                challenge["challenge_id"], signature, expected_universe=universe,
+            )
+            role_id = joined["role_profile"]["role_id"]
+            runtime.update_role_profile(role_id, display_name=display)
+            runtime.revoke_identity_token(joined["identity"]["token_id"])
+            participants[label] = {"role_id": role_id, "key_path": str(key_path)}
+        definition = make_world(
+            founder_role_id=participants["Founder"]["role_id"],
+            judge_role_ids=(participants["GM"]["role_id"],),
         )
-        role_id = joined["role_profile"]["role_id"]
-        runtime.update_role_profile(role_id, display_name=display)
-        runtime.revoke_identity_token(joined["identity"]["token_id"])
-        participants[label] = {"role_id": role_id, "key_path": str(key_path)}
-    definition = make_world(
-        founder_role_id=participants["Founder"]["role_id"],
-        judge_role_ids=(participants["GM"]["role_id"],),
-    )
-    if definition.manifest()["world_id"] != profile.world_id:
-        raise ValueError("The selected camp factory has an unexpected world_id.")
-    install_world(runtime, universe, definition)
-    result = {"database": str(db_path), "universe": universe, "world_profile": profile.world_profile,
-              "world_id": profile.world_id, "participants": participants}
-    with metadata.open("x", encoding="utf-8") as out:
-        os.chmod(metadata, 0o600)
-        json.dump(result, out, ensure_ascii=False, indent=2)
-        out.write("\n")
-    os.chmod(db_path, 0o600)
-    return result
+        if definition.manifest()["world_id"] != profile.world_id:
+            raise ValueError("The selected camp factory has an unexpected world_id.")
+        install_world(runtime, universe, definition)
+        result = {"database": str(db_path), "universe": universe, "world_profile": profile.world_profile,
+                  "world_id": profile.world_id, "participants": participants}
+        with metadata.open("x", encoding="utf-8") as out:
+            os.chmod(metadata, 0o600)
+            json.dump(result, out, ensure_ascii=False, indent=2)
+            out.write("\n")
+        os.chmod(db_path, 0o600)
+        return result
 
 
 def create_camp_application(db_path: Path, *, universe=None, port=None, mode="river"):
@@ -175,23 +175,27 @@ def create_camp_application(db_path: Path, *, universe=None, port=None, mode="ri
         db_path, world_profile=profile.world_profile, universe=universe,
         public_base_url=f"http://127.0.0.1:{port}",
     )
-    web = files("examples").joinpath("river_camp_web")
+    try:
+        web = files("examples").joinpath("river_camp_web")
 
-    async def home(request):
-        return FileResponse(web.joinpath("index.html"), headers={
-            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer",
-        })
+        async def home(request):
+            return FileResponse(web.joinpath("index.html"), headers={
+                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            })
 
-    @asynccontextmanager
-    async def lifespan(app):
-        async with inner.router.lifespan_context(inner):
-            yield
+        @asynccontextmanager
+        async def lifespan(app):
+            async with inner.router.lifespan_context(inner):
+                yield
 
-    return Starlette(routes=[
-        Route("/", home), Mount("/camp-static", StaticFiles(directory=str(web))),
-        Mount("/", inner),
-    ], lifespan=lifespan)
+        return Starlette(routes=[
+            Route("/", home), Mount("/camp-static", StaticFiles(directory=str(web))),
+            Mount("/", inner),
+        ], lifespan=lifespan)
+    except BaseException:
+        inner.state.runtime.close()
+        raise
 
 
 def main():

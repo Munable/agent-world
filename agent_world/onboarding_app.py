@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import os
 import pathlib
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -92,221 +93,233 @@ def create_onboarding_app(
     identity_ttl_seconds: float | None = None,
 ) -> FastAPI:
     runtime = WorldRuntime(db_path)
-    app = FastAPI(title="Agent World Onboarding", version="0.7")
-    app.state.runtime = runtime
-    app.state.universe = universe
-    add_web_safety(app)
 
-    def require_operator(value: str | None) -> None:
-        if not operator_key:
-            raise HTTPException(
-                status_code=503,
-                detail="operator authorization is not configured",
-            )
-        if value is None:
-            raise HTTPException(status_code=401, detail="operator key required")
-        if not hmac.compare_digest(value.encode(), operator_key.encode()):
-            raise HTTPException(status_code=403, detail="invalid operator key")
+    try:
+        @asynccontextmanager
+        async def lifespan(app):
+            try:
+                yield
+            finally:
+                runtime.close()
 
-    def exchange_url() -> str:
-        if public_base_url:
-            return public_base_url.rstrip("/") + "/v1/join/exchange"
-        return "/v1/join/exchange"
+        app = FastAPI(title="Agent World Onboarding", version="0.7", lifespan=lifespan)
+        app.state.runtime = runtime
+        app.state.universe = universe
+        add_web_safety(app)
 
-    @app.exception_handler(WorldRuntimeError)
-    async def runtime_error(_: Request, exc: WorldRuntimeError):
-        status, payload = error_response(exc)
-        return JSONResponse(payload, status_code=status, headers={"Cache-Control": "no-store"})
-
-    @app.get("/health")
-    def health():
-        return {
-            "ok": True,
-            "version": "0.7",
-            "universe": universe,
-            "operator_configured": bool(operator_key),
-        }
-
-    @app.post("/v1/key-identities/challenges")
-    def issue_identity_key_challenge(body: CreateIdentityKeyChallengeRequest):
-        return runtime.issue_identity_key_challenge(
-            universe,
-            body.public_key,
-            ttl_seconds=body.ttl_seconds,
-            access_mode=body.access_mode,
-        )
-
-    @app.post("/v1/key-identities/exchange")
-    def exchange_identity_key_challenge(body: ExchangeIdentityKeyChallengeRequest):
-        result = runtime.exchange_identity_key_challenge(
-            body.challenge_id,
-            body.signature,
-            expected_universe=universe,
-            identity_ttl_seconds=identity_ttl_seconds,
-        )
-        return {
-            **result,
-            "mcp": {
-                "url": mcp_url,
-                "authorization_scheme": "Bearer",
-                "authorization_token": result["identity"]["token"],
-            },
-            "next": {
-                "tool": "world.bootstrap",
-                "arguments": {},
-            },
-        }
-
-    @app.post("/v1/roles")
-    def create_role(
-        body: CreateRoleRequest,
-        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
-    ):
-        require_operator(x_operator_key)
-        return runtime.create_role(body.display_name, body.avatar_ref)
-
-    @app.get("/v1/roles/{role_id}")
-    def get_role(
-        role_id: str,
-        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
-    ):
-        require_operator(x_operator_key)
-        return runtime.get_role(role_id)
-
-    @app.get("/v1/roles/{role_id}/entry-status")
-    def get_role_entry_status(
-        role_id: str,
-        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
-    ):
-        require_operator(x_operator_key)
-        return runtime.get_role_entry_status(universe, role_id)
-
-    @app.patch("/v1/roles/{role_id}")
-    def update_role(
-        role_id: str,
-        body: UpdateRoleRequest,
-        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
-    ):
-        require_operator(x_operator_key)
-        fields: dict[str, Any] = {}
-        if "display_name" in body.model_fields_set:
-            if body.display_name is None:
+        def require_operator(value: str | None) -> None:
+            if not operator_key:
                 raise HTTPException(
-                    status_code=422,
-                    detail="display_name cannot be null",
+                    status_code=503,
+                    detail="operator authorization is not configured",
                 )
-            fields["display_name"] = body.display_name
-        if "avatar_ref" in body.model_fields_set:
-            fields["avatar_ref"] = body.avatar_ref
-        return runtime.update_role_profile(role_id, **fields)
+            if value is None:
+                raise HTTPException(status_code=401, detail="operator key required")
+            if not hmac.compare_digest(value.encode(), operator_key.encode()):
+                raise HTTPException(status_code=403, detail="invalid operator key")
 
-    @app.post("/v1/roles/{role_id}/status")
-    def set_role_status(
-        role_id: str,
-        body: SetRoleStatusRequest,
-        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
-    ):
-        require_operator(x_operator_key)
-        return runtime.set_role_status(role_id, body.status)
+        def exchange_url() -> str:
+            if public_base_url:
+                return public_base_url.rstrip("/") + "/v1/join/exchange"
+            return "/v1/join/exchange"
 
-    @app.post("/v1/join-tickets")
-    def issue_join_ticket(
-        body: IssueJoinTicketRequest,
-        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
-    ):
-        require_operator(x_operator_key)
-        role = runtime.get_role(body.role_id)
-        issued = runtime.issue_join_ticket(
-            universe,
-            body.role_id,
-            ttl_seconds=body.ttl_seconds,
-        )
-        return {
-            "version": "agent-world-join-v1",
-            "universe": universe,
-            "role_profile": role,
-            "join": {
-                "ticket_id": issued["ticket_id"],
-                "ticket": issued["ticket"],
-                "expires_at": issued["expires_at"],
-                "exchange_url": exchange_url(),
-            },
-            "mcp": {
-                "url": mcp_url,
-                "authorization": "Bearer <identity_token returned by exchange>",
-            },
-            "steps": [
-                "Exchange the join ticket once at join.exchange_url.",
-                "Store the returned identity token as a secret.",
-                "Connect to mcp.url using Authorization: Bearer <identity_token>.",
-                "Call world.bootstrap with no role_id argument.",
-                "Call world.describe and follow entry_instructions before choosing actions.",
-            ],
-        }
+        @app.exception_handler(WorldRuntimeError)
+        async def runtime_error(_: Request, exc: WorldRuntimeError):
+            status, payload = error_response(exc)
+            return JSONResponse(payload, status_code=status, headers={"Cache-Control": "no-store"})
 
-    @app.post("/v1/join/exchange")
-    def exchange_join_ticket(body: ExchangeJoinTicketRequest):
-        identity = runtime.exchange_join_ticket(
-            body.ticket,
-            identity_ttl_seconds=identity_ttl_seconds,
-            expected_universe=universe,
-        )
-        return {
-            "version": "agent-world-identity-v1",
-            "replayed": identity["replayed"],
-            "identity": {
-                "token_id": identity["token_id"],
-                "token": identity["token"],
-                "universe": identity["universe"],
-                "role_id": identity["role_id"],
-                "expires_at": identity["expires_at"],
-            },
-            "role_profile": identity["role_profile"],
-            "mcp": {
-                "url": mcp_url,
-                "authorization_scheme": "Bearer",
-                "authorization_token": identity["token"],
-            },
-            "next": {
-                "tool": "world.bootstrap",
-                "arguments": {},
-            },
-        }
+        @app.get("/health")
+        def health():
+            return {
+                "ok": True,
+                "version": "0.7",
+                "universe": universe,
+                "operator_configured": bool(operator_key),
+            }
 
-    @app.post("/v1/identity-tokens/{token_id}/rotate")
-    def rotate_identity_token(
-        token_id: str,
-        body: RotateTokenRequest,
-        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
-    ):
-        require_operator(x_operator_key)
-        return runtime.rotate_identity_token(
-            token_id,
-            operation_id=body.operation_id,
-            ttl_seconds=body.ttl_seconds,
-            expected_universe=universe,
-        )
+        @app.post("/v1/key-identities/challenges")
+        def issue_identity_key_challenge(body: CreateIdentityKeyChallengeRequest):
+            return runtime.issue_identity_key_challenge(
+                universe,
+                body.public_key,
+                ttl_seconds=body.ttl_seconds,
+                access_mode=body.access_mode,
+            )
 
-    @app.get("/v1/identity-token-rotations/{operation_id}")
-    def get_identity_token_rotation(
-        operation_id: str,
-        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
-    ):
-        require_operator(x_operator_key)
-        return runtime.get_identity_token_rotation(universe, operation_id)
+        @app.post("/v1/key-identities/exchange")
+        def exchange_identity_key_challenge(body: ExchangeIdentityKeyChallengeRequest):
+            result = runtime.exchange_identity_key_challenge(
+                body.challenge_id,
+                body.signature,
+                expected_universe=universe,
+                identity_ttl_seconds=identity_ttl_seconds,
+            )
+            return {
+                **result,
+                "mcp": {
+                    "url": mcp_url,
+                    "authorization_scheme": "Bearer",
+                    "authorization_token": result["identity"]["token"],
+                },
+                "next": {
+                    "tool": "world.bootstrap",
+                    "arguments": {},
+                },
+            }
 
-    @app.delete("/v1/identity-tokens/{token_id}")
-    def revoke_identity_token(
-        token_id: str,
-        x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
-    ):
-        require_operator(x_operator_key)
-        changed = runtime.revoke_identity_token(token_id, expected_universe=universe)
-        if not changed:
-            raise InvalidIdentityToken("identity token not found or already revoked")
-        return {"revoked": True, "token_id": token_id}
+        @app.post("/v1/roles")
+        def create_role(
+            body: CreateRoleRequest,
+            x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+        ):
+            require_operator(x_operator_key)
+            return runtime.create_role(body.display_name, body.avatar_ref)
 
-    return app
+        @app.get("/v1/roles/{role_id}")
+        def get_role(
+            role_id: str,
+            x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+        ):
+            require_operator(x_operator_key)
+            return runtime.get_role(role_id)
+
+        @app.get("/v1/roles/{role_id}/entry-status")
+        def get_role_entry_status(
+            role_id: str,
+            x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+        ):
+            require_operator(x_operator_key)
+            return runtime.get_role_entry_status(universe, role_id)
+
+        @app.patch("/v1/roles/{role_id}")
+        def update_role(
+            role_id: str,
+            body: UpdateRoleRequest,
+            x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+        ):
+            require_operator(x_operator_key)
+            fields: dict[str, Any] = {}
+            if "display_name" in body.model_fields_set:
+                if body.display_name is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="display_name cannot be null",
+                    )
+                fields["display_name"] = body.display_name
+            if "avatar_ref" in body.model_fields_set:
+                fields["avatar_ref"] = body.avatar_ref
+            return runtime.update_role_profile(role_id, **fields)
+
+        @app.post("/v1/roles/{role_id}/status")
+        def set_role_status(
+            role_id: str,
+            body: SetRoleStatusRequest,
+            x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+        ):
+            require_operator(x_operator_key)
+            return runtime.set_role_status(role_id, body.status)
+
+        @app.post("/v1/join-tickets")
+        def issue_join_ticket(
+            body: IssueJoinTicketRequest,
+            x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+        ):
+            require_operator(x_operator_key)
+            role = runtime.get_role(body.role_id)
+            issued = runtime.issue_join_ticket(
+                universe,
+                body.role_id,
+                ttl_seconds=body.ttl_seconds,
+            )
+            return {
+                "version": "agent-world-join-v1",
+                "universe": universe,
+                "role_profile": role,
+                "join": {
+                    "ticket_id": issued["ticket_id"],
+                    "ticket": issued["ticket"],
+                    "expires_at": issued["expires_at"],
+                    "exchange_url": exchange_url(),
+                },
+                "mcp": {
+                    "url": mcp_url,
+                    "authorization": "Bearer <identity_token returned by exchange>",
+                },
+                "steps": [
+                    "Exchange the join ticket once at join.exchange_url.",
+                    "Store the returned identity token as a secret.",
+                    "Connect to mcp.url using Authorization: Bearer <identity_token>.",
+                    "Call world.bootstrap with no role_id argument.",
+                    "Call world.describe and follow entry_instructions before choosing actions.",
+                ],
+            }
+
+        @app.post("/v1/join/exchange")
+        def exchange_join_ticket(body: ExchangeJoinTicketRequest):
+            identity = runtime.exchange_join_ticket(
+                body.ticket,
+                identity_ttl_seconds=identity_ttl_seconds,
+                expected_universe=universe,
+            )
+            return {
+                "version": "agent-world-identity-v1",
+                "replayed": identity["replayed"],
+                "identity": {
+                    "token_id": identity["token_id"],
+                    "token": identity["token"],
+                    "universe": identity["universe"],
+                    "role_id": identity["role_id"],
+                    "expires_at": identity["expires_at"],
+                },
+                "role_profile": identity["role_profile"],
+                "mcp": {
+                    "url": mcp_url,
+                    "authorization_scheme": "Bearer",
+                    "authorization_token": identity["token"],
+                },
+                "next": {
+                    "tool": "world.bootstrap",
+                    "arguments": {},
+                },
+            }
+
+        @app.post("/v1/identity-tokens/{token_id}/rotate")
+        def rotate_identity_token(
+            token_id: str,
+            body: RotateTokenRequest,
+            x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+        ):
+            require_operator(x_operator_key)
+            return runtime.rotate_identity_token(
+                token_id,
+                operation_id=body.operation_id,
+                ttl_seconds=body.ttl_seconds,
+                expected_universe=universe,
+            )
+
+        @app.get("/v1/identity-token-rotations/{operation_id}")
+        def get_identity_token_rotation(
+            operation_id: str,
+            x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+        ):
+            require_operator(x_operator_key)
+            return runtime.get_identity_token_rotation(universe, operation_id)
+
+        @app.delete("/v1/identity-tokens/{token_id}")
+        def revoke_identity_token(
+            token_id: str,
+            x_operator_key: str | None = Header(default=None, alias="X-Operator-Key"),
+        ):
+            require_operator(x_operator_key)
+            changed = runtime.revoke_identity_token(token_id, expected_universe=universe)
+            if not changed:
+                raise InvalidIdentityToken("identity token not found or already revoked")
+            return {"revoked": True, "token_id": token_id}
+
+        return app
+    except BaseException:
+        runtime.close()
+        raise
 
 
 from .asgi_lifecycle import LazyASGI

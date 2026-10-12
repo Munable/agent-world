@@ -171,7 +171,9 @@ class WorldDefinition:
 
 
 def install_world(runtime, universe: str, definition: WorldDefinition) -> None:
-    with runtime._lock:
+    # Rare code/policy changes fence SQL commit and bundle publication together.
+    # Ordinary world writes keep using only the existing transaction lock.
+    with runtime._lock, runtime._registry_lock:
         return _install_world_locked(runtime, universe, definition)
 
 
@@ -275,13 +277,7 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
             )
             runtime._bind_timer_transitions_tx(c, transitions, commit_seq)
     # Publish handlers only after the entire migration and registry transaction commits.
-    runtime._handlers = {k: v for k, v in runtime._handlers.items() if k[0] != universe}
-    runtime._function_options = {k: v for k, v in runtime._function_options.items() if k[0] != universe}
-    for spec in definition.functions:
-        key = (universe, spec.name, spec.version)
-        runtime._handlers[key] = spec.handler
-        runtime._function_options[key] = {"authorize": spec.authorize, "visible_to": spec.visible_to}
-    runtime._worlds[universe] = definition
+    runtime._publish_registry(universe, definition=definition, specs=definition.functions)
 
 
 def definition_from_installer(
