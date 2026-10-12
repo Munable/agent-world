@@ -6,7 +6,7 @@ from agent_world.simulation import matter as sm
 from agent_world.simulation.programs import evaluate, plan_reaction
 from agent_world.simulation.registry import MaterialDef
 from . import model as m
-from .definitions import (DEFINITIONS, REGISTRY, bind_material, registry_for, retain_material_snapshots,
+from .definitions import (REGISTRY, bind_material, registry_for, retain_material_snapshots, read_definition,
                           contained_quantities, reaction_available_quantities, mixture_capacity,
                           execution_semantics)
 
@@ -26,7 +26,7 @@ def _material(ctx, identity):
     if identity in REGISTRY.materials:
         return REGISTRY.materials[identity]
     reference, symbol = identity.split("#", 1)
-    source = ctx.get_state(DEFINITIONS, reference)
+    source = read_definition(ctx, reference)
     if not source or symbol not in source["definition"]["materials"]:
         raise RuleViolation("接触反应引用的原始材料定义缺失。")
     execution_semantics(source)
@@ -85,7 +85,7 @@ def installed_candidates(ctx, entity):
     """
     found = {}
     for reference in installed_references(entity):
-        record = ctx.get_state(DEFINITIONS, reference)
+        record = read_definition(ctx, reference)
         if not record:
             raise RuleViolation("已安装交互的不可变定义缺失；原材料保留。")
         execution_semantics(record)
@@ -113,7 +113,7 @@ def candidates(ctx, entity, *, possible=None):
         reference, symbol = identity.split("#", 1)
         carried.setdefault(reference, set()).add(symbol)
     for reference, symbols in carried.items():
-        record = ctx.get_state(DEFINITIONS, reference)
+        record = read_definition(ctx, reference)
         if not record:
             continue
         execution_semantics(record)
@@ -325,7 +325,7 @@ def projection(ctx, entity, *, detailed=False):
               "products_available": "next_logical_step", "unit": "u",
               "process_is_history": True, "installed_definitions": list(references)}
     result["installed_interactions"] = [{"definition_ref": ref,
-        "name": ctx.get_state(DEFINITIONS, ref)["definition"]["name"]}
+        "name": read_definition(ctx, ref)["definition"]["name"]}
         for ref in references]
     if detailed:
         available = reaction_available_quantities(entity, symbolic=False)
@@ -354,7 +354,7 @@ def projection(ctx, entity, *, detailed=False):
         result["reactions"] = reactions
         history = []
         for application in (process or {}).get("last_applications", []):
-            record = ctx.get_state(DEFINITIONS, application["definition_ref"])
+            record = read_definition(ctx, application["definition_ref"])
             rule = next(row for row in record["definition"]["contact_reactions"] if row["id"] == application["rule_id"])
             effect = rule["reaction"]
             history.append({**application, "material_names": {_identity(record["definition"], application["definition_ref"], key):

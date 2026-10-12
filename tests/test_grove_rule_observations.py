@@ -137,8 +137,8 @@ class AutomaticWorldObservationTests(unittest.TestCase):
     def inspect(self, target, actor="A"):
         return self.h.read(actor, "grove.inspect", {"entity_id": target})["entity"]["creative"]
 
-    def test_step_preflight_rejects_without_advancing_clock_or_consuming_events(self):
-        from agent_world.worlds.shared_grove import model as m, events
+    def test_domain_preflight_rejects_without_applying_or_consuming_events(self):
+        from agent_world.worlds.shared_grove import model as m, events, domains
         from unittest.mock import patch
         h = self.h
         target = self.source()
@@ -146,14 +146,16 @@ class AutomaticWorldObservationTests(unittest.TestCase):
         entity = h.entity(target)
         journal = h.world.get_state("w", m.META, "creative_events")
         queue = h.world.get_state("w", events.PENDING, target)
-        h.time.return_value += 1
         with patch("agent_world.worlds.shared_grove.creative._instance_capacity_budget",
                    return_value={"valid": False}):
-            result = h.world.run_due_timers("w")
-        self.assertEqual(result["count"], 1)
-        self.assertEqual([row["status"] for row in result["processed"]], ["rejected"])
-        self.assertEqual([row["error_code"] for row in result["processed"]], ["RuleViolation"])
-        self.assertEqual(h.world.get_state("w", m.META, "clock"), clock)
+            h.ticks(1)
+        current = h.world.get_state("w", m.META, "clock")["value"]
+        self.assertEqual(current["completed_sequence"], clock["value"]["sequence"] + 1)
+        owner = h.world.get_state("w", domains.OWNERS, target)["value"]
+        domain = h.world.get_state("w", domains.DOMAINS, owner["domain_id"])["value"]
+        self.assertEqual(domain["status"], "pressure")
+        self.assertEqual(domain["last_applied_tick"], clock["value"]["sequence"])
+        self.assertEqual(domain["failure"]["code"], "CapacityPressure")
         self.assertEqual(h.entity(target), entity)
         self.assertEqual(h.world.get_state("w", m.META, "creative_events"), journal)
         self.assertEqual(h.world.get_state("w", events.PENDING, target), queue)
@@ -201,7 +203,19 @@ class AutomaticWorldObservationTests(unittest.TestCase):
         # A failed optional forward-capacity estimate cannot stop the real
         # rule, replace saved evidence, or stamp a fictitious latest step.
         from unittest.mock import patch
-        with patch.object(creative, "_check_instance_capacity", side_effect=RuleViolation("前瞻容量不可用")):
+        from agent_world.worlds.shared_grove.domains import CapacityPressure
+        original_capacity = creative._check_instance_capacity
+
+        def optional_capacity_unavailable(ctx, ids, *, reject=True):
+            if not reject:
+                # Inject the failure inside the optional helper, preserving
+                # its real downgrade path and the formal step admission.
+                with patch.object(creative, "_unchanged_step_boundary", return_value=None), patch.object(
+                        creative, "_instance_capacity_budget", side_effect=CapacityPressure("前瞻容量不可用")):
+                    return original_capacity(ctx, ids, reject=False)
+            return original_capacity(ctx, ids, reject=reject)
+
+        with patch.object(creative, "_check_instance_capacity", side_effect=optional_capacity_unavailable):
             h.ticks(1)
         self.assertEqual(h.entity(target)["state"]["program"]["fields"]["lamp"], 1)
         self.assertEqual(self.inspect(target)["automatic_field_change"], second)

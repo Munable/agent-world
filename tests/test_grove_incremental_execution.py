@@ -163,24 +163,37 @@ class IncrementalExecutionContracts(unittest.TestCase):
         self.assertEqual(reserved["entity_writes"], ["one", "two"])
         self.assertGreaterEqual(reserved["changes"], 6)  # two members/queues/new facts
 
-    def test_event_reservation_includes_transitive_wake_without_running_it(self):
+    def test_event_reservation_wakes_direct_receiver_until_its_source_changes(self):
         self.ctx.set_state(DEFINITIONS, "fixed", {"definition": declaration(event=True)})
-        self.ctx.set_state(DEFINITIONS, "passive", {"definition": declaration()})
+        follower_definition = compile_program({"key": "follower", "name": "来源读取器", "version": 1,
+            "types": {"tag": {"name": "来源读取器", "body_material": "stone", "cost": {"stone": 1},
+                "fields": {"seen": {"type": "boolean", "default": False}},
+                "rules": [{"id": "read_notice", "phase": "after", "when": True,
+                    "effects": [{"op": "set", "field": "seen",
+                        "value": {"object": {"id": "notice", "field": "intact"}}}]}]}}},
+            materials=REGISTRY.materials, body_materials=("wood", "stone", "cloth"), max_custom_materials=4)
+        self.ctx.set_state(DEFINITIONS, "passive", {"definition": follower_definition})
         for eid, reference in (("notice", "fixed"), ("follower", "passive")):
             current = entity(eid)
             current["state"]["program"]["definition_ref"] = reference
             self.save(current)
             execution.register(self.ctx, current)
             self.settle(eid)
-        member = execution.get_member(self.ctx, "follower")
-        member["sources"] = ["follower", "notice"]
-        execution._set(self.ctx, execution.MEMBERS, "follower", member)
-        execution._set(self.ctx, execution.SOURCES, "notice", ["follower", "notice"])
         before = deepcopy(self.ctx.rows)
         reserved = execution.reservation(self.ctx, [], max_facts=1, consumer_ids=["notice"])
-        self.assertEqual(reserved["possible_members"], ["follower", "notice"])
+        self.assertEqual(reserved["possible_members"], ["notice"])
         self.assertEqual(reserved["entity_writes"], ["notice"])
         self.assertEqual(self.ctx.rows, before)
+        follower_before = execution.get_member(self.ctx, "follower")
+        events.record_event(self.ctx, action="use", entity_id="notice")
+        self.assertEqual(activity.meta_get(self.ctx, "creative_instances", []), ["notice"])
+        self.assertEqual(execution.get_member(self.ctx, "follower"), follower_before)
+        self.assertEqual(events.consumer_status(self.ctx, "notice")["pending_count"], 1)
+        notice = m.get_entity(self.ctx, "notice")
+        notice["state"]["program"]["fields"]["seen"] = True
+        self.save(notice)
+        execution.reconcile(self.ctx, notice)
+        self.assertEqual(activity.meta_get(self.ctx, "creative_instances", []), ["follower", "notice"])
 
     def test_possible_physical_wake_reads_non_event_watchers_only_from_sources(self):
         for eid in ("source", "follower"):
@@ -207,7 +220,7 @@ class IncrementalExecutionContracts(unittest.TestCase):
             execution.register(self.ctx, current)
             active.append(current["id"])
         before = deepcopy(self.ctx.rows)
-        with self.assertRaisesRegex(RuleViolation, "成员并集超过32"):
+        with self.assertRaisesRegex(RuleViolation, "成员写入并集超过32"):
             execution.reservation(self.ctx, active, max_facts=1, consumer_ids=["notice"])
         self.assertEqual(self.ctx.rows, before)
 
@@ -266,6 +279,104 @@ class IncrementalExecutionContracts(unittest.TestCase):
         self.assertEqual(self.ctx.rows, before)
         commit_frame.assert_not_called()
 
+    def test_watcher_already_in_physical_forest_needs_no_second_closure(self):
+        from agent_world.worlds.shared_grove import creative
+        watcher = entity("watcher")
+        self.save(watcher)
+        execution.register(self.ctx, watcher)
+        self.settle("watcher")
+        source = entity("source")
+        source["state"].pop("program")
+        self.save(source)
+        execution._set(self.ctx, execution.SOURCES, "source", ["watcher"])
+        before = deepcopy(self.ctx.rows)
+        with patch.object(activity, "physical_closure", return_value=(
+                {"source": source, "watcher": watcher}, {"chunk_0_0"})) as forest:
+            objects, chunks, members, admitted = creative._capacity_domain(self.ctx, [])
+        forest.assert_called_once()
+        self.assertEqual(set(objects), {"source", "watcher"})
+        self.assertEqual(chunks, {"chunk_0_0"})
+        self.assertEqual(members, ["watcher"])
+        self.assertEqual(set(admitted), {"watcher"})
+        self.assertEqual(self.ctx.rows, before)
+
+    def test_present_watcher_with_missing_child_still_closes_its_whole_forest(self):
+        from agent_world.worlds.shared_grove import creative
+        watcher = entity("watcher")
+        child = entity("child")
+        child.update(x=None, y=None, container=watcher["id"],
+                     physical_parent={"id": watcher["id"], "relation": "contained"})
+        child["state"].pop("program")
+        watcher["state"]["contents"] = [child["id"]]
+        self.save(watcher)
+        self.save(child)
+        execution.register(self.ctx, watcher)
+        self.settle("watcher")
+        source = entity("source")
+        source["state"].pop("program")
+        self.save(source)
+        execution._set(self.ctx, execution.SOURCES, "source", ["watcher"])
+        initial = {"source": source, "watcher": watcher}
+        full = {**initial, "child": child}
+        before = deepcopy(self.ctx.rows)
+        with patch.object(activity, "physical_closure", side_effect=[
+                (initial, {"chunk_0_0"}), (full, {"chunk_0_0"})]) as forest:
+            objects, _, _, _ = creative._capacity_domain(self.ctx, [])
+        self.assertEqual(forest.call_count, 2)
+        self.assertEqual(set(objects), {"source", "watcher", "child"})
+        self.assertEqual(self.ctx.rows, before)
+
+    def _full_ground_chunk(self):
+        roots = []
+        for index in range(m.MAX_CHUNK_ENTITIES):
+            current = entity("ground_"+str(index), x=index % 16)
+            current["state"]["burning"] = False
+            self.save(current)
+            roots.append(current)
+        self.ctx.set_state(m.CHUNKS, "chunk_0_0", {
+            "id": "chunk_0_0", "cx": 0, "cy": 0, "tiles": ["grass"]*256,
+            "entity_ids": [root["id"] for root in roots], "player_ids": [], "safe_zones": []})
+        return roots
+
+    def test_existing_zero_release_root_does_not_repermit_unrelated_neighbors(self):
+        roots = self._full_ground_chunk()
+        root = roots[0]
+        activity.meta_set(self.ctx, "physical_active", [root["id"]])
+        before = deepcopy(self.ctx.rows)
+        self.ctx.reads.clear()
+        with patch.object(m, "can_place_ground", wraps=m.can_place_ground) as placement:
+            objects, chunks = activity.physical_closure(self.ctx)
+        placement.assert_not_called()
+        self.assertEqual(set(objects), {root["id"]})
+        self.assertEqual(chunks, {"chunk_0_0"})
+        self.assertNotIn((m.ENTITIES, roots[1]["id"]), self.ctx.reads)
+        self.assertEqual(self.ctx.rows, before)
+
+    def test_new_root_still_rejects_a_full_public_chunk(self):
+        self._full_ground_chunk()
+        root = entity("new_root")
+        root["state"]["burning"] = False
+        before = deepcopy(self.ctx.rows)
+        with self.assertRaisesRegex(RuleViolation, "公共地面空间"):
+            activity.physical_closure(self.ctx, [root])
+        self.assertEqual(self.ctx.rows, before)
+
+    def test_existing_burning_root_still_reserves_public_child_release(self):
+        root = self._full_ground_chunk()[0]
+        child = entity("contained_child")
+        child.update(x=None, y=None, container=root["id"],
+                     physical_parent={"id": root["id"], "relation": "contained"})
+        root["state"].update(contents=[child["id"]], burning=True)
+        root["matter"] = [{"id": "body", "material": "wood", "quantity": 8,
+                          "slot": "body", "role": "structural", "burning": True}]
+        self.save(root)
+        self.save(child)
+        activity.meta_set(self.ctx, "physical_active", [root["id"]])
+        before = deepcopy(self.ctx.rows)
+        with self.assertRaisesRegex(RuleViolation, "公共地面空间"):
+            activity.physical_closure(self.ctx)
+        self.assertEqual(self.ctx.rows, before)
+
     def test_legal_pending_prefix_reserves_immutable_bodies_at_their_actual_size(self):
         self.ctx.set_state(DEFINITIONS, "fixed", {"definition": declaration(event=True)})
         current = entity("tag")
@@ -316,6 +427,10 @@ class LocalEventRetentionContracts(unittest.TestCase):
 
     def save(self, value):
         self.ctx.set_state(m.ENTITIES, value["id"], value)
+
+    def settle(self, eid):
+        execution.begin_step(self.ctx, [eid])
+        execution.after_step(self.ctx, [eid])
 
     def test_shared_fact_and_saved_cursor_preserve_newer_input(self):
         a, b = entity("a"), entity("b")
@@ -392,6 +507,51 @@ class LocalEventRetentionContracts(unittest.TestCase):
         self.assertEqual(activity.meta_get(self.ctx, "creative_instances", []), [])
         self.assertEqual(execution.get_member(self.ctx, "a")["status"], "error")
         self.assertEqual(events.consumer_status(self.ctx, "a")["pending_count"], 1)
+
+    def test_failed_continuous_mechanical_member_settles_motion_once_then_sleeps(self):
+        current = entity("failed_machine")
+        program = current["state"]["program"]
+        program["process"]["status"] = "error"
+        program["mechanical"] = {"position": 2, "speed": 1, "available_torque": 20,
+                                  "status": "running", "enabled": False, "energy": 2}
+        self.save(current)
+        execution._set(self.ctx, execution.MEMBERS, current["id"], {
+            "entity_id": current["id"], "sources": [current["id"]], "chunks": [],
+            "status": "active", "sleep_safe": False, "continuous": True, "wake_revision": 1})
+        activity.meta_set(self.ctx, "creative_instances", [current["id"]])
+        self.settle(current["id"])
+        self.assertEqual(activity.meta_get(self.ctx, "creative_instances"), [current["id"]])
+        # The next real rule pass stops motion without undoing its solved
+        # position or spent energy; these scheduling facts then admit sleep.
+        program["mechanical"].update(speed=0, available_torque=0, status="program_error", enabled=False)
+        self.save(current)
+        self.settle(current["id"])
+        self.assertEqual(activity.meta_get(self.ctx, "creative_instances"), [])
+        saved = m.get_entity(self.ctx, current["id"])["state"]["program"]
+        self.assertEqual((saved["mechanical"]["position"], saved["mechanical"]["energy"]), (2, 2))
+        self.assertEqual(execution.get_member(self.ctx, current["id"])["status"], "error")
+
+    def test_failed_member_keeps_finite_contract_and_recorder_until_they_settle(self):
+        current = entity("failed_timed")
+        program = current["state"]["program"]
+        program["process"]["status"] = "error"
+        program["contract"] = {"status": "active", "deadline_tick": 3}
+        program["recorder"] = {"active": True, "until_tick": 4}
+        self.save(current)
+        execution._set(self.ctx, execution.MEMBERS, current["id"], {
+            "entity_id": current["id"], "sources": [current["id"]], "chunks": [],
+            "status": "active", "sleep_safe": False, "continuous": True, "wake_revision": 1})
+        activity.meta_set(self.ctx, "creative_instances", [current["id"]])
+        self.settle(current["id"])
+        self.assertEqual(activity.meta_get(self.ctx, "creative_instances"), [current["id"]])
+        program["contract"]["status"] = "failed"
+        self.save(current)
+        self.settle(current["id"])
+        self.assertEqual(activity.meta_get(self.ctx, "creative_instances"), [current["id"]])
+        program["recorder"]["active"] = False
+        self.save(current)
+        self.settle(current["id"])
+        self.assertEqual(activity.meta_get(self.ctx, "creative_instances"), [])
 
 
 if __name__ == "__main__":

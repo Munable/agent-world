@@ -6,7 +6,7 @@ import unittest
 from agent_world import FunctionOutcome, FunctionSpec, WorldRuntime
 from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.simulation import matter as sm
-from agent_world.worlds.shared_grove import contact, world_facts
+from agent_world.worlds.shared_grove import contact, world_facts, domains
 from agent_world.worlds.shared_grove import model as m
 from agent_world.worlds.shared_grove.definitions import DEFINITIONS, execution_semantics, material_uses
 from agent_world.worlds.shared_grove.world import make_world
@@ -35,6 +35,13 @@ class LocalInteractionTests(unittest.TestCase):
         source = h.item("A", "木柴")["id"]
         lot = next(row for row in h.entity(source)["matter"] if row["material"] == "wood")
         h.interact("A", target, "transfer", item_id=source, lot_id=lot["id"], amount=amount)
+
+    def physical_active(self, target):
+        owner = self.h.world.get_state("w", domains.OWNERS, target)
+        if not owner or not owner["exists"]:
+            return []
+        domain = self.h.world.get_state("w", domains.DOMAINS, owner["value"]["domain_id"])
+        return domain["value"]["physical_active"]
 
     def test_installation_is_local_no_stock_and_other_actor_can_continue_public_result(self):
         h = self.h
@@ -97,7 +104,7 @@ class LocalInteractionTests(unittest.TestCase):
         self.assertEqual(first, again)
         with self.assertRaises(StateConflict):
             h.call("A", "grove.interact", args)
-        self.assertNotIn(target, h.world.get_state("w", m.META, "physical_active")["value"])
+        self.assertNotIn(target, self.physical_active(target))
         observed = h.read("A", "grove.inspect", {"entity_id": target})["entity"]["simulation"]["contact"]
         self.assertEqual(observed["candidate_count"], 0)
         self.assertEqual(observed["installed_interactions"][0]["definition_ref"], reference)
@@ -105,10 +112,10 @@ class LocalInteractionTests(unittest.TestCase):
         h.world.install_world("w", make_world())
         self.assertEqual(h.entity(target)["state"]["interaction_definitions"], [reference])
         self.add_wood(target)
-        self.assertIn(target, h.world.get_state("w", m.META, "physical_active")["value"])
+        self.assertIn(target, self.physical_active(target))
         h.ticks(1)
         self.assertEqual(sm.quantity(h.entity(target), "cloth", "contained"), 1)
-        self.assertNotIn(target, h.world.get_state("w", m.META, "physical_active")["value"])
+        self.assertNotIn(target, self.physical_active(target))
 
     def test_candidate_budget_rejects_complete_install_without_adding_partial_reference(self):
         h = self.h

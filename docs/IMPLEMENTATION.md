@@ -1,12 +1,12 @@
 # L6：当前实现
 
-复核：2026-10-10。本文描述当前分支实际代码与公开表面。当前源码范围、模型实验和交付检查统一见[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)，旧交付结果保留原范围。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-10-12。本文描述当前分支候选代码与公开表面，不记录本轮验收结论。当前源码范围、模型实验和交付检查统一见[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)，旧交付结果保留原范围。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
-持续创生轮候选为0.31.0／world32／state22。`simulation.execution`从原canonical定义推导读写与休眠计划；`shared_grove.execution`只维护持久成员、依赖索引和活动前沿，`events`保存局部消费者待处理序列与共享事件事实，`commit`仍是同一事务中统一落库的拥有者。`world_facts`提供固定定义来源的公开字段，`interactions`处理正式容器安装／卸载，`contact`沿有限安装引用和真实材料身份发现候选；不扫描所有发表定义。运行中的原世界尚未因此自动升级，新源码的验收范围见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
+分域计算与容量恢复轮候选为0.32.0／world33／state23：package 版本来自`pyproject.toml`和`agent_world.__version__`，世界及状态版本来自`shared_grove.world.make_world()`。`simulation.execution`继续从原canonical定义推导读写与休眠计划；`shared_grove.execution`维护持久成员、依赖索引和活动前沿。新增`domains`保存真实相互作用域及局部活动索引，`scheduling`持久协调同一公共逻辑轮，Runtime current checkpoint分别提交协调与域工作。`events`保存局部消费者待处理序列与共享事件事实，`commit`仍拥有单次行动或单个域任务的候选批次和统一落库。运行实例与新源码的范围分别记录，见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
 
-- Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，候选版本0.31.0。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
+- Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，候选版本0.32.0。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
@@ -15,6 +15,8 @@
 - Runtime 本身不调用模型，也没有用户 Agent 执行器。
 
 普通 HTTP 每次从请求 bearer 解析主体，不依赖上一段模型对话。当前 MCP 使用 `stateless_http=False`，`BearerIdentityMiddleware.sessions` 在进程内绑定 session_id 与 token_id；服务重启后客户端重新 initialize，但不改变用户身份或持久世界事实。组合入口对同一 SQLite 路径分别创建 HTTP、MCP 与产品页 Runtime，规则注册、锁及等待唤醒在进程内，世界状态和回执以数据库为准。这些通信／执行状态不保存用户的提示词、目的、私人记忆或模型推理进度。
+
+**以下0.20—0.22段落为历史工作轮说明，不是0.32候选验收结果。**
 
 0.20 新增 [River Camp 有界世界实验](WORLD_EXPERIMENT.md)：自由意图、裁判、本人接受和资源后果由独立 World Definition 消费现有 SDK。组合应用公开身份默认签发 24 小时凭据；没有新增 Runtime 原语或托管推理循环。
 
@@ -41,7 +43,8 @@
 | View | `ViewSpec` / `view_checkpoints`。 |
 | Sync Position | recipient event seq、signed stream cursor、opaque view checkpoint。 |
 | Control Lease | `activities` + `activity_claims`。 |
-| Scheduled Effect | `TimerSpec` / `world_timers` / `timer_transitions`，执行 actor 为 `system:timer`。 |
+| Scheduled Effect（one-shot） | `TimerSpec` / `world_timers` / `timer_transitions`，执行 actor 为 `system:timer`；原ID、回执和重试合同不变。 |
+| Scheduled Effect（current checkpoint） | `CheckpointSpec` / `world_checkpoints`，执行 actor 为 `system:checkpoint`；按key保存当前代次和最新精确回执，不为每代写Operation或one-shot Timer。 |
 | Presentation | `PresentationCue`，event kind 为 `world.presentation`。 |
 
 ## Identity 当前状态
@@ -62,7 +65,7 @@ schema 8 的新增 nullable access_mode 列保留原数据库 pending／used v1 
 
 同一 Principal 的所有 control Credential 都有这些管理权限；外部宿主的 control 不低于浏览器 control，没有仅人类 owner 的管理边界。observe 能读取获准内容，不能写／重放写、改档案或管理凭据。用户可保留私钥并为每个宿主独立签发 bearer；凭据管理本身不能签发新 bearer，持有原私钥者仍能重新进入。宿主密钥保管及同 UID 进程隔离不是 Runtime 提供的保证。
 
-世界 Command 在提交前解析有效 Credential，将 `actor_role_id / credential_id` 与结果一起写入原 Receipt；可信进程内调用和 timer 的 credential_id 为 null。同 Principal 换 bearer 查回执或重放保留原提交来源，旧 Receipt 不补填来源字段。Operation identity 仍为 `universe + actor_role_id + operation_id`，不是每 Credential 各自命名空间。事件、共享流和 journal 继续保存 Principal 归因，未新增事件级宿主作者；credential_id 不定义 AgentIdentity。
+世界 Command 在提交前解析有效 Credential，将 `actor_role_id / credential_id` 与结果一起写入原 Receipt；可信进程内调用、timer和current checkpoint的credential_id为null。同 Principal 换 bearer 查回执或重放保留原提交来源，旧 Receipt 不补填来源字段。Operation identity 仍为 `universe + actor_role_id + operation_id`，不是每 Credential 各自命名空间。事件、共享流和 journal 继续保存 Principal 归因，未新增事件级宿主作者；credential_id 不定义 AgentIdentity。
 
 **密钥丢失没有恢复路径。** 没有原私钥就不能再次完成该公钥的持钥证明；旧本地档案可以作为历史事实保留，但对该用户而言成为不可再控制的死档。Runtime 当前没有、也不计划隐式提供密钥恢复、换钥继承或人工“认人”接口。
 
@@ -79,7 +82,8 @@ schema 8 的新增 nullable access_mode 列保留原数据库 pending／used v1 
 | Control Lease | `runtime_activities.py` |
 | View | `runtime_views.py`、`world_views.py` |
 | Shared Stream | `runtime_streams.py`、`world_streams.py` |
-| Scheduled Effect | `runtime_timers.py`、`world_timers.py`、`timer_worker.py` |
+| one-shot Scheduled Effect | `runtime_timers.py`、`world_timers.py` |
+| current checkpoint与共用worker | `runtime_checkpoints.py`、`world_checkpoints.py`、`runtime_timers.py`、`timer_worker.py` |
 | Retention | `retention.py`、`maintenance.py` |
 | 作者 SDK 声明 | `world_sdk.py`、`world_types.py` |
 | Presentation | `presentation.py`、`web/stream-client.js` |
@@ -90,7 +94,7 @@ schema 8 的新增 nullable access_mode 列保留原数据库 pending／used v1 
 | Web 安全／诊断 | `web_safety.py`、`diagnostics.py` |
 | Web prototype | `agent_world/web/` |
 | 可选可信模拟辅助层 | `agent_world/simulation/`：注册、组合编译、材料批次、固定阶段快照与类型化效果；中立 Runtime 不依赖它。 |
-| 当前官方世界 | `agent_world/worlds/shared_grove/`：材料参数与构造数据、准入、动作、过程、公共内容接续。 |
+| 当前官方世界 | `agent_world/worlds/shared_grove/`：材料参数与构造数据、准入、动作、过程、公共内容接续；`domains.py`拥有相互作用域和活动索引，`scheduling.py`拥有公共逻辑轮与分页协调。 |
 | 自己的Agent／玩家页面 | `grove_connector.py`、`agent_world/grove_web/`；私人意图本机持久化，显式目标驱动委托，服务器描述驱动真实操作。 |
 | 仓库内 demo/test consumers | `demo_universe.py`、`commons_universe.py`、`world_zero_universe.py`、`examples/` |
 
@@ -98,7 +102,27 @@ schema 8 的新增 nullable access_mode 列保留原数据库 pending／used v1 
 
 ### Shared Grove 候选实现
 
-材料接触工作轮的现行范围与证据见 [SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)。world24／state15／definition_publish4／rule_catalog2／rule_action5；state15沿原 `resume_clock` 正式交接唯一兼容计时任务，保留tick、期限和全部世界状态，不追赶墙钟。`contact.py`按真实同槽canonical材料读取原不可变包，保留物性快照的有限身份，不增加全局可执行规则池。编译器增加可选顶层接触声明，旧定义缺此字段时保持原canonical形状／摘要；MaterialDef不承载执行代码。旧 authored reaction→mechanical→after 后，接触共用剩余输入，输出下一步参与；统一账户及候选批次提交。普通容器入料和树关系变动沿共同commit准入，预留4材料、8批次、8KiB、可达产物及子容器破裂后可能到达父容器的液体组合，完整步共享164事实／512写／2MiB。默认不逐容器写账户；私有和合盖内部接触只保存授权可读事实，不发布内部过程。网页与Agent详细读取当前条件、缺口和历史实际数量；场景仅保留安全摘要及按需inspect入口。
+world33／state23保留原不可变定义、真实材料数量、归属、空间操作、规则阶段和候选提交责任。`world_facts`提供固定定义来源的公开字段，`interactions`处理正式容器安装／卸载，`contact`沿有限安装引用和真实材料身份发现候选；不扫描所有发表定义。Agent和真人继续通过相同正式动作改变同一世界，Runtime不承担模型推理。
+
+| 当前责任 | 实现位置与边界 |
+| --- | --- |
+| 相互作用域 | `domains.py`点查对象、可变读写依赖、容器关系、材料／机械关联及过程覆盖，保存域目录、归属、区域、ready／dirty索引；共享区块本身不等于同一作用域。 |
+| 公共逻辑轮 | `scheduling.py`保存目标tick、准备／计算阶段、目录high-water、公共事件cutoff、分页游标和当前待结算页；每页最多8个域，不在协调事务中计算所有域。 |
+| 局部规则计算 | `processes.advance_domain`在已接纳的完整域中推进物理和声明规则；`simulation`保留具体机制的快照、效果、冲突与数量语义，`commit`统一提交该次候选批次。 |
+| 持久执行与回执 | Runtime的`grove.frame`与`grove.domain.<id>` current checkpoint独立提交；保存当前任务状态、代次水位和最新精确回执，协调器读取真实终态，不能仅等世界回调。 |
+| 公共事实接续 | `events.py`保存共享事件和局部待处理序列；新帧固定事件cutoff，失败不提交材料变化或消费者游标，已有不可变事件事实不充当可变依赖边。 |
+
+原来世界级32个活跃声明参与者的限制改为完整相互作用域的有限预算；域之间通过ready目录分页推进，不把世界人口或同一区块所有物件直接当作执行前沿。域内的对象、材料、区块、事实及Runtime单事务预算仍保留，不能把一个不可分的超大相互作用图强行拆开后声称结果等价。
+
+容量或规则任务失败只回滚该域任务，已提交的其他域后果保留。协调器将该域记为pressure／fault并移出ready，关闭其本帧工作；没有实际计算时`last_applied_tick`、物质及事件消费游标保持。`last_tick`用于帧协调，不证明物质已推进。实际输入或关系发生变化后重验并重新唤醒，当前帧中新唤醒的域从下一目标tick计算一次，不补做暂停期间的步数。当前地图和inspect读取域状态、最后实际计算步和错误事实。
+
+world33不再为每个物理步创建新的one-shot Timer。`grove.frame`协调公共轮，`grove.domain.<id>`执行局部工作；这些任务复用同一Runtime事务与原TimerWorker。已有one-shot Timer及其历史转移、用户Operation、已发表定义和物件状态保留；state23迁移只交接调度与建立域索引，不重建现场或把历史文字转换成物件。
+
+停机期间不推进世界。`WorldDefinition.resume(ctx)`在同一个Runtime首次接入已有世界时，于受管安装事务内接续保存的调度；新initialize和同Runtime重复安装不再执行该hook。迁移已恢复工作时以`ctx.world_resumed=True`避免再次恢复。Shared Grove的`resume`继续未完成帧的未完成工作，已关闭帧保留步数并安排当前时间之后的下一步，不追赶停机墙钟；普通队列迟到不再被当作停机丢弃。公共合同期限仍按同一个`clock.sequence`，不引入每域独立时间。
+
+### 历史材料接触与0.26组合执行阶段
+
+以下保留原工作轮说明与证据范围，不作为world33的当前调度说明；当前范围见 [SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)。当时world24／state15／definition_publish4／rule_catalog2／rule_action5；state15沿原 `resume_clock` 正式交接唯一兼容计时任务，保留tick、期限和全部世界状态，不追赶墙钟。`contact.py`按真实同槽canonical材料读取原不可变包，保留物性快照的有限身份，不增加全局可执行规则池。编译器增加可选顶层接触声明，旧定义缺此字段时保持原canonical形状／摘要；MaterialDef不承载执行代码。旧 authored reaction→mechanical→after 后，接触共用剩余输入，输出下一步参与；统一账户及候选批次提交。普通容器入料和树关系变动沿共同commit准入，预留4材料、8批次、8KiB、可达产物及子容器破裂后可能到达父容器的液体组合，完整步共享164事实／512写／2MiB。默认不逐容器写账户；私有和合盖内部接触只保存授权可读事实，不发布内部过程。网页与Agent详细读取当前条件、缺口和历史实际数量；场景仅保留安全摘要及按需inspect入口。
 
 **0.26.0候选引擎已冻结，普通玩家组合执行完成，自主完整体验未通过。** 新表面为 `grove.rule_catalog / grove.definition_publish / grove.definition_read / grove.rule_action / grove.control_grant / grove.control_revoke / grove.control_status`。规则目录、定义读取和控制状态提供获准事实；合法声明发表自动完成，无人工审批；控制委托与收回作用于同一角色的未来行动，不改变 Ed25519 身份、世界本地档案或凭据体系。
 
@@ -145,30 +169,39 @@ Conversation/Message 的参与者授权、Post/Reply 的公开读取、Operation
 
 ## 当前 SQLite schema
 
-当前 schema `user_version` 为 8；新增 `identity_key_challenges.access_mode` 并保留已有 v1 证明。主要表：
+当前 schema `user_version` 为8；原`identity_key_challenges.access_mode`保留已有v1证明，current checkpoint表、回收元数据和索引以加法方式初始化，不改用户Operation身份。主要表：
 
 - identity / entry：`roles`、`identity_keys`、`identity_key_challenges`、`role_world_presence`、`identity_tokens`、`join_tickets`、`identity_token_rotations`。
 - world registry：`world_definitions`、`function_registry`。
 - current state / operations：`world_state`、`operations`。
-- commit journal：`world_commits`、`state_changes`、`state_history_floors`。
+- commit journal：`world_commits`、`state_changes`、`state_history_floors`；新checkpoint来源另有`checkpoint_history_floors`和`world_commits.checkpoint_reclaimable`。
 - recipient events：`events`、`event_floors`。
 - coordination：`activities`、`activity_claims`。
 - timers：`world_timers`、`timer_transitions`。
+- current checkpoint：`world_checkpoints`，每个`universe + checkpoint_key`一行，保存当前generation、completed_through、最新终态代次／精确Receipt／commit引用及当前状态。
 - shared streams：`stream_events`、`stream_heads`。
 - view cache：`view_checkpoints`。
 - runtime metadata：`runtime_meta`。
 
 表名只是 L6 存储选择，不等于 L3 概念必须一一对应。
 
+current checkpoint代次不写入`operations`、`world_timers`或`timer_transitions`；其状态、后果及最新回执仍与`source='checkpoint'`的commit在同一事务提交。`latest_commit_seq`引用、共享流和原timer转移保护仍需引用的commit；引用释放在自身事务更新回收资格，不依赖下次worker恰好看到那次释放。live state及各类commit引用有独立索引，待执行队列按索引取有限候选。
+
 ## 当前公共 Python SDK
 
-`agent_world.__all__` 当前导出：WorldRuntime、WorldDefinition、FunctionSpec、StateRule、RetentionPolicy、PresentationCue、StreamSpec、StreamEvent、ViewSpec、TimerSpec、TimerInvocation、RetryTimer、FunctionContext、FunctionOutcome、EventSpec。
+`agent_world.__all__` 当前导出：WorldRuntime、WorldDefinition、FunctionSpec、StateRule、RetentionPolicy、PresentationCue、StreamSpec、StreamEvent、ViewSpec、TimerSpec、TimerInvocation、CheckpointSpec、CheckpointInvocation、RetryTimer、FunctionContext、FunctionOutcome、EventSpec。
 
-包根通过 `__getattr__` 按需从原模块导入并缓存这 15 个对象，`TYPE_CHECKING` 保留静态类型导入；`__all__`、star import、原对象同一性与未知名称的 `AttributeError` 行为保持。单独导入 `agent_world.connect` 不再预加载 Runtime／jsonschema 依赖图。延迟导出不创建代理对象、不更改 Identity／Credential 语义，也不启动服务。
+包根通过 `__getattr__` 按需从原模块导入并缓存这些对象，`TYPE_CHECKING` 保留静态类型导入；`__all__`、star import、原对象同一性与未知名称的 `AttributeError` 行为保持。单独导入 `agent_world.connect` 不再预加载 Runtime／jsonschema 依赖图。延迟导出不创建代理对象、不更改 Identity／Credential 语义，也不启动服务。
 
-WorldDefinition 当前可声明 functions、state rules、state authorizer、bootstrap/initialize/migrations、views、timers、retention、streams 等；这些可选能力不是所有世界的必选模型。FunctionContext 对世界作者暴露受管 state / timer / stream / role 等 helper，不再暴露公共数据库连接。
+WorldDefinition当前可声明functions、state rules、state authorizer、state forget authorizer、bootstrap/initialize/migrations/resume、views、timers、checkpoints、retention、streams等；这些可选能力不是所有世界的必选模型。FunctionContext对世界作者暴露受管state／timer／checkpoint／stream／role等helper，不再暴露公共数据库连接。
 
-### 当前本地验证与有界模型工具
+`CheckpointSpec`声明同步handler及其输入／可选输出schema、版本、授权和有限重试参数；handler以`(ctx, args)`执行，通过`ctx.checkpoint`读取本代调用信息。`schedule_checkpoint(..., expected_generation=...)`严格排下一代，`get_checkpoint`可读取本事务已排的后继，`cancel_checkpoint`取消当前任务；当前正在执行的同代不能自行取消。提交重新检查代次，旧代缺失的精确回执为`CheckpointReceiptExpired`，不能据此换编号重做。`get_checkpoint_receipt()`默认返回最新终态回执，可能仍是上一代失败；当前代结论必须核对generation和status。watermark表示旧代已被处理或取代，不等于旧代全部成功执行。
+
+`forget_state(scope, key, expected_version=...)`只物理回收已删除、版本匹配且受信`state_forget_authorizer`明确允许的墓碑；授权回调只读，普通handler不能直接删除state。Shared Grove仅允许已保存序号水位证明永不复用的公共事件事实key。墓碑回收不制造第二次事实删除、版本或history，物件、身份、不可变定义和用户回执不沿此路径清理。
+
+### 历史本地验证与有界模型工具
+
+以下保留0.21等历史宿主和验证基础设施说明；不将其模型结果或检查数量套用到当前候选。
 
 0.21 新阶段仅执行四个有界语义宿主，前三组六条有效输出、第四组超时；真实执行封存旧 7f helper。超时暴露 watchdog 与主动回收重叠，当前修复将主动停止汇入关闭 SIGALRM 后的唯一有界回收，保留权限失败诊断；新 helper 2da199da 的 28 项离线回归通过，不声称再次真实推理验证。新语义 runner 的真实阶段仍封存执行摘要并拒绝新源码复用，fixture 单独封存当前 helper。下述十次 GM／A／B 与清理记录属于原初桥实验，预算不重置。
 
@@ -218,23 +251,31 @@ HTTP Runtime API 与 MCP 均拒绝重复 Authorization 请求头；已鉴权的�
 | result / event batch budget | 256 KiB；单次 outcome 最多 128 events |
 | managed state changes per commit | 512；历史前后内容合计 2 MiB |
 | history page payload | 1 MiB |
-| WorldDefinition declarations | views ≤64，timer handlers ≤64，streams ≤64 |
+| WorldDefinition declarations | views ≤64，timer handlers ≤64，checkpoint handlers ≤64，streams ≤64 |
 | View | ≤256 entities、≤64 resources、总 payload 96 KiB |
 | View checkpoint | TTL 300s；每 viewer/universe 16；全局 1024 |
 | Stream | read page ≤100 events，page payload 192 KiB；cursor lifetime 86400s |
 | Stream declaration | retention ≤365d，max_events ≤100000 |
 | wait | 当前最大 30s |
-| timer commands per transaction | 32 |
-| timer argument payload | 64 KiB |
-| pending timers per universe | 10000 |
-| timer retries | max_attempts 1..10，retry delay ≤86400s |
+| timer＋checkpoint commands per transaction | 合计32 |
+| timer／checkpoint argument payload | 各64 KiB |
+| pending one-shot timers per universe | 10000；不是current checkpoint的全世界活动上限 |
+| timer／checkpoint retries | max_attempts 1..10，retry delay ≤86400s；仅显式RetryTimer有限重试 |
+| Runtime due-work sweep | limit 1..100；可选monotonic deadline在任务之间让出 |
+| Shared Grove域调度 | 每页8域；单个完整域的32声明参与者等预算仍有限 |
 | retention config | event/history seconds ≤315360000；row limits ≤10000000 |
 
 这些数值可能同时具有“当前公共行为限制”和“实现容量保护”两种性质。修改前需要判断是否会改变 L4 客户端可观察合同。
 
 ## worker 与 maintenance
 
-组合入口默认 timer poll interval 1s，可关闭；TimerWorker 默认 batch 25，interval 最低 0.05s。Retention maintenance 在世界声明 retention 或 streams 时启动后台线程，当前每 30s sweep 一次。
+组合入口默认timer poll interval为1s，可关闭；TimerWorker默认batch为25，interval最低0.05s。one-shot仍使用单次sweep开始时固定的候选和原timer_id身份，后续排出的one-shot需下一次sweep；current checkpoint可以在同次sweep的有限预算中执行后继，按持久ready顺序及工作类别公平取候选。
+
+原worker每个时间片最多4个批次、100个选中工作，并以约100ms的monotonic deadline在各任务之间检查；已到期工作让出约10ms再续，空闲按`next_due_work`的索引队首时间等待、不超过配置interval，异常至多约100ms后复查。单个可信规则调用不能硬抢占，不能把该时间片写成绝对响应保证。每个任务都有独立事务，worker不为整个逻辑帧持有写锁，也不调用模型。
+
+定义checkpoints的世界在原TimerWorker内接入新checkpoint历史回收，按实际checkpoint提交、state change和stream event数量给出有界预算；先释放过期stream引用，再回收checkpoint journal，空闲每30s有限补扫。默认旧提交超过近期4096个checkpoint commits的数量窗口或86400秒时具备回收资格，最新精确回执及其他实际引用继续保护。旧用户`operations`和精确Receipt不清理，checkpoint回收只删除新checkpoint来源的旧commit和关联`state_changes`；独立completeness floor明确标记历史已不完整，不伪装完整历史或降低同步revision。最新世界状态与代次水位不清理，因此删观察历史不重新执行旧代。
+
+既有retention maintenance仍在世界声明retention或streams时按原方式运行，每30s有界维护；没有为分域计算新增另一层后台线程。普通retention policy及one-shot历史契约保持原责任。
 
 也可以分别运行 timer worker 和 retention maintenance CLI。导入 package 本身不会安装常驻系统服务。
 
@@ -246,7 +287,7 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 
 ## World Package 数据访问边界
 
-`FunctionContext` 不再公开数据库连接。World Package 的受支持数据路径是声明过的 state / timer / stream / role helper；实现内部仍持有私有 transaction handle 以完成这些操作，但它不是 SDK 合同。
+`FunctionContext`不再公开数据库连接。World Package的受支持数据路径是声明过的state／timer／checkpoint／stream／role helper；实现内部仍持有私有transaction handle以完成这些操作，但它不是SDK合同。checkpoint排队、取消和state墓碑回收分别通过受管API，不能绕过代次、CAS、权限或提交预算。
 
 `FunctionContext.get_role` 按 `identity_keys / identity_tokens / join_tickets / role_world_presence` 中的现有 world 关联限制档案读取：已关联其他 universe、未关联当前 universe 的 role 返回 `RoleNotFound`。完全没有 world 关联的可信 SDK 角色仍可读取；`WorldRuntime.get_role` 保留 operator 全局查询能力。这里不新增成员表，也不把 world 关联当作具体动作授权。
 
@@ -279,7 +320,7 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 ## 当前明确实现差距
 
 1. **外部系统副作用交付没有通用合同。** Runtime store 内部提交不能自动覆盖支付、第三方 API、文件等外部写入；尚无统一 outbox / delivery / compensation 能力。
-2. **0.26.0冻结候选的自主完整体验未通过。** 普通模拟人已完成真实Agent定义的混合器合同组合执行，但B接受后推理超时，Agent未自行完成全目标；运行中交付条件、旧开桥／不变持续运动拒绝仍未完成现场验证。分层检查与最终包probe不覆盖这些体验及验证缺口。
+2. **历史0.26.0冻结候选的自主完整体验未通过。** 普通模拟人已完成真实Agent定义的混合器合同组合执行，但B接受后推理超时，Agent未自行完成全目标；运行中交付条件、旧开桥／不变持续运动拒绝仍未完成现场验证。分层检查与最终包probe不覆盖这些体验及验证缺口。后续候选的实际范围与结论仅在[当前研发记录](SHARED_GROVE.md#当前研发记录)接续。
 3. **完整美术上传未实现。** 当前方向为既有本地皮肤和新对象共享默认比例fallback，不宣称已建立上传系统。
 
 共同事项模型、第三方／群众公裁等仍属于 [OPEN_DESIGN](OPEN_DESIGN.md) 的产品／领域设计问题，不能因为“尚未实现”就假装它们已经被证明应该进入 Runtime。

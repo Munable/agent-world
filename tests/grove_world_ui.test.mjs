@@ -6,6 +6,15 @@ const source=readFileSync(new URL('../agent_world/grove_web/grove-world-ui.js',i
 const ui=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 {
+  const pending=ui.domainObservationLines({execution_domain:{state:'calculating',last_applied_tick:4,pending_target_tick:5}});
+  assert(pending.some(line=>line.includes('正在结算世界时刻 5')));
+  assert(pending.some(line=>line.includes('世界时刻 4')));
+  const pressure=ui.domainObservationLines({execution_domain:{state:'pressure',last_applied_tick:4}});
+  assert(pressure.some(line=>line.includes('自动变化已暂停')&&line.includes('其他地方继续运行')));
+  assert.deepEqual(ui.domainObservationLines({}),[]);
+}
+
+{
   assert.equal(ui.installedInteractionDefinition({definition:{contact_reactions:[{activation:'material'}]}}),false);
   assert.equal(ui.installedInteractionDefinition({definition:{contact_reactions:[{}]}}),false);
   assert.equal(ui.installedInteractionDefinition({definition:{contact_reactions:[{activation:'installed'}]}}),true);

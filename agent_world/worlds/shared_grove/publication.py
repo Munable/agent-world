@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from agent_world import FunctionOutcome, FunctionSpec, StateRule
 from agent_world.errors import RuleViolation
 from agent_world.simulation import matter as sm
@@ -14,9 +15,42 @@ DIRECTORY = "grove.creative.directory"
 AUTHORS = "grove.creative.author."
 SERIES = "grove.creative.series."
 PUBLISHERS = "grove.creative.publishers"
+AUTHOR_STORAGE = "grove.creative.author_storage"
 LEDGER_KEY = "publication_storage"
 MAX_PUBLISH_PER_STEP = 8
 _KEY = re.compile(r"[a-z][a-z0-9_.-]{0,79}\Z")
+
+
+@dataclass(frozen=True)
+class PublicationBudget:
+    """Trusted deployment allowance, never a player's publication argument."""
+    payload_bytes: int = 16 * 1024 * 1024
+    definitions: int = 4096
+
+    def contract(self):
+        if (type(self.payload_bytes) is not int or type(self.definitions) is not int
+                or self.payload_bytes < 0 or self.definitions < 0):
+            raise ValueError("publication storage limits must be nonnegative integers")
+        return {"payload_bytes": self.payload_bytes, "definitions": self.definitions,
+                "scope": "per_author", "charge": "definition+version_mapping+three_directory_summaries",
+                "excludes": "keys, SQLite pages/indexes, receipts, history, WAL and backups",
+                "on_exhaustion": "reject_new_publication_preserve_existing_definitions"}
+
+
+DEFAULT_BUDGET = PublicationBudget()
+
+
+def bind_budget(handler, budget):
+    """The world factory pins one trusted allowance to its ordinary handlers."""
+    budget.contract()
+    def wrapped(ctx, args):
+        ctx._grove_publication_budget = budget
+        return handler(ctx, args)
+    return wrapped
+
+
+def budget_contract(ctx):
+    return getattr(ctx, "_grove_publication_budget", DEFAULT_BUDGET).contract()
 
 
 def _save(ctx, scope, key, value):
@@ -35,17 +69,58 @@ def _scope(author=None, key=None):
     return AUTHORS + digest if key is None else SERIES + hashlib.sha256((author + ":" + key).encode()).hexdigest()
 
 
-def _index(ctx, reference, record, sequence):
+def _summary(reference, record):
     definition = record["definition"]
-    summary = {"definition_ref": reference, "author": record["author"], "key": definition["key"],
+    return {"definition_ref": reference, "author": record["author"], "key": definition["key"],
                "name": definition["name"], "version": definition["version"], "hash": record["hash"],
                "published_tick": record["published_tick"], "type_ids": list(definition["types"])}
+
+
+def _publication_bytes(reference, record):
+    return (sm.encoded_size(record) + sm.encoded_size({"definition_ref": reference})
+            + 3 * sm.encoded_size(_summary(reference, record)))
+
+
+def _index(ctx, reference, record, sequence):
+    definition = record["definition"]
+    summary = _summary(reference, record)
     key = f"{(1 << 63) - 1 - sequence:019d}:{reference}"
     sizes = 0
     for scope in (DIRECTORY, _scope(record["author"]), _scope(record["author"], definition["key"])):
         _save(ctx, scope, key, summary)
         sizes += sm.encoded_size(summary)
     return sizes
+
+
+def author_storage(ctx, author, *, budget=None):
+    """Backfill only one old author's seek-paged catalogue, bounded by allowance.
+
+    Existing over-budget contents remain intact. For a large old catalogue the
+    first proven excess is enough to refuse growth; its displayed count/bytes
+    are explicitly a lower bound, rather than a fabricated total.
+    """
+    budget = budget or getattr(ctx, "_grove_publication_budget", DEFAULT_BUDGET)
+    usage = ctx.get_state(AUTHOR_STORAGE, author)
+    if usage is not None:
+        return usage
+    usage = {"definitions_count": 0, "payload_bytes": 0, "complete": True}
+    cursor = None
+    while True:
+        page = ctx.list_state(_scope(author), limit=64, after=cursor, order="key")
+        for item in page["items"]:
+            summary = item["value"]
+            reference = summary["definition_ref"]
+            record = ctx.get_state(DEFINITIONS, reference)
+            if record is None or record["author"] != author or _summary(reference, record) != summary:
+                raise RuleViolation("作者发表目录与不可变正文不一致；新发表未提交，原内容保留。")
+            usage["definitions_count"] += 1
+            usage["payload_bytes"] += _publication_bytes(reference, record)
+            if usage["definitions_count"] > budget.definitions or usage["payload_bytes"] > budget.payload_bytes:
+                usage["complete"] = False
+                return usage
+        if not page["has_more"]:
+            return usage
+        cursor = page["next_cursor"]
 
 
 def migrate_catalog(ctx):
@@ -82,14 +157,23 @@ def publish(ctx, reference, version_key, record):
     used = rate["used"] if rate["tick"] == tick else 0
     if used >= MAX_PUBLISH_PER_STEP:
         raise RuleViolation("本作者当前逻辑步的新发表预算已用完；原定义和物件继续可用。")
+    budget = getattr(ctx, "_grove_publication_budget", DEFAULT_BUDGET)
+    usage = author_storage(ctx, ctx.actor_role_id, budget=budget)
+    charge = _publication_bytes(reference, record)
+    if (not usage["complete"] or usage["definitions_count"]+1 > budget.definitions
+            or usage["payload_bytes"]+charge > budget.payload_bytes):
+        raise RuleViolation("本作者发表存储预算已满；原定义、版本引用和物件保留，只拒绝新发表。")
     version = {"definition_ref": reference}
     _save(ctx, DEFINITIONS, reference, record)
     _save(ctx, VERSIONS, version_key, version)
     ledger["sequence"] += 1
     ledger["definitions_count"] += 1
-    ledger["payload_bytes"] += sm.encoded_size(record) + sm.encoded_size(version) + _index(ctx, reference, record, ledger["sequence"])
+    _index(ctx, reference, record, ledger["sequence"])
+    ledger["payload_bytes"] += charge
     _save(ctx, m.META, LEDGER_KEY, ledger)
     _save(ctx, PUBLISHERS, ctx.actor_role_id, {"tick": tick, "used": used + 1})
+    _save(ctx, AUTHOR_STORAGE, ctx.actor_role_id, {"definitions_count": usage["definitions_count"]+1,
+        "payload_bytes": usage["payload_bytes"]+charge, "complete": True})
 
 
 def definition_list(ctx, args):
@@ -101,7 +185,9 @@ def definition_list(ctx, args):
         "order": "publication_sequence_desc", "storage": ctx.get_state(m.META, LEDGER_KEY, {}),
         "complete": not page["has_more"], "last_page": not page["has_more"], "scope": "one_query_page",
         "storage_scope": "whole_world_publications",
-        "storage_meaning": "累计定义、版本映射及三类目录摘要的JSON负载字节；不含key、SQLite、回执、journal、WAL或备份，不是磁盘占用或终生配额。"})
+        "storage_meaning": "累计定义、版本映射及三类目录摘要的JSON负载字节；不含key、SQLite、回执、journal、WAL或备份，不是总磁盘占用。",
+        "author_storage": author_storage(ctx, ctx.actor_role_id) if ctx.actor_role_id else None,
+        "publication_budget": budget_contract(ctx)})
 
 
 def specs():
@@ -115,4 +201,4 @@ def specs():
 
 
 def state_specs():
-    return tuple(StateRule(scope, "", {}, history="metadata") for scope in (DIRECTORY, AUTHORS, SERIES, PUBLISHERS))
+    return tuple(StateRule(scope, "", {}, history="metadata") for scope in (DIRECTORY, AUTHORS, SERIES, PUBLISHERS, AUTHOR_STORAGE))

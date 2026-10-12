@@ -24,15 +24,48 @@ class RetentionPolicy:
 
 class RuntimeRetention:
     @staticmethod
+    def _init_checkpoint_retention_tx(c):
+        """Current eligibility follows references in their own transactions.
+
+        This index excludes millions of current receipts. A released old
+        latest receipt, or an expired stream reference, becomes discoverable
+        again even if the worker crashes before its maintenance pass.
+        """
+        c.execute("CREATE INDEX IF NOT EXISTS idx_checkpoint_reclaimable "
+                  "ON world_commits(universe,checkpoint_reclaimable,seq) WHERE source='checkpoint'")
+        c.execute("""CREATE TRIGGER IF NOT EXISTS aw_checkpoint_reference_insert AFTER INSERT ON world_checkpoints
+            WHEN NEW.latest_commit_seq IS NOT NULL BEGIN
+            UPDATE world_commits SET checkpoint_reclaimable=0
+                WHERE seq=NEW.latest_commit_seq AND source='checkpoint'; END""")
+        c.execute("""CREATE TRIGGER IF NOT EXISTS aw_checkpoint_reference_update AFTER UPDATE OF latest_commit_seq ON world_checkpoints
+            WHEN OLD.latest_commit_seq IS NOT NEW.latest_commit_seq BEGIN
+            UPDATE world_commits SET checkpoint_reclaimable=1
+                WHERE seq=OLD.latest_commit_seq AND source='checkpoint';
+            UPDATE world_commits SET checkpoint_reclaimable=0
+                WHERE seq=NEW.latest_commit_seq AND source='checkpoint'; END""")
+        c.execute("""CREATE TRIGGER IF NOT EXISTS aw_checkpoint_reference_delete AFTER DELETE ON world_checkpoints
+            WHEN OLD.latest_commit_seq IS NOT NULL BEGIN
+            UPDATE world_commits SET checkpoint_reclaimable=1
+                WHERE seq=OLD.latest_commit_seq AND source='checkpoint'; END""")
+        c.execute("""CREATE TRIGGER IF NOT EXISTS aw_checkpoint_stream_release AFTER DELETE ON stream_events
+            WHEN OLD.commit_seq IS NOT NULL BEGIN
+            UPDATE world_commits SET checkpoint_reclaimable=1
+                WHERE seq=OLD.commit_seq AND source='checkpoint'; END""")
+
+    @staticmethod
     def _retention_prefix_tx(c, table, universe, now, seconds, keep_rows, limit):
         # Only contiguous prefixes are removed. Wall-clock rollback cannot create silent gaps.
-        total = c.execute("SELECT COUNT(*) FROM " + table + " WHERE universe=?", (universe,)).fetchone()[0]
-        excess = max(0, total - keep_rows)
+        # A seek through at most the configured retained window, never a full
+        # COUNT over the lifetime journal. This boundary remains universe-local.
+        excess_row = c.execute("SELECT seq FROM " + table +
+                               " WHERE universe=? ORDER BY seq DESC LIMIT 1 OFFSET ?",
+                               (universe, keep_rows)).fetchone()
+        excess_through = int(excess_row[0]) if excess_row else 0
         rows = c.execute("SELECT seq,created_at FROM " + table +
                          " WHERE universe=? ORDER BY seq LIMIT ?", (universe, limit)).fetchall()
         candidate = None
-        for index, row in enumerate(rows):
-            if index < excess or row["created_at"] <= now - seconds:
+        for row in rows:
+            if row["seq"] <= excess_through or row["created_at"] <= now - seconds:
                 candidate = row["seq"]
             else:
                 break
@@ -71,3 +104,73 @@ class RuntimeRetention:
         if any(removed.values()):
             self.wake_waiters()
         return {"configured": True, **removed}
+
+    def apply_checkpoint_retention(self, universe, *, keep_commits=4096, seconds=86400,
+                                   limit=64, change_limit=4096):
+        """Retain bounded new checkpoint observations, preserving all old sources.
+
+        Current work receipts and foreign-key consumers keep their commits.
+        Reference release atomically reopens the indexed eligibility bit, so
+        this seek never walks the entire protected latest-receipt directory.
+        The host supplies a work-proportional scan/change budget plus catch-up;
+        its hard bounds apply even while recovering an old backlog.
+        """
+        import time
+        identifier(universe, "universe")
+        integer(keep_commits, "checkpoint retained commits", 0, 100000)
+        duration(seconds, "checkpoint retention", 315360000, zero=True)
+        integer(limit, "checkpoint retention batch", 1, 256)
+        integer(change_limit, "checkpoint retained-change batch", 1, 106496)
+        removed_commits = removed_changes = 0
+        with self._conn(serialized=True) as c:
+            c.execute("BEGIN IMMEDIATE")
+            self._check_world_tx(c, universe)
+            current = c.execute("SELECT floor,commit_floor,scan_after FROM checkpoint_history_floors WHERE universe=?",
+                                (universe,)).fetchone()
+            floor, commit_floor, scan_after = tuple(current) if current else (0, 0, 0)
+            boundary = c.execute("SELECT seq FROM world_commits WHERE universe=? AND source='checkpoint' "
+                                 "ORDER BY seq DESC LIMIT 1 OFFSET ?", (universe, keep_commits)).fetchone()
+            count_through = int(boundary[0]) if boundary else 0
+            rows = c.execute("SELECT seq,actor_role_id,operation_id,created_at,change_count FROM world_commits "
+                             "WHERE universe=? AND source='checkpoint' AND checkpoint_reclaimable=1 "
+                             "AND seq>? ORDER BY seq LIMIT ?",
+                             (universe, scan_after, limit)).fetchall()
+            now = time.time()
+            scanned = scan_after
+            reached_fresh = False
+            for row in rows:
+                if row['seq'] > count_through and row['created_at'] > now-seconds:
+                    reached_fresh = True
+                    break
+                references = (
+                    ("SELECT 1 FROM world_checkpoints WHERE universe=? AND latest_commit_seq=? LIMIT 1",
+                     (universe, row['seq'])),
+                    ("SELECT 1 FROM stream_events WHERE commit_seq=? LIMIT 1", (row['seq'],)),
+                    ("SELECT 1 FROM timer_transitions WHERE commit_seq=? LIMIT 1", (row['seq'],)),
+                    ("SELECT 1 FROM operations WHERE universe=? AND actor_role_id=? AND idempotency_key=? LIMIT 1",
+                     (universe, row['actor_role_id'], row['operation_id'])),
+                )
+                if any(c.execute(sql, params).fetchone() is not None for sql, params in references):
+                    scanned = int(row['seq'])
+                    c.execute("UPDATE world_commits SET checkpoint_reclaimable=0 WHERE seq=?", (row['seq'],))
+                    continue
+                if removed_changes + row['change_count'] > change_limit:
+                    break
+                scanned = int(row['seq'])
+                last = c.execute("SELECT MAX(seq) FROM state_changes WHERE commit_seq=?", (row['seq'],)).fetchone()[0]
+                removed_changes += c.execute("DELETE FROM state_changes WHERE commit_seq=?", (row['seq'],)).rowcount
+                removed_commits += c.execute("DELETE FROM world_commits WHERE seq=?", (row['seq'],)).rowcount
+                floor = max(floor, int(last) if last is not None else 0)
+                commit_floor = max(commit_floor, int(row['seq']))
+            if not rows or reached_fresh or (rows and scanned == rows[-1]['seq'] and len(rows) < limit):
+                scanned = 0
+            # No repeated journal entry: this is current maintenance position.
+            if (floor, commit_floor, scanned) != (tuple(current) if current else (0, 0, 0)):
+                c.execute("INSERT INTO checkpoint_history_floors(universe,floor,commit_floor,scan_after) VALUES(?,?,?,?) "
+                          "ON CONFLICT(universe) DO UPDATE SET floor=excluded.floor,commit_floor=excluded.commit_floor,"
+                          "scan_after=excluded.scan_after", (universe, floor, commit_floor, scanned))
+        if removed_changes:
+            self.wake_waiters()
+        return {"checkpoint_commits_removed": removed_commits, "checkpoint_changes_removed": removed_changes,
+                "checkpoint_completeness_floor": floor, "checkpoint_commit_floor": commit_floor,
+                "scanned_through": scanned}

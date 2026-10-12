@@ -73,11 +73,8 @@ class SharedGroveTests(unittest.TestCase):
         return self.call(actor, "grove.interact", args, operation)
 
     def ticks(self, count):
-        for _ in range(count):
-            self.clock.return_value += 1
-            result = self.world.run_due_timers("u")
-            self.assertEqual(result["count"], 1, result)
-            self.assertEqual(result.get("failed", 0), 0, result)
+        from grove_clock import advance_frames
+        advance_frames(self, self.world, "u", self.clock, count)
 
     def publish(self, actor, content):
         context = self.call(actor, "grove.generation_context", {"reason": "user_request", "kind": content["kind"]})
@@ -501,7 +498,9 @@ class SharedGroveTests(unittest.TestCase):
                         fire("隔开的额外火", position)
                 ids["process"] = processes.start_rain(ctx, [m.chunk_id(2, 0)],
                     ticks=4, intensity=10, start_delay=0)["id"]
-                objects, _ = activity.physical_closure(ctx)
+                from agent_world.worlds.shared_grove import domains
+                objects = {eid: m.get_entity(ctx, eid) for row in ctx.list_state(domains.DOMAINS, limit=100)["items"]
+                           for eid in row["value"]["objects"]}
                 return FunctionOutcome({"prepared": True, "physical_objects": len(objects),
                     "fires": sum(any(lot["burning"] for lot in entity["matter"]) for entity in objects.values())})
             self.clock.return_value = 1000.0

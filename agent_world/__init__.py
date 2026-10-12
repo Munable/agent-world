@@ -10,6 +10,7 @@ if _TYPE_CHECKING:
     from .presentation import PresentationCue
     from .world_streams import StreamSpec, StreamEvent
     from .world_timers import TimerSpec, TimerInvocation, RetryTimer
+    from .world_checkpoints import CheckpointSpec, CheckpointInvocation
     from .world_sdk import WorldDefinition, FunctionSpec, StateRule, FunctionContext, FunctionOutcome, EventSpec
 
 # Identity setup needs the client and crypto libraries, not the world engine.
@@ -22,6 +23,7 @@ _EXPORT_MODULES = {
     "PresentationCue": "presentation",
     **dict.fromkeys(("StreamSpec", "StreamEvent"), "world_streams"),
     **dict.fromkeys(("TimerSpec", "TimerInvocation", "RetryTimer"), "world_timers"),
+    **dict.fromkeys(("CheckpointSpec", "CheckpointInvocation"), "world_checkpoints"),
     **dict.fromkeys(("WorldDefinition", "FunctionSpec", "StateRule", "FunctionContext", "FunctionOutcome", "EventSpec"), "world_sdk"),
 }
 
@@ -38,7 +40,7 @@ def __getattr__(name):
 def __dir__():
     return sorted(set(globals()) | set(_EXPORT_MODULES))
 
-__version__ = "0.31.0"
+__version__ = "0.32.0"
 __all__ = [
     "WorldRuntime",
     "WorldDefinition",
@@ -52,6 +54,8 @@ __all__ = [
     "TimerSpec",
     "TimerInvocation",
     "RetryTimer",
+    "CheckpointSpec",
+    "CheckpointInvocation",
     "FunctionContext",
     "FunctionOutcome",
     "EventSpec",

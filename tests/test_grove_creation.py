@@ -398,9 +398,11 @@ class CreationTests(unittest.TestCase):
         for _ in range(32):self.place(self.form(refs[0], "body"))
         _, args = self.plan(refs[-1], "body")
         before = {row["entity_id"]: h.entity(row["entity_id"]) for row in args["sources"]}
-        with self.assertRaisesRegex(RuleViolation, "32"):
-            h.call("A", "grove.fabricate", args)
-        for eid, snapshot in before.items():self.assertEqual(h.entity(eid), snapshot)
+        created = h.call("A", "grove.fabricate", args)["entity"]
+        self.assertEqual(created["state"]["program"]["definition_ref"], refs[-1])
+        for row in args["sources"]:
+            self.assertEqual(sm.quantity(h.entity(row["entity_id"])),
+                sm.quantity(before[row["entity_id"]])-row["quantity_u"])
         self.assertEqual(h.read("B", "grove.definition_list")["storage"]["definitions_count"], 35)
 
     def test_ordinary_receiver_releases_consumed_snapshots_for_new_material(self):

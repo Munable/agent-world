@@ -209,7 +209,7 @@ class MaterialContactTests(unittest.TestCase):
         h = self.h;ref, prep = self.prepare();target = h.item("A", "水壶")["id"]
         before_source, before_target = h.entity(prep)["matter"], h.entity(target)["matter"]
         with patch("agent_world.worlds.shared_grove.creative.MAX_COMMIT_BYTES", 1):
-            with self.assertRaisesRegex(RuleViolation, "完整物理步"):
+            with self.assertRaisesRegex(RuleViolation, "完整物理域"):
                 self.put(target, prep, ref + "#starter")
         self.assertEqual(h.entity(prep)["matter"], before_source)
         self.assertEqual(h.entity(target)["matter"], before_target)

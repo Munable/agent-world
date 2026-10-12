@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+from functools import lru_cache
+import json
 import re
 
 from agent_world.errors import RuleViolation
@@ -334,11 +336,57 @@ def instance_definition(ctx, entity):
     binding = entity["state"].get("program", {})
     if not binding.get("definition_ref"):
         return None, None
-    pack = ctx.get_state(DEFINITIONS, binding["definition_ref"])
+    pack = read_definition(ctx, binding["definition_ref"])
     if not pack or binding["type_id"] not in pack["definition"]["types"]:
         raise RuleViolation("物件引用的已发布规则版本缺失。")
     execution_semantics(pack)
     return pack["definition"], pack["definition"]["types"][binding["type_id"]]
+
+
+def read_definition(ctx, reference):
+    """Borrow one immutable publication within this authorized transaction.
+
+    Missing publications are not cached: the same transaction may publish one
+    later. Callers must not mutate returned definitions or their type specs.
+    Actual entity state, permissions and visibility are never memoized here.
+    """
+    records = getattr(ctx, "_grove_definition_records", None)
+    if records is None:
+        records = ctx._grove_definition_records = {}
+    if reference not in records:
+        record = ctx.get_state(DEFINITIONS, reference)
+        if record is None:
+            return None
+        execution_semantics(record)
+        records[reference] = record
+    return records[reference]
+
+
+@lru_cache(maxsize=128)
+def _analyze_definition(encoded, semantics):
+    """Bounded pure analysis only; canonical bytes distinguish all worlds."""
+    from agent_world.simulation.execution import execution_plan
+    if semantics != PROGRAM_EXECUTION_SEMANTICS:
+        raise RuleViolation("规则执行语义不受当前世界支持。")
+    return execution_plan(json.loads(encoded))["types"]
+
+
+def execution_type_plan(ctx, reference, type_id):
+    plans = getattr(ctx, "_grove_execution_plans", None)
+    if plans is None:
+        plans = ctx._grove_execution_plans = {}
+    token = reference, type_id
+    if token not in plans:
+        record = read_definition(ctx, reference)
+        if not record or type_id not in record["definition"]["types"]:
+            raise RuleViolation("物件引用的已发布规则版本缺失。")
+        encodings = getattr(ctx, "_grove_definition_encodings", None)
+        if encodings is None:
+            encodings = ctx._grove_definition_encodings = {}
+        if reference not in encodings:
+            encodings[reference] = json.dumps(record["definition"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        plans[token] = deepcopy(_analyze_definition(encodings[reference], execution_semantics(record))[type_id])
+    return plans[token]
 
 
 def mixture_capacity(entity):

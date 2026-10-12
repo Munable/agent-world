@@ -5,7 +5,7 @@ from copy import deepcopy
 from agent_world.simulation.facts import snapshot_facts
 from agent_world.errors import RuleViolation
 from . import model as m
-from .definitions import registry_for, instance_definition, execution_semantics, DEFINITIONS
+from .definitions import registry_for, instance_definition, execution_semantics, read_definition
 
 
 def interface_schema(ctx, source):
@@ -13,7 +13,7 @@ def interface_schema(ctx, source):
     from agent_world.simulation.programs import exported_interface
     if not isinstance(source, dict) or set(source) != {"definition_ref", "type_id"}:
         raise RuleViolation("公开接口来源须为明确的definition_ref与type_id。")
-    record = ctx.get_state(DEFINITIONS, source["definition_ref"])
+    record = read_definition(ctx, source["definition_ref"])
     if not record:
         raise RuleViolation("公开接口的不可变定义不存在。")
     execution_semantics(record)
@@ -60,7 +60,9 @@ def interface_facts(ctx, entity):
 
 def bound_ids(entity, definition):
     from .creative import _bound_ids
-    return _bound_ids(definition or {}) | set(entity.get("state", {}).get("program", {}).get("port_bindings", {}).values())
+    program = entity.get("state", {}).get("program", {})
+    spec = (definition or {}).get("types", {}).get(program.get("type_id"), {})
+    return _bound_ids(spec) | set(program.get("port_bindings", {}).values())
 
 
 def freeze(ctx, anchors):

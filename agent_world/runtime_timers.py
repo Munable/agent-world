@@ -1,11 +1,12 @@
 """Durable one-shot world timers with transactional effects and bounded catch-up."""
 from __future__ import annotations
 
+from collections import deque
 import json
 import time
 import sqlite3
 
-from .runtime_contracts import identifier, integer, json_text, validate
+from .runtime_contracts import identifier, integer, duration, json_text, validate
 from .runtime_errors import (
     WorldDefinitionError, WorldVersionMismatch, PermissionDenied, RuleViolation,
     SchemaRejected, InvalidArguments,
@@ -126,10 +127,12 @@ class RuntimeTimers:
                 raise TimerNotFound("timer not found in this universe")
             return json.loads(row[0]) if row[0] is not None else None
 
-    def run_due_timers(self, universe, *, limit=50):
-        """Trusted worker entry. A fixed candidate list prevents recursive catch-up storms."""
+    def run_due_timers(self, universe, *, limit=50, deadline=None):
+        """Fixed one-shot candidates and a bounded, fair current-task pipeline."""
         identifier(universe, "universe")
         integer(limit, "limit", 1, 100)
+        if deadline is not None:
+            duration(deadline, "worker monotonic deadline", 253402300799, zero=True)
         with self._conn(readonly=True, serialized=True) as c:
             c.execute("BEGIN")
             self._check_world_tx(c, universe)
@@ -139,14 +142,64 @@ class RuntimeTimers:
             candidates = c.execute("""SELECT timer_id FROM world_timers
                 WHERE universe=? AND status='pending' AND available_at<=? AND due_at<=?
                 ORDER BY available_at,timer_id LIMIT ?""", (universe, cutoff, cutoff, limit)).fetchall()
-        processed = []
-        for candidate in candidates:
-            item = self._run_one_timer(universe, cutoff, candidate[0])
+            has_checkpoints = bool(self._worlds[universe].checkpoints)
+            # Operational fairness only; no world fact or extra history write.
+            prefer_checkpoint = self._checkpoint_first.get(universe, False)
+            self._checkpoint_first[universe] = not prefer_checkpoint
+        processed, seen = [], set()
+        checkpoint_candidates = deque()
+        checkpoint_work = {"commits": 0, "changes": 0, "stream_events": 0}
+        timer_index = work = 0
+        while work < limit and (deadline is None or time.monotonic() < deadline):
+            if has_checkpoints and not checkpoint_candidates:
+                checkpoint_candidates.extend(self._due_checkpoint_candidates(universe, seen, limit=limit-work))
+            checkpoint = checkpoint_candidates[0] if checkpoint_candidates else None
+            if checkpoint is not None and (prefer_checkpoint or timer_index >= len(candidates)):
+                checkpoint_candidates.popleft()
+                seen.add(checkpoint)
+                item = self._run_one_checkpoint(universe, *checkpoint)
+            elif timer_index < len(candidates):
+                item = self._run_one_timer(universe, cutoff, candidates[timer_index][0])
+                timer_index += 1
+            else:
+                break
+            work += 1
+            prefer_checkpoint = not prefer_checkpoint
             if item is not None:
                 processed.append(item)
+                if "checkpoint_key" in item:
+                    checkpoint_work["commits"] += 1
+                    checkpoint_work["changes"] += item["change_count"]
+                    checkpoint_work["stream_events"] += item["stream_event_count"]
         if processed:
             self.wake_waiters()
-        return {"processed": processed, "count": len(processed)}
+        result = {"processed": processed, "count": len(processed)}
+        if has_checkpoints:
+            result["checkpoint_work"] = checkpoint_work
+        return result
+
+    def next_due_work(self, universe):
+        """Trusted worker wake time; two indexed head reads, never a queue scan."""
+        identifier(universe, "universe")
+        with self._conn(readonly=True, serialized=True) as c:
+            c.execute("BEGIN")
+            self._check_world_tx(c, universe)
+            definition = self._worlds.get(universe)
+            if definition is None:
+                raise WorldDefinitionError("worker requires the matching installed world")
+            times = []
+            row = c.execute("""SELECT available_at,due_at FROM world_timers
+                WHERE universe=? AND status='pending' ORDER BY available_at,timer_id LIMIT 1""",
+                (universe,)).fetchone()
+            if row is not None:
+                times.append(max(row["available_at"], row["due_at"]))
+            if definition.checkpoints:
+                row = c.execute("""SELECT available_at,due_at FROM world_checkpoints
+                    WHERE universe=? AND status='pending'
+                    ORDER BY available_at,ready_order,checkpoint_key LIMIT 1""", (universe,)).fetchone()
+                if row is not None:
+                    times.append(max(row["available_at"], row["due_at"]))
+            return min(times) if times else None
 
     def _run_one_timer(self, universe, cutoff, timer_id):
         with self._conn(serialized=True) as c:

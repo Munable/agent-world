@@ -163,13 +163,16 @@ class RuntimeStreams:
             definition=self._worlds.get(universe)
             removed=0
             for spec in definition.streams if definition else ():
-                count=c.execute('SELECT COUNT(*) FROM stream_events WHERE universe=? AND stream=?',(universe,spec.name)).fetchone()[0]
-                excess=max(0,count-spec.max_events)
+                # The policy window bounds this reverse seek. Never COUNT the
+                # lifetime history just to retire one small contiguous prefix.
+                boundary=c.execute('SELECT seq FROM stream_events WHERE universe=? AND stream=? '
+                    'ORDER BY seq DESC LIMIT 1 OFFSET ?', (universe,spec.name,spec.max_events)).fetchone()
+                excess_through=int(boundary[0]) if boundary else 0
                 rows=c.execute('SELECT seq,created_at FROM stream_events WHERE universe=? AND stream=? ORDER BY seq LIMIT ?',
                                (universe,spec.name,limit)).fetchall()
                 through=None
-                for i,row in enumerate(rows):
-                    if i<excess or row['created_at']<=time.time()-spec.retention_seconds:
+                for row in rows:
+                    if row['seq']<=excess_through or row['created_at']<=time.time()-spec.retention_seconds:
                         through=row['seq']
                     else:
                         break

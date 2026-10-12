@@ -4,8 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from dataclasses import replace
 
-from agent_world import FunctionOutcome, FunctionSpec, StateRule, TimerSpec, ViewSpec, WorldDefinition
+from agent_world import FunctionOutcome, FunctionSpec, StateRule, ViewSpec, WorldDefinition
+from agent_world.world_checkpoints import CheckpointSpec, CHECKPOINT_ACTOR
 from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.world_streams import StreamEvent, StreamSpec
 from agent_world.world_timers import TimerNotFound
@@ -15,6 +17,7 @@ from . import commit
 from . import activity
 from . import processes
 from . import building
+from . import domains, scheduling
 from .definitions import COMBUSTION_CADENCE_TICKS, COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for, material_import
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
@@ -62,9 +65,6 @@ INTERACT_ARGS = {"type": "object", "properties": {
 VIEW_ARGS = {"type": "object", "properties": {"cx": COORD, "cy": COORD,
     "radius": {"type": "integer", "minimum": 1, "maximum": 8}, "inventory_after": ID,
     "inventory_limit": {"type": "integer", "minimum": 1, "maximum": 16}}, "additionalProperties": False}
-TICK_ARGS = {"type": "object", "properties": {"epoch": ID, "sequence": {"type": "integer", "minimum": 0}},
-             "required": ["epoch", "sequence"], "additionalProperties": False}
-
 ENTITY_SCHEMA = {"type": "object", "properties": {
     "id": ID, "name": {"type": "string", "minLength": 1, "maxLength": 80},
     "x": NULL_COORD, "y": NULL_COORD, "material": {"enum": list(m.MATERIALS)},
@@ -163,7 +163,7 @@ def member(ctx, args=None):
 def _state_authorizer(ctx, scope, key, access):
     # Trusted handlers project facts themselves. Generic state access must not
     # disclose another backpack or expose process/lease control internals.
-    if ctx.actor_role_id in {"system:timer", "system:installer"}:
+    if ctx.actor_role_id in {"system:timer", "system:installer", CHECKPOINT_ACTOR}:
         return True
     if ctx.function_id.startswith("grove.") or ctx.function_id in {"map.viewport", "view:grove.map", "world.bootstrap"}:
         return True
@@ -175,6 +175,11 @@ def _state_authorizer(ctx, scope, key, access):
         value = ctx.authorization_state(scope, key)
         return value is not None and value.get("owner") == ctx.actor_role_id
     return scope == m.META and key in {"clock", "seed", "changes"}
+
+
+def _state_forget_authorizer(ctx, scope, key):
+    from .events import state_forget_authorizer
+    return state_forget_authorizer(ctx, scope, key)
 
 
 def initialize(ctx):
@@ -191,7 +196,8 @@ def initialize(ctx):
     migrate(ctx)
     commit.ensure_chunk(ctx, 0, 0)
     commit.ensure_chunk(ctx, -1, 0)
-    ctx.schedule_timer(f"grove.tick.{epoch}.0", "grove.tick", {"epoch": epoch, "sequence": 0}, due_at=ctx.now+1)
+    domains.migrate(ctx)
+    scheduling.resume(ctx)
 
 
 def resume_clock(ctx):
@@ -208,10 +214,7 @@ def resume_clock(ctx):
         pass
     else:
         ctx.cancel_timer(old_id)
-    clock["epoch"] = m.identifier("clock")
-    ctx.set_state(m.META, "clock", clock)
-    ctx.schedule_timer(f"grove.tick.{clock['epoch']}.{clock['sequence']}", "grove.tick",
-        {"epoch": clock["epoch"], "sequence": clock["sequence"]}, due_at=ctx.now+1)
+    scheduling.resume(ctx)
 
 
 def handbook(ctx, args):
@@ -392,6 +395,8 @@ def move(ctx,args):
     if max(abs(x),abs(y))>m.WORLD_LIMIT:
         raise RuleViolation("这里是世界边界。")
     commit.ensure_chunk(ctx,*m.chunk_for(x,y))
+    domains.guard_tiles(ctx, [(player["x"], player["y"]), (x, y)])
+    domains.guard_action(ctx, {"entity_id": player["backpack_id"]})
     if m.tile_at(ctx,x,y)=="rock" or m.blocking_at(ctx,x,y):
         raise RuleViolation("这一格被岩壁或未毁坏的物件挡住。")
     previous_chunk=m.chunk_for(player["x"],player["y"])
@@ -890,6 +895,11 @@ def interact(ctx, args):
     # implicit/default pours and other actions retain strict observed versions.
     revalidate_pour = action == "pour" and "amount" in args and "target_slot" in args
     target = _target(ctx, args, revalidate=revalidate_pour)
+    domains.guard_action(ctx, args, topology=action in {
+        "pickup", "drop", "open", "close", "store", "retrieve", "attach", "detach", "launch",
+        "install_interaction", "uninstall_interaction"})
+    if action in {"pickup", "drop", "retrieve", "detach", "launch"}:
+        domains.guard_tiles(ctx, [(player["x"], player["y"])])
     guard_ordinary_action(ctx, action, target, m.get_entity(ctx, args["item_id"]) if args.get("item_id") else None)
     if action in {"store", "attach"} and "expected_combination_fingerprint" in args:
         if not args.get("item_id"):
@@ -1029,12 +1039,6 @@ def interact(ctx, args):
 
 
 def _process_refs(ctx, entity):
-    active = tuple(activity.active_process_ids(ctx))
-    cached = getattr(ctx, "_grove_projection_processes", None)
-    if cached is None or cached[0] != active:
-        rows = [activity.get_process(ctx, pid) for pid in active]
-        cached = (active, [row for row in rows if row and row["status"] == "active"])
-        ctx._grove_projection_processes = cached
     roots, cursor = {entity["id"]}, entity
     for _ in range(8):
         parent = cursor.get("physical_parent")
@@ -1042,14 +1046,28 @@ def _process_refs(ctx, entity):
             break
         roots.add(parent["id"])
         cursor = m.get_entity(ctx, parent["id"])
+    if domains.installed(ctx):
+        owner = domains.for_entity(ctx, cursor["id"])
+        active = tuple(owner["active_processes"]) if owner else ()
+    else:
+        active = tuple(activity.active_process_ids(ctx))
+    cache = getattr(ctx, "_grove_projection_processes", None)
+    if cache is None:
+        cache = ctx._grove_projection_processes = {}
+    if active not in cache:
+        rows = [activity.get_process(ctx, pid) for pid in active]
+        cache[active] = [row for row in rows if row and row["status"] == "active"]
     region = m.chunk_id(*m.chunk_for(entity["x"], entity["y"])) if m.is_ground(entity) else None
-    return [{"id": row["id"], "kind": row["kind"]} for row in cached[1]
+    return [{"id": row["id"], "kind": row["kind"]} for row in cache[active]
             if row["entity_id"] in roots or entity["id"] in row.get("reserved_ids", [])
             or row["kind"] == "rain" and region in row["chunk_ids"]]
 
 
 def _project_entity(ctx, player, entity, *, include_options=True, detailed=False):
     value = deepcopy(entity)
+    execution_state = domains.observation(ctx, entity["id"])
+    value["execution_domain"] = {key: execution_state[key] for key in
+        ("state", "last_applied_tick", "pending_target_tick", "failure") if key in execution_state}
     hidden = entity["owner"] is None and not entity["state"]["open"] and "container" in entity["components"]
     children = [child for child in m.descendants(ctx, entity) if (child.get("physical_parent") or {}).get("id") == entity["id"]]
     if hidden:
@@ -1323,20 +1341,24 @@ def _registered_entity_schema():
     return schema
 
 
-def make_world():
+def make_world(*, publication_budget=None):
     from .generation import generation_specs, generation_state_specs
     from . import creative
+    from .publication import DEFAULT_BUDGET, bind_budget
+    budget = DEFAULT_BUDGET if publication_budget is None else publication_budget
     def migrate_creation(ctx):
         from .publication import migrate_catalog
         from . import execution
         migrate_catalog(ctx)
         execution.migrate(ctx)
+        domains.migrate(ctx)
         resume_clock(ctx)
+        ctx.world_resumed = True
     def with_delegation(schema):
         schema = deepcopy(schema)
         schema["properties"]["delegation"] = creative.DELEGATION
         return schema
-    return WorldDefinition("shared-grove","溪源",(
+    definition = WorldDefinition("shared-grove","溪源",(
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
         FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=13,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
@@ -1344,15 +1366,21 @@ def make_world():
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=3,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=32,state_version=22,
+        *generation_specs(), *creative.specs()),version=33,state_version=23,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
-            StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs()),
-        state_authorizer=_state_authorizer,initialize=initialize,bootstrap=bootstrap,
+            StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs(),
+            *domains.state_specs(), *scheduling.state_specs()),
+        state_authorizer=_state_authorizer,state_forget_authorizer=_state_forget_authorizer,
+        initialize=initialize,resume=scheduling.resume,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
-        migrations={6: lambda ctx: None, 7: lambda ctx: None, 8: lambda ctx: None, 9: lambda ctx: None, 10: lambda ctx: None, 11: lambda ctx: None, 12: lambda ctx: None, 13: lambda ctx: None, 14: lambda ctx: None, 15: lambda ctx: None, 16: lambda ctx: None, 17: lambda ctx: None, 18: lambda ctx: None, 19: lambda ctx: None, 20: lambda ctx: None, 21: lambda ctx: None, 22: migrate_creation},
-        timers=(TimerSpec("grove.tick",processes.tick,TICK_ARGS,max_attempts=3,retry_delay_seconds=1),),
+        migrations={**{target: lambda ctx: None for target in range(6, 23)}, 23: migrate_creation},
+        checkpoints=(CheckpointSpec("grove.frame",scheduling.tick,scheduling.CHECKPOINT_ARGS),
+                     CheckpointSpec("grove.domain",scheduling.advance_domain,scheduling.DOMAIN_ARGS)),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),
-        entry_instructions="先读grove.handbook与grove.rule_catalog。人可亲自移动操作，或明确目标委托给自己的外部Agent实际读、计划、行动、读回和调整；随时收回。规则发布与实例生成分开，后者消耗真实区域资源。")
+        entry_instructions="先读grove.handbook与grove.rule_catalog。人可亲自移动操作，或明确目标委托给自己的外部Agent实际读、计划、行动、读回和调整；随时收回。规则发布与实例生成分开，后者消耗真实区域资源。"
+            f"每位作者的发表容量为{budget.payload_bytes}字节、{budget.definitions}份定义；原已发表内容保留。")
+    return replace(definition, functions=tuple(replace(spec, handler=bind_budget(spec.handler, budget))
+                                               for spec in definition.functions))

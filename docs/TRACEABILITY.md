@@ -1,6 +1,6 @@
 # 六层关键主张追溯
 
-复核：2026-10-07。这里将关键L1/L2主张追到L3-L6与证据，不新增规格或质量评分。最终562项本地检查、访问回归、实际UI局部动作／截图、安装probe及独立恢复通过；模型14次仍未完整通过可靠指导，最佳0.24不变。最后页面读回与临时副本清理已完成，最终文字版本的包记录及本地交付提交见唯一外置索引；原失败保留范围。
+复核：2026-10-12。这里将关键L1/L2主张追到L3-L6与证据，不新增规格或质量评分。当前源码、整轮验证和历史原生Agent结果分别见[当前研发记录](SHARED_GROVE.md#当前研发记录)，本机合同与恢复结果不替代真人体验、跨机及规模验收。
 
 | 主张 | 下层落点 | 当前状态 | 核心证据／限制 |
 | --- | --- | --- | --- |
@@ -40,6 +40,8 @@
 | View / Snapshot / Sync / Timeline | **已实现可选能力** | 授权投影、增量同步、checkpoint、retention gap、乱序客户端处理已有覆盖。 |
 | Control Lease / fencing | **已实现可选能力** | claim/renew/finish、过期与 stale runtime fencing 有测试；不作为所有行为前提。 |
 | Scheduled Effect / Timer | **已实现可选能力** | 持久 timer、离线 owner、retry/rollback、重启与 retention 有覆盖。 |
+| 连续系统工作检查点 | **已实现；验证范围见当前研发记录** | 当前代次、完成水位与最新准确回执；独立任务提交、重启接续、旧代不重做及引用保护。玩家Receipt和一次性Timer不采用这项过期策略。 |
+| Shared Grove 相互作用域 | **已实现；不代表生产规模** | 完整可变依赖闭包、帧前准备、域内预算、局部压力恢复和完成水位；正式路径合同见 `test_grove_domain_contracts.py`。统一帧屏障与SQLite单写者仍是明确边界。 |
 | Retention | **已实现机制；长期策略仍需验证** | event/history/stream 保留与 gap recovery 已实现；长期压缩与真实增长仍需 soak。 |
 | 结构化错误与恢复提示 | **已实现** | recovery / retry_after / details 经 HTTP/MCP 保真。 |
 | HTTP / MCP 统一 Gateway | **已实现主要合同** | 同函数、同错误、receipt replay、identity/session 边界有跨 transport 测试。 |

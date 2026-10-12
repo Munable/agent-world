@@ -240,6 +240,17 @@ export function ruleRuntimeObservationLines(creative,entity){
   if(Number.isFinite(creative.process?.steps))lines.push('过程累计 '+creative.process.steps+' 个反应逻辑步；不是机械推进次数或目标完成进度。');
   return lines;
 }
+
+export function domainObservationLines(entity){
+  const domain=entity?.execution_domain;
+  if(!domain||typeof domain!=='object')return [];
+  const lines=[];
+  if(domain.state==='calculating')lines.push('相关物件正在结算世界时刻 '+domain.pending_target_tick+'；当前显示已保存状态，相关操作需稍候。');
+  if(domain.state==='pressure')lines.push('相关作用域超过运行容量，自动变化已暂停。可以解除连接、停用规则或减少内容后恢复；其他地方继续运行。');
+  if(domain.state==='error')lines.push('相关作用域自动运行受阻，原物件和材料保留；当前状态不是执行成功。');
+  if(Number.isInteger(domain.last_applied_tick))lines.push('最近完成自动结算：世界时刻 '+domain.last_applied_tick+'。休眠期间没有虚构计算，恢复不补扣停顿期间的材料。');
+  return lines;
+}
 export function reactionObservationLines(creative,entity){
   const lines=[],inputs=creative?.reaction_inputs,materials={...entity,creative:{...(entity?.creative||entity?.state?.program||{}),...creative}};
   if(inputs){const actual=Object.entries(inputs.quantities||{}).map(([material,quantity])=>materialLabel(material,materials)+' '+quantity+' 份').join('，');lines.push('已装入的反应材料：'+(actual||'当前没有材料')+'。物件本体和整件放入的物品不参与这份配料。');if(Number.isFinite(inputs.contained_quantity)&&Number.isFinite(inputs.capacity))lines.push('已装材料 '+inputs.contained_quantity+' / '+inputs.capacity+' 份。');}

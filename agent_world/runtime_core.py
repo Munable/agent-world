@@ -84,11 +84,12 @@ from .runtime_activities import RuntimeActivities
 from .runtime_journal import RuntimeJournal
 from .runtime_views import RuntimeViews
 from .runtime_timers import RuntimeTimers
+from .runtime_checkpoints import RuntimeCheckpoints
 from .retention import RuntimeRetention
 from .runtime_streams import RuntimeStreams
 
 
-class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJournal, RuntimeViews, RuntimeTimers, RuntimeRetention, RuntimeStreams):
+class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJournal, RuntimeViews, RuntimeTimers, RuntimeCheckpoints, RuntimeRetention, RuntimeStreams):
     def __init__(self, db_path: str | Path):
         if str(db_path) == ":memory:":
             raise ValueError("WorldRuntime requires a file-backed SQLite database")
@@ -99,6 +100,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         self._lock = threading.RLock()
         self._changed = threading.Condition(self._lock)
         self._handlers: dict[tuple[str, str, int], FunctionHandler] = {}
+        self._checkpoint_first: dict[str, bool] = {}
         self._init_db()
 
     @contextmanager
@@ -366,12 +368,19 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             self._init_journal_tx(c)
             self._init_views_tx(c)
             self._init_timers_tx(c)
+            self._init_checkpoints_tx(c)
             if "access_mode" not in {r["name"] for r in c.execute("PRAGMA table_info(identity_tokens)")}:
                 c.execute("ALTER TABLE identity_tokens ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'control'")
             if "access_mode" not in {r["name"] for r in c.execute("PRAGMA table_info(identity_key_challenges)")}:
                 # NULL preserves the signed v1 control proof for already stored challenges.
                 c.execute("ALTER TABLE identity_key_challenges ADD COLUMN access_mode TEXT")
             self._init_streams_tx(c)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_world_state_live_key ON world_state(universe,scope,state_key) WHERE deleted=0")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_world_commits_source ON world_commits(universe,source,seq)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_state_changes_commit ON state_changes(commit_seq,seq)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_stream_events_commit ON stream_events(commit_seq)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_timer_transitions_commit ON timer_transitions(commit_seq)")
+            self._init_checkpoint_retention_tx(c)
             c.execute("PRAGMA user_version=8")
             c.execute("COMMIT")
 

@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,ruleSnapshotChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,reactionObservationLines,contactObservationLines,installedInteractionDefinition,interactionChoices,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines} from './grove-world-ui.js?v=creation-foundation-v1';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,ruleSnapshotChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,domainObservationLines,reactionObservationLines,contactObservationLines,installedInteractionDefinition,interactionChoices,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines} from './grove-world-ui.js?v=domain-runtime-v1';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -339,7 +339,7 @@ function acceptWorld(value){
   if(previous&&(previous.x!==value.player.x||previous.y!==value.player.y))motion={from:{x:previous.x,y:previous.y},to:{x:value.player.x,y:value.player.y},start:performance.now(),duration:160};
   if(!previous){camera.x=value.player.x;camera.y=value.player.y;}
   $('player-name').textContent=value.player.name;$('position').textContent='坐标 '+value.player.x+'，'+value.player.y;
-  $('freshness').textContent='刚刚读取';$('map-scale').textContent='只显示身边的区域'+(value.truncated?' · 更多物件需靠近查看':'');
+  $('freshness').textContent=value.clock?.frame_status==='open'?'刚刚读取 · 世界正在结算':'刚刚读取';$('map-scale').textContent='只显示身边的区域'+(value.truncated?' · 更多物件需靠近查看':'');
   const rain=(value.processes||[]).find(p=>p.kind==='rain'&&p.status==='active');
   $('weather').textContent=rain?(rain.start_tick>finite(value.clock?.sequence)?'附近短雨将到来':'附近有雨 · 蓝色覆盖区以世界状态为准'):'附近无雨 · 湿料会继续干燥';
   if(selectedId){
@@ -561,6 +561,7 @@ function renderSelection(){
   const references=(world?.public_content?.contributions||[]).filter(contribution=>(contribution.entity_ids||[]).includes(entity.id));
   for(const reference of references)$('selection-history').append(node('p','公共贡献 · '+authorLabel(reference.author),'small'));
   renderEffects(entity);
+  for(const line of domainObservationLines(entity))$('selection-history').append(node('p',line,'small'));
   const lots=matterLots(entity),stats=[stat('本体材质',materialLabel(entity.material,entity))];
   if(entity.simulation){stats.push(...simulationStats(entity,point()?.backpack_id).map(([label,value])=>stat(label,value)));stats.push(stat('结构与残材',lifecycleLabel(entity)||'结构完整'),stat('燃烧',lots.some(lot=>lot.burning)||(entity.simulation.burning_lots||[]).length?'有批次正在燃烧':'未燃烧'));}
   else{if(caps(entity).includes('wettable'))stats.push(stat('湿度',Number.isFinite(s.wetness)?s.wetness:'未公开'));if(caps(entity).includes('flammable'))stats.push(stat('燃料',finite(s.fuel)));if(caps(entity).includes('flammable'))stats.push(stat('火',s.destroyed?'材料已耗尽':s.burning?'正在燃烧':'未燃烧'));}

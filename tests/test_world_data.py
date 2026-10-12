@@ -334,6 +334,81 @@ class DataTests(unittest.TestCase):
         self.assertEqual(self.history(), [])
         self.assertEqual(self.count("world_commits"), before)
 
+    def test_metadata_prefixes_strip_only_new_matching_rows_in_one_update(self):
+        self.write("private.old", {"n": 1}, "old-full-history")
+        before = self.history()
+
+        def mixed(ctx, args):
+            ctx.set_state("objects", "private.secret", {"n": 2})
+            ctx.set_state("objects", "private.secret", {"n": 3})
+            ctx.delete_state("objects", "private.secret")
+            ctx.set_state("objects.extra", "private.note", {"n": 4})
+            ctx.set_state("objects", "public", {"n": 5})
+            ctx.set_state("other", "private.note", {"n": 6})
+            return FunctionOutcome({"saved": True})
+
+        definition = replace(WORLD, version=2,
+            functions=(*WORLD.functions, FunctionSpec("object.mixed", mixed, EMPTY)),
+            state_rules=(*WORLD.state_rules, StateRule("other", "", {"type": "object"}),
+                         StateRule("objects", "private.", {}, history="metadata"),
+                         StateRule("objects", "private.secret", {}, history="metadata"),
+                         *tuple(StateRule("unused." + str(index), "", {}, history="metadata")
+                                for index in range(25))))
+        install_world(self.runtime, "u", definition)
+        statements = []
+        record = self.runtime._record_commit_tx
+
+        def traced(connection, *args, **kwargs):
+            connection.set_trace_callback(statements.append)
+            try:
+                return record(connection, *args, **kwargs)
+            finally:
+                connection.set_trace_callback(None)
+
+        with patch.object(self.runtime, "_record_commit_tx", side_effect=traced):
+            self.write("public.only", {"n": 7}, "no-metadata-change")
+            receipt = self.runtime.call_function("u", "object.mixed", self.a, {},
+                operation_id="mixed-history", identity_token=self.ta)
+        clears = [statement for statement in statements
+                  if "UPDATE state_changes SET before_json=NULL" in statement]
+        self.assertEqual(len(clears), 1)
+        history = self.history()
+        self.assertEqual(history[:len(before)], before)
+        current = [row for row in history if row["commit_seq"] == receipt["commit_seq"]]
+        stripped = [row for row in current if row["scope"].startswith("objects")
+                    and row["state_key"].startswith("private.")]
+        self.assertEqual([row["kind"] for row in stripped], ["create", "update", "delete", "create"])
+        self.assertTrue(all(row["before"] is None and row["value"] is None
+                            and row["payload_retained"] == 0 for row in stripped))
+        retained = [row for row in current if row not in stripped]
+        self.assertEqual([row["value"] for row in retained], [{"n": 5}, {"n": 6}])
+        self.assertTrue(all(row["payload_retained"] == 1 for row in retained))
+        self.assertEqual(self.runtime.get_receipt("u", self.a, "mixed-history",
+                                                 identity_token=self.ta), receipt)
+
+    def test_metadata_cleanup_accepts_the_full512_change_budget(self):
+        def many(ctx, args):
+            for index in range(512):
+                ctx.set_state("objects", str(index), {"n": index})
+            return FunctionOutcome({"saved": 512})
+        definition = replace(WORLD, version=2,
+            functions=(FunctionSpec("object.many_metadata", many, EMPTY),),
+            state_rules=(StateRule("objects", "", {"type": "object"}, history="metadata"),))
+        install_world(self.runtime, "u", definition)
+        receipt = self.runtime.call_function("u", "object.many_metadata", self.a, {},
+                                            operation_id="metadata512", identity_token=self.ta)
+        history, after = [], 0
+        while True:
+            page = self.runtime.read_state_history("u", after=after, limit=200)
+            history.extend(page["changes"])
+            if not page["has_more"]:
+                break
+            after = page["next_cursor"]
+        self.assertEqual(len(history), 512)
+        self.assertTrue(all(row["commit_seq"] == receipt["commit_seq"]
+                            and row["payload_retained"] == 0 and row["value"] is None for row in history))
+        self.assertEqual(receipt["result"], {"saved": 512})
+
 
 if __name__ == "__main__":
     unittest.main()

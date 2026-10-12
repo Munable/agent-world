@@ -213,7 +213,10 @@ class RuntimeFunctions:
             now=now,
             state_validator=definition.validate_state if definition else None,
             state_authorizer=definition.state_authorizer if definition else None,
+            state_forget_authorizer=definition.state_forget_authorizer if definition else None,
             timers_enabled=definition is not None,
+            checkpoints_enabled=definition is not None,
+            checkpoint_specs=definition.checkpoints if definition else (),
         )
 
     def _run_user_code(self, c, callback, *args, read_only=False):
@@ -232,6 +235,9 @@ class RuntimeFunctions:
                     return sqlite3.SQLITE_OK
                 if read_only or arg1 != "world_state":
                     return sqlite3.SQLITE_DENY
+                if action == sqlite3.SQLITE_DELETE and not any(
+                        getattr(arg, "_forgetting_state", False) for arg in args if isinstance(arg, FunctionContext)):
+                    return sqlite3.SQLITE_DENY
             if action not in {
                 sqlite3.SQLITE_SELECT,
                 sqlite3.SQLITE_READ,
@@ -244,6 +250,10 @@ class RuntimeFunctions:
                 return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
 
+        contexts = [arg for arg in args if isinstance(arg, FunctionContext)]
+        old_guards = [getattr(ctx, "_sql_authorizer", None) for ctx in contexts]
+        for ctx in contexts:
+            ctx._sql_authorizer = guard
         c.set_authorizer(guard)
         try:
             return callback(*args)
@@ -254,7 +264,9 @@ class RuntimeFunctions:
                 ) from exc
             raise
         finally:
-            c.set_authorizer(None)
+            for ctx, previous in zip(contexts, old_guards):
+                ctx._sql_authorizer = previous
+            c.set_authorizer(old_guards[0] if old_guards else None)
 
     def _validate_managed_state_changes_tx(
         self, c, ctx, marker, *, definition=None, enforce_authorizer=True, validate_values=True
@@ -581,10 +593,12 @@ class RuntimeFunctions:
         return receipt
 
     def _commit_outcome_tx(self, c, ctx, outcome, arguments, *, journal_marker,
-                           activity_id=None, source="action", extra_receipt=None, credential_id=None):
+                           activity_id=None, source="action", extra_receipt=None, credential_id=None,
+                           record_operation=True):
         """One effect/receipt path shared by immediate actions and durable timers."""
         self._validate_managed_state_changes_tx(c, ctx, journal_marker)
         transitions = self._apply_timer_commands_tx(c, ctx)
+        self._apply_checkpoint_commands_tx(c, ctx)
         event_seqs = []
         publications = []
         for index, event in enumerate(outcome.events):
@@ -621,12 +635,13 @@ class RuntimeFunctions:
         if ctx.random_draws:
             receipt["random_draws"] = ctx.random_draws
         encoded = json_text(receipt)
-        c.execute(
-            "INSERT INTO operations(universe,actor_role_id,idempotency_key,function_id,function_version,args_hash,receipt_json,created_at,activity_id) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
-            (ctx.universe, ctx.actor_role_id, ctx.operation_id, ctx.function_id, ctx.function_version,
-             self._sha256({"function_id": ctx.function_id, "arguments": arguments}), encoded, ctx.now, activity_id),
-        )
+        if record_operation:
+            c.execute(
+                "INSERT INTO operations(universe,actor_role_id,idempotency_key,function_id,function_version,args_hash,receipt_json,created_at,activity_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (ctx.universe, ctx.actor_role_id, ctx.operation_id, ctx.function_id, ctx.function_version,
+                 self._sha256({"function_id": ctx.function_id, "arguments": arguments}), encoded, ctx.now, activity_id),
+            )
         return json.loads(encoded)
 
     def get_receipt(self, universe, role_id, operation_id, *, identity_token=None):

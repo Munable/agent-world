@@ -133,7 +133,8 @@ def _water_items(ctx, player, minimum=1):
 
 
 def _hearth_ids(ctx):
-    return list(ctx.get_state(m.META, "active_hearths", []))
+    from .activity import meta_get
+    return list(meta_get(ctx, "active_hearths", []))
 
 
 def _live_hearths(ctx):
@@ -144,7 +145,8 @@ def _live_hearths(ctx):
 def _set_hearths(ctx, ids):
     ids = list(dict.fromkeys(ids))
     if ids != _hearth_ids(ctx):
-        ctx.set_state(m.META, "active_hearths", ids)
+        from .activity import meta_set
+        meta_set(ctx, "active_hearths", ids)
 
 
 def _choose_materials(ctx, player, recipe, selected):
@@ -183,6 +185,7 @@ def _choose_materials(ctx, player, recipe, selected):
 
 
 def build(ctx, player, args):
+    from . import domains
     recipe = RECIPES[args["recipe"]]
     x, y = args["x"], args["y"]
     if abs(x-player["x"])+abs(y-player["y"]) > 1:
@@ -197,10 +200,9 @@ def build(ctx, player, args):
         raise RuleViolation("请先移开这一格的障碍。")
     if "heater" in recipe["components"] and m.is_safe(ctx, x, y):
         raise RuleViolation("出生安全区不能建设火炉。")
-    hearths = _live_hearths(ctx)
-    if "heater" in recipe["components"] and len(hearths) >= MAX_HEARTHS:
-        raise RuleViolation("世界最多保留16座可用烘干炉，请先拆除不用的炉。")
     materials = _choose_materials(ctx, player, recipe, args.get("material_ids"))
+    domains.guard_action(ctx, {"material_ids": list({eid for eid, _, _ in materials})}, topology=True)
+    domains.guard_tiles(ctx, [(x, y)])
     region = f"{x//m.CHUNK_SIZE}:{y//m.CHUNK_SIZE}"
     content_region = next((m.get_entity(ctx,source_id)["state"].get("generation_region")
                            for source_id,_,_ in materials if m.get_entity(ctx,source_id)["state"].get("generation_region") == region),None)
@@ -234,6 +236,10 @@ def build(ctx, player, args):
     if m.load_summary(ctx, entity)["overload"]:
         raise RuleViolation("所选原材料超过建筑的支撑载荷。")
     if "heater" in recipe["components"]:
+        domains.ensure(ctx, entity_ids=[bid])
+        hearths = _live_hearths(ctx)
+        if len(hearths) >= MAX_HEARTHS:
+            raise domains.CapacityPressure("同一相互作用域最多保留16座可用烘干炉。")
         _set_hearths(ctx, [e["id"] for e in hearths]+[bid])
     return entity, f"搭建了{recipe['name']}，投入真实材料；剩余原料保留在背包。"
 

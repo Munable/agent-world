@@ -4,6 +4,7 @@ import base64
 import json
 import math
 import secrets
+import sqlite3
 import time
 from typing import Any
 
@@ -27,7 +28,10 @@ class FunctionContext:
         operation_id=None,
         state_validator=None,
         state_authorizer=None,
+        state_forget_authorizer=None,
         timers_enabled=False,
+        checkpoints_enabled=False,
+        checkpoint_specs=(),
         timer=None,
     ):
         self._conn = conn  # Internal transaction handle; not part of the World SDK.
@@ -42,10 +46,20 @@ class FunctionContext:
         self.random_draws: list[dict[str, int]] = []
         self._state_validator = state_validator
         self._state_authorizer = state_authorizer
+        self._state_forget_authorizer = state_forget_authorizer
         self._authorizing_state = False
+        self._forgetting_state = False
         self._timers_enabled = timers_enabled
         self._timer_commands = []
+        self._checkpoints_enabled = checkpoints_enabled
+        self._checkpoint_specs = {spec.name: spec for spec in checkpoint_specs}
+        self._checkpoint_commands = []
+        self._checkpoint_rows = {}
         self.timer = timer
+        self.checkpoint = None
+        # A migration that already resumed scheduled work can suppress the
+        # first-attach hook in the same managed installation transaction.
+        self.world_resumed = False
         # Mutations performed through the scoped API are recorded so commit-time
         # validation can distinguish them from unexpected direct internal writes.
         self._approved_state_changes: list[tuple[str, str, int, int, str]] = []
@@ -60,7 +74,7 @@ class FunctionContext:
         identifier(handler, "timer handler")
         due_at = duration(due_at, "due_at", 253402300799, zero=True)
         arguments_object(arguments)
-        if len(self._timer_commands) >= MAX_TIMER_COMMANDS:
+        if len(self._timer_commands) + len(self._checkpoint_commands) >= MAX_TIMER_COMMANDS:
             raise InvalidArguments("too many timer changes in one transaction")
         self._timer_commands.append({"kind": "schedule", "timer_id": timer_id, "handler": handler,
                                      "arguments": json.loads(json_text(arguments, maximum=MAX_TIMER_ARGUMENT_BYTES)),
@@ -76,7 +90,7 @@ class FunctionContext:
         identifier(timer_id, "timer_id")
         if self.timer is not None and self.timer.timer_id == timer_id:
             raise InvalidArguments("a firing timer cannot cancel itself")
-        if len(self._timer_commands) >= MAX_TIMER_COMMANDS:
+        if len(self._timer_commands) + len(self._checkpoint_commands) >= MAX_TIMER_COMMANDS:
             raise InvalidArguments("too many timer changes in one transaction")
         self._timer_commands.append({"kind": "cancel", "timer_id": timer_id})
 
@@ -89,6 +103,90 @@ class FunctionContext:
         if row is None:
             raise TimerNotFound("timer not found in this universe")
         return public_timer(row)
+
+    def _checkpoint_record(self, checkpoint_key):
+        if checkpoint_key not in self._checkpoint_rows:
+            row = self._conn.execute("SELECT * FROM world_checkpoints WHERE universe=? AND checkpoint_key=?",
+                                     (self.universe, checkpoint_key)).fetchone()
+            self._checkpoint_rows[checkpoint_key] = dict(row) if row is not None else None
+        return self._checkpoint_rows[checkpoint_key]
+
+    def get_checkpoint(self, checkpoint_key):
+        from .world_checkpoints import CheckpointNotFound, public_checkpoint
+        identifier(checkpoint_key, "checkpoint key")
+        row = self._checkpoint_record(checkpoint_key)
+        if row is None:
+            raise CheckpointNotFound("checkpoint not found in this universe")
+        return public_checkpoint(row)
+
+    def schedule_checkpoint(self, checkpoint_key, handler, arguments, *, due_at, expected_generation=None):
+        from .world_checkpoints import (
+            CheckpointConflict, MAX_CHECKPOINT_COMMANDS, MAX_CHECKPOINT_ARGUMENT_BYTES,
+        )
+        from .runtime_contracts import duration, arguments_object, validate
+        from .runtime_errors import WorldDefinitionError
+
+        if self.access != "write" or not self._checkpoints_enabled:
+            raise WorldRuntimeError("checkpoints require a managed world write")
+        identifier(checkpoint_key, "checkpoint key")
+        identifier(handler, "checkpoint handler")
+        spec = self._checkpoint_specs.get(handler)
+        if spec is None:
+            raise WorldDefinitionError("checkpoint handler is not declared by this world")
+        due_at = duration(due_at, "due_at", 253402300799, zero=True)
+        arguments_object(arguments)
+        validate(spec.input_schema, arguments)
+        previous = self._checkpoint_record(checkpoint_key)
+        current = previous["generation"] if previous is not None else 0
+        if expected_generation is not None:
+            integer(expected_generation, "expected checkpoint generation")
+            if current != expected_generation:
+                raise CheckpointConflict("checkpoint generation changed before scheduling")
+        if len(self._checkpoint_commands) + len(self._timer_commands) >= MAX_CHECKPOINT_COMMANDS:
+            raise InvalidArguments("too many scheduled changes in one transaction")
+        encoded = json_text(arguments, maximum=MAX_CHECKPOINT_ARGUMENT_BYTES)
+        generation = current + 1
+        self._checkpoint_commands.append({"kind": "schedule", "checkpoint_key": checkpoint_key,
+            "handler": handler, "arguments": json.loads(encoded), "due_at": due_at,
+            "expected_generation": current, "generation": generation})
+        json_text(self._checkpoint_commands)
+        # Read-your-writes includes staged successors. Runtime rechecks the same
+        # generations and applies these commands only with the outcome commit.
+        self._checkpoint_rows[checkpoint_key] = {
+            **(previous or {}), "checkpoint_key": checkpoint_key, "generation": generation,
+            "completed_through": max((previous or {}).get("completed_through", 0), current),
+            "latest_completed_generation": (previous or {}).get("latest_completed_generation"),
+            "latest_commit_seq": (previous or {}).get("latest_commit_seq"),
+            "handler": handler, "handler_version": spec.version, "arguments_json": encoded,
+            "due_at": due_at, "available_at": due_at, "status": "pending", "attempts": 0,
+            "created_at": self.now, "created_by": self.actor_role_id,
+            "created_operation_id": self.operation_id, "completed_at": None, "last_error_code": None,
+        }
+        return generation
+
+    def cancel_checkpoint(self, checkpoint_key, *, expected_generation=None):
+        from .world_checkpoints import CheckpointConflict, CheckpointNotFound, MAX_CHECKPOINT_COMMANDS
+        if self.access != "write" or not self._checkpoints_enabled:
+            raise WorldRuntimeError("checkpoints require a managed world write")
+        identifier(checkpoint_key, "checkpoint key")
+        previous = self._checkpoint_record(checkpoint_key)
+        if previous is None:
+            raise CheckpointNotFound("checkpoint not found in this universe")
+        if expected_generation is not None:
+            integer(expected_generation, "expected checkpoint generation")
+            if previous["generation"] != expected_generation:
+                raise CheckpointConflict("checkpoint generation changed before cancellation")
+        if (self.checkpoint is not None and checkpoint_key == self.checkpoint.checkpoint_key
+                and previous["generation"] == self.checkpoint.generation):
+            raise InvalidArguments("a firing checkpoint cannot cancel itself")
+        if len(self._checkpoint_commands) + len(self._timer_commands) >= MAX_CHECKPOINT_COMMANDS:
+            raise InvalidArguments("too many scheduled changes in one transaction")
+        self._checkpoint_commands.append({"kind": "cancel", "checkpoint_key": checkpoint_key,
+                                          "expected_generation": previous["generation"]})
+        json_text(self._checkpoint_commands)
+        self._checkpoint_rows[checkpoint_key] = {**previous, "status": "cancelled", "completed_at": self.now,
+            "completed_through": max(previous["completed_through"], previous["generation"])}
+        return previous["generation"]
 
     def stream_event_id(self, stream, key):
         from .world_streams import event_id
@@ -203,6 +301,43 @@ class FunctionContext:
         )
         self._approved_state_changes.append((scope, key, version, 1, "null"))
         return version
+
+    def forget_state(self, scope: str, key: str, *, expected_version: int) -> int:
+        """Physically remove only a reviewed never-reused tombstone, with CAS."""
+        self._check(scope, key, "write")
+        integer(expected_version, "expected tombstone version", 1)
+        row = self._conn.execute(
+            "SELECT version,deleted FROM world_state WHERE universe=? AND scope=? AND state_key=?",
+            (self.universe, scope, key),
+        ).fetchone()
+        if row is None or row["version"] != expected_version:
+            raise StateConflict("tombstone changed before forgetting")
+        if not row["deleted"] or self._state_forget_authorizer is None:
+            raise PermissionDenied("only explicitly authorized tombstones can be forgotten")
+        def read_guard(action, arg1, arg2, database, trigger):
+            return (sqlite3.SQLITE_OK if action in {
+                sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE,
+            } else sqlite3.SQLITE_DENY)
+        old_access, old_authorizing = self.access, self._authorizing_state
+        self.access, self._authorizing_state = "read", True
+        self._conn.set_authorizer(read_guard)
+        try:
+            allowed = self._state_forget_authorizer(self, scope, key)
+        finally:
+            self._conn.set_authorizer(getattr(self, "_sql_authorizer", None))
+            self.access, self._authorizing_state = old_access, old_authorizing
+        if allowed is not True:
+            raise PermissionDenied("world has not authorized forgetting this tombstone")
+        self._forgetting_state = True
+        try:
+            self._conn.execute("DELETE FROM world_state WHERE universe=? AND scope=? AND state_key=? AND version=? AND deleted=1",
+                               (self.universe, scope, key, expected_version))
+        finally:
+            self._forgetting_state = False
+        # An already committed tombstone is not deleted a second time as a
+        # world fact. The delete trigger skips it; never-reuse is the policy's
+        # responsibility rather than fabricating a CAS version after removal.
+        return expected_version
 
     def list_state(
         self, scope: str, *, prefix: str = "", limit: int = 50, after: str | None = None, order: str = "key"

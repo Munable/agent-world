@@ -73,11 +73,49 @@ def _write_fact(ctx, sequence, value):
         return False
     if value is None:
         execution._delete(ctx, FACTS, key)
+        forgotten = getattr(ctx, "_grove_fact_forgets", set())
+        ctx._grove_fact_forgets = forgotten | {key}
+        if getattr(ctx, "_grove_batch", None) is None:
+            finalize_forgets(ctx)
     else:
         execution._set(ctx, FACTS, key, value)
     if getattr(ctx, "_grove_batch", None) is None:
         ctx._grove_event_fact_writes = touched | {key}
     return True
+
+
+def state_forget_authorizer(ctx, scope, key):
+    """Only the server's never-reused fact identities may forget a tombstone."""
+    if scope != FACTS or not isinstance(key, str) or not key.isascii() or not key.isdecimal():
+        return False
+    sequence = int(key)
+    if sequence <= 0 or str(sequence) != key:
+        return False
+    journal = ctx.get_state(m.META, "creative_events", {"sequence": 0})
+    return sequence <= journal["sequence"]
+
+
+def finalize_forgets(ctx):
+    """Reclaim only a consumed fact, after the owning batch saved its tombstone.
+
+    Current queues are the causal state; this removes no live body or unread
+    input. Forgetting an already-deleted never-reused identity adds no second
+    business deletion/history entry. Reusable CAS keys retain their tombstones.
+    """
+    pending = getattr(ctx, "_grove_fact_forgets", set())
+    if not pending:
+        return
+    if not hasattr(ctx, "forget_state"):
+        # Lightweight in-memory declaration fixtures do not model physical GC.
+        return
+    for key in sorted(pending, key=int):
+        row = ctx.get_state_record(FACTS, key)
+        if row["exists"]:
+            # A shared fact got another real reference later in the same step.
+            continue
+        if row["version"]:
+            ctx.forget_state(FACTS, key, expected_version=row["version"])
+    ctx._grove_fact_forgets = set()
 
 
 def _pause(ctx, entity, queue, sequence, reason):
@@ -130,8 +168,11 @@ def pending_events(ctx, entity_id, since=0):
     if queue["paused"]:
         return []
     result = []
+    cutoff = getattr(ctx, "_grove_event_cutoff", None)
     for sequence in queue["sequences"]:
         if sequence <= max(since, queue["consumed_through"]):
+            continue
+        if cutoff is not None and sequence > cutoff:
             continue
         fact = execution._get(ctx, FACTS, str(sequence))
         if fact is None or fact["references"] <= 0:

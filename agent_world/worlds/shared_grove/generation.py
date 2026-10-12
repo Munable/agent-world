@@ -836,13 +836,15 @@ def _spawn(ctx, obj, x, y, opportunity, resources_consumed):
 
 
 def content_submit(ctx, args):
-    from . import processes
+    from . import processes, domains
     from .creative import check_delegation
     check_delegation(ctx, args)
     player = _player(ctx)
     record, opportunity, region_record, region = _owned_opportunity(ctx, args)
     continuation = args.get("continuation")
     anchor = _check_continuation(ctx, opportunity, continuation)
+    if anchor:
+        domains.guard_action(ctx, {"entity_id": anchor["id"]}, topology=True)
     if _region_key(player["x"], player["y"]) != opportunity["region"]:
         raise StateConflict("return to the claimed public region before publishing")
     content = args["content"]
@@ -864,6 +866,7 @@ def content_submit(ctx, args):
     if content["kind"] == "layout":
         objects = content["objects"]
         positions = [(obj["x"], obj["y"]) for obj in objects]
+        domains.guard_tiles(ctx, positions)
         if len(set(positions)) != len(positions):
             raise RuleViolation("each new ground object requires its own free tile")
         if any(position not in allowed for position in positions):
@@ -902,6 +905,7 @@ def content_submit(ctx, args):
         route = _route(ctx, cx, cy, occupied)
         if not route:
             raise StateConflict("current region has no unoccupied safe water-to-shore route")
+        domains.guard_tiles(ctx, [(point["x"], point["y"]) for point in route])
         if len(ground) >= MAX_REGION_GROUND:
             raise StateConflict("current region ground-object limit is full")
         cost = _cost([drift], ctx)

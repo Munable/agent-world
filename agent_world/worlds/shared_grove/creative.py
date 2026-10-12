@@ -23,7 +23,7 @@ from . import model as m, commit, activity, publication, execution
 from .model import public_location as _public_location
 from .commit import public_event, physical_contract_failure
 from .events import bounded_record, RECORDS, MAX_RECORDS, MAX_EVENTS, MAX_RECORD_BYTES, MAX_EVENT_BYTES, MAX_EVENT_JOURNAL_BYTES
-from .definitions import BODY_MATERIALS, MAX_CUSTOM_MATERIALS, REGISTRY, registry_for, DEFINITIONS, instance_definition as _type, material_identity as _material, contained_quantities as _quantities, reaction_available_quantities
+from .definitions import BODY_MATERIALS, MAX_CUSTOM_MATERIALS, REGISTRY, registry_for, DEFINITIONS, read_definition, instance_definition as _type, material_identity as _material, contained_quantities as _quantities, reaction_available_quantities
 
 VERSIONS = "grove.creative.versions"
 CONTROL = "grove.creative.control"
@@ -67,10 +67,15 @@ def _capacity_domain(ctx, ids):
         if not additions:
             return objects, set(chunks), members, admitted
         for eid in additions:
-            entity = m.get_entity(ctx, eid)
+            entity = objects.get(eid) or m.get_entity(ctx, eid)
             if _type(ctx, entity)[1] is None:
                 raise RuleViolation("潜在执行成员缺少原不可变定义；本步未提交。")
             admitted[eid] = entity
+        if additions.issubset(objects) and all(
+                set(m._tree_objects(ctx, objects[eid])).issubset(objects) for eid in additions):
+            # These members' complete forests already participate in this
+            # candidate closure; admitting their metadata adds no new edges.
+            return objects, set(chunks), members, admitted
 
 
 def _instance_capacity_budget(ctx, ids):
@@ -194,7 +199,8 @@ def _instance_capacity_budget(ctx, ids):
         if location is not None:
             chunk_domain.add(m.chunk_id(*m.chunk_for(*location)))
     if len(chunk_domain) > physical.MAX_FRAME_CHUNKS:
-        raise RuleViolation("完整物理步的地块提交范围超过8个；本次变化未提交。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("完整物理域的地块提交范围超过8个；本次变化未提交。")
     # A tick cannot generate arbitrary terrain: start_rain/start_drift ensure
     # their complete routes before admission; physical_closure includes those
     # routes, spills, break recipients and fire neighbours. Finished processes
@@ -214,38 +220,61 @@ def _instance_capacity_budget(ctx, ids):
             consumers.update(execution.local_subscribers(ctx, int(cx)*16, int(cy)*16))
     metadata = execution.reservation(ctx, step_ids, max_facts=public_facts,
                                      consumer_ids=sorted(consumers))
-    if set(metadata["possible_members"]) - set(step_ids):
-        # Tail events wake next-step participants after this step's declarations.
-        # Their exact forest must still satisfy wake's existing admission before
-        # publication, without executing a second physical or declarative pass.
-        _capacity_domain(ctx, metadata["possible_members"])
+    # Tail public events only queue direct receivers for their own next frame.
+    # Their bounded queue/bookkeeping writes count in this transaction, but
+    # their foreign physical forests do not join this domain's frozen solve.
     # Error/recorder writes outside the frame share the existing64-entity
     # transaction pool; they do not receive a second physics pass or a second
     # fictitious64-object byte allowance. Same-step watchers also save here.
     entity_writes = (set(objects) | set(step_ids) | set(metadata["entity_writes"])
                      | (batch.dirty_entities if batch is not None else set()))
     if len(entity_writes) > sm.MAX_FRAME_OBJECTS:
-        raise RuleViolation("本步物理、规则及局部消费者保存并集超过64个对象；本步未推进或消费事件。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("本域物理、规则及局部消费者保存并集超过64个对象；本步未推进或消费事件。")
     changes += metadata["changes"]
     size += metadata["size"] + chunk_before - physical.MAX_FRAME_CHUNKS * m.MAX_CHUNK_BYTES
     valid = not (any(len(keys) > 32 for keys in builtin_accounts.values()) or total_facts > MAX_OUTCOMES_PER_STEP
             or combination_changes > MAX_COMMIT_CHANGES or combination_size > MAX_COMMIT_BYTES
             or changes > MAX_COMMIT_CHANGES or size > MAX_COMMIT_BYTES)
     return {"valid": valid, "changes": MAX_COMMIT_CHANGES - max(changes, combination_changes),
-            "bytes": MAX_COMMIT_BYTES - max(size, combination_size)}
+            "bytes": MAX_COMMIT_BYTES - max(size, combination_size),
+            "objects": objects, "chunks": chunk_domain, "members": step_ids}
+
+
+def _unchanged_step_boundary(ctx, ids):
+    plan = getattr(ctx, "_grove_step_plan", None)
+    batch = getattr(ctx, "_grove_batch", None)
+    if plan is None or batch is None or not set(ids).issubset(plan["members"]):
+        return None
+    if not batch.dirty_entities.issubset(plan["objects"]) or not batch.dirty_chunks.issubset(plan["chunks"]):
+        return None
+    # Program values may change without changing the physical reservation.
+    # Material/position/containment changes require fresh boundary admission.
+    for eid in batch.dirty_entities:
+        if m.physical_shape(batch.entities[eid]) != m.physical_shape(plan["objects"][eid]):
+            return None
+        before = plan["objects"][eid].get("state", {}).get("program", {})
+        after = batch.entities[eid].get("state", {}).get("program", {})
+        if any(before.get(key) != after.get(key) for key in ("connections", "port_bindings")):
+            return None
+    return plan
 
 
 def _check_instance_capacity(ctx, ids, *, reject=True):
+    from .domains import CapacityPressure
+    plan = _unchanged_step_boundary(ctx, ids)
+    if plan is not None:
+        return {key: plan[key] for key in ("changes", "bytes")}
     try:
         budget = _instance_capacity_budget(ctx, ids)
-    except RuleViolation:
+    except CapacityPressure:
         if reject:
             raise
         return {"changes": 0, "bytes": 0}
     if not budget["valid"]:
         if not reject:
             return {"changes": 0, "bytes": 0}
-        raise RuleViolation("活动物件组合超过完整物理步的提交容量；现有物件继续运行，本次入料或创建未提交。")
+        raise CapacityPressure("活动物件组合超过完整物理域的提交容量；本次变化未提交。")
     return {key: budget[key] for key in ("changes", "bytes")}
 
 
@@ -254,12 +283,17 @@ def check_step_capacity(ctx):
     # today's BEFORE values; old admission is not a future commit permission.
     # Optional histories use their own forward-capacity check independently.
     ids = activity.meta_get(ctx, "creative_instances", [])
-    if not _instance_capacity_budget(ctx, ids)["valid"]:
-        raise RuleViolation("当前完整规则步超过提交容量；未推进时间或消费事件。")
+    budget = _instance_capacity_budget(ctx, ids)
+    if not budget["valid"]:
+        from .domains import CapacityPressure
+        raise CapacityPressure("当前完整规则域超过提交容量；未推进时间或消费事件。")
+    # Borrowed identity/area plan; mutable reducer views are still phase copies.
+    return budget
 
 
 def step(ctx):
-    return ctx.get_state(m.META, "clock", {}).get("sequence", 0)
+    target = getattr(ctx, "_grove_target_tick", None)
+    return target if target is not None else ctx.get_state(m.META, "clock", {}).get("sequence", 0)
 
 
 def _member(ctx, args=None):
@@ -331,7 +365,7 @@ def _imported_interfaces(ctx, proposed):
                 continue
             if len(interfaces) >= 8:
                 raise RuleViolation("端口最多引用8份不同的不可变接口来源。")
-            record = ctx.get_state(DEFINITIONS, reference)
+            record = read_definition(ctx, reference)
             if not record:
                 raise RuleViolation("端口接口来源未发表；使用真实definition_ref。")
             execution_semantics(record)
@@ -385,7 +419,7 @@ def definition_publish(ctx, args):
 
 def definition_read(ctx, args):
     from .definitions import execution_semantics
-    value = ctx.get_state(DEFINITIONS, args["definition_ref"])
+    value = read_definition(ctx, args["definition_ref"])
     if not value:
         raise RuleViolation("规则版本不存在；先发布并使用返回的definition_ref。")
     return FunctionOutcome({"definition_ref": args["definition_ref"], **value,
@@ -400,7 +434,7 @@ def definition_read(ctx, args):
 def _resolve_material(ctx, reference, symbol):
     """Pin imports to the original immutable definition, never a display name."""
     from .definitions import execution_semantics
-    record = ctx.get_state(DEFINITIONS, reference)
+    record = read_definition(ctx, reference)
     if not record:
         raise RuleViolation("导入材料引用不存在；使用已发表definition_ref与材料symbol。")
     execution_semantics(record)
@@ -410,7 +444,7 @@ def _resolve_material(ctx, reference, symbol):
     binding = pack.get("material_imports", {}).get(symbol)
     if binding:
         # Publication canonicalizes every import to its original material.
-        source = ctx.get_state(DEFINITIONS, binding["definition_ref"])
+        source = read_definition(ctx, binding["definition_ref"])
         if source:
             execution_semantics(source)
         if source and binding["symbol"] in source["definition"]["materials"]:
@@ -826,7 +860,15 @@ def tick(ctx):
     original = deepcopy(objects)
     from . import contact, world_facts
     reaction_view = world_facts.freeze(ctx, original)
-    physical_objects, _ = activity.physical_closure(ctx)
+    plan = getattr(ctx, "_grove_step_plan", None)
+    if plan is None:
+        physical_objects, _ = activity.physical_closure(ctx)
+    else:
+        if not set(ids).issubset(plan["members"]):
+            from .domains import CapacityPressure
+            raise CapacityPressure("本域阶段唤醒超出已关闭参与范围；本步未提交。")
+        physical_objects = {eid: entity for eid in plan["objects"]
+                            if (entity := m.get_entity(ctx, eid, required=False)) is not None}
     contact_original = {eid: deepcopy(entity) for eid, entity in physical_objects.items()
                         if contact.candidates(ctx, entity)}
     events, pending_accounts, phase_supply = {}, {}, {}
@@ -1056,10 +1098,7 @@ def tick(ctx):
                 # The core reservation also covers later public outcomes. Only
                 # estimate spare room when an actual field change needs it.
                 if history_budget is None:
-                    try:
-                        history_budget = _check_instance_capacity(ctx, list(objects), reject=False)
-                    except RuleViolation:
-                        history_budget = {"changes": 0, "bytes": 0}
+                    history_budget = _check_instance_capacity(ctx, list(objects), reject=False)
                 transition = {"step": step(ctx), "before": {key: previous[key] for key in changed_fields}, "after": changed_fields}
                 size = sm.encoded_size(ctx.get_state(FIELD_CHANGES, eid, {})) + sm.encoded_size(transition)
                 if history_budget["changes"] > 0 and history_budget["bytes"] >= size:
@@ -1068,6 +1107,7 @@ def tick(ctx):
                     history_budget["bytes"] -= size
     changed = {eid for eid, entity in objects.items() if entity != persisted[eid]}
     commit.commit_results(ctx, objects, changed, accounts=accounts, tick=step(ctx))
+    commit.maintain_candidates(ctx)
     for eid, action, summary in outcomes:
         public_event(ctx, action=action, entity_id=eid, kind="process", actor="system:rules")
     execution.after_step(ctx, ids)
@@ -1126,6 +1166,8 @@ def rule_action(ctx, args):
                 "可用generation_context的layout创建该定义中的容器类型。普通容器只对转入的已有材料批次结算接触反应，feedstock不等于新材料。")
         raise RuleViolation("此物件没有可执行的声明规则。")
     program, action = entity["state"]["program"], args["action"]
+    from . import domains
+    domains.guard_action(ctx, args, topology=action in {"connect", "disconnect", "bind_port", "unbind_port"})
     summary = ""
     result_extra = {}
     _contract_update(ctx, entity, spec)
@@ -1587,7 +1629,8 @@ def rule_catalog(ctx, args):
             "readback": "Inspect current automatic conditions, bindings and actual fields/matter/mechanical state. A satisfied snapshot condition is not execution evidence; a saved control request records a past change, not repeated activity. Read actual state after the request's applies_from_step. process.steps counts reaction steps only, not all rule execution or goal progress. Another person may change public inputs; re-read the same instance and continue from its real shared consequences."},
         "limits": {"publication_bytes": 24576, "new_publications_per_author_step": publication.MAX_PUBLISH_PER_STEP,
                    "publication_storage": "no small lifetime package/byte cap; metered JSON payloads and actual host storage remain separate",
-                   "active_instances": MAX_INSTANCES, "stored_instances": "stored membership is independent of the active frontier; no global32 lifetime instance limit. Active simulation and local subscriber budgets still apply",
+                   "active_instances": MAX_INSTANCES, "active_scope": "interaction_domain",
+                   "stored_instances": "No world-global32 active or lifetime creation cap. Each connected interaction domain and each actual publication keep their finite execution/write budgets",
                    "types_per_package": 8, "materials_per_package": 4, "rules_per_type": 8,
                    "effects_per_rule": 8, "expression_depth": 8, "expression_nodes": 64, "links_per_object": MAX_LINKS, "records_per_object": MAX_RECORDS,
                    "record_bytes_per_object": MAX_RECORD_BYTES, "event_bytes": MAX_EVENT_BYTES,

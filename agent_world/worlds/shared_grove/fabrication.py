@@ -118,6 +118,9 @@ def fabricate(ctx, args):
     check_delegation(ctx, args)
     player = m.get_player(ctx)
     m.check_player_version(player, args["expected_player_version"])
+    from . import domains
+    domains.guard_action(ctx, {"entity_id": player["backpack_id"],
+                              "material_ids": [row["entity_id"] for row in args["sources"]]}, topology=True)
     _, spec, target, costs = _plan(ctx, args)
     target = {key: target[key] for key in ("name", "material", "capabilities", "state", "matter", "components", "composition")}
     sources, taken, selected, effects = {}, {}, set(), []

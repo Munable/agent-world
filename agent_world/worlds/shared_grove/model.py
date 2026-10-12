@@ -64,6 +64,9 @@ class CandidateBatch:
     records: dict[str, dict] = field(default_factory=dict)
     execution_rows: dict[tuple[str, str], object] = field(default_factory=dict)
     dirty_execution: set[tuple[str, str]] = field(default_factory=set)
+    entity_records: dict[str, dict] = field(default_factory=dict)
+    indexed_entities: dict[str, dict] = field(default_factory=dict)
+    pending_reconcile: set[str] = field(default_factory=set)
 
 
 def liquid_quantity(entity, slot="contained", registry=None):
@@ -138,10 +141,16 @@ def get_chunk(ctx, cx, cy):
         return batch.chunks[cid]
     rec = ctx.get_state_record(CHUNKS, cid)
     if rec["exists"]:
-        return {**rec["value"], "version": rec["version"]}
-    return {"id": cid, "cx": cx, "cy": cy, "seed": SEED, "generator_version": GENERATOR_VERSION,
-            "tiles": [terrain(cx*16+x, cy*16+y) for y in range(16) for x in range(16)],
-            "entity_ids": [], "player_ids": [], "safe_zones": [], "version": rec["version"]}
+        chunk = {**rec["value"], "version": rec["version"]}
+    else:
+        chunk = {"id": cid, "cx": cx, "cy": cy, "seed": SEED, "generator_version": GENERATOR_VERSION,
+                 "tiles": [terrain(cx*16+x, cy*16+y) for y in range(16) for x in range(16)],
+                 "entity_ids": [], "player_ids": [], "safe_zones": [], "version": rec["version"]}
+    if batch is not None:
+        # The transaction's candidate view owns both reads and later saves;
+        # neighboring rules share it, while the next transaction reads anew.
+        batch.chunks[cid] = chunk
+    return chunk
 
 
 def save_chunk(ctx, chunk):
@@ -184,7 +193,10 @@ def get_player(ctx, role_id=None, *, required=True):
         if required:
             raise RuleViolation("请先连接自己的 Agent 并进入溪源。")
         return None
-    return {**rec["value"], "version": rec["version"]}
+    value = {**rec["value"], "version": rec["version"]}
+    if batch is not None:
+        batch.players[role_id] = deepcopy(value)
+    return value
 
 
 def save_player(ctx, player, expected_version=None):
@@ -215,7 +227,12 @@ def get_entity(ctx, entity_id, *, required=True):
         if required:
             raise RuleViolation("物件已经不存在。")
         return None
-    return {**rec["value"], "version": rec["version"]}
+    value = {**rec["value"], "version": rec["version"]}
+    if batch is not None:
+        batch.entity_records[entity_id] = rec
+        batch.entities[entity_id] = deepcopy(value)
+        batch.indexed_entities.setdefault(entity_id, deepcopy(value))
+    return value
 
 
 def entity_location(ctx, entity):
@@ -611,25 +628,32 @@ def store_entity(ctx, entity, expected_version=None):
     project_world_uses(ctx, value)
     batch = getattr(ctx, "_grove_batch", None)
     if batch is not None:
-        record = ctx.get_state_record(ENTITIES, value["id"])
+        if value["id"] not in batch.entity_records:
+            batch.entity_records[value["id"]] = ctx.get_state_record(ENTITIES, value["id"])
+        record = batch.entity_records[value["id"]]
         previous = {**record["value"], "version": record["version"]} if record["exists"] else None
     else:
         previous = get_entity(ctx, value["id"], required=False)
+    indexed_previous = batch.indexed_entities.get(value["id"], previous) if batch is not None else previous
     expected = entity.get("version") if expected_version is None else expected_version
     if previous and expected is not None and previous["version"] != expected:
         raise StateConflict("物件已经变化，请刷新后再行动。")
     if previous and value == {k:v for k,v in previous.items() if k != "version"} and not (batch is not None and value["id"] in batch.dirty_entities):
         entity.update(previous)
         return previous, False
-    if previous and ((previous.get("x"), previous.get("y"), previous.get("owner"), previous.get("container")) != (value.get("x"), value.get("y"), value.get("owner"), value.get("container"))
-                     or (is_ground(previous) and not is_ground(value))):
-        _index_entity(ctx, previous, False)
-    if is_ground(value):
+    if indexed_previous and ((indexed_previous.get("x"), indexed_previous.get("y"), indexed_previous.get("owner"), indexed_previous.get("container")) != (value.get("x"), value.get("y"), value.get("owner"), value.get("container"))
+                     or (is_ground(indexed_previous) and not is_ground(value))):
+        _index_entity(ctx, indexed_previous, False)
+    same_public_shape = (indexed_previous is not None and is_ground(indexed_previous) and is_ground(value)
+                         and physical_shape(indexed_previous) == physical_shape(value))
+    if is_ground(value) and not same_public_shape:
         _index_entity(ctx, value, True)
     if batch is not None:
         result = {**value, "version": previous["version"] if previous else 0}
         batch.entities[value["id"]] = result
+        batch.indexed_entities[value["id"]] = deepcopy(result)
         batch.dirty_entities.add(value["id"])
+        batch.pending_reconcile.add(value["id"])
         entity.update(result)
         return result, True
     version = ctx.set_state(ENTITIES, value["id"], value,
@@ -637,6 +661,25 @@ def store_entity(ctx, entity, expected_version=None):
     result = {**value, "version": version}
     entity.update(result)
     return result, True
+
+
+def physical_shape(entity):
+    """Facts that can change physical admission, excluding rule bookkeeping.
+
+    This is a comparison projection, not a simulation or cached permission.
+    Matter, components, location, containment and actual ordinary state remain
+    present. Material definitions and mixture policy also remain present.
+    """
+    state = entity.get("state", {})
+    program = state.get("program", {})
+    bindings = {key: value for key, value in program.items()
+                if key in {"definition_ref", "type_id", "materials", "material_aliases", "mixture_capacity"}}
+    return {key: value for key, value in entity.items() if key in {
+                "id", "owner", "container", "physical_parent", "x", "y", "material",
+                "capabilities", "components", "matter", "lifecycle"}} | {
+        "state": {key: value for key, value in state.items() if key != "program"},
+        "program_materials": bindings,
+    }
 
 
 def project_world_uses(ctx, entity):
@@ -815,7 +858,8 @@ def can_attach(ctx, part, target):
 def write_candidates(ctx, batch):
     """Admit the complete write plan, then CAS each current record once."""
     if len(batch.dirty_entities) > sm.MAX_FRAME_OBJECTS or len(batch.dirty_chunks) > 8 or len(batch.dirty_players) > 4:
-        raise RuleViolation("本步物理提交超过已预留的记录预算。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("本域物理提交超过已预留的记录预算。")
     estimate, writes = 0, []
     for scope, cache, dirty in ((ENTITIES, batch.entities, batch.dirty_entities),
                               (CHUNKS, batch.chunks, batch.dirty_chunks),
@@ -827,7 +871,8 @@ def write_candidates(ctx, batch):
             writes.append((scope, key, cache[key], value, rec["version"]))
     # 600KiB covers bounded process/meta/outcome rows and Runtime journal framing.
     if estimate > 1400000:
-        raise RuleViolation("本步物理提交超过2MiB中预留给对象和空间索引的预算。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("本域物理提交超过2MiB中预留给对象和空间索引的预算。")
     for scope, key, candidate, value, current_version in writes:
         candidate["version"] = ctx.set_state(scope, key, value, expected_version=current_version)
 

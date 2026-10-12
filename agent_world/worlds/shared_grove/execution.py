@@ -13,9 +13,8 @@ import json
 from agent_world import StateRule
 from agent_world.errors import RuleViolation
 from agent_world.simulation import matter as sm
-from agent_world.simulation.execution import execution_plan
 from . import activity, model as m
-from .definitions import instance_definition
+from .definitions import instance_definition, execution_type_plan
 
 MEMBERS = "grove.execution.members"
 SOURCES = "grove.execution.sources"
@@ -85,7 +84,8 @@ def flush(ctx, batch):
             or counts[events.PENDING] > MAX_QUEUE_WRITES
             or counts[events.FACTS] > (events.MAX_EVENTS if migrating else events.MAX_FACT_WRITES)
             or counts[CONTROL] > 1):
-        raise RuleViolation("本步执行依赖索引写入超过预留预算；本次变化没有提交。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("本步执行依赖索引写入超过预留预算；本次变化没有提交。")
     for scope, key in sorted(batch.dirty_execution):
         row = batch.execution_rows[scope, key]
         if row["exists"]:
@@ -113,7 +113,8 @@ def _replace_index(ctx, scope, entity_id, before, after):
         previous = _get(ctx, scope, key, [])
         proposed = sorted((set(previous) - {entity_id}) | ({entity_id} if key in after else set()))
         if len(proposed) > MAX_SUBSCRIBERS or sm.encoded_size(proposed) > MAX_INDEX_BYTES:
-            raise RuleViolation("同一来源或局部事件区域的依赖超过接纳预算；创建或绑定未提交。")
+            from .domains import CapacityPressure
+            raise CapacityPressure("同一来源或局部事件区域的依赖超过接纳预算；创建或绑定未提交。")
         if proposed:
             _set(ctx, scope, key, proposed)
         else:
@@ -136,27 +137,22 @@ def _ancestry(ctx, entity_id):
     raise RuleViolation("执行依赖的物件祖先超过已声明界限。")
 
 
-def _member_for(ctx, entity, previous=None):
+def _member_for(ctx, entity, previous=None, *, fingerprint=True):
     pack, spec = instance_definition(ctx, entity)
     if spec is None:
         return None
     binding = entity["state"]["program"]
     # Only immutable definition analysis is shared within this transaction.
     # Sources, visibility, fingerprints and capacity still read current facts.
-    plans = getattr(ctx, "_grove_execution_plans", None)
-    if plans is None:
-        plans = ctx._grove_execution_plans = {}
-    token = (binding["definition_ref"], binding["type_id"])
-    if token not in plans:
-        plans[token] = execution_plan(pack, type_id=binding["type_id"])["types"][binding["type_id"]]
-    plan = plans[token]
+    plan = execution_type_plan(ctx, binding["definition_ref"], binding["type_id"])
     sources = set(_ancestry(ctx, entity["id"]))
     for eid in set(plan["literal_objects"]) | set(binding.get("port_bindings", {}).values()):
         sources.update(_ancestry(ctx, eid))
     for link in binding.get("connections", []):
         sources.update(_ancestry(ctx, link["other_id"]))
     if len(sources) > MAX_SOURCES:
-        raise RuleViolation("实例来源及可见性祖先依赖超过接纳预算。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("实例来源及可见性祖先依赖超过接纳预算。")
     location = m.public_location(ctx, entity)
     chunks = []
     if (plan["event_driven"] or plan["recorder"]) and location is not None:
@@ -168,11 +164,12 @@ def _member_for(ctx, entity, previous=None):
              "event_driven": plan["event_driven"], "recorder": plan["recorder"],
              "continuous": plan["continuous"], "sleep_safe": plan["sleep_safe"],
              "status": previous.get("status", "active"),
-             "input_fingerprint": _input_fingerprint(ctx, sources),
+             "input_fingerprint": _input_fingerprint(ctx, sources) if fingerprint else previous.get("input_fingerprint", ""),
              "wake_revision": previous.get("wake_revision", 0),
              "registered_tick": previous.get("registered_tick", activity.meta_get(ctx, "clock", {}).get("sequence", 0))}
     if sm.encoded_size(value) > MAX_MEMBER_BYTES:
-        raise RuleViolation("实例依赖记录超过8KiB接纳预算。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("实例依赖记录超过8KiB接纳预算。")
     return value
 
 
@@ -183,20 +180,25 @@ def _input_fingerprint(ctx, sources):
     Visibility ancestors and ordinary matter are included; a process/cursor
     update alone must not turn a sleeping declaration into a polling loop.
     """
-    inputs = {}
+    # Only reconcile_many owns this phase cache. It is discarded before any
+    # candidate can change, and is never keyed by a persisted version.
+    facts = getattr(ctx, "_grove_input_facts", None)
+    inputs = []
     for eid in sorted(sources):
-        source = m.get_entity(ctx, eid, required=False)
-        if source is None:
-            inputs[eid] = None
-            continue
-        source = deepcopy(source)
-        source.pop("version", None)
-        program = source.get("state", {}).get("program", {})
-        program.pop("process", None)
-        program.pop("event_cursor", None)
-        program.get("recorder", {}).pop("recorded_count", None)
-        inputs[eid] = source
-    encoded = json.dumps(inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        encoded_source = facts.get(eid) if facts is not None else None
+        if encoded_source is None:
+            source = m.get_entity(ctx, eid, required=False)
+            if source is not None:
+                source.pop("version", None)
+                program = source.get("state", {}).get("program", {})
+                program.pop("process", None)
+                program.pop("event_cursor", None)
+                program.get("recorder", {}).pop("recorded_count", None)
+            encoded_source = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if facts is not None:
+                facts[eid] = encoded_source
+        inputs.append(json.dumps(eid, ensure_ascii=False)+":"+encoded_source)
+    encoded = ("{"+",".join(inputs)+"}").encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -220,12 +222,14 @@ def _closure(ctx, seeds):
                 continue
             found.add(eid)
             if len(found) > MAX_FRONTIER:
-                raise RuleViolation("来源变化的完整依赖唤醒超过32个执行参与者；创建或绑定未提交。")
+                from .domains import CapacityPressure
+                raise CapacityPressure("来源变化的完整依赖唤醒超过32个局部执行参与者；创建或绑定未提交。")
             pending.append(eid)
         if get_member(ctx, source) is not None and source not in found:
             found.add(source)
             if len(found) > MAX_FRONTIER:
-                raise RuleViolation("完整依赖唤醒超过32个执行参与者。")
+                from .domains import CapacityPressure
+                raise CapacityPressure("完整依赖唤醒超过32个局部执行参与者。")
     return found
 
 
@@ -239,7 +243,8 @@ def _admit_dependency_graph(ctx, member):
             continue
         ancestors.add(eid)
         if len(ancestors) > MAX_SOURCES * MAX_FRONTIER:
-            raise RuleViolation("依赖关系接纳工作超过有界来源预算。")
+            from .domains import CapacityPressure
+            raise CapacityPressure("依赖关系接纳工作超过有界来源预算。")
         _closure(ctx, [eid])
         row = get_member(ctx, eid)
         if row:
@@ -258,14 +263,33 @@ def potential_members(ctx, entity_ids, *, source_ids=()):
                 and not entity["state"].get("retired") and get_member(ctx, eid) is not None):
             members.append(eid)
     if len(members) > MAX_FRONTIER:
-        raise RuleViolation("本步可能唤醒的完整成员并集超过32个；本步未推进或消费事件。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("本步可能唤醒的局部完整成员并集超过32个；本步未推进或消费事件。")
     return members
 
 
 def wake(ctx, entity_ids, *, reason=None):
     if isinstance(entity_ids, str):
         entity_ids = [entity_ids]
-    awakened = _closure(ctx, entity_ids)
+    from . import domains
+    direct_event = reason == "public_event"
+    if domains.installed(ctx):
+        awakened = set(entity_ids) if direct_event else set().union(*(_closure(ctx, [eid]) for eid in entity_ids))
+        groups = {}
+        for eid in sorted(awakened):
+            domain = domains.for_entity(ctx, eid) or domains.ensure(ctx, entity_ids=[eid])
+            if domain:
+                groups.setdefault(domain["id"], set()).add(eid)
+        for did, ids in groups.items():
+            with domains.scope(ctx, did):
+                _wake_members(ctx, ids, check_capacity=not getattr(ctx, "_grove_domain_work", False))
+        return awakened
+    awakened = set(entity_ids) if direct_event else _closure(ctx, entity_ids)
+    _wake_members(ctx, awakened)
+    return awakened
+
+
+def _wake_members(ctx, awakened, *, check_capacity=True):
     current = set(activity.meta_get(ctx, "creative_instances", []))
     candidates = []
     for eid in sorted(current | awakened):
@@ -273,9 +297,10 @@ def wake(ctx, entity_ids, *, reason=None):
         if entity and entity["lifecycle"] == "intact" and not entity["state"].get("retired") and get_member(ctx, eid) is not None:
             candidates.append(eid)
     if len(candidates) > MAX_FRONTIER:
-        raise RuleViolation("本次变化所需活动程序超过32个执行参与者；本次变化未提交。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("本次变化所需活动程序超过32个局部执行参与者；本次变化未提交。")
     activity.meta_set(ctx, "creative_instances", candidates)
-    if set(candidates) - current:
+    if check_capacity and set(candidates) - current:
         from .creative import _check_instance_capacity
         _check_instance_capacity(ctx, candidates)
     for eid in sorted(awakened):
@@ -285,7 +310,6 @@ def wake(ctx, entity_ids, *, reason=None):
         member["wake_revision"] += 1
         member["status"] = "active"
         _set(ctx, MEMBERS, eid, member)
-    return awakened
 
 
 def register(ctx, entity):
@@ -293,18 +317,36 @@ def register(ctx, entity):
         return
     member = _index_member(ctx, entity)
     _admit_dependency_graph(ctx, member)
+    from . import domains
+    if domains.installed(ctx):
+        domains.ensure(ctx, entity_ids=[entity["id"]])
     wake(ctx, [entity["id"]], reason="registration")
 
 
 def reconcile(ctx, entity, *, previous=None):
     """Called after ordinary state/ownership changes, including non-program sources."""
-    affected = set(subscribers(ctx, entity["id"]))
-    member = get_member(ctx, entity["id"])
-    if member is not None:
-        affected.add(entity["id"])
+    return reconcile_many(ctx, {entity["id"]: entity})
+
+
+def reconcile_many(ctx, entities):
+    """Index the final source union once, then wake each real domain once."""
+    previous = getattr(ctx, "_grove_input_facts", None)
+    ctx._grove_input_facts = {}
+    try:
+        return _reconcile_many(ctx, entities)
+    finally:
+        ctx._grove_input_facts = previous
+
+
+def _reconcile_many(ctx, entities):
+    affected = set()
+    for eid, entity in entities.items():
+        affected.update(subscribers(ctx, eid))
+        if get_member(ctx, eid) is not None or entity["state"].get("program", {}).get("definition_ref"):
+            affected.add(eid)
     changed = []
     for eid in sorted(affected):
-        current = entity if eid == entity["id"] else m.get_entity(ctx, eid, required=False)
+        current = entities.get(eid) or m.get_entity(ctx, eid, required=False)
         if current is None:
             continue
         before = get_member(ctx, eid)
@@ -326,9 +368,12 @@ def _retire(ctx, entity_id, member):
     _replace_index(ctx, CHUNKS, entity_id, member["chunks"], [])
     member.update(status="retired", sources=[], chunks=[])
     _set(ctx, MEMBERS, entity_id, member)
-    frontier = set(activity.meta_get(ctx, "creative_instances", []))
-    frontier.discard(entity_id)
-    activity.meta_set(ctx, "creative_instances", sorted(frontier))
+    from . import domains
+    domain = domains.for_entity(ctx, entity_id) if domains.installed(ctx) else None
+    with domains.scope(ctx, domain) if domain else nullcontext():
+        frontier = set(activity.meta_get(ctx, "creative_instances", []))
+        frontier.discard(entity_id)
+        activity.meta_set(ctx, "creative_instances", sorted(frontier))
 
 
 def begin_step(ctx, entity_ids):
@@ -357,9 +402,20 @@ def after_step(ctx, processed_ids):
         error = program["process"]["status"] == "error"
         changed_during_step = eid not in start or member["wake_revision"] != start[eid]
         visible_events = m.public_location(ctx, entity) is not None
-        keep = (not member["sleep_safe"] or member["continuous"] or eid in physical
-                or (visible_events and not queue["paused"] and not error and queue["retained_count"])
-                or (not error and changed_during_step))
+        mechanical = program.get("mechanical", {})
+        # An after-rule failure preserves this step's solved motion. One next
+        # step must publish its stopped state before the declaration can sleep.
+        # Contracts and recorders likewise retain only their finite deadlines.
+        error_settlement = error and (
+            bool(mechanical) and (mechanical.get("status") != "program_error"
+                or mechanical.get("speed", 0) != 0 or mechanical.get("available_torque", 0) != 0
+                or mechanical.get("enabled", False))
+            or program.get("contract", {}).get("status") == "active"
+            or program.get("recorder", {}).get("active", False))
+        keep = (eid in physical or error_settlement or not error and
+                (not member["sleep_safe"] or member["continuous"]
+                 or visible_events and not queue["paused"] and queue["retained_count"]
+                 or changed_during_step))
         member["status"] = "error" if error else "active" if keep else "sleeping"
         if not keep:
             frontier.discard(eid)
@@ -467,22 +523,24 @@ def reservation(ctx, entity_ids, *, max_facts=None, consumer_ids=None):
                     if room > 0 and entity["state"]["program"]["process"]["status"] != "error":
                         event_seeds.add(eid)
     if len(consumers) > MAX_QUEUE_WRITES:
-        raise RuleViolation("本步局部事件消费者超过32个队列写入预算；未消费或丢弃事实。")
-    # Tail events wake a whole dependency closure, not just their subscribers.
-    # They do not execute those declarations in this step, but saving their
-    # status/revision is still part of this same transaction.
-    possible_members = potential_members(ctx, entity_ids, source_ids=event_seeds)
+        from .domains import CapacityPressure
+        raise CapacityPressure("本步局部事件消费者超过32个队列写入预算；未消费或丢弃事实。")
+    # Immutable event bodies are next-frame input. Budget the direct receiver
+    # writes here, not their future source graph or a foreign physics forest.
+    possible_members = sorted(set(entity_ids) | event_seeds)
     for eid in possible_members:
         member = get_member(ctx, eid)
         rows.setdefault((MEMBERS, eid), _record(ctx, MEMBERS, eid))
         indexes.update((SOURCES, source) for source in member["sources"])
         indexes.update((CHUNKS, chunk) for chunk in member["chunks"])
     if sum(scope == MEMBERS for scope, _ in rows) > MAX_MEMBER_WRITES:
-        raise RuleViolation("本步成员写入并集超过32个预算；本步未推进或消费事件。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("本步成员写入并集超过32个预算；本步未推进或消费事件。")
     for eid in record_writes:
         rows.setdefault((events.RECORDS, eid), _record(ctx, events.RECORDS, eid))
     if sum(scope == events.PENDING for scope, _ in rows) > MAX_QUEUE_WRITES:
-        raise RuleViolation("本步局部事件队列写入并集超过32个预算；未消费或丢弃事实。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("本步局部事件队列写入并集超过32个预算；未消费或丢弃事实。")
     changes, size = len(rows), 0
     for (scope, key), row in rows.items():
         previous = ctx.get_state_record(scope, key)

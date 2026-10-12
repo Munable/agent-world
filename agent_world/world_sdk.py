@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import inspect
 from typing import Callable
 
 from .runtime_contracts import (
@@ -18,6 +19,7 @@ from .world_context import FunctionContext
 from .world_types import EventSpec, FunctionOutcome
 from .world_views import ViewSpec
 from .world_timers import TimerSpec
+from .world_checkpoints import CheckpointSpec
 from .retention import RetentionPolicy
 from .world_streams import StreamSpec
 
@@ -84,6 +86,9 @@ class WorldDefinition:
     timers: tuple[TimerSpec, ...] = ()
     retention: RetentionPolicy | None = None
     streams: tuple[StreamSpec, ...] = ()
+    checkpoints: tuple[CheckpointSpec, ...] = ()
+    state_forget_authorizer: Callable | None = None
+    resume: Callable | None = None
 
     def manifest(self):
         identifier(self.world_id, "world_id")
@@ -100,6 +105,15 @@ class WorldDefinition:
             raise WorldDefinitionError("world must declare at most 64 TimerSpec values")
         if len({t.name for t in self.timers}) != len(self.timers):
             raise WorldDefinitionError("duplicate timer handler names")
+        if len(self.checkpoints) > 64 or any(not isinstance(spec, CheckpointSpec) for spec in self.checkpoints):
+            raise WorldDefinitionError("world must declare at most 64 CheckpointSpec values")
+        if len({spec.name for spec in self.checkpoints}) != len(self.checkpoints):
+            raise WorldDefinitionError("duplicate checkpoint handler names")
+        if self.state_forget_authorizer is not None and (
+                not callable(self.state_forget_authorizer) or inspect.iscoroutinefunction(self.state_forget_authorizer)):
+            raise WorldDefinitionError("state forget authorizer must be callable")
+        if self.resume is not None and (not callable(self.resume) or inspect.iscoroutinefunction(self.resume)):
+            raise WorldDefinitionError("world resume callback must be synchronous")
         if len(self.streams)>64 or any(not isinstance(s,StreamSpec) for s in self.streams):
             raise WorldDefinitionError("at most 64 StreamSpec declarations are allowed")
         if len({s.name for s in self.streams}) != len(self.streams):
@@ -131,6 +145,12 @@ class WorldDefinition:
             value["views"] = [v.contract() for v in self.views]
         if self.timers:
             value["timers"] = [t.contract() for t in self.timers]
+        if self.checkpoints:
+            value["checkpoints"] = [spec.contract() for spec in self.checkpoints]
+        if self.state_forget_authorizer is not None:
+            value["state_forgetting"] = "explicit_tombstone_authorizer"
+        if self.resume is not None:
+            value["resumption"] = "runtime_first_attach"
         if self.streams:
             value["streams"] = [s.contract() for s in self.streams]
         if self.retention is not None:
@@ -184,7 +204,9 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
         # Migrations use only the scoped storage API and run in one transaction.
         migration_ctx = FunctionContext(
             c, universe, "system:installer", "world.migrate", definition.version, access="write",
-            timers_enabled=True
+            timers_enabled=True, checkpoints_enabled=True,
+            state_forget_authorizer=definition.state_forget_authorizer,
+            checkpoint_specs=definition.checkpoints,
         )
         if old is None:
             if definition.initialize is not None:
@@ -195,6 +217,12 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
                 if migration is None:
                     raise WorldDefinitionError(f"missing migration to state version {target}")
                 runtime._run_user_code(c, migration, migration_ctx)
+        resumed = (old is not None and universe not in runtime._worlds
+                   and definition.resume is not None and not migration_ctx.world_resumed)
+        if resumed:
+            migration_ctx.function_id = "world.resume"
+            runtime._run_user_code(c, definition.resume, migration_ctx)
+            migration_ctx.world_resumed = True
         for row in c.execute(
             "SELECT scope,state_key,value_json FROM world_state WHERE universe=? AND deleted=0", (universe,)
         ):
@@ -236,10 +264,12 @@ def _install_world_locked(runtime, universe: str, definition: WorldDefinition) -
             (universe, definition.world_id, definition.version, encoded, definition.state_version),
         )
         transitions = runtime._apply_timer_commands_tx(c, migration_ctx, definition)
-        if old is None or old["manifest_json"] != encoded:
+        runtime._apply_checkpoint_commands_tx(c, migration_ctx, definition)
+        if old is None or old["manifest_json"] != encoded or resumed:
             commit_seq = runtime._record_commit_tx(
                 c, universe, journal_marker, actor_role_id="system:installer",
-                function_id="world.install", source="migration" if old else "initialize",
+                function_id="world.resume" if resumed and old["manifest_json"] == encoded else "world.install",
+                source="resume" if resumed and old["manifest_json"] == encoded else "migration" if old else "initialize",
                 world_version=definition.version,
                 history_definition=definition,
             )

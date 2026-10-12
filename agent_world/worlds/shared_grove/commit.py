@@ -24,7 +24,14 @@ def save_entity(ctx, entity, expected_version=None):
     prepare_materials(ctx, entity)
     result, changed = m.store_entity(ctx, entity, expected_version=expected_version)
     if changed:
-        from . import execution
+        batch = getattr(ctx, "_grove_batch", None)
+        if batch is not None:
+            # The owning reducer publishes its complete candidate view before
+            # updating dependency and physics indexes. Reconcile each source
+            # once per phase, not one full closure per changed object.
+            return result
+        from . import domains, execution
+        domains.sync_entities(ctx, {result["id"]: result})
         execution.reconcile(ctx, result)
         from .contact import reserve, may_contact, authored_outputs
         contacts = reserve(ctx, result)
@@ -40,6 +47,25 @@ def save_entity(ctx, entity, expected_version=None):
             from .creative import _check_instance_capacity
             _check_instance_capacity(ctx, activity.meta_get(ctx, "creative_instances", []))
     return result
+
+
+def maintain_candidates(ctx):
+    """Maintain one phase's final source union without executing any rules."""
+    batch = getattr(ctx, "_grove_batch", None)
+    if batch is None or not batch.pending_reconcile:
+        return
+    changed = {eid: deepcopy(batch.entities[eid]) for eid in sorted(batch.pending_reconcile)}
+    batch.pending_reconcile.clear()
+    from . import domains, execution
+    domains.sync_entities(ctx, changed)
+    execution.reconcile_many(ctx, changed)
+    activity.reconcile_many(ctx, changed)
+    from .contact import reserve_forest
+    roots = {}
+    for entity in changed.values():
+        roots.update(m._tree_objects(ctx, entity))
+    if any(reserve_forest(ctx, roots).values()):
+        batch.contact_admission = True
 
 
 def ensure_chunk(ctx, cx, cy):
@@ -232,6 +258,8 @@ def consume_resources(ctx, cx, cy, cost):
             field = "water_remaining" if kind == "water" else "stock"
             amount = min(remaining, source["state"][field])
             if amount:
+                from . import domains
+                domains.guard_action(ctx, {"entity_id": source["id"]})
                 units = amount if kind == "water" else amount*PIECE_QUANTITIES[kind]
                 try:
                     sm.take_material(source, kind, units, include_burning=True, remove_empty=False)
@@ -292,6 +320,11 @@ def record_account(ctx, category, material, amount, reason):
 
 def apply_matter(ctx, objects, effects, *, sources=(), sinks=()):
     from .contact import bind_incoming
+    from . import domains
+    if not getattr(ctx, "_grove_domain_work", False):
+        # Some operations discover their finite source after the requested
+        # target was checked. Guard the actual transfer participants as well.
+        domains.guard_action(ctx, {"material_ids": [obj["id"] for obj in objects]})
     try:
         frame = Frame(registry_for(objects), {obj["id"]: obj for obj in objects},
                       bind_material=lambda entity, definition: bind_incoming(ctx, entity, definition), mixture_capacity=mixture_capacity)
@@ -545,15 +578,21 @@ def candidate_batch(ctx):
 
 def _flush_batch(ctx, batch):
     """Write this owner's admitted state and public facts through existing CAS."""
+    maintain_candidates(ctx)
     if (len(batch.dirty_processes) > activity.MAX_PROCESSES
             or len(batch.dirty_meta) > activity.MAX_FRAME_META):
-        raise RuleViolation("过程及索引写入超过预留记录预算。")
+        from .domains import CapacityPressure
+        raise CapacityPressure("过程及索引写入超过本域预留记录预算。")
     from .contact import prepare_materials
     for eid in batch.dirty_entities:
         entity = batch.entities[eid]
         prepare_materials(ctx, entity)
         version = entity.get("version")
-        batch.entities[eid] = m.normalize_entity(entity)
+        # store_entity already validated the final candidate. Only later
+        # direct reducer edits or added contact metadata need normalization
+        # again; final Runtime schema/CAS/write-budget checks always remain.
+        if entity != batch.indexed_entities.get(eid):
+            batch.entities[eid] = m.normalize_entity(entity)
         m.project_world_uses(ctx, batch.entities[eid])
         if version is not None:
             batch.entities[eid]["version"] = version
@@ -575,9 +614,10 @@ def _flush_batch(ctx, batch):
         events._save(ctx, events.RECORDS, eid, record)
     from . import execution
     execution.flush(ctx, batch)
+    events.finalize_forgets(ctx)
 
 
-def commit_results(ctx, objects, dirty, *, accounts=None, spills=None, chunks=(), tick=None):
+def commit_results(ctx, objects, dirty, *, accounts=None, spills=None, spills_before=None, chunks=(), tick=None):
     """Commit one trusted candidate set; reducers still own mechanism/order policy.
 
     Seed the complete read view before reconciling any member, then normalize
@@ -605,27 +645,33 @@ def commit_results(ctx, objects, dirty, *, accounts=None, spills=None, chunks=()
                     player["inventory"].remove(eid)
                     m.save_player(ctx, player)
         if spills is not None:
+            if spills_before is None:
+                raise RuleViolation("接触池提交缺少本帧原数量；未改变世界。")
             covered = set(chunks)
-            indexed = set(activity.meta_get(ctx, "spill_chunks", []))-covered
-            # Partition this frame's final reservoirs once, rather than
-            # parsing every spilled coordinate again for each covered chunk.
-            by_point = {}
-            if covered:
-                for key, amount in spills.items():
-                    if amount:
-                        point = m.chunk_for(*map(int, key.split(",")))
-                        by_point.setdefault(point, {})[key] = amount
-            for cid in sorted(covered):
-                _, cx, cy = cid.split("_")
-                point = int(cx), int(cy)
+            by_chunk = {}
+            owned = set(spills_before) | set(spills)
+            for key in owned:
+                point = m.chunk_for(*map(int, key.split(",")))
+                if m.chunk_id(*point) not in covered:
+                    raise RuleViolation("接触池变化超出本帧已接纳地块；未改变世界。")
+                by_chunk.setdefault(point, set()).add(key)
+            for point, keys in sorted(by_chunk.items()):
                 chunk = m.get_chunk(ctx, *point)
-                held = by_point.get(point, {})
+                held = dict(chunk.get("water_reservoirs", {}))
+                for key in keys:
+                    if held.get(key, 0) != spills_before.get(key, 0):
+                        raise StateConflict("本帧接触池原数量已改变；没有重复消费或覆盖。")
+                    if spills.get(key, 0):
+                        held[key] = spills[key]
+                    else:
+                        held.pop(key, None)
                 if held != chunk.get("water_reservoirs", {}):
                     chunk["water_reservoirs"] = held
                     m.save_chunk(ctx, chunk)
-                if held:
-                    indexed.add(cid)
-            activity.meta_set(ctx, "spill_chunks", sorted(indexed))
+            from . import domains
+            if domains.installed(ctx) and not getattr(ctx, "_grove_domain_work", False) and any(spills.values()):
+                domains.ensure(ctx, entity_ids=list(objects), spill_points=[key for key, amount in spills.items() if amount])
+            activity.update_spill_index(ctx, owned, spills)
         for (category, material, reason), amount in sorted((accounts or {}).items()):
             record_account(ctx, category, material, amount, reason)
         return changed
@@ -642,6 +688,7 @@ def commit_frame(ctx, frame, *, chunks=(), tick=None):
         for (material, reason), amount in values.items():
             sm.accumulate_quantity(accounts, (category, material, reason), amount)
     changed = commit_results(ctx, frame.objects, frame.dirty, accounts=accounts,
-                             spills=frame.spills if chunks else None, chunks=chunks, tick=tick)
+                             spills=frame.spills if chunks else None,
+                             spills_before=frame.spills_before if chunks else None, chunks=chunks, tick=tick)
     frame.dirty.update(changed)
     return changed

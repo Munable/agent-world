@@ -230,11 +230,8 @@ class CreativeWorldTests(unittest.TestCase):
         self.assertEqual(self.view("B")["player"]["id"], self.roles["B"])
 
     def ticks(self, count):
-        for _ in range(count):
-            self.time.return_value += 1
-            result = self.world.run_due_timers("w")
-            self.assertEqual(result["count"], 1, result)
-            self.assertEqual([row["status"] for row in result["processed"]], ["completed"], result)
+        from grove_clock import advance_frames
+        advance_frames(self, self.world, "w", self.time, count)
 
     def _assert_after_phase_reads(self, gate_id, observer_id):
         gate_definition = {"key": "phase_gate", "name": "按步开门", "version": 1, "types": {"gate": {
@@ -317,10 +314,10 @@ class CreativeWorldTests(unittest.TestCase):
         self.action("A", objects["source"], "fuel", item_id=fuel, amount=3)
         self.action("A", objects["source"], "start")
         matter_before = deepcopy(self.entity(objects["gate"])["matter"])
-        clock = self.view()["clock"]
-        timer_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
         self.ticks(1)
-        receipt = self.world.get_timer_receipt("w", timer_id)
+        from agent_world.worlds.shared_grove.domains import OWNERS
+        domain_id = self.world.get_state("w", OWNERS, objects["gate"])["value"]["domain_id"]
+        receipt = self.world.get_checkpoint_receipt("w", "grove.domain." + domain_id)
         self.assertTrue(receipt["ok"])
         self.assertTrue(any("bounded" in change for change in receipt["result"]["changes"]))
         current = self.entity(objects["gate"])
@@ -472,29 +469,32 @@ class CreativeWorldTests(unittest.TestCase):
         db = self.db.with_name("blocked-clock-upgrade.sqlite3")
         world = WorldRuntime(db)
         definition = make_world()
-        world.install_world("w", replace(definition, version=13, state_version=7, migrations={}))
+        world.install_world("w", definition)
         role = world.create_role("returning")["role_id"]
         world.call_function("w", "grove.join", role, {"name": "returning"}, operation_id="clock-join")
         self.time.return_value += 1
         self.assertEqual(world.run_due_timers("w")["count"], 1)
         clock = world.get_state("w", m.META, "clock")["value"]
-        old_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
+        old_generation = world.get_checkpoint("w", "grove.frame")["generation"]
         player = world.get_state("w", m.PLAYERS, role)
         # A world-only revision leaves its durable old-version task blocked.
-        world.install_world("w", replace(definition, version=16, state_version=7, migrations={}))
+        world.install_world("w", replace(definition, version=definition.version + 1))
         self.time.return_value += 1
         world.run_due_timers("w")
-        self.assertEqual(world.get_timer("w", old_id)["status"], "blocked")
-        world.install_world("w", definition)
+        self.assertEqual(world.get_checkpoint("w", "grove.frame")["status"], "blocked")
+        from agent_world.worlds.shared_grove.scheduling import resume
+        upgrade = replace(definition, version=definition.version + 2, state_version=definition.state_version + 1,
+                          migrations={**definition.migrations, definition.state_version + 1: resume})
+        world.install_world("w", upgrade)
         resumed = world.get_state("w", m.META, "clock")["value"]
         self.assertEqual(resumed["sequence"], clock["sequence"])
-        self.assertEqual(resumed["last_tick_at"], clock["last_tick_at"])
-        self.assertNotEqual(resumed["epoch"], clock["epoch"])
+        self.assertEqual(resumed["last_tick_at"], self.time.return_value)
+        self.assertEqual(resumed["epoch"], clock["epoch"])
         self.assertEqual(world.get_state("w", m.PLAYERS, role), player)
-        self.assertEqual(world.get_timer("w", old_id)["status"], "cancelled")
-        next_id = f"grove.tick.{resumed['epoch']}.{resumed['sequence']}"
-        self.assertEqual(world.get_timer("w", next_id)["status"], "pending")
-        world.install_world("w", definition)
+        current_task = world.get_checkpoint("w", "grove.frame")
+        self.assertGreater(current_task["generation"], old_generation)
+        self.assertEqual(current_task["status"], "pending")
+        world.install_world("w", upgrade)
         self.assertEqual(world.get_state("w", m.META, "clock")["value"], resumed)
         self.time.return_value += 1
         self.assertEqual(world.run_due_timers("w")["count"], 1)
@@ -1103,9 +1103,12 @@ class CreativeWorldTests(unittest.TestCase):
 
     def test_one_step_coalesces_event_and_recorder_writes_with_ordered_facts(self):
         definition = package()
-        for kind in ("mixer", "polisher"):
+        for kind in ("mixer", "polisher", "echo"):
             definition["types"][kind]["recorder"] = {"radius": 8, "window_ticks": 100}
+            definition["types"][kind]["ports"] = {"peer": {"fields": ["physical.contained_water"]}}
         _, objects = self.publish("A", definition, ["mixer", "polisher", "echo"])
+        self.action("A", objects["mixer"], "bind_port", port="peer", other_id=objects["polisher"])
+        self.action("A", objects["polisher"], "bind_port", port="peer", other_id=objects["echo"])
         wood = self.item("A", "木柴")["id"]
         for symbol in ("amber", "blue"):
             self.action("A", objects["mixer"], "charge", material=symbol, amount=1, item_id=wood)
@@ -1128,9 +1131,9 @@ class CreativeWorldTests(unittest.TestCase):
             self.assertEqual([event["sequence"] for event in observed],
                              [journal["value"]["sequence"]+1, journal["value"]["sequence"]+2])
 
-    def test_optional_field_evidence_does_not_block_full_core_combination(self):
-        # This exact existing combination fills the core reservation. Optional
-        # evidence must not reject admission or stop its actual automatic rules.
+    def test_independent_field_evidence_uses_local_reservation_and_keeps_rules_running(self):
+        # Independent domains do not charge every object's optional history
+        # against the former world-wide combination reservation.
         def visit(ctx, args):
             commit.ensure_chunk(ctx, args["cx"], args["cy"])
             player = m.get_player(ctx)
@@ -1170,12 +1173,11 @@ class CreativeWorldTests(unittest.TestCase):
                     "content": {"kind": "layout", "objects": specs}})
                 ids.extend(entity["id"] for entity in result["entities"])
         self.assertEqual(len(ids), 31)
-        # The lease-only clock jumps make the first due timer late; that timer
-        # rearms without catch-up. The next ordinary step must really execute.
+        # Queue lateness is not an outage. Only actual restart pauses the world.
         self.ticks(2)
         for eid in ids:
             self.assertTrue(self.entity(eid)["state"]["program"]["fields"]["ready"], self.entity(eid))
-            self.assertFalse(self.world.get_state("w", creative.FIELD_CHANGES, eid)["exists"])
+            self.assertTrue(self.world.get_state("w", creative.FIELD_CHANGES, eid)["exists"])
         self.ticks(1)
         self.assertTrue(all(self.entity(eid)["state"]["program"]["process"]["status"] != "error" for eid in ids))
 
@@ -1243,8 +1245,8 @@ class CreativeWorldTests(unittest.TestCase):
         self.assertLessEqual(size, 2*1024*1024)
 
         # Independent material identities consume separate accounting rows.
-        # The ninth full-capability instance exceeds the combination budget,
-        # while the 32-instance count and regional stock still allow it.
+        # Nine unrelated combinations each use their own accounting budget.
+        # They must no longer exhaust one world-wide combination reservation.
         self.db = self.db.with_name("combination-capacity.sqlite3")
         self.world = WorldRuntime(self.db)
         self.world.install_world("w", replace(world, functions=(*world.functions, fixture)))
@@ -1279,15 +1281,15 @@ class CreativeWorldTests(unittest.TestCase):
         self.call("A", "grove.fixture_visit", {"cx": regions[1][0], "cy": regions[1][1]})
         self.time.return_value += 31
         context = self.call("A", "grove.generation_context", {"kind": "layout", "reason": "user_request"})
-        with sqlite3.connect(self.db) as connection:
-            before = connection.execute("SELECT scope,state_key,value_json,version FROM world_state ORDER BY scope,state_key").fetchall()
-        with self.assertRaisesRegex(RuleViolation, "提交容量"):
-            self.call("A", "grove.content_submit", {"opportunity_id": context["opportunity"]["id"],
-                "expected_opportunity_version": context["opportunity"]["version"], "content": {"kind": "layout", "objects": [
-                    {"definition_ref": refs[-1], "type_id": "combined", **context["allowed_tiles"][0]}]}})
-        with sqlite3.connect(self.db) as connection:
-            self.assertEqual(connection.execute("SELECT scope,state_key,value_json,version FROM world_state ORDER BY scope,state_key").fetchall(), before)
-        self.assertEqual(len(self.world.get_state("w", m.META, "creative_instances")["value"]), 8)
+        ninth = self.call("A", "grove.content_submit", {"opportunity_id": context["opportunity"]["id"],
+            "expected_opportunity_version": context["opportunity"]["version"], "content": {"kind": "layout", "objects": [
+                {"definition_ref": refs[-1], "type_id": "combined", **context["allowed_tiles"][0]}]}})["entities"][0]
+        from agent_world.worlds.shared_grove import domains
+        with self.world._conn(readonly=True) as connection:
+            domains_now = [json.loads(row[0]) for row in connection.execute(
+                "SELECT value_json FROM world_state WHERE universe='w' AND scope=? AND deleted=0", (domains.DOMAINS,))]
+        self.assertEqual(sum(len(row["creative_instances"]) for row in domains_now), 9)
+        self.assertTrue(self.world.get_state("w", m.ENTITIES, ninth["id"])["exists"])
         self.call("A", "grove.fixture_visit", {"cx": 0, "cy": 0})
         wood = self.item("A", "木柴")["id"]
         for eid in combined_ids:
@@ -1304,46 +1306,6 @@ class CreativeWorldTests(unittest.TestCase):
             self.assertTrue(any(event["kind"] == "process" for event in record["history"]))
             self.assertLessEqual(encoded_size(record), creative.MAX_RECORD_BYTES)
 
-    def test_world_upgrade_hands_off_clock_without_advancing_saved_state(self):
-        for old_world_version, old_state_version in ((10, 5), (17, 8), (18, 9), (19, 10), (28, 19), (29, 19), (30, 20)):
-            db = self.db.with_name(f"upgrade-{old_world_version}-{old_state_version}.sqlite3")
-            world = WorldRuntime(db)
-            initial_version = 28 if old_world_version == 29 else old_world_version
-            world.install_world("w", replace(make_world(), version=initial_version, state_version=old_state_version, migrations={}))
-            role = world.create_role("returning")["role_id"]
-            world.call_function("w", "grove.join", role, {"name": "returning"}, operation_id="upgrade-join")
-            self.time.return_value += 1
-            self.assertEqual(world.run_due_timers("w")["count"], 1)
-            player = world.get_state("w", m.PLAYERS, role)
-            clock = world.get_state("w", m.META, "clock")["value"]
-            old_id = f"grove.tick.{clock['epoch']}.{clock['sequence']}"
-            if old_world_version == 29:
-                world.install_world("w", replace(make_world(), version=29, state_version=19, migrations={}))
-                self.time.return_value += 1
-                world.run_due_timers("w")
-                self.assertEqual(world.get_timer("w", old_id)["status"], "blocked")
-                self.assertEqual(world.get_state("w", m.META, "clock")["value"], clock)
-            world = WorldRuntime(db)
-            world.install_world("w", make_world())
-            resumed = world.get_state("w", m.META, "clock")["value"]
-            self.assertEqual(resumed["sequence"], clock["sequence"])
-            self.assertEqual(resumed["last_tick_at"], clock["last_tick_at"])
-            self.assertNotEqual(resumed["epoch"], clock["epoch"])
-            self.assertEqual(world.get_state("w", m.PLAYERS, role), player)
-            self.assertEqual(world.get_timer("w", old_id)["status"], "cancelled")
-            next_id = f"grove.tick.{resumed['epoch']}.{resumed['sequence']}"
-            self.assertEqual(world.get_timer("w", next_id)["status"], "pending")
-            with world._conn(readonly=True) as connection:
-                self.assertEqual(connection.execute("SELECT COUNT(*) FROM world_timers WHERE universe='w' AND handler='grove.tick' AND status='pending'").fetchone()[0], 1)
-            world.install_world("w", make_world())
-            self.assertEqual(world.get_state("w", m.META, "clock")["value"], resumed)
-            self.time.return_value += 100  # simulated service outage, not elapsed play
-            result = world.run_due_timers("w")
-            self.assertEqual(result["count"], 1)
-            self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"])
-            self.time.return_value += 1
-            self.assertEqual(world.run_due_timers("w")["count"], 1)
-            self.assertEqual(world.get_state("w", m.META, "clock")["value"]["sequence"], clock["sequence"]+1)
 
 if __name__ == "__main__":
     unittest.main()
