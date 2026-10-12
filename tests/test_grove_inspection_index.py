@@ -38,7 +38,9 @@ class InspectionIndexTests(unittest.TestCase):
         self.assertEqual(unequal["entity"]["state"]["program"]["fields"], {"signal": 1})
         self.assertEqual(unequal["entity"]["creative"]["fields"], fields)
         default = companion_projection("grove.inspect", before)
-        self.assertEqual(default["entity"]["state"]["program"], before["entity"]["state"]["program"])
+        self.assertEqual(default["entity"]["state"]["program"], {})
+        self.assertEqual(default["entity"]["creative"]["fields"], fields)
+        self.assertEqual(default["entity"]["creative"]["process"], process)
         observed = AgentObservations("person").present("execution_checkpoint", {"execution_readback": {
             "selected_inspection": before}})
         self.assertEqual(observed["execution_readback"]["selected_inspection"]["entity"]["execution_domain"], domain)

@@ -19,12 +19,55 @@ from typing import Awaitable, Callable
 
 from jsonschema import Draft202012Validator
 
-from .grove_agent_observation import AGENT_ACTION_FUNCTIONS
+from .grove_agent_observation import AGENT_WRITE_FUNCTIONS
 from .grove_connector_errors import ConnectorError
 
 
 MAX_ACTION_TARGETS = 4
 MAX_ACTION_SUMMARY_BYTES = 8 * 1024
+RECEIPT_HISTORY_SCOPE = "formal_agent_writes"
+
+
+def _summary_outcome(outcome):
+    """Keep original commit evidence, without repeating a whole object snapshot."""
+    if not isinstance(outcome, dict):
+        return None
+    value = {"kind": "server_receipt"}
+    if isinstance(outcome.get("changes"), list):
+        value["changes"] = [text[:160] for text in outcome["changes"][:2] if isinstance(text, str)]
+    entity = outcome.get("entity")
+    if isinstance(entity, dict):
+        value["entity"] = {key: deepcopy(entity[key]) for key in
+            ("id", "name", "version", "x", "y", "owner", "container", "physical_parent", "lifecycle")
+            if key in entity}
+    action = outcome.get("action_result")
+    if isinstance(action, dict):
+        # Authored recordings and full object lists remain in the original
+        # receipt. Their absence here must never look like an empty result.
+        keep = ("action", "target_id", "target_name", "stored_energy_after", "costs", "transfer")
+        value["action_result"] = {key: deepcopy(action[key]) for key in keep if key in action}
+        omitted = sorted(set(action) - set(keep))
+        if omitted:
+            value["action_result_omitted_fields"] = omitted
+    value["meaning"] = "Selected facts at the original commit; omitted fields remain in that operation's original receipt. Not current state or a goal verdict."
+    return value
+
+
+def _receipt_costs(outcome):
+    """Only typed costs explicitly reported by the server, never quantity inference."""
+    action = outcome.get("action_result") if isinstance(outcome, dict) else None
+    if not isinstance(action, dict) or "costs" not in action:
+        return None
+    rows = action["costs"]
+    if not isinstance(rows, list):
+        return False
+    costs = {}
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("material"), str) or
+                not row["material"] or type(row.get("quantity_u")) is not int or row["quantity_u"] < 0):
+            return False
+        costs[row["material"]] = costs.get(row["material"], 0) + row["quantity_u"]
+    return costs
 
 
 def action_entity_ids(arguments, payload=None):
@@ -110,7 +153,8 @@ class ExecutionController:
         self.ports = ports
         self.state = {"status": "idle", "goal": "", "max_actions": 0, "actions_count": 0,
             "control_status": "idle", "delegation_active": False,
-            "grant_version": None, "receipts": [], "readback": None,
+            "grant_version": None, "receipts": [], "receipt_history_complete": True,
+            "receipt_history_scope": RECEIPT_HISTORY_SCOPE, "readback": None,
             "readback_actual": False, "error": None,
             "task_id": "", "context_entity_id": None, "requests_used": 0, "max_requests": 4,
             "request_status": "idle", "stop_reason": "", "resume_allowed": False,
@@ -151,12 +195,18 @@ class ExecutionController:
             "action_summary": self.action_summary()}
 
     def action_summary(self) -> dict:
-        """Group this task's retained confirmed actions, never its current state."""
+        """Count all formal Agent writes across segments, not host control work."""
         task = self.state.get("task_id")
-        groups, confirmed = {}, 0
-        for receipt in self.state.get("receipts", []):
-            if (not task or receipt.get("task_id") != task or receipt.get("status") != "confirmed" or
-                    receipt.get("function") not in AGENT_ACTION_FUNCTIONS):
+        groups, segments, materials = {}, {}, {}
+        costed, invalid_costs, missing_outcomes = 0, 0, 0
+        # Recovery normally updates the same row, but old persisted duplicates
+        # must not turn one operation into two confirmed actions or costs.
+        receipts = {row["operation_id"]: row for row in self.state.get("receipts", [])
+            if task and row.get("task_id") == task and isinstance(row.get("operation_id"), str)
+            and row.get("function") in AGENT_WRITE_FUNCTIONS}
+        confirmed = 0
+        for receipt in receipts.values():
+            if receipt.get("status") != "confirmed":
                 continue
             targets = tuple(receipt.get("action_entity_ids", []))
             key = (receipt["function"], receipt.get("action"), receipt.get("action_id"), targets)
@@ -169,22 +219,55 @@ class ExecutionController:
                     group[field] = receipt[field]
             # An older group's outcome cannot stand in for a missing last one.
             group.pop("last_confirmed_outcome", None)
-            if "confirmed_outcome" in receipt:
-                group["last_confirmed_outcome"] = deepcopy(receipt["confirmed_outcome"])
+            outcome = receipt.get("confirmed_outcome")
+            if (compact := _summary_outcome(outcome)) is not None:
+                group["last_confirmed_outcome"] = compact
+            else:
+                missing_outcomes += 1
+            costs = _receipt_costs(outcome)
+            if costs is False:
+                invalid_costs += 1
+            elif costs is not None:
+                costed += 1
+                for material, quantity in costs.items():
+                    materials[material] = materials.get(material, 0) + quantity
             groups[key] = group
             confirmed += 1
+            segment = receipt.get("segment_id") or None
+            segments[segment] = segments.get(segment, 0) + 1
         summary = {"task_id": task, "scope": "current_task_retained_confirmed_actions",
             "confirmed_count": confirmed, "total_groups": len(groups),
             "omitted_groups": max(0, len(groups) - 8), "groups": list(groups.values())[-8:],
-            "meaning": "Only this person's retained confirmed actions in this task's bounded receipt ledger. "
-                "Outcomes describe each group's last original commit, not current state, cumulative material "
-                "totals, other people's actions or goal verification. Omitted groups or receipts do not "
-                "mean an action never happened."}
-        # Keep complete recent groups, including their exact original outcome.
-        # Indented JSON bounds both compact prompts and native tool rendering.
+            "segments": [{"segment_id": identity, "confirmed_count": count} for identity, count in segments.items()],
+            "material_costs": [{"material": identity, "quantity_u": quantity} for identity, quantity in sorted(materials.items())],
+            "coverage": {"receipt_history_complete": self.state.get("receipt_history_complete") is True,
+                "receipt_history_scope": self.state.get("receipt_history_scope", "legacy_write_scope_unverified"),
+                "structured_cost_operations": costed, "invalid_cost_operations": invalid_costs,
+                "operations_without_structured_costs": confirmed - costed - invalid_costs,
+                "confirmed_operations_without_outcome": missing_outcomes,
+                "committed_unconfirmed_count": sum(row.get("status") == "committed" for row in receipts.values()),
+                "unknown_count": sum(row.get("status") == "unknown" for row in receipts.values()),
+                "omitted_material_cost_rows": 0, "omitted_segment_rows": 0,
+                "cost_scope": "Sum of explicitly reported costs in retained confirmed receipts only; not all material transfers, automatic consumption or other people's actions."},
+            "meaning": "All this person's retained confirmed formal Agent writes across ALL segments of this SAME task's bounded receipt ledger. "
+                "Opportunity claims/releases, definition publications, content submissions and object operations each count as their own confirmed writes. "
+                "A claimed opportunity is not published content; a published definition does not create an object or matter. Host control grants/revocations are excluded. "
+                "material_costs sums actual cost rows, never count times the last cost. "
+                "Missing outcome/cost rows and incomplete receipt history prevent claiming all task spending. "
+                "receipt_history_scope=legacy_write_scope_unverified means the saved completeness flag covered an older scope; full formal-write completeness is unknown. "
+                "Groups show selected original-commit evidence, not current state or goal verification. "
+                "Omitted groups or receipts do not mean an action never happened."}
+        # Aggregate facts survive detail omission. Never truncate an outcome
+        # into something that looks like a complete but smaller original.
         while summary["groups"] and len(json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")) > MAX_ACTION_SUMMARY_BYTES:
             summary["groups"].pop(0)
             summary["omitted_groups"] += 1
+        while summary["material_costs"] and len(json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")) > MAX_ACTION_SUMMARY_BYTES:
+            summary["material_costs"].pop()
+            summary["coverage"]["omitted_material_cost_rows"] += 1
+        while summary["segments"] and len(json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")) > MAX_ACTION_SUMMARY_BYTES:
+            summary["segments"].pop(0)
+            summary["coverage"]["omitted_segment_rows"] += 1
         return summary
 
     def value(self, field: str, default=None):
@@ -202,6 +285,14 @@ class ExecutionController:
         """Restore the same task/session authority, without reopening a goal."""
         if isinstance(saved, dict):
             self.state.update(deepcopy(saved))
+            # Old completeness flags covered only physical object operations.
+            # Broader retained writes remain valid, but their whole history
+            # cannot be inferred from that old flag or a saved summary cache.
+            if saved.get("task_id"):
+                if "receipt_history_complete" not in saved or saved.get("receipt_history_scope") != RECEIPT_HISTORY_SCOPE:
+                    self.state["receipt_history_complete"] = False
+                if saved.get("receipt_history_scope") != RECEIPT_HISTORY_SCOPE:
+                    self.state["receipt_history_scope"] = "legacy_write_scope_unverified"
             self.state.pop("remaining_actions", None)
             self.state.pop("action_summary", None)
         self.archive = deepcopy(archive[-8:]) if isinstance(archive, list) else []
@@ -318,7 +409,8 @@ class ExecutionController:
         # Preserve the public state shape and the fixed per-request budget.
         self.state.update(status="starting", goal=goal.strip(), max_actions=maximum, actions_count=0,
             delegation_active=False, grant_version=None, control_status=None,
-            receipts=[], readback=None, readback_actual=False, error=None, action_entity_ids=[],
+            receipts=[], receipt_history_complete=True, receipt_history_scope=RECEIPT_HISTORY_SCOPE,
+            readback=None, readback_actual=False, error=None, action_entity_ids=[],
             task_id="grove-task-" + secrets.token_hex(16), context_entity_id=selected,
             requests_used=0, max_requests=request_budget, request_status="idle", stop_reason="", resume_allowed=False,
             grant_action_offset=0, pending_grant_action_offset=None, grant_operation_id=None,
@@ -429,7 +521,11 @@ class ExecutionController:
             existing.update(value)
         else:
             receipts.append(value)
-        owner["receipts"] = receipts[-self.request_limit * self.world_call_limit:]
+        limit = self.request_limit * self.world_call_limit
+        if any(row.get("function") in AGENT_WRITE_FUNCTIONS and row.get("status") != "rejected"
+               for row in receipts[:-limit]):
+            owner["receipt_history_complete"] = False
+        owner["receipts"] = receipts[-limit:]
         if owner is self.state and status == "unknown":
             self.state.update(status="unknown", resume_allowed=False)
         self._persist()
@@ -895,7 +991,7 @@ class ExecutionController:
                 if not self.state["delegation_active"]:
                     self.pause("行动权已收回或原动作额度已用完。")
                     break
-                if failure is not None and not progress:
+                if failure is not None and (not progress or failure.code == "InternalContextResponse"):
                     self.pause(failure.message, error={"code": failure.code, "message": failure.message})
                     break
                 if failure is not None and failure.code in {"ModelUnavailable", "HostAuthenticationFailed", "SavedSessionMissing"}:
@@ -972,9 +1068,20 @@ class ExecutionController:
     async def checkpoint(self, arguments: dict, *, schema: dict, write_busy=False):
         if not Draft202012Validator(schema).is_valid(arguments):
             raise ConnectorError("InvalidCheckpoint", "执行检查点需要本任务标识、状态、真实发现及原回执引用。")
-        if (not self.active or self.stopped or self.reclaiming or self.state.get("status") != "running" or
-                arguments["task_id"] != self.state.get("task_id") or arguments["execution_segment_id"] != self.state.get("segment_id")):
-            raise ConnectorError("NoActiveExecution", "这个检查点不属于当前正在执行的目标。", 409)
+        # Diagnose the actual stop boundary before mismatched report IDs. An
+        # ID error alone neither means control was reclaimed nor permits a
+        # replacement ID, new grant or automatic resubmission.
+        if self.reclaiming:
+            raise ConnectorError("NoActiveExecution", "本人正在收回控制；这份报告没有记录为检查点，停止后续提交。已成立结果保留。", 409)
+        if self.stopped:
+            raise ConnectorError("NoActiveExecution", "本次执行已停止；这份报告没有记录为检查点，不能靠修改编号恢复执行。已成立结果保留。", 409)
+        if not self.active or self.state.get("status") != "running":
+            reason = "这一执行段已封闭" if self.state.get("checkpoint") else "当前执行段未在活动执行状态"
+            raise ConnectorError("NoActiveExecution", reason + "；这份报告没有记录为检查点，不要重复提交或靠修改编号继续执行。", 409)
+        if arguments["task_id"] != self.state.get("task_id"):
+            raise ConnectorError("NoActiveExecution", "task_id与当前获准任务不一致；核对本次请求的execution_task.task_id，不沿用历史任务编号。报告未记录；编号不符不表示控制被收回。", 409)
+        if arguments["execution_segment_id"] != self.state.get("segment_id"):
+            raise ConnectorError("NoActiveExecution", "execution_segment_id与当前活动段不一致；核对本次请求的execution_task.segment_id，不沿用历史段编号。报告未记录；编号不符不表示控制被收回。", 409)
         if write_busy or self.unresolved:
             raise ConnectorError("UnconfirmedAction", "先核对原行动结果，再报告这一段结果。", 409)
         confirmed = {item["operation_id"]: item for item in self.state["receipts"] if item.get("status") == "confirmed" and
@@ -995,8 +1102,10 @@ class ExecutionController:
                     "segment_id": arguments["execution_segment_id"], "checkpoint_recorded": False,
                     "segment_finished": False, "current_facts_available": False,
                     "readback_error": exc.code if isinstance(exc, ConnectorError) else type(exc).__name__}) from exc
-        if self.stopped or self.reclaiming:
-            raise ConnectorError("NoActiveExecution", "控制已收回；这份迟到报告没有记录为检查点。", 409)
+        if self.reclaiming:
+            raise ConnectorError("NoActiveExecution", "读取期间本人开始收回控制；这份迟到报告没有记录为检查点，停止后续提交。", 409)
+        if self.stopped:
+            raise ConnectorError("NoActiveExecution", "读取期间执行已停止；这份迟到报告没有记录为检查点，不能靠修改编号恢复执行。", 409)
         if arguments["status"] == "completed":
             if not self.state.get("readback_actual") or self.state.get("readback_actions_count") != self.state["actions_count"] or self.state.get("control_status") not in {"active", "exhausted"}:
                 raise ConnectorError("ReadbackRequired", "最新行动结果尚未核对，不能提交完成声明。", 409)

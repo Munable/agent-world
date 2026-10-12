@@ -383,9 +383,11 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
             self.session.present_agent_result("grove.inspect", single)
         self.assertEqual(rejected.exception.code, "ToolOutputTooLarge")
         self.assertEqual(self.session.observations.sequence, before_rejected)
-        # A preflight is a full user-message input, not a native tool response.
+        # Preflight follows the same discovery boundary; hidden default
+        # previews cannot bypass it by moving into a user-message input.
         supplied = self.session.present_agent_result("map.viewport", {"selected_inspection": inspection}, preflight=True)
-        self.assertEqual(supplied["selected_inspection"]["action_options"], inspection["action_options"])
+        self.assertNotIn("input", supplied["selected_inspection"]["action_options"][0])
+        self.assertFalse(self.session.agent_observation(supplied["observation_id"]).get("combination_previews"))
 
     def test_write_summary_cannot_upgrade_an_old_loading_preview(self):
         inspection = {"player": {"id": self.role, "version": 11},

@@ -6,6 +6,37 @@ const source=readFileSync(new URL('../agent_world/grove_web/grove-world-ui.js',i
 const ui=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 {
+  const execution={task_id:'same-task',action_summary:{task_id:'same-task',scope:'current_task_retained_confirmed_actions',confirmed_count:3,
+    material_costs:[{material:'wood',quantity_u:30}],coverage:{receipt_history_complete:true}}};
+  const lines=ui.executionTaskSummaryLines(execution);
+  assert(lines.some(line=>line.includes('3 次行动')&&line.includes('各段执行')));
+  assert(lines.some(line=>line.includes('木 30 份')&&line.includes('不包含')));
+  assert(!lines.some(line=>line.includes('零消耗')));
+  execution.action_summary.coverage={receipt_history_complete:false,operations_without_structured_costs:1,unknown_count:1};
+  const partial=ui.executionTaskSummaryLines(execution);
+  assert(partial.some(line=>line.includes('仅统计仍保留')));
+  assert(partial.some(line=>line.includes('不表示零消耗')));
+  assert(partial.some(line=>line.includes('待核对')));
+  execution.action_summary.task_id='different-task';
+  assert.deepEqual(ui.executionTaskSummaryLines(execution),[]);
+}
+
+{
+  const lines=ui.ruleRuntimeObservationLines({mechanical_observation:{current_inputs:{energy:10,enabled:true},
+    saved_outputs:{values:{energy:0,angle:360,speed:0,status:'insufficient_energy'}},stored_state:{energy:10,speed:0}}},{});
+  assert(lines.some(line=>line.includes('当前机械输入')&&line.includes('能源 10')));
+  assert(lines.some(line=>line.includes('机械保存输出')&&line.includes('历史求解输出')));
+  assert(!lines.some(line=>line.includes('保存能源 0')));
+}
+
+{
+  const lines=ui.ruleRuntimeObservationLines({process:{status:'error',error:'规则字段count结果越界',
+    error_diagnostic:{code:'field_range',field:'count',attempted_value:13,min:0,max:12}}},{});
+  assert(lines.some(line=>line.includes('自动规则已暂停')));
+  assert(lines.some(line=>line.includes('实际赋值 13')&&line.includes('0 至 12')));
+}
+
+{
   const pending=ui.domainObservationLines({execution_domain:{state:'calculating',last_applied_tick:4,pending_target_tick:5}});
   assert(pending.some(line=>line.includes('正在结算世界时刻 5')));
   assert(pending.some(line=>line.includes('世界时刻 4')));
@@ -524,7 +555,7 @@ for(const [execution,label,detail,resume] of [
   };
   const context={host:{status:'ready',execution,admission:{goal:{allowed:true},resume:{allowed:!!execution.resume_allowed},extend:{allowed:false,reason:'额度不可追加'}}},playing:true,current:()=>true,goalDirty:true,hostCommandBusy:false,executionReclaimBusy:false,
     actionBusy:false,manualControlRecoveryPending:false,document:{activeElement:null},client:{pending:()=>null},$:element,
-    receiptOutcomeLines:ui.receiptOutcomeLines,executionReadbackLines:ui.executionReadbackLines,
+    receiptOutcomeLines:ui.receiptOutcomeLines,executionReadbackLines:ui.executionReadbackLines,executionTaskSummaryLines:ui.executionTaskSummaryLines,
     node:()=>({append(){}})};
   vm.createContext(context);
   vm.runInContext(extract('function agentAdmission(','const point='),context);

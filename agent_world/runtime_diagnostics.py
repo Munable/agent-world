@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime, timezone
 import logging
 import threading
 import time
@@ -41,13 +42,16 @@ class WorkDiagnostics:
                     total["count"] += 1
                     total["seconds"] += elapsed
                     total["max_seconds"] = max(total["max_seconds"], elapsed)
-            if sample["seconds"] >= 1 and kind in {"action", "checkpoint", "timer", "maintenance"}:
+            if sample["seconds"] >= 1 and kind in {"action", "checkpoint", "timer", "maintenance", "wal-checkpoint"}:
                 phases = sample["phases"]
-                logger.warning("world work slow kind=%s seconds=%.3f writer_wait=%.3f begin=%.3f "
-                    "handler=%.3f handler_cpu=%.3f managed=%.3f commit=%.3f",
-                    kind, sample["seconds"], phases.get("writer_wait", 0), phases.get("begin", 0),
+                logger.warning("world work slow started_at=%.6f started_utc=%s kind=%s function=%s "
+                    "seconds=%.3f writer_wait=%.3f begin=%.3f handler=%.3f handler_cpu=%.3f "
+                    "managed=%.3f commit=%.3f wal_backfill=%.3f",
+                    sample["started_at"], datetime.fromtimestamp(sample["started_at"], timezone.utc).isoformat(),
+                    kind, sample.get("handler", "-"), sample["seconds"],
+                    phases.get("writer_wait", 0), phases.get("begin", 0),
                     phases.get("handler", 0), phases.get("handler_cpu", 0), phases.get("managed", 0),
-                    phases.get("sqlite_commit", 0))
+                    phases.get("sqlite_commit", 0), phases.get("wal_backfill", 0))
 
     @contextmanager
     def phase(self, name, *, cpu=False):

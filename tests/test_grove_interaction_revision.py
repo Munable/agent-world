@@ -3,6 +3,7 @@
 Product checks retain original operation IDs and observed guards. They do not
 establish model acceptance, multiplayer load, or permissions from a preview.
 """
+from collections import deque
 from copy import deepcopy
 import json
 from types import SimpleNamespace
@@ -170,6 +171,94 @@ class InteractionRevisionProductContracts(unittest.TestCase):
         replay = self.call_original("A", "grove.interact", args, "drop-evolving-original")
         self.assertEqual(replay, {**receipt, "replayed": True})
         self.assertEqual(self.h.entity(entity_id), saved)
+
+    def test_other_player_picks_up_an_evolving_object_with_the_displayed_guard_once(self):
+        for identity_field in ("target_id", "item_id"):
+            with self.subTest(identity_field=identity_field):
+                entity_id = self.counter("revision_pickup_" + identity_field)
+                self.h.approach("B", entity_id)
+                observed = self.h.read("B", "grove.inspect", {"entity_id": entity_id, "action": "pickup"})
+                option = next(row for row in observed["action_options"] if row["action"] == "pickup")
+                shown = observed["entity"]
+                self.assertTrue(option["available"])
+                self.assertEqual(option["arguments"]["expected_target_interaction_revision"], shown["interaction_revision"])
+                self.assertIn("expected_target_interaction_revision", option["input_schema"]["properties"])
+                self.assertIn("expected_item_interaction_revision", option["input_schema"]["properties"])
+                args = {**deepcopy(option["arguments"]),
+                    "expected_player_version": observed["player"]["version"]}
+                if identity_field == "item_id":
+                    args["item_id"] = args.pop("target_id")
+                original = deepcopy(args)
+                self.h.ticks(5)
+                evolved = deepcopy(self.h.entity(entity_id))
+                self.assertGreater(evolved["version"], shown["version"])
+                self.assertEqual(m.interaction_revision(evolved), shown["interaction_revision"])
+                count = evolved["state"]["program"]["fields"]["count"]
+                operation = "pickup-evolving-original-" + identity_field
+                receipt = self.call_original("B", "grove.interact", args, operation)
+                saved = deepcopy(self.h.entity(entity_id))
+                self.assertEqual(saved["owner"], self.h.roles["B"])
+                self.assertEqual(saved["physical_parent"],
+                    {"id": observed["player"]["backpack_id"], "relation": "contained"})
+                self.assertEqual(saved["state"]["program"]["fields"]["count"], count)
+                self.assertEqual(saved["matter"], evolved["matter"])
+                self.assertEqual(m.interaction_revision(saved), saved["version"])
+                self.assertEqual(args, original)
+                self.h.world.close()
+                self.h.world = WorldRuntime(self.h.db)
+                self.h.world.install_world("w", make_world())
+                replay = self.call_original("B", "grove.interact", args, operation)
+                self.assertEqual(replay, {**receipt, "replayed": True})
+                self.assertEqual(self.h.entity(entity_id), saved)
+
+    def test_pickup_rejects_another_players_field_aba_without_moving_the_object(self):
+        entity_id = self.counter("revision_pickup_external_aba", extra_actions=[{
+            "id": "one", "label": "设为一", "effects": [{"op": "set", "field": "count", "value": 1}]}])
+        self.h.approach("B", entity_id)
+        args = self.intent("A", entity_id, "pickup")
+        self.h.action("B", entity_id, "one")
+        self.h.action("B", entity_id, "reset")
+        changed = deepcopy(self.h.entity(entity_id))
+        self.assertGreater(m.interaction_revision(changed), args["expected_target_interaction_revision"])
+        self.assertEqual(changed["state"]["program"]["fields"]["count"], 0)
+        with self.assertRaises(StateConflict):
+            self.call_original("A", "grove.interact", args, "pickup-stale-external-aba")
+        self.assertEqual(self.h.entity(entity_id), changed)
+        with self.assertRaises(ReceiptNotFound):
+            self.h.world.get_receipt("w", self.h.roles["A"], "pickup-stale-external-aba")
+
+    def test_pickup_guard_does_not_remove_current_distance_checks(self):
+        entity_id = self.counter("revision_pickup_distance")
+        args = self.intent("A", entity_id, "pickup")
+        scene = self.h.view("A")
+        target = self.h.entity(entity_id)
+        tiles = {(chunk["cx"] * 16 + index % 16, chunk["cy"] * 16 + index // 16): tile
+                 for chunk in scene["chunks"] for index, tile in enumerate(chunk["tiles"])}
+        blocked = {(row["x"], row["y"]) for row in scene["entities"]
+                   if row.get("barrier_active") or "blocking" in row["capabilities"]}
+        start = scene["player"]["x"], scene["player"]["y"]
+        queue, visited, destination = deque([start]), {start}, None
+        while queue:
+            point = queue.popleft()
+            if abs(point[0] - target["x"]) + abs(point[1] - target["y"]) >= 3:
+                destination = point
+                break
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                step = point[0] + dx, point[1] + dy
+                if step not in visited and step not in blocked and tiles.get(step, "rock") != "rock":
+                    visited.add(step)
+                    queue.append(step)
+        self.assertIsNotNone(destination)
+        self.fixture.move_to(destination)
+        args["expected_player_version"] = self.h.view("A")["player"]["version"]
+        self.h.ticks(2)
+        evolved = deepcopy(self.h.entity(entity_id))
+        self.assertEqual(m.interaction_revision(evolved), args["expected_target_interaction_revision"])
+        with self.assertRaises(RuleViolation):
+            self.call_original("A", "grove.interact", args, "pickup-out-of-reach")
+        self.assertEqual(self.h.entity(entity_id), evolved)
+        with self.assertRaises(ReceiptNotFound):
+            self.h.world.get_receipt("w", self.h.roles["A"], "pickup-out-of-reach")
 
     def test_other_player_field_aba_invalidates_the_old_revision(self):
         entity_id = self.counter("revision_external_aba", extra_actions=[{
@@ -344,6 +433,7 @@ class InteractionRevisionProductContracts(unittest.TestCase):
         self.fixture.c.place(entity_id)
         self.h.interact("A", entity_id, "ignite", item_id=self.h.item("A", "打火石")["id"])
         args = self.intent("A", entity_id, "reset")
+        pickup = self.intent("A", entity_id, "pickup")
         before = deepcopy(self.h.entity(entity_id))
         sequence = self.h.world.get_state("w", m.META, "clock")["value"]["sequence"]
         self.h.ticks(COMBUSTION_CADENCE_TICKS - sequence % COMBUSTION_CADENCE_TICKS)
@@ -353,6 +443,11 @@ class InteractionRevisionProductContracts(unittest.TestCase):
         with self.assertRaises(StateConflict):
             self.call_original("A", "grove.rule_action", args, "old-intent-after-real-burning")
         self.assertEqual(self.h.entity(entity_id), burnt)
+        with self.assertRaises(StateConflict):
+            self.call_original("A", "grove.interact", pickup, "pickup-after-real-burning")
+        self.assertEqual(self.h.entity(entity_id), burnt)
+        with self.assertRaises(ReceiptNotFound):
+            self.h.world.get_receipt("w", self.h.roles["A"], "pickup-after-real-burning")
 
 
 if __name__ == "__main__":

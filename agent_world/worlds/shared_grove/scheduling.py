@@ -45,7 +45,7 @@ def _wake_frame(ctx):
     return _schedule_frame(ctx, ctx.now)
 
 
-def resume(ctx, *, replace_domain_checkpoints=False):
+def resume(ctx):
     """Resume saved progress; downtime never generates missed physical ticks."""
     domains.migrate(ctx)
     clock = ctx.get_state(m.META, "clock", {"sequence": 0})
@@ -59,12 +59,33 @@ def resume(ctx, *, replace_domain_checkpoints=False):
         work["cadence_anchor_at"] = ctx.now
         for entry in work["pending"]:
             domain = domains.get(ctx, entry["domain_id"])
-            if domain and domain["last_tick"] < work["target_tick"]:
+            if (domain and domain["status"] != "retired"
+                    and domain["last_tick"] < work["target_tick"]
+                    and not (work["status"] == "preparing"
+                             and domain.get("prepared_frame") == work["id"])):
                 checkpoint = _checkpoint(ctx, DOMAIN_PREFIX+domain["id"])
-                if (replace_domain_checkpoints or checkpoint is None
-                        or checkpoint["status"] in {"blocked", "cancelled"}):
-                    entry["generation"] = _schedule_domain(ctx, domain, work)
+                if (checkpoint is not None and checkpoint["status"] not in {"pending", "cancelled"}
+                        and not _version_blocked(checkpoint)):
+                    # A terminal receipt must reach the coordinator unchanged.
+                    # Restarting before that observation cannot erase a real
+                    # rejection/failure or retry its rolled-back rule handler.
+                    continue
+                if (checkpoint is not None and checkpoint["status"] == "pending"
+                        and checkpoint.get("attempts", 0) > 0):
+                    # Keep an actual retry's attempt limit and availability.
+                    # If its revision changed, Runtime will first fence it;
+                    # the coordinator can then reissue that exact old target.
+                    continue
+                # Installation also resumes when only the world revision
+                # changes. Pending tasks still belong to the old revision;
+                # reissue the same unfinished frame rather than wait for its
+                # version fence to turn an uncomputed domain into a fault.
+                entry["generation"] = _schedule_domain(ctx, domain, work)
         domains._set(ctx, domains.CONTROL, "frame", work)
+    recovery = domains._get(ctx, domains.CONTROL, "checkpoint_recovery")
+    if not recovery or recovery["world_revision"] != ctx.function_version:
+        domains._set(ctx, domains.CONTROL, "checkpoint_recovery", {
+            "world_revision": ctx.function_version, "cursor": None, "complete": False})
     _schedule_frame(ctx, ctx.now if work and work["status"] in {"preparing", "open"} else ctx.now+1)
     ctx.world_resumed = True
 
@@ -121,11 +142,40 @@ def _settle_page(ctx, work):
             continue
         elif checkpoint["status"] == "completed":
             code = "DomainSettlementMissing"
+        elif _version_blocked(checkpoint):
+            # This receipt proves that no rule handler ran. Keep the exact
+            # frame, logical target and event cutoff; settled neighbors remain
+            # untouched and the successor is fenced by its own generation.
+            entry["generation"] = _schedule_domain(ctx, domain, work)
+            pending.append(entry)
+            continue
         else:
             code = checkpoint["last_error_code"] or "DomainCheckpoint"+checkpoint["status"].title()
         domains.mark_failure(ctx, domain, work["target_tick"], code)
         work["pressure" if code == "CapacityPressure" else "faults"] += 1
     work["pending"] = pending
+
+
+def _version_blocked(checkpoint):
+    return (checkpoint is not None and checkpoint["status"] == "blocked"
+            and checkpoint["last_error_code"] == "CheckpointVersionMismatch")
+
+
+def _recover_version_faults(ctx):
+    """Bounded restart repair, never replay an already closed physical frame."""
+    recovery = domains._get(ctx, domains.CONTROL, "checkpoint_recovery")
+    if not recovery or recovery["complete"]:
+        return
+    page = ctx.list_state(domains.DOMAINS, limit=PAGE_SIZE, after=recovery["cursor"])
+    for item in page["items"]:
+        domain = item["value"]
+        if (domain.get("status") == "fault"
+                and domain.get("failure", {}).get("code") == "CheckpointVersionMismatch"):
+            checkpoint = _checkpoint(ctx, DOMAIN_PREFIX+domain["id"])
+            if _version_blocked(checkpoint):
+                domains.recover_checkpoint_version(ctx, domain, checkpoint)
+    recovery.update(cursor=page["next_cursor"], complete=not page["has_more"])
+    domains._set(ctx, domains.CONTROL, "checkpoint_recovery", recovery)
 
 
 def _dispatch_page(ctx, work):
@@ -169,6 +219,7 @@ def tick(ctx, args):
         if args["epoch"] != clock["epoch"] or args["sequence"] != clock["sequence"]:
             return FunctionOutcome({"advanced": False, "superseded": True, "tick": clock["sequence"]})
     domains.migrate(ctx)
+    _recover_version_faults(ctx)
     work = domains.frame(ctx)
     if work is None or work["status"] == "closed":
         work = _open(ctx)

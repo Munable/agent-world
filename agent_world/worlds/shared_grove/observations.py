@@ -206,6 +206,14 @@ def _mechanical_observation(binding, spec, deployment, observed_tick):
     request = deepcopy(binding.get("drive_request"))
     role = spec["mechanical"]["role"]
     result = {"role": role, "stored_state": deepcopy(binding["mechanical"]),
+            "current_inputs": {"energy": binding["mechanical"].get("energy"),
+                "enabled": binding["mechanical"].get("enabled"), "drive_request": deepcopy(request),
+                "observed_tick": observed_tick,
+                "meaning": "本次读取的储能和动力输入；投入已提交不等于机械已经求解，也不保证会运动。"},
+            "saved_outputs": {"values": {key: deepcopy(binding["mechanical"][key]) for key in
+                ("angle", "position", "speed", "status", "available_torque") if key in binding["mechanical"]},
+                "last_output_change": deepcopy(last_solved), "observed_tick": observed_tick,
+                "meaning": "上次保存的机械输出，可能早于本次投入；不能用其中速度或状态裁定新燃料无效。输出变化步不是每次求解步；标记较旧不证明没有求解。"},
             "angle_unit": "logical_turns",
             "role_meaning": {"source": "动力源只提供角动力，不产生直线行程。", "gear": "齿轮只传递角动力，不产生直线行程。",
                              "actuator": "执行器把角动力转换成有限直线行程。"}[role],

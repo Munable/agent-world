@@ -309,6 +309,22 @@ def public_players_near(ctx, x, y, radius=8):
     return result[:64]
 
 
+def public_player_name(ctx, role_id):
+    """Read only the current same-world public name for an already known ID.
+
+    A missing or deleted player has no current name. Names are not unique and
+    never replace the stable author ID; no profile, inventory or location is
+    projected, and no role directory or spatial lookup is consulted.
+    """
+    if not isinstance(role_id, str) or not role_id:
+        return None
+    player = ctx.get_state(PLAYERS, role_id)
+    if not isinstance(player, dict) or player.get("id") != role_id:
+        return None
+    name = player.get("name")
+    return name if isinstance(name, str) and name else None
+
+
 def blocking_at(ctx, x, y, *, ignore=None):
     return any(e["id"] != ignore and e.get("lifecycle", "intact") == "intact"
                and e.get("components", {}).get("barrier", {}).get("active", False) is True
@@ -612,6 +628,26 @@ def future_control_bytes(program):
         current = sm.encoded_size({key: program[key]}) if key in program else 2
         reserved += max(0, maximum-current) + int(key not in program)
     return reserved
+
+
+def fit_program_error_diagnostic(entity, diagnostic):
+    """Fit optional error evidence inside the unchanged entity/future budget.
+
+    Old admitted records are not charged a new mandatory reserve. An optional
+    explanation must never turn an isolated authored failure into a domain
+    capacity failure. The normal error string and rollback remain authoritative.
+    """
+    process = entity["state"]["program"]["process"]
+    for key, value in (("error_diagnostic", diagnostic), ("error_diagnostic_omitted", "capacity")):
+        probe = deepcopy(entity)
+        probe["state"]["program"]["process"][key] = value
+        try:
+            normalize_entity(probe)  # Includes actual bytes and existing future reserves.
+        except RuleViolation:
+            continue
+        process[key] = deepcopy(value)
+        return key == "error_diagnostic"
+    return False  # Projection must explicitly identify missing exact evidence.
 
 
 def future_water_slots(value, registry):

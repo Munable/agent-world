@@ -61,7 +61,7 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controller.action_summary()["groups"][0]["last_confirmed_outcome"]["action_result"]["stored_energy_after"], 5)
         self.assertEqual(self.controller.value("action_summary"), self.controller.snapshot()["action_summary"])
 
-    def test_task_action_summary_excludes_old_tasks_and_unconfirmed_or_non_actions(self):
+    def test_task_action_summary_excludes_old_tasks_unconfirmed_and_host_internal_work(self):
         self.start()
         old_task = self.controller.state["task_id"]
         old_record = {"task_id": old_task, "envelope": {"arguments": {"action": "fuel", "target_id": "old-wheel"}}}
@@ -75,7 +75,7 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         for status in ("committed", "unknown", "rejected"):
             self.controller.receipt("grove.rule_action", status, {"commit_seq": 3}, status=status,
                 operation_record={"task_id": task, "envelope": {"arguments": {"action": "fuel", "target_id": "wheel"}}})
-        for function in ("grove.control_grant", "grove.definition_publish", "grove.content_submit"):
+        for function in ("grove.control_grant", "grove.control_revoke", "map.viewport"):
             self.controller.receipt(function, function, {"commit_seq": 4}, status="confirmed",
                 operation_record={"task_id": task})
         # Legacy records without action classification still group by their
@@ -120,7 +120,7 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("action_summary", self.controller.state)
         self.assertEqual(self.controller.snapshot()["action_summary"], summary)
 
-    def test_task_action_summary_byte_budget_omits_whole_groups_without_changing_receipts(self):
+    def test_task_action_summary_omits_large_recording_body_but_keeps_action_evidence(self):
         self.start()
         task = self.controller.state["task_id"]
         oversized = {"commit_seq": 1, "result": {"action_result": {"recorded_text": "真实" * 3000}}}
@@ -131,15 +131,131 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         before = deepcopy(self.controller.state)
         summary = self.controller.action_summary()
         self.assertLessEqual(len(json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")), 8 * 1024)
-        self.assertEqual((summary["confirmed_count"], summary["total_groups"], summary["omitted_groups"]), (2, 2, 1))
-        self.assertEqual(summary["groups"][0]["last_operation_id"], "small-original")
+        self.assertEqual((summary["confirmed_count"], summary["total_groups"], summary["omitted_groups"]), (2, 2, 0))
+        recording = summary["groups"][0]
+        self.assertEqual(recording["last_operation_id"], "large-original")
+        self.assertEqual(recording["last_confirmed_outcome"]["action_result_omitted_fields"], ["recorded_text"])
+        self.assertNotIn("recorded_text", recording["last_confirmed_outcome"]["action_result"])
+        self.assertEqual(summary["groups"][1]["last_operation_id"], "small-original")
         self.assertEqual(self.controller.state, before)
-        # A large latest group is not represented by a misleading empty result.
+        # The large latest group stays attributable; original text is untouched
+        # and its explicit omission cannot masquerade as an empty recording.
         self.controller.receipt("grove.rule_action", "large-latest", oversized, status="confirmed",
             operation_record={"task_id": task, "envelope": {"arguments": {"action_id": "record", "target_id": "recorder"}}})
         summary = self.controller.action_summary()
-        self.assertEqual((summary["confirmed_count"], summary["total_groups"], summary["omitted_groups"]), (3, 2, 2))
-        self.assertEqual(summary["groups"], [])
+        self.assertEqual((summary["confirmed_count"], summary["total_groups"], summary["omitted_groups"]), (3, 2, 0))
+        self.assertEqual(summary["groups"][-1]["last_operation_id"], "large-latest")
+        self.assertEqual(summary["groups"][-1]["last_confirmed_outcome"]["action_result_omitted_fields"], ["recorded_text"])
+        self.assertEqual(self.controller.state["receipts"][-1]["confirmed_outcome"]["action_result"]["recorded_text"], "真实" * 3000)
+
+    def test_task_costs_add_distinct_actual_receipts_across_segments_not_last_cost_times_count(self):
+        self.start()
+        task = self.controller.state["task_id"]
+        for index, (segment, amount) in enumerate((("first", 5), ("second", 10), ("second", 15))):
+            payload = {"commit_seq": 100 + index, "result": {"action_result": {"action": "fuel",
+                "costs": [{"material": "wood", "quantity_u": amount}], "stored_energy_after": amount}}}
+            record = {"task_id": task, "segment_id": segment, "envelope": {"arguments": {
+                "action": "fuel", "target_id": "source", "item_id": "wood"}}}
+            self.controller.receipt("grove.rule_action", "fuel-" + str(index), payload,
+                status="confirmed", operation_record=record)
+        # Transport recovery/replay and a duplicated retained historical row
+        # must neither add a fourth action nor repeat a confirmed material cost.
+        self.controller.receipt("grove.rule_action", "fuel-2", payload, status="confirmed")
+        self.controller.state["receipts"].append(deepcopy(self.controller.state["receipts"][-1]))
+        before = deepcopy(self.controller.state)
+        summary = self.controller.action_summary()
+        self.assertEqual(summary["confirmed_count"], 3)
+        self.assertEqual(summary["groups"][0]["count"], 3)
+        self.assertEqual(summary["groups"][0]["last_confirmed_outcome"]["action_result"]["stored_energy_after"], 15)
+        self.assertEqual(summary["material_costs"], [{"material": "wood", "quantity_u": 30}])
+        self.assertEqual(summary["segments"], [{"segment_id": "first", "confirmed_count": 1},
+            {"segment_id": "second", "confirmed_count": 2}])
+        self.assertTrue(summary["coverage"]["receipt_history_complete"])
+        self.assertEqual(summary["coverage"]["structured_cost_operations"], 3)
+        self.assertEqual(self.controller.state, before)
+
+    def test_cost_summary_never_guesses_from_names_body_or_transfers_and_reports_missing_facts(self):
+        self.start()
+        task = self.controller.state["task_id"]
+        def receipt(operation, result, *, status="confirmed"):
+            self.controller.receipt("grove.rule_action", operation, {"commit_seq": 4, "result": result},
+                status=status, operation_record={"task_id": task, "envelope": {"arguments": {"target_id": "item"}}})
+        receipt("unstructured", {"changes": ["消耗了999u木料。"], "entity": {
+            "id": "item", "material_quantity": {"wood": 999}}, "action_result": {"transfer": {"transferred": 12}}})
+        receipt("missing", {})
+        receipt("invalid", {"action_result": {"costs": [{"material": "wood", "quantity_u": True}]}})
+        for status in ("committed", "unknown", "rejected"):
+            receipt(status, {"action_result": {"costs": [{"material": "wood", "quantity_u": 100}]}}, status=status)
+        receipt("actual", {"action_result": {"costs": [{"material": "canonical_wood", "quantity_u": 3},
+            {"material": "canonical_wood", "quantity_u": 4}, {"material": "cloth", "quantity_u": 2}]}})
+        summary = self.controller.action_summary()
+        self.assertEqual(summary["material_costs"], [{"material": "canonical_wood", "quantity_u": 7},
+            {"material": "cloth", "quantity_u": 2}])
+        self.assertEqual(summary["confirmed_count"], 4)
+        self.assertEqual(summary["coverage"]["structured_cost_operations"], 1)
+        self.assertEqual(summary["coverage"]["invalid_cost_operations"], 1)
+        self.assertEqual(summary["coverage"]["operations_without_structured_costs"], 2)
+        self.assertEqual(summary["coverage"]["confirmed_operations_without_outcome"], 1)
+        self.assertEqual(summary["coverage"]["committed_unconfirmed_count"], 1)
+        self.assertEqual(summary["coverage"]["unknown_count"], 1)
+
+    def test_task_summary_coverage_preserves_old_uncertainty_and_marks_evicted_action_history(self):
+        self.start()
+        old = self.controller.snapshot()
+        del old["receipt_history_complete"]
+        self.controller.restore(old)
+        self.assertFalse(self.controller.action_summary()["coverage"]["receipt_history_complete"])
+        # A genuinely new task has complete provenance until its actual bounded
+        # action history is evicted. This is not a derived cumulative ledger.
+        self.controller.state.update(status="paused", request_status="idle_confirmed")
+        self.start(goal="New goal")
+        self.assertTrue(self.controller.action_summary()["coverage"]["receipt_history_complete"])
+        self.controller.request_limit = self.controller.world_call_limit = 1
+        task = self.controller.state["task_id"]
+        for operation in ("old-cost", "new-cost"):
+            self.controller.receipt("grove.rule_action", operation, {"commit_seq": 5, "result": {
+                "action_result": {"costs": [{"material": "wood", "quantity_u": 10}]}}},
+                status="confirmed", operation_record={"task_id": task})
+        summary = self.controller.action_summary()
+        self.assertEqual(summary["confirmed_count"], 1)
+        self.assertEqual(summary["material_costs"], [{"material": "wood", "quantity_u": 10}])
+        self.assertFalse(summary["coverage"]["receipt_history_complete"])
+        restored = self.controller.snapshot()
+        self.controller.restore(restored)
+        self.assertFalse(self.controller.action_summary()["coverage"]["receipt_history_complete"])
+
+    def test_task_cost_aggregation_survives_omitted_group_details(self):
+        self.start(max_actions=64)
+        task = self.controller.state["task_id"]
+        for index in range(12):
+            self.controller.receipt("grove.rule_action", "fuel-" + str(index), {"commit_seq": index + 1,
+                "result": {"action_result": {"costs": [{"material": "wood", "quantity_u": index + 1}]}}},
+                status="confirmed", operation_record={"task_id": task, "envelope": {"arguments": {
+                    "action": "fuel", "target_id": "source-" + str(index)}}})
+        summary = self.controller.action_summary()
+        self.assertEqual(summary["material_costs"], [{"material": "wood", "quantity_u": 78}])
+        self.assertEqual(summary["confirmed_count"], 12)
+        self.assertGreaterEqual(summary["omitted_groups"], 4)
+        self.assertEqual(summary["coverage"]["omitted_material_cost_rows"], 0)
+        self.assertLessEqual(len(json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")), 8 * 1024)
+
+    def test_large_distinct_cost_catalog_omits_rows_explicitly_not_as_a_complete_total(self):
+        self.start(max_actions=64)
+        task = self.controller.state["task_id"]
+        for index in range(64):
+            material = "material-" + str(index) + "-" + "a" * 120
+            self.controller.receipt("grove.rule_action", "cost-" + str(index), {"commit_seq": index + 1,
+                "result": {"action_result": {"costs": [{"material": material, "quantity_u": 1}]}}},
+                status="confirmed", operation_record={"task_id": task})
+        before = deepcopy(self.controller.state)
+        summary = self.controller.action_summary()
+        self.assertLessEqual(len(json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")), 8 * 1024)
+        self.assertGreater(summary["coverage"]["omitted_material_cost_rows"], 0)
+        self.assertEqual(len(summary["material_costs"]) + summary["coverage"]["omitted_material_cost_rows"], 64)
+        self.assertEqual(summary["coverage"]["structured_cost_operations"], 64)
+        self.assertEqual(summary["confirmed_count"], 64)
+        self.assertTrue(all(row["quantity_u"] == 1 for row in summary["material_costs"]))
+        self.assertEqual(self.controller.state, before)
 
     async def test_actual_action_readback_keeps_selection_and_distinguishes_commit_from_later_state(self):
         await self.running()
@@ -522,6 +638,33 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controller.state["task_id"], original_task)
         self.assertEqual(self.controller.state["requests_used"], 1)
         self.assertEqual(self.controller.state["actions_count"], 0)
+
+    async def test_internal_index_after_real_progress_pauses_without_another_native_request(self):
+        self.start()
+        original_task = self.controller.state["task_id"]
+        original_goal = self.controller.state["goal"]
+        message = "模型返回了内部历史索引，没有形成可展示的回答；已确认行动保留，未自动重试。"
+        async def action_then_artifact():
+            await self.controller.write("grove.move", {"dx": 1, "dy": 0},
+                segment_id=self.controller.state["segment_id"])
+            raise ConnectorError("InternalContextResponse", message, 502)
+        self.native_action = AsyncMock(side_effect=action_then_artifact)
+        await self.controller.execute_goal(original_goal)
+        self.native_action.assert_awaited_once()
+        task = self.controller.state
+        self.assertEqual((task["requests_used"], task["max_requests"], task["actions_count"]), (1, 4, 1))
+        self.assertEqual(task["task_id"], original_task)
+        self.assertEqual(task["goal"], original_goal)
+        self.assertEqual(task["status"], "paused")
+        self.assertEqual(task["request_status"], "idle_confirmed")
+        self.assertEqual(task["error"], {"code": "InternalContextResponse", "message": message})
+        self.assertEqual(task["stop_reason"], message)
+        self.assertEqual(task["segments"][-1]["error"], "InternalContextResponse")
+        self.assertTrue(task["segments"][-1]["progress"])
+        self.assertEqual(len(task["receipts"]), 1)
+        self.assertEqual(task["receipts"][0]["status"], "confirmed")
+        self.assertIn(task["receipts"][0]["operation_id"], self.receipts)
+        self.assertEqual(self.replays, [False])
 
     async def test_stale_segment_and_reclaimed_authority_do_not_invoke_world(self):
         self.start()

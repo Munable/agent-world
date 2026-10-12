@@ -46,12 +46,17 @@ BLUEPRINT_AGENT = "shared-grove-blueprint"
 EXECUTOR_AGENT = "shared-grove-executor"
 MCP_NAME = "grove_world"
 AGENT_READ_FUNCTIONS = frozenset({"map.viewport", "grove.inspect", "grove.handbook", "grove.content_history",
-    "grove.rule_catalog", "grove.definition_read", "grove.definition_list", "grove.fabrication_options", "grove.control_status"})
+    "grove.rule_catalog", "grove.definition_read", "grove.definition_list", "grove.definition_validate",
+    "grove.fabrication_options", "grove.control_status"})
 MAX_SECONDS, MAX_WORLD_CALLS = 150, 16
+_TOOL_ARGUMENT_DIAGNOSTIC_MAX_CHARS = 16 * 1024
 MAX_EXECUTION_REQUESTS = 8
 DOMAIN_BUSY_RETRY_SECONDS, DOMAIN_BUSY_MAX_ATTEMPTS = 3.0, 6
 HOST_START_SECONDS = 45
 HOST_METADATA_SECONDS = 10
+NATIVE_CONTEXT_HOOK = "experimental.chat.messages.transform"
+NATIVE_CONTEXT_VERSION = 1
+NATIVE_HISTORY_INDEX_PREFIX = "[Grove native historical tool location index]\n"
 EXECUTION_CHECKPOINT_SCHEMA = {"type": "object", "additionalProperties": False,
     "required": ["task_id", "execution_segment_id", "status", "summary", "next_intent", "evidence_operation_ids"],
     "properties": {"task_id": {"type": "string", "minLength": 1, "maxLength": 100},
@@ -160,6 +165,11 @@ EXECUTION_INSTRUCTIONS = (
     "the details needed now: grove_inspect for current object facts and exact "
     "action/candidate inputs; grove_rule_catalog for declaration and automatic "
     "execution semantics; grove_definition_read for an immutable definition. "
+    "Read the relevant catalog topic before creating behavior: a material name or "
+    "authored field does not supply undeclared components, alias solver state, "
+    "or automatically change presentation. Use grove_definition_validate "
+    "to check a draft without publishing or consuming materials; read its actual "
+    "diagnostics before deciding whether to revise or publish. Validation is not a runtime guarantee. "
     "Use live inputSchema and read_request, never names or guessed parameters. "
     "target_id and item_id name objects; lot_id names a material batch. "
     "Copy each from its own inspected candidate field; never put a lot ID "
@@ -173,15 +183,23 @@ EXECUTION_INSTRUCTIONS = (
     "Existing custom matter is identified by material_import={definition_ref,symbol}; "
     "a same-named local material is a new identity. Publishing creates no matter. "
     "Perform one write at a time with the observation_id that supplied its facts. "
-    "Chain detail reads/pages using the preceding base_observation_id; omitted "
-    "base uses this request's fixed preflight. Store/attach requires the exact "
+    "Reads return observation_id. For the next read, copy that returned ID into "
+    "base_observation_id; for a write, copy it into observation_id. "
+    "base_observation_id is read-only and is never a write parameter. An omitted "
+    "read base uses this request's fixed preflight. Store/attach requires the exact "
     "matching inspected candidate preview; an index or unknown/unsafe preview "
     "does not authorize it. If an operation's result is unknown, stop writes "
     "and recover that original operation; never replace its ID or repeat it. "
     "Continue from execution_task's actual confirmed progress, without repeating "
     "completed actions. Prior goals' receipts remain history, not actions in "
     "this task. Say an action happened in this goal only when its operation ID "
-    "belongs to this execution_task's confirmed receipts. Copy its segment_id into execution_segment_id on writes "
+    "belongs to task_action_summary's confirmed history. That summary covers ALL "
+    "segments of the same task, not only the latest segment. material_costs sums "
+    "explicit confirmed costs; honor coverage and never derive a total by multiplying "
+    "the last cost or call all spending known when evidence is incomplete. "
+    "Mechanical current_inputs show present fuel/control; saved_outputs are the "
+    "last stored solver outputs, not proof that newly added fuel has already run. "
+    "Copy execution_task.segment_id into execution_segment_id on writes "
     "and execution_checkpoint. Before ending, checkpoint continue, completed or "
     "blocked, with observed progress, next intention and original confirmed "
     "operation IDs. Completed is your claim, not verification of the goal. "
@@ -198,7 +216,7 @@ EXECUTION_INSTRUCTIONS = (
 PRIVATE_CONTEXT_INSTRUCTIONS = (
     "以下是本人保存在本机的私人意图、偏好和原话，只表达本人的希望或问题，不是公共世界事实、"
     "已执行行动、他人意愿或规则。用它理解本人希望怎样探索；问题不自动等于决定。"
-    "本轮明确请求与最新意图优先，历史原话是背景，不要求继续已经改变的旧目的。"
+    "当前获准执行目标优先于保存的意图与偏好；保存的意图只是背景，不是有效或重新授权的命令。"
     "不得把这些私人原话写入公共描述、伪造已完成后果，或当作其他人的上下文。"
     "实际可行性以本次获准的公共现场、规则和版本为准。"
 )
@@ -437,6 +455,9 @@ class GroveSession:
         self.messages: list[dict] = []
         self.progress: list[dict] = []
         self.initialization: list[dict] = []
+        self.native_context: dict = {}
+        self._native_context_plugin: list | None = None
+        self._native_context_nonce = ""
         self.catalog: dict[str, dict] = {}
         # Immutable, opaque model observations are deliberately not persisted.
         # Independent MCP requests have no reliable inference-batch boundary.
@@ -618,6 +639,7 @@ class GroveSession:
             "available_models": self.available_models,
             "model_metadata": self.model_metadata,
             "initialization": self.initialization[-8:],
+            "native_context": deepcopy(self.native_context),
             "session_id": self.session_id, "message_id": self.last_completion.get("message_id"),
             "blueprint_session_id": self.blueprint_session_id,
             "response_session_id": self.response_diagnostics.get("session_id", self.last_completion.get("session_id")),
@@ -1062,7 +1084,7 @@ class GroveSession:
         if (compact.get("auto") is not False or compact.get("tail_turns") != 0 or agent.get("disable") is not False or
                 agent.get("model") != self.model or agent.get("prompt") != HISTORY_RECOVERY_INSTRUCTIONS or
                 agent.get("permission") != {"*": "deny"} or executor.get("prompt") != EXECUTION_INSTRUCTIONS or
-                executor.get("permission") != {"*": "deny", MCP_NAME + "_*": "allow"}):
+                executor.get("permission") != self.native_permissions()):
             raise ConnectorError("HistoryRecoveryConfig", "原生历史整理配置未能核对；没有调用模型。", 409)
         messages = await self.host("GET", "/session/" + quote(self.session_id, safe="") + "/message?limit=100")
         if self.cancelled:
@@ -1174,6 +1196,7 @@ class GroveSession:
             await self.wait_for_host()
         else:
             await self.launch()
+        await self.verify_native_context(initialize=True)
         providers_started = time.monotonic()
         try:
             providers = await self.host("GET", "/config/providers")
@@ -1204,13 +1227,7 @@ class GroveSession:
         if self.session_id:
             session_started = time.monotonic()
             try:
-                session = await self.host("GET", "/session/" + quote(self.session_id, safe=""))
-                if self.restore_permissions:
-                    await self.host("PATCH", "/session/" + quote(self.session_id, safe=""), {"permission": self.permissions()})
-                    session = await self.host("GET", "/session/" + quote(self.session_id, safe=""))
-                    self.restore_permissions = False
-                if not session_permissions_match(session.get("permission"), self.permissions()):
-                    raise ConnectorError("UnsafeSession", "The saved session permissions have changed.", 409)
+                await self.recover_session_permissions()
             except (ConnectorError, httpx.HTTPError) as exc:
                 self.initialization_phase("saved_session", session_started, error=exc)
                 # A transient upstream error or a different database must not
@@ -1302,9 +1319,35 @@ class GroveSession:
             self.last_completion.get("completed"))
         self.remember()
 
+    def native_permissions(self):
+        # OpenCode 1.18.34 hides invalid from the model's activeTools but uses
+        # it internally to return malformed-call diagnostics. It cannot invoke
+        # the named original tool or grant world/file/network/process access.
+        return {"*": "deny", MCP_NAME + "_*": "allow", "invalid": "allow"}
+
     def permissions(self):
-        return [{"permission": "*", "pattern": "*", "action": "deny"},
-                {"permission": MCP_NAME + "_*", "pattern": "*", "action": "allow"}]
+        return [{"permission": name, "pattern": "*", "action": action}
+                for name, action in self.native_permissions().items()]
+
+    async def recover_session_permissions(self):
+        """Upgrade only our exact previous rules after owned-host verification."""
+        path = "/session/" + quote(self.session_id, safe="")
+        session = await self.host("GET", path)
+        expected = self.permissions()
+        # The sole previous policy lacks the final internal diagnostic rule.
+        previous = expected[:-1]
+        if not isinstance(session, dict) or session.get("id") != self.session_id:
+            raise ConnectorError("UnsafeSession", "The saved session identity has changed.", 409)
+        if not session_permissions_match(session.get("permission"), expected):
+            if not session_permissions_match(session.get("permission"), previous):
+                raise ConnectorError("UnsafeSession", "The saved session permissions have changed.", 409)
+            await self.host("PATCH", path, {"permission": expected})
+            session = await self.host("GET", path)
+            if (not isinstance(session, dict) or session.get("id") != self.session_id or
+                    not session_permissions_match(session.get("permission"), expected)):
+                raise ConnectorError("UnsafeSession", "The saved session permissions could not be verified.", 409)
+        # An old restoration marker never permits replacing foreign rules.
+        self.restore_permissions = False
 
     def blueprint_permissions(self):
         return [{"permission": "*", "pattern": "*", "action": "deny"}]
@@ -1321,6 +1364,107 @@ class GroveSession:
                 value["error_code"] = error.code
         self.initialization = (self.initialization + [value])[-8:]
 
+    def configure_native_context(self):
+        """Install one bundled dependency-free hook in this owned profile."""
+        source = Path(__file__).with_name("grove_native_context.mjs").read_bytes()
+        target = self.profile / "grove-native-context.mjs"
+        diagnostic = self.profile / "native-context.json"
+        if target.is_symlink() or diagnostic.is_symlink():
+            raise ConnectorError("UnsafeStorage", "本机上下文配置不能是符号链接。", 500)
+        temporary = target.with_name(target.name + ".tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(source)
+        os.replace(temporary, target)
+        self._native_context_nonce = secrets.token_hex(16)
+        options = {"version": NATIVE_CONTEXT_VERSION, "source_sha256": hashlib.sha256(source).hexdigest(),
+            "nonce": self._native_context_nonce, "role_id": self.role_id, "session_id": self.session_id,
+            "diagnostic_path": str(diagnostic),
+            "machine_context_prefixes": list(_CURRENT_CONTEXT_PREFIXES),
+            "formal_tools": [MCP_NAME + "_" + tool["name"] for tool in self.tools()
+                             if tool["name"] != NATIVE_HISTORY_TOOL]}
+        self._native_context_plugin = [target.as_uri(), options]
+        self.native_context = {"status": "configured", "source_sha256": options["source_sha256"]}
+        return deepcopy(self._native_context_plugin)
+
+    async def verify_native_context(self, *, initialize=False, request_message_id=None,
+                                    request_started_at_ms=None):
+        """Verify actual native loading, not merely a generated config file."""
+        started = time.monotonic()
+        try:
+            if not self._native_context_plugin or not self._native_context_nonce:
+                raise ValueError("unconfigured native context")
+            uri, options = self._native_context_plugin
+            source = Path(__file__).with_name("grove_native_context.mjs").read_bytes()
+            target = self.profile / "grove-native-context.mjs"
+            diagnostic = self.profile / "native-context.json"
+            expected = hashlib.sha256(source).hexdigest()
+            if (target.is_symlink() or diagnostic.is_symlink() or
+                    hashlib.sha256(target.read_bytes()).hexdigest() != expected or options["source_sha256"] != expected):
+                raise ValueError("native context source mismatch")
+            config = await self.host("GET", "/config", timeout=HOST_METADATA_SECONDS)
+            if not isinstance(config, dict) or config.get("plugin") != [[uri, options]]:
+                raise ValueError("native context effective configuration mismatch")
+            if initialize:
+                # This official read-only registry route initializes native
+                # plugins without starting a model or making a world action.
+                tools = await self.host("GET", "/experimental/tool/ids", timeout=HOST_METADATA_SECONDS)
+                if not isinstance(tools, list) or any(not isinstance(tool, str) for tool in tools):
+                    raise ValueError("native context initialization unavailable")
+            if not diagnostic.is_file() or diagnostic.stat().st_size > 8192:
+                raise ValueError("native context loading proof unavailable")
+            proof = json.loads(diagnostic.read_text())
+            if (not isinstance(proof, dict) or proof.get("status") != "loaded" or
+                    proof.get("version") != NATIVE_CONTEXT_VERSION or proof.get("hook") != NATIVE_CONTEXT_HOOK or
+                    proof.get("nonce") != self._native_context_nonce or proof.get("role_id") != self.role_id or
+                    proof.get("source_sha256") != expected or type(proof.get("process_id")) is not int or
+                    proof["process_id"] <= 0):
+                raise ValueError("native context loading proof mismatch")
+            # Only bounded counters/identities are copied into the local UI.
+            # The private launch nonce, file paths and bodies never reach it.
+            self.native_context = {key: deepcopy(proof[key]) for key in
+                ("status", "version", "hook", "source_sha256", "process_id", "loaded_at_ms") if key in proof}
+            projection = proof.get("projection")
+            require_projection = request_message_id is not None or request_started_at_ms is not None
+            if require_projection and (not isinstance(request_message_id, str) or not request_message_id or
+                    type(request_started_at_ms) is not int or request_started_at_ms < 0 or
+                    not isinstance(projection, dict)):
+                raise ValueError("native context current request proof unavailable")
+            if isinstance(projection, dict):
+                numeric = ("observed_at_ms", "omitted_assistant_parts", "omitted_assistant_characters", "reduced_tool_parts",
+                    "historical_tool_characters_before", "historical_tool_characters_after",
+                    "omitted_machine_snapshot_parts", "omitted_machine_snapshot_characters")
+                history_numeric = ("historical_tool_history_budget_bytes", "retained_historical_tool_parts",
+                    "omitted_historical_tool_parts", "historical_tool_input_bytes_before", "historical_tool_input_bytes_after",
+                    "historical_tool_output_bytes_before", "historical_tool_output_bytes_after",
+                    "omitted_historical_tool_input_bytes", "omitted_historical_tool_output_bytes",
+                    "historical_tool_index_bytes", "retained_historical_tool_pair_bytes", "historical_tool_history_bytes_after",
+                    "unfoldable_historical_tool_parts", "unfoldable_historical_tool_input_bytes",
+                    "unfoldable_historical_tool_output_bytes", "current_tool_parts", "current_tool_input_bytes", "current_tool_output_bytes")
+                included_history = tuple(key for key in history_numeric if key in projection)
+                if (projection.get("session_id") != self.session_id or
+                        not isinstance(projection.get("current_request_message_id"), str) or
+                        any(type(projection.get(key)) is not int or projection[key] < 0 for key in (*numeric, *included_history)) or
+                        projection.get("stored_originals_changed") is not False):
+                    raise ValueError("native context projection proof mismatch")
+                if require_projection and (projection["current_request_message_id"] != request_message_id or
+                        projection["observed_at_ms"] < request_started_at_ms):
+                    raise ValueError("native context current request proof mismatch")
+                self.native_context["projection"] = {key: deepcopy(projection[key]) for key in
+                    ("session_id", "current_request_message_id", "stored_originals_changed", *numeric, *included_history)}
+                if projection.get("character_unit") == "utf16_code_units":
+                    self.native_context["projection"]["character_unit"] = projection["character_unit"]
+                if projection.get("byte_unit") == "utf8":
+                    self.native_context["projection"]["byte_unit"] = "utf8"
+                if projection.get("budget_scope") == "readable_completed_formal_tool_pairs_only":
+                    self.native_context["projection"]["budget_scope"] = projection["budget_scope"]
+        except (OSError, ValueError, TypeError, KeyError, ConnectorError, httpx.HTTPError) as exc:
+            self.native_context = {"status": "unverified"}
+            self.initialization_phase("native_context", started, error=exc)
+            raise ConnectorError("NativeContextUnavailable", "本机上下文整理未能核验；原会话和已成立结果保留，暂停后续模型请求。", 503) from None
+        if initialize:
+            self.initialization_phase("native_context", started)
+
     async def launch(self):
         setup_started = time.monotonic()
         binary = self.manager.binary
@@ -1335,8 +1479,9 @@ class GroveSession:
             safe_directory(self.runtime_profile / ("xdg-" + kind))
         config_directory = safe_directory(self.profile / "xdg-config" / "opencode")
         # The private gateway capability remains in the process environment, not config.
-        permission = {"*": "deny", MCP_NAME + "_*": "allow"}
-        tools = {"*": False, MCP_NAME + "_*": True}
+        permission = self.native_permissions()
+        tools = {"*": False, MCP_NAME + "_*": True, "invalid": True}
+        context_plugin = self.configure_native_context()
         # OpenCode 1.18.34 injects MAX_STEPS_PROMPT on the first request when
         # steps=1. Using 2 avoids that conflicting summary instruction; all
         # blueprint tools stay denied, so a normal final JSON answer exits.
@@ -1346,6 +1491,7 @@ class GroveSession:
             "small_model": self.model, "enabled_providers": [self.model.split("/", 1)[0]],
             "autoupdate": False, "share": "disabled", "snapshot": False,
             "compaction": {"auto": False, "prune": False, "tail_turns": 0},
+            "plugin": [context_plugin],
             "tools": tools, "permission": permission, "default_agent": AGENT,
             "agent": {AGENT: {"description": "溪源的有界本地伙伴", "mode": "primary", "steps": 8,
                 "prompt": HOST_INSTRUCTIONS, "tools": tools, "permission": permission},
@@ -1384,6 +1530,7 @@ class GroveSession:
             "GROVE_MCP_CAPABILITY": self.capability,
             "OPENCODE_DISABLE_PROJECT_CONFIG": "true", "OPENCODE_DISABLE_CLAUDE_CODE": "true",
             "OPENCODE_DISABLE_DEFAULT_PLUGINS": "true", "OPENCODE_DISABLE_LSP_DOWNLOAD": "true",
+            "OPENCODE_DISABLE_EXTERNAL_SKILLS": "true",
             "OPENCODE_DISABLE_AUTOUPDATE": "true", "OPENCODE_DISABLE_AUTOCOMPACT": "true",
             "OPENCODE_DISABLE_MODELS_FETCH": "true", "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "8192",
             **{f"XDG_{kind.upper()}_HOME": str(self.profile / ("xdg-" + kind))
@@ -1396,7 +1543,7 @@ class GroveSession:
             if os.environ.get("OPENCODE_API_KEY"):
                 env["OPENCODE_API_KEY"] = os.environ["OPENCODE_API_KEY"]
         command = ([str(self.manager.wrapper)] if self.manager.wrapper else []) + [str(binary), "serve",
-            "--pure", "--hostname", "127.0.0.1", "--port", str(port), "--log-level", "ERROR"]
+            "--hostname", "127.0.0.1", "--port", str(port), "--log-level", "ERROR"]
         self.process = await asyncio.create_subprocess_exec(*command, cwd=workspace, env=env,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
         self.initialization_phase("configuration_and_spawn", setup_started)
@@ -1505,6 +1652,8 @@ class GroveSession:
             raise ConnectorError("UnknownWrite", "Recover the previous world write first.", 409)
         if executing and self.cancelled:
             raise asyncio.CancelledError()
+        if self._native_context_plugin is not None:
+            await self.verify_native_context()
         if not executing:
             self.execution_controller.begin_native_work()
         self.status, self.error = "thinking", None
@@ -1551,8 +1700,6 @@ class GroveSession:
                     ("goal", "max_actions", "actions_count", "remaining_actions", "delegation_active", "grant_version")}
                 facts["execution_task"] = {key: self.execution_controller.value(key) for key in
                     ("task_id", "segment_id", "goal", "requests_used", "max_requests", "remaining_actions", "progress")}
-                facts["execution_task"]["confirmed_receipts"] = [item for item in
-                    self.execution_controller.value("receipts") if item.get("status") == "confirmed"][-8:]
                 self.execution_controller.preflight_observed(facts)
             facts = self.present_agent_result("map.viewport", facts, preflight=True)
             parts.append({"type": "text", "text": CURRENT_FACTS_INSTRUCTIONS + "\n" +
@@ -1566,13 +1713,14 @@ class GroveSession:
             self.execution_controller.phase("preflight", preflight_started)
         inference = self.inference_started("entry" if initial else "execution" if executing else "explain")
         native_started = time.monotonic()
+        native_started_at_ms = int(time.time() * 1000)
         inference["timings"] = {"scope": "Observed connector/native event latency, not provider wire timing; "
             "world requests count only this native phase; preflight and settlement have separate phase timings.",
             "first_model_response_seconds": None, "first_tool_seconds": None,
             "first_confirmed_action_seconds": None, "reasoning_completed_spans_seconds": None,
             "world_requests": 0, "world_request_seconds": 0}
         self._active_request_measurement = {"entry": inference, "started": native_started,
-            "started_at_ms": time.time() * 1000, "assistant_ids": set(), "reasoning_spans": {}}
+            "started_at_ms": native_started_at_ms, "assistant_ids": set(), "reasoning_spans": {}}
         native_returned = False
         try:
             try:
@@ -1599,6 +1747,10 @@ class GroveSession:
             if not isinstance(info, dict) or not isinstance(parts, list):
                 raise ConnectorError("IncompleteResponse", "OpenCode has not completed a real response.", 502)
             self.raise_if_native_error(info)
+            if self._native_context_plugin is not None:
+                await self.verify_native_context(request_message_id=info.get("parentID"),
+                    request_started_at_ms=native_started_at_ms)
+                inference["native_context"] = deepcopy(self.native_context)
             answer = "\n".join(p["text"] for p in parts if isinstance(p, dict) and p.get("type") == "text"
                 and isinstance(p.get("text"), str) and not p.get("ignored") and not p.get("synthetic"))
             if info.get("finish") == "length":
@@ -1606,6 +1758,7 @@ class GroveSession:
             if (info.get("role") != "assistant" or info.get("error") or
                     not self.response_diagnostics["completed"] or info.get("finish") in {"length", "tool-calls", "error"} or not answer.strip()):
                 raise ConnectorError("IncompleteResponse", "OpenCode has not completed a real response.", 502)
+            self.reject_internal_history_index_answer(answer)
             self.response_diagnostics["validated_final"] = True
             self.text = answer[:12000]
             self.messages.append({"role": "assistant", "text": self.text, "time": time.time(),
@@ -1752,8 +1905,12 @@ class GroveSession:
         # observations at their returned times, not one atomic combined snapshot.
         page = await self.world("POST", "/v1/streams/grove.changes/read", {"limit": 24})
         response = await self.invoke("map.viewport", {})
-        projection = companion_projection("map.viewport", response)
-        scene = projection.get("result", projection)
+        # Keep the authenticated scene for internal readback and outcome
+        # detection. Model projection is applied later by present_agent_result;
+        # a discovery index must not become the source of world facts.
+        scene = response.get("result", response)
+        if not isinstance(scene, dict):
+            raise ConnectorError("CurrentWorldReadRequired", "当前现场未能读回；这次不会消耗模型请求。", 502)
         player = scene.get("player", {})
         if not isinstance(player.get("x"), int) or not isinstance(player.get("y"), int):
             raise ConnectorError("CurrentWorldReadRequired", "当前现场未能读回；这次不会消耗模型请求。", 502)
@@ -1892,6 +2049,7 @@ class GroveSession:
         if (info.get("role") != "assistant" or info.get("error") or not self.response_diagnostics.get("completed") or
                 info.get("finish") in {"tool-calls", "error"} or not answer.strip()):
             raise ConnectorError("IncompleteResponse", "OpenCode has not completed a real response.", 502)
+        self.reject_internal_history_index_answer(answer)
         self.response_diagnostics["validated_final"] = True
         self.completion_count += 1
         self.last_completion = {"completed": True, "message_id": info.get("id"), "session_id": session_id or self.session_id,
@@ -1899,6 +2057,30 @@ class GroveSession:
             "cost": self.response_diagnostics["cost"]}
         self.remember()
         return answer
+
+    def reject_internal_history_index_answer(self, answer: str):
+        """Reject only a complete managed location envelope, never ordinary prose.
+
+        The native output, usage and confirmed actions remain recorded. This
+        classifies a transport artifact, not the truth of a natural-language goal.
+        """
+        text = answer.strip()
+        if not text.startswith(NATIVE_HISTORY_INDEX_PREFIX):
+            return
+        def invalid_constant(_value):
+            raise ValueError("Non-JSON constant")
+        try:
+            index = json.loads(text[len(NATIVE_HISTORY_INDEX_PREFIX):], parse_constant=invalid_constant)
+        except (ValueError, TypeError):
+            return
+        if (not isinstance(index, dict) or index.get("scope") != "historical_tool_location_index" or
+                index.get("historical_only") is not True):
+            return
+        self.response_diagnostics.update(validated_final=False,
+            final_rejection="internal_history_location_index")
+        self.remember()
+        raise ConnectorError("InternalContextResponse",
+            "模型返回了内部历史索引，没有形成可展示的回答；已确认行动保留，未自动重试。", 502)
 
     def blueprint_input(self, text: str, context: dict, handbook: dict, *, private_context: dict | None = None) -> dict:
         compact = companion_projection("grove.generation_context", {"result": context})["result"]
@@ -1922,7 +2104,7 @@ class GroveSession:
             "player": {key: player.get(key) for key in ("id", "name", "x", "y")},
             "public_entities": [{key: entity.get(key) for key in
                 ("id", "name", "version", "x", "y", "material", "capabilities", "state", "owner", "container",
-                 "created_by", "source", "composition", "parts", "resolved", "matter", "components", "physical_parent",
+                 "created_by", "created_by_name", "source", "composition", "parts", "resolved", "matter", "components", "physical_parent",
                  "relations", "simulation", "material_quantity", "lifecycle", "authored_description", "process_refs", "content_summary",
                  "creative", "presentation", "barrier_active")}
                 for entity in entities[:12]],
@@ -2662,7 +2844,7 @@ class GroveSession:
         result = [{"name": "world_bootstrap", "description": "Read authenticated entry facts of this world.",
                    "inputSchema": {"type": "object", "properties": {"base_observation_id": {
                        "type": "string", "minLength": 1, "maxLength": 100,
-                       "description": "Optional fixed observation to extend; omitted uses this request's preflight."}},
+                       "description": "For this read only, copy a prior read's returned observation_id here to extend it. Omitted uses this request's preflight. Writes instead require observation_id."}},
                        "additionalProperties": False}}]
         result.append({"name": NATIVE_HISTORY_TOOL, "description": NATIVE_HISTORY_DESCRIPTION,
                        "inputSchema": deepcopy(NATIVE_HISTORY_SCHEMA)})
@@ -2681,6 +2863,14 @@ class GroveSession:
             if function in AGENT_READ_FUNCTIONS and spec.get("access") != "read":
                 continue
             schema = agent_mcp_schema(spec["input_schema"], function=function)
+            if function in AGENT_WRITE_FUNCTIONS:
+                schema["properties"]["observation_id"]["description"] = (
+                    "For this write, copy the observation_id returned with the exact facts used. "
+                    "Do not use base_observation_id: that field is accepted by reads only. Never invent or replace an ID.")
+            else:
+                schema["properties"]["base_observation_id"]["description"] = (
+                    "For this read only, copy a prior read's returned observation_id here to extend it. "
+                    "Omitted uses this request's fixed preflight. Writes instead require observation_id.")
             description = spec.get("description", function)
             if function == "grove.inspect":
                 description = (
@@ -2748,13 +2938,31 @@ class GroveSession:
             segment_id = arguments.get("execution_segment_id")
             self.execution_controller.admit_write(segment_id)
             schema = agent_mcp_schema(self.catalog[function]["input_schema"], function=function)
-            # Diagnose missing semantic choices; binding still owns observation
-            # errors and discards caller-supplied optimistic snapshot guards.
-            errors = [error for error in Draft202012Validator(schema).iter_errors(arguments)
-                      if error.validator == "required" and error.message != "'observation_id' is a required property"]
-            if errors:
-                message = "; ".join(error.message for error in errors[:3])
-                raise ConnectorError("InvalidToolArguments", "输入不符合此工具的参数要求：" + message + "。没有执行动作，也没有产生新观察标识。", 422)
+            # Name missing semantic choices by their real schema paths. Do not
+            # echo values or convert a read-base into a write observation.
+            missing = []
+            for error in Draft202012Validator(schema).iter_errors(arguments):
+                if error.validator != "required" or not isinstance(error.instance, dict):
+                    continue
+                for field in error.validator_value:
+                    if field in error.instance:
+                        continue
+                    path = ""
+                    for part in (*error.absolute_path, field):
+                        path += f"[{part}]" if isinstance(part, int) else ("." if path else "") + str(part)
+                    if path not in missing:
+                        missing.append(path)
+            if any(path != "observation_id" for path in missing):
+                raise ConnectorError("InvalidToolArguments", "缺少必需字段：" + ", ".join(missing[:3]) +
+                    "。按此工具的inputSchema提供自己的选择；没有执行动作，也没有产生新观察标识。", 422)
+            if not isinstance(arguments.get("observation_id"), str) or not arguments["observation_id"]:
+                raise ConnectorError("ObservationRequired",
+                    "此写入缺少有效observation_id；请原样使用真实读取返回的observation_id。"
+                    "base_observation_id只用于接续读取，不能代替写入字段。没有执行动作，也没有产生新观察标识。", 409)
+            if "base_observation_id" in arguments:
+                raise ConnectorError("InvalidToolArguments",
+                    "此写入不接受base_observation_id；写入使用observation_id，base_observation_id只用于读取。"
+                    "不会转换或自动补观察。没有执行动作，也没有产生新观察标识。", 422)
             if self.execution_write_lock.locked():
                 raise ConnectorError("ExecutionWriteBusy", "Wait for the current write and its readback before another action.", 409)
             async with self.execution_write_lock:
@@ -2825,7 +3033,8 @@ class GroveSession:
             result = await self.execution_controller.checkpoint(arguments, schema=EXECUTION_CHECKPOINT_SCHEMA)
             try:
                 delivered = self.present_agent_result("execution_checkpoint", result,
-                    base_id=self.observations.preflight_id)
+                    base_id=self.observations.preflight_id,
+                    action_entity_ids=self.execution_controller.value("action_entity_ids", []))
                 # Include the newly assigned opaque handle in this final size
                 # check, before the outer MCP encoder can lose stage evidence.
                 _checked_agent_tool_text(delivered)
@@ -3159,15 +3368,53 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
             except (ConnectorError, httpx.HTTPError) as exc:
                 error = exc.public_payload() if isinstance(exc, ConnectorError) else {
                     "error": "UnknownWorldResult", "message": "World request disconnected. Stop; recover the original receipt before another write."}
-                if isinstance(exc, ConnectorError) and exc.code in {
+                name = str(params.get("name", "")) if isinstance(params, dict) else ""
+                args = params.get("arguments", {}) if isinstance(params, dict) else {}
+                outcome = (exc.execution_outcome or {}) if isinstance(exc, ConnectorError) else {}
+                draft_rejection = (isinstance(exc, ConnectorError) and exc.status < 500
+                    and name in {"grove_definition_publish", "grove_definition_validate"}
+                    and exc.code in {"InvalidToolArguments", "InvalidArguments", "SchemaRejected", "RuleViolation", "StateConflict"}
+                    and outcome.get("stage") != "unknown_result"
+                    and outcome.get("world_action_committed") is not True and outcome.get("receipt_confirmed") is not True)
+                if draft_rejection:
+                    # Native can wrap an unparsed argument string in value.
+                    # Diagnose the submitted shape, never repair or invoke it.
+                    if isinstance(args, dict) and set(args) == {"value"} and isinstance(args["value"], str):
+                        diagnostic = {"submitted_shape": "top_level_value_string",
+                            "expected_shape": "object matching this tool's inputSchema",
+                            "meaning": "This describes the received argument wrapper, not an effect's value field. No parsed or repaired arguments were executed."}
+                        if len(args["value"]) <= _TOOL_ARGUMENT_DIAGNOSTIC_MAX_CHARS:
+                            try:
+                                json.loads(args["value"])
+                            except json.JSONDecodeError as parse_error:
+                                diagnostic.update(json_parse="rejected", line=parse_error.lineno, column=parse_error.colno)
+                            except (ValueError, RecursionError):
+                                diagnostic["json_parse"] = "rejected"
+                            else:
+                                diagnostic["json_parse"] = "decoder_accepted_only"
+                        else:
+                            diagnostic["json_parse"] = "not_checked_size_limit"
+                        error["argument_diagnostic"] = diagnostic
+                    # Definition syntax is not discovered by walking the map.
+                    # These are read-only entries, not a repaired draft, new
+                    # observation, publication retry or permission decision.
+                    if session.catalog.get("grove.rule_catalog", {}).get("access") == "read":
+                        error["read_requests"] = [{"tool": "grove_rule_catalog", "arguments": {"topic": "program"}}]
+                    if session.catalog.get("grove.definition_validate", {}).get("access") == "read":
+                        error["validation_hint"] = {"tool": "grove_definition_validate",
+                            "meaning": "Supply your own proposed definition in definition; this read checks the draft without publishing or changing it. No corrected draft is supplied here."}
+                    error["recovery_meaning"] = (
+                        "Keep the original error and operation outcome. Read the actual program syntax, then validate your own draft "
+                        "before deciding whether to change it. Validation does not establish resources, publication permission or runtime safety. "
+                        "This error creates no new observation_id; these entries do not retry or prove a previous publication failed.")
+                elif isinstance(exc, ConnectorError) and exc.code in {
                         "ObservationRequired", "StateConflict", "RuleViolation", "DomainBusy", "PermissionDenied", "ReadbackPending", "CheckpointFeedbackUnavailable", "CheckpointReadbackPending"}:
                     # These are new reads, never a replacement observation or
                     # replay of the rejected/committed action. Do not chain an
                     # unknown handle into the recovery read itself.
-                    args = params.get("arguments", {})
                     requests = [{"tool": "map_viewport", "arguments": {}}]
                     for key in ("entity_id", "target_id", "item_id", "other_id"):
-                        identity = args.get(key)
+                        identity = args.get(key) if isinstance(args, dict) else None
                         request = {"tool": "grove_inspect", "arguments": {"entity_id": identity}}
                         if isinstance(identity, str) and len(identity) <= 100 and request not in requests:
                             requests.append(request)

@@ -78,7 +78,7 @@ class AgentObservationsTests(unittest.TestCase):
         facts["entities"][0].update(version=23, creative={"mechanical_observation": {
             "role": "source", "angle_unit": "logical_turns", "stored_state": {"angle": 36, "energy": 4}}})
         result = self.observations.present("execution_checkpoint", {"status": "completed", "segment_finished": True,
-            "execution_readback": facts}, base_id=old)
+            "execution_readback": facts}, base_id=old, action_entity_ids=["target"])
         self.assertNotEqual(result["observation_id"], old)
         self.assertEqual(result["execution_readback"]["clock"]["sequence"], 91)
         current = result["execution_readback"]["entities"][0]["creative"]["mechanical_observation"]

@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,ruleSnapshotChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,domainObservationLines,reactionObservationLines,contactObservationLines,installedInteractionDefinition,interactionChoices,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines} from './grove-world-ui.js?v=domain-runtime-v1';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,ruleSnapshotChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,domainObservationLines,reactionObservationLines,contactObservationLines,installedInteractionDefinition,interactionChoices,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines,executionTaskSummaryLines} from './grove-world-ui.js?v=accurate-agent-facts-v1';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -318,6 +318,7 @@ function renderExecution(){
   const detail=unknown?'原行动结果未确认。先核对原回执，才可接续或开始新目标；核对不会自动继续行动。':goalClaimed?'Agent已结束本次委托。这是它对目标的判断；程序确认的具体世界结果另列。':status==='completed'?'原执行记录已结束，目标结果未确认。已经保存的行动保留；旧完成记录没有验证来源，不能将请求结束视为成功。':active?'行动授权仍有效。Agent 可在总额度内继续；收回或亲手行动会停止后续行动，已保存的结果保留。':resumeAdmission.allowed?'当前没有行动授权。点击“接续这个目标”才再次授权；它会读取最新现场，继续原目标与剩余额度。':execution.goal?'当前没有行动授权。已保存的行动保留；请求结束或额度用完不代表目标完成。':'人可以直接玩，也可以在这里明确授权 Agent 帮你实现目标。';
   $('execution-detail').textContent=[execution.stop_reason,execution.error?.message,detail,goalAdmission.reason].filter((value,index,values)=>typeof value==='string'&&value&&values.indexOf(value)===index).join('\n');
   const progress=execution.progress||{},progressNodes=[];
+  for(const line of executionTaskSummaryLines(execution))progressNodes.push(node('p',line,'small'));
   if(goalClaimed&&typeof goalResult.summary==='string'&&goalResult.summary)progressNodes.push(node('p','Agent完成声明：'+goalResult.summary,'small'));
   else if(typeof progress.summary==='string'&&progress.summary)progressNodes.push(node('p','最近发现与行动：'+progress.summary,'small'));
   if(typeof progress.next_intent==='string'&&progress.next_intent)progressNodes.push(node('p','下一步打算：'+progress.next_intent,'small'));
@@ -830,7 +831,7 @@ function renderDefinitionDirectory(){
     if(fabricationError)section.append(node('p',fabricationError,'action-reason'));
     if(fabricationMenu)renderFabricationEditor(section);area.append(section);
   }
-  const language=node('details',undefined,'rule-definition'),languageResult=node('div');language.append(node('summary','规则语言能力（不展开发表历史）'),button('读取语言目录',()=>run(async()=>{const epoch=session;languageResult.replaceChildren(node('p','正在读取…','small'));try{const result=await client.query('grove.rule_catalog',{});if(epoch===session&&language.isConnected){languageResult.replaceChildren();appendFacts(languageResult,result);}}catch(error){if(epoch===session&&language.isConnected)languageResult.replaceChildren(node('p',error.message,'action-reason'));}}),{secondary:true}),languageResult);area.append(language);
+  const language=node('details',undefined,'rule-definition'),languageResult=node('div');language.append(node('summary','规则语言能力（不展开发表历史）'),button('读取语言目录',()=>run(async()=>{const epoch=session;languageResult.replaceChildren(node('p','正在读取…','small'));try{const result=await client.query('grove.rule_catalog',{topic:'all'});if(epoch===session&&language.isConnected){languageResult.replaceChildren();appendFacts(languageResult,result);}}catch(error){if(epoch===session&&language.isConnected)languageResult.replaceChildren(node('p',error.message,'action-reason'));}}),{secondary:true}),languageResult);area.append(language);
 }
 function renderFabricationEditor(container){
   const menu=fabricationMenu,form=node('form',undefined,'descriptor-action fabrication-editor'),rowsArea=node('div'),summary=node('div',undefined,'interaction-preview'),note=node('p',undefined,'small');

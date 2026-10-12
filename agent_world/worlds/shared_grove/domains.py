@@ -746,6 +746,37 @@ def mark_failure(ctx, domain, target_tick, code):
     refresh_ready(ctx, domain)
 
 
+def recover_checkpoint_version(ctx, domain, checkpoint):
+    """Resume only a scheduler-fenced, demonstrably uncomputed old task.
+
+    The failed logical step remains a saved fact. A closed frame cannot be
+    recomputed against today's inputs, so recovery joins the next legal frame
+    through the ordinary readiness index, without advancing physical state.
+    """
+    failure = domain.get("failure", {})
+    arguments = checkpoint.get("arguments", {})
+    tick = failure.get("tick")
+    if (domain.get("status") != "fault" or failure.get("computed") is not False
+            or failure.get("code") != "CheckpointVersionMismatch"
+            or type(tick) is not int or domain.get("last_tick") != tick
+            or domain.get("last_applied_tick", tick) >= tick
+            or checkpoint.get("status") != "blocked"
+            or checkpoint.get("last_error_code") != "CheckpointVersionMismatch"
+            or checkpoint.get("handler") != "grove.domain"
+            or arguments.get("domain_id") != domain["id"]
+            or arguments.get("target_tick") != tick
+            or arguments.get("topology_revision") != domain["topology_revision"]
+            or arguments.get("phase") != "advance"):
+        return False
+    restored = deepcopy(domain)
+    restored["status"] = "sleeping"
+    restored["recovered_failure"] = restored.pop("failure")
+    if sm.encoded_size(restored) > MAX_DOMAIN_BYTES:
+        return False
+    refresh_ready(ctx, restored)
+    return True
+
+
 def observation(ctx, entity_id):
     domain = for_entity(ctx, entity_id)
     if domain is None:
@@ -753,12 +784,15 @@ def observation(ctx, entity_id):
     work = frame(ctx)
     pending = pending_in_frame(ctx, domain)
     state = "calculating" if pending else {"fault": "error", "ready": "settled"}.get(domain["status"], domain["status"])
-    return {"domain_id": domain["id"], "state": state,
+    result = {"domain_id": domain["id"], "state": state,
             "last_applied_tick": domain.get("last_applied_tick", domain["last_tick"]),
             "pending_target_tick": work["target_tick"] if pending else None,
             "failure": deepcopy(domain.get("failure")),
             "counts": {"objects": len(domain["objects"]), "rules": len(domain["creative_instances"]),
                        "processes": len(domain["active_processes"]), "chunks": len(domain["chunks"])}}
+    if "recovered_failure" in domain:
+        result["recovered_failure"] = deepcopy(domain["recovered_failure"])
+    return result
 
 
 def migrate(ctx):

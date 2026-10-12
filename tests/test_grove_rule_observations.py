@@ -108,10 +108,42 @@ class AutomaticRuleObservationTests(unittest.TestCase):
         self.assertFalse(observed["pending_next_step"])
         self.assertFalse(observed["solver_eligible"])
         self.assertTrue(observed["stored_output_is_history"])
+        self.assertEqual(observed["current_inputs"]["energy"], original["mechanical"].get("energy"))
+        self.assertEqual(observed["current_inputs"]["drive_request"], original["drive_request"])
+        self.assertEqual(observed["saved_outputs"]["values"]["speed"], original["mechanical"]["speed"])
+        self.assertEqual(observed["saved_outputs"]["last_output_change"]["step"], 5)
+        self.assertNotIn("energy", observed["saved_outputs"]["values"])
+        self.assertNotIn("status", observed["current_inputs"])
         observed["stored_state"]["speed"] = 100
         observed["last_solved"]["step"] = 100
         observed["drive_request"]["source"]["rule_id"] = "changed"
+        observed["current_inputs"]["drive_request"]["source"]["rule_id"] = "new"
+        observed["saved_outputs"]["values"]["speed"] = 200
+        observed["saved_outputs"]["last_output_change"]["step"] = 200
         self.assertEqual(binding, original)
+
+    def test_fuel_inputs_and_saved_mechanical_outputs_are_separate_without_a_new_solver_verdict(self):
+        binding = {"mechanical": {"energy": 10, "enabled": True, "angle": 360,
+            "position": 0, "speed": 0, "status": "insufficient_energy", "available_torque": 0},
+            "mechanical_last_solved": {"step": 40},
+            "drive_request": {"enabled": True, "requested_step": 20, "applies_from_step": 21}}
+        observed = observations._mechanical_observation(binding, {"mechanical": {"role": "source"}},
+            {"mechanical_solver_eligible": True}, 80)
+        self.assertEqual(observed["current_inputs"]["energy"], 10)
+        self.assertEqual(observed["current_inputs"]["observed_tick"], 80)
+        self.assertEqual(observed["saved_outputs"]["values"]["status"], "insufficient_energy")
+        self.assertEqual(observed["saved_outputs"]["last_output_change"]["step"], 40)
+        self.assertTrue(observed["saved_outputs"]["last_output_change"]["historical"])
+        self.assertFalse(observed["pending_next_step"])
+        self.assertNotIn("running", observed["current_inputs"])
+        self.assertNotIn("current_solver_status", observed)
+        # A missing output-change marker is unknown evidence, not proof that
+        # this object has never been solved or that scheduling is late.
+        del binding["mechanical_last_solved"]
+        unknown = observations._mechanical_observation(binding, {"mechanical": {"role": "source"}},
+            {"mechanical_solver_eligible": True}, 80)
+        self.assertIsNone(unknown["saved_outputs"]["last_output_change"])
+        self.assertEqual(unknown["saved_outputs"]["values"], observed["saved_outputs"]["values"])
 
 
 class AutomaticWorldObservationTests(unittest.TestCase):

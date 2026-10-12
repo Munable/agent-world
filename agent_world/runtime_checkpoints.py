@@ -158,6 +158,7 @@ class RuntimeCheckpoints:
                 AND available_at<=? AND due_at<=?""", (universe, checkpoint_key, generation, now, now)).fetchone()
             if row is None:
                 return None
+            self._work_timings.annotate(handler=row["handler"], generation=generation)
             definition = self._worlds[universe]
             spec = next((spec for spec in definition.checkpoints if spec.name == row["handler"]), None)
             operation_id = "checkpoint:" + self._sha256({"universe": universe, "key": checkpoint_key,
@@ -174,8 +175,7 @@ class RuntimeCheckpoints:
                 row["created_operation_id"], row["created_at"], attempt)
             arguments = json.loads(row["arguments_json"])
             phase = arguments.get("phase") if isinstance(arguments, dict) else None
-            self._work_timings.annotate(handler=row["handler"], generation=generation,
-                                       task_phase=phase if phase in ("prepare", "advance") else None)
+            self._work_timings.annotate(task_phase=phase if phase in ("prepare", "advance") else None)
             c.execute("SAVEPOINT checkpoint_effects")
             try:
                 validate(spec.input_schema, arguments)

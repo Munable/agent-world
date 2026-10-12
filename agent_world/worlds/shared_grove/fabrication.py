@@ -24,6 +24,8 @@ ARGS = {"type": "object", "additionalProperties": False,
             "properties": {"entity_id": ID, "expected_entity_version": VERSION, "lot_id": ID,
                            "quantity_u": {"type": "integer", "minimum": 1, "maximum": 200}}}},
         "delegation": {"type": "string", "minLength": 16, "maxLength": 100}}}
+MAX_SOURCE_DISCOVERY = 12
+MAX_SOURCE_SCAN = 160
 
 
 def eligible_lots(ctx, player, entity):
@@ -46,6 +48,98 @@ def eligible_lots(ctx, player, entity):
             and sm.lot_moisture(entity, lot) < 35 and not sm.quantity(entity, "water", "surface")]
 
 
+def _unavailable_source(ctx, player, entity, costs):
+    """Explain actual current eligibility, without summing structural matter."""
+    from .world import _accessible, _transfer_lots
+    from .creative import guard_ordinary_action
+    relevant = [lot for lot in entity["matter"] if lot["material"] in costs and lot["quantity"] > 0]
+    if not relevant or any(lot["material"] in costs for lot in eligible_lots(ctx, player, entity)):
+        return None
+    try:
+        _accessible(ctx, player, entity, subject="item")
+        guard_ordinary_action(ctx, "fabricate", entity)
+    except (RuleViolation, PermissionDenied) as exc:
+        code, reason = "access_or_rule", str(exc)
+    else:
+        if entity["lifecycle"] != "intact" or entity["state"].get("retired"):
+            code, reason = "not_intact", "物件已损坏或退役，不能作为成型原料。"
+        elif entity["state"]["burning"]:
+            code, reason = "burning", "燃烧中的材料不能用于成型。"
+        elif "personal" in entity["capabilities"]:
+            code, reason = "personal_structure", "背包等私人物件的结构不是可消费原料。"
+        elif any(sm.lot_moisture(entity, lot) >= 35 for lot in relevant) or sm.quantity(entity, "water", "surface"):
+            code, reason = "wet", "需先取得足够干燥且无表面水的实际批次。"
+        elif not _transfer_lots(ctx, player, entity):
+            code, reason = "not_loose_material", "只有合格裸料或打开容器内可取用的材料能投料；物件结构不能静默拆作原料。"
+        else:
+            code, reason = "lot_not_eligible", "相关批次被绑定、材质不符或属于已成型结构；请读取真实批次。"
+    return {"id": entity["id"], "name": entity["name"], "reason_code": code, "reason": reason[:220],
+            "materials": sorted({lot["material"] for lot in relevant}),
+            "read_request": {"function_id": "grove.inspect", "arguments": {"entity_id": entity["id"]}}}
+
+
+def _acquisition_sources(ctx, player, costs):
+    """Local authorized discovery, not reserved sources or an automatic plan."""
+    from .world import _accessible
+    from . import building
+    visible = m.public_entities_near(ctx, player["x"], player["y"], radius=8, limit=MAX_SOURCE_SCAN)
+    found = []
+    for entity in visible:
+        try:
+            _accessible(ctx, player, entity, near=False)
+        except (RuleViolation, PermissionDenied):
+            continue
+        materials, action, reason = {}, None, None
+        state = entity["state"]
+        if state.get("kind") == "resource_node" and state.get("resource_kind") in costs:
+            material = state["resource_kind"]
+            # Actual visible node stock, not regeneration promises or body mass.
+            if state.get("stock", 0) > 0 and entity["lifecycle"] == "intact":
+                materials[material] = state["stock"] * building.MATERIAL_UNITS[material]
+                action = "harvest"
+        elif ("transport" in entity["capabilities"] and "container" not in entity["components"]
+              and entity["lifecycle"] == "intact" and not state["burning"]):
+            # A prospective pickup is evaluated by the same formal own-source
+            # filter; this detached read candidate grants no ownership.
+            prospective = deepcopy(entity)
+            prospective["owner"] = player["id"]
+            for lot in eligible_lots(ctx, player, prospective):
+                if lot["material"] in costs:
+                    materials[lot["material"]] = materials.get(lot["material"], 0)+lot["quantity"]
+            if materials:
+                action = "pickup"
+        elif "container" in entity["components"] and entity["lifecycle"] == "intact":
+            # Do not examine a closed container's contents. It may be worth
+            # opening, but unknown stock is never reported as existing material.
+            if not state["open"]:
+                action, reason = "open", "内部材料尚不可见；打开后重新检查，不保证有需要的原料。"
+            else:
+                prospective = deepcopy(entity)
+                prospective["owner"] = player["id"]
+                for lot in eligible_lots(ctx, player, prospective):
+                    if lot["slot"] == "contained" and lot["material"] in costs:
+                        materials[lot["material"]] = materials.get(lot["material"], 0)+lot["quantity"]
+                if materials:
+                    action = "pickup" if "transport" in entity["capabilities"] else None
+                    reason = ("取走整件容器不消费其结构；拿取后仍须重新检查内部材料资格。" if action
+                              else "该容器不可拿起；从本人可盛料容器的转移菜单读取该来源，再实际转移材料。")
+        if action is None and not materials:
+            continue
+        found.append({"id": entity["id"], "name": entity["name"], "location": {"x": entity["x"], "y": entity["y"]},
+            "materials": [{"material_id": key, "visible_quantity_u": quantity} for key, quantity in materials.items()],
+            "distance": abs(entity["x"]-player["x"])+abs(entity["y"]-player["y"]),
+            "next_action": action, "reason": reason,
+            "read_request": {"function_id": "grove.inspect", "arguments": {"entity_id": entity["id"],
+                **({"action": action} if action else {})}},
+            "permission": "Discovery only; inspect actual action conditions and revalidate before acting."})
+    found.sort(key=lambda row: (not row["materials"], row["distance"], row["id"]))
+    return found[:MAX_SOURCE_DISCOVERY], {"radius": 8, "radius_metric": "chebyshev",
+        "scan_limit": MAX_SOURCE_SCAN, "source_limit": MAX_SOURCE_DISCOVERY,
+        "truncated": len(visible) >= MAX_SOURCE_SCAN or len(found) > MAX_SOURCE_DISCOVERY,
+        "scope": "authorized_nearby_public_sources", "world_scan": False,
+        "meaning": "Visible possible acquisition sources, not available own stock or reserved quantities; omitted sources may exist."}
+
+
 def _plan(ctx, args):
     from .creative import object_definition, definition_read, _material
     definition = definition_read(ctx, {"definition_ref": args["definition_ref"]}).result["definition"]
@@ -65,7 +159,7 @@ def fabrication_options(ctx, args):
     from .creative import _material
     player = m.get_player(ctx)
     definition, spec, candidate, costs = _plan(ctx, args)
-    choices, available = [], {identity: 0 for identity in costs}
+    choices, unavailable, available = [], [], {identity: 0 for identity in costs}
     for eid in player["inventory"]:
         entity = m.get_entity(ctx, eid)
         lots = [lot for lot in eligible_lots(ctx, player, entity) if lot["material"] in costs]
@@ -75,6 +169,8 @@ def fabrication_options(ctx, args):
                     **({"material_import": material_import(lot["material"])} if material_import(lot["material"]) else {})} for lot in lots]})
             for lot in lots:
                 available[lot["material"]] += lot["quantity"]
+        elif (reason := _unavailable_source(ctx, player, entity, costs)) is not None:
+            unavailable.append(reason)
     registry = registry_for(candidate)
     enough = all(available[key] >= quantity for key, quantity in costs.items())
     action = {"action": "fabricate", "label": "从真实材料成型", "function_id": "grove.fabricate",
@@ -82,6 +178,8 @@ def fabrication_options(ctx, args):
                       "expected_player_version": player["version"], "placement": {"kind": "inventory"}, "sources": []},
         "input_schema": deepcopy(ARGS), "choices": {"sources": choices}, "available": enough,
         "reason": None if enough else "本人可用材料不足；先取得配方所需的真实批次。"}
+    acquisition, discovery = _acquisition_sources(ctx, player, costs) if not enough else ([], {
+        "scope": "not_requested_materials_already_available", "truncated": False, "world_scan": False})
     result = {"player": _public_self(player), "definition_ref": args["definition_ref"], "type_id": args["type_id"],
         "source_scope": "Only eligible lots in this person's own inventory are counted. Lots outside that inventory, foreign-owned, too wet, burning and constructed body lots are not fabrication stock. This read neither reserves nor selects sources; fabricate revalidates the exact submitted lots and versions.",
         "materials_quantity_basis": "quantity_u, available_u and missing_u are totals per canonical material_id, as in cost_u. Rows with different aliases but the same material_id describe the same group; their quantities must not be added again.",
@@ -89,7 +187,9 @@ def fabrication_options(ctx, args):
             "name": registry.materials[identity].name, "quantity_u": costs[identity],
             "available_u": available[identity], "missing_u": max(0, costs[identity]-available[identity])}
             for symbol in spec["cost_u"] for identity in [_material(candidate, symbol)]],
-        "action": action}
+        "action": action, "unavailable_sources": unavailable[:MAX_SOURCE_DISCOVERY],
+        "unavailable_sources_truncated": len(unavailable) > MAX_SOURCE_DISCOVERY,
+        "acquisition_sources": acquisition, "source_discovery_projection": discovery}
     if sm.encoded_size(result) > 45000:
         raise RuleViolation("真实来源选项超出一次可完整呈现的读取；先整理本人材料物件，再重新读取。")
     return FunctionOutcome(result)
@@ -184,6 +284,6 @@ def specs():
     return (FunctionSpec("grove.fabrication_options", fabrication_options,
         {"type": "object", "additionalProperties": False, "required": ["definition_ref", "type_id"],
          "properties": {"definition_ref": ID, "type_id": ARGS["properties"]["type_id"]}},
-        version=2, access="read", authorize=_member, description="Read one exact canonical cost_u recipe, actual eligible own available/missing quantities and bounded source lots/versions, with the same formal fabricate descriptor used by the web UI. No source is reserved or automatically selected."),
+        version=3, access="read", authorize=_member, description="Read one exact cost_u recipe, eligible own lots and missing totals, bounded rejected-source reasons and authorized nearby acquisition sources. Discovery is not own available stock or an action permission; inspect its actual action before acting. No source is reserved or automatically selected."),
         FunctionSpec("grove.fabricate", fabricate, ARGS, authorize=_member,
         description="Atomically form one published cost_u body from1..8 exact own observed lots; pass every source version, exact quantities and placement inventory. Preserves canonical identity, origins and remainders. No new material is generated; a constructed structural body is not a disassembly source."))

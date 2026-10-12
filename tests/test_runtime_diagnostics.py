@@ -32,14 +32,39 @@ class WorkDiagnosticsTests(unittest.TestCase):
 
     def test_failure_and_slow_log_record_no_exception_detail(self):
         timings = WorkDiagnostics()
-        with patch("time.monotonic", side_effect=[100, 102]), \
+        with patch("time.time", return_value=0.25), \
+                patch("time.monotonic", side_effect=[100, 102]), \
                 self.assertLogs("agent_world.runtime_diagnostics", level="WARNING") as logs:
             with self.assertRaises(RuntimeError):
                 with timings.transaction("checkpoint"):
+                    timings.annotate(handler="grove.domain", generation=2)
                     raise RuntimeError("PRIVATE_ARGUMENT_SECRET")
         sample = timings.snapshot()["recent"][0]
         self.assertEqual(sample["error"], "RuntimeError")
+        self.assertEqual(sample["started_at"], 0.25)
+        self.assertIn("started_at=0.250000", logs.output[0])
+        self.assertIn("started_utc=1970-01-01T00:00:00.250000+00:00", logs.output[0])
+        self.assertIn("function=grove.domain", logs.output[0])
         self.assertNotIn("PRIVATE_ARGUMENT_SECRET", json.dumps(sample)+str(logs.output))
+
+    def test_slow_wal_backfill_logs_original_start_and_its_separate_phase(self):
+        timings = WorkDiagnostics()
+        with patch("time.time", return_value=0.5) as wall_clock, \
+                patch("time.monotonic", side_effect=[100, 101, 103, 104]), \
+                self.assertLogs("agent_world.runtime_diagnostics", level="WARNING") as logs:
+            with timings.transaction("wal-checkpoint"):
+                with timings.phase("wal_backfill"):
+                    pass
+                wall_clock.return_value = 10.5
+                timings.annotate(wal_frames=100, checkpointed_frames=80, pending_frames=20)
+        sample = timings.snapshot()["recent"][0]
+        self.assertEqual(sample["started_at"], 0.5)
+        self.assertEqual(sample["phases"]["wal_backfill"], 2)
+        self.assertIn("started_at=0.500000", logs.output[0])
+        self.assertIn("started_utc=1970-01-01T00:00:00.500000+00:00", logs.output[0])
+        self.assertIn("kind=wal-checkpoint function=-", logs.output[0])
+        self.assertIn("wal_backfill=2.000", logs.output[0])
+        self.assertEqual(sample["pending_frames"], 20)
 
     def test_live_health_optional_diagnostics_preserve_default_and_ignore_writer_lock(self):
         directory = tempfile.TemporaryDirectory()

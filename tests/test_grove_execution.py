@@ -621,7 +621,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
                     "compaction": {"disable": False, "model": self.session.model,
                         "prompt": HISTORY_RECOVERY_INSTRUCTIONS, "permission": {"*": "deny"}},
                     EXECUTOR_AGENT: {"prompt": EXECUTION_INSTRUCTIONS,
-                        "permission": {"*": "deny", MCP_NAME + "_*": "allow"}}}}
+                        "permission": self.session.native_permissions()}}}
             if path.endswith("/message?limit=100"):
                 return {"messages": deepcopy(messages), "next_cursor": None} if include_page_cursor else deepcopy(messages)
             if path.endswith("/summarize"):

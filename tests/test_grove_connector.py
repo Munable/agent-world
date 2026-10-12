@@ -14,6 +14,7 @@ from starlette.testclient import TestClient
 
 from agent_world.grove_connector import (
     ConnectorError, ConnectorManager, GroveSession, create_connector_app, session_permissions_match,
+    NATIVE_HISTORY_INDEX_PREFIX,
 )
 from agent_world.grove_agent_observation import (
     companion_projection, _companion_chunk_terrain, _companion_scene_index, blueprint_model_input)
@@ -122,6 +123,16 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
                                     "test-private-bearer", "Test", "provider/model")
         self.session.host_url = "http://127.0.0.1:9000"
         self.session.session_id = "test-session"
+
+    def simulated_native_context_loaded(self):
+        """Only the loading boundary is doubled; preserve the recovery tests."""
+        plugin = self.session.configure_native_context()
+        options = plugin[1]
+        Path(options["diagnostic_path"]).write_text(json.dumps({"status": "loaded", "version": 1,
+            "hook": "experimental.chat.messages.transform", "nonce": options["nonce"],
+            "role_id": self.session.role_id, "source_sha256": options["source_sha256"],
+            "process_id": 42, "loaded_at_ms": 1}))
+        return plugin
 
     async def test_missing_transfer_inputs_report_parameters_without_trying_a_write(self):
         self.session.status = "thinking"
@@ -251,6 +262,69 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(call.args[1].endswith('/message') for call in self.session.host.await_args_list), 1)
         self.assertEqual(self.session.execution['request_status'], 'idle_confirmed')
 
+    async def test_internal_history_index_is_not_published_or_retried_and_keeps_native_usage(self):
+        body = NATIVE_HISTORY_INDEX_PREFIX + json.dumps({"scope": "historical_tool_location_index",
+            "historical_only": True, "session_id": "test-session", "omitted_tool_parts": 208})
+        response = {"info": {"id": "msg_artifact", "role": "assistant", "finish": "stop",
+            "time": {"completed": 1}, "tokens": {"input": 8, "output": 508,
+                "cache": {"read": 73741, "write": 472}}, "cost": 0.001514216},
+            "parts": [{"type": "text", "text": body}]}
+        original_response = deepcopy(response)
+        original_history = {"role": "assistant", "text": "原来已确认的回复与引用"}
+        original_completion = {"completed": True, "message_id": "msg_original", "session_id": "test-session"}
+        self.session.messages = [deepcopy(original_history)]
+        self.session.last_completion = deepcopy(original_completion)
+        self.session.current_turn_facts = AsyncMock(return_value={"player": {"id": "test-user"}, "entities": []})
+        self.session.execution_controller.state.update(task_id="original-task", segment_id="original-segment",
+            status="running", request_status="idle_confirmed", requests_used=0, max_requests=2)
+        self.session.host = AsyncMock(return_value=response)
+        with self.assertRaises(ConnectorError) as rejected:
+            await self.session.turn("继续原目标", executing=True)
+        self.assertEqual(rejected.exception.code, "InternalContextResponse")
+        self.assertIn("未自动重试", rejected.exception.message)
+        self.session.fail(rejected.exception)
+        self.assertEqual(response, original_response)
+        self.session.host.assert_awaited_once()
+        self.assertEqual(self.session.inference_count, 1)
+        self.assertEqual(self.session.execution["requests_used"], 1)
+        self.assertEqual(self.session.session_id, "test-session")
+        self.assertEqual(self.session.messages[0], original_history)
+        self.assertFalse(any(message.get("text") == body for message in self.session.messages))
+        self.assertEqual(self.session.last_completion, original_completion)
+        self.assertEqual(self.session.text, "")
+        self.assertEqual(self.session.completion_count, 0)
+        self.assertTrue(self.session.response_diagnostics["completed"])
+        self.assertFalse(self.session.response_diagnostics["validated_final"])
+        self.assertEqual(self.session.response_diagnostics["final_rejection"], "internal_history_location_index")
+        self.assertEqual(self.session.response_diagnostics["usage"]["cache"], {"read": 73741, "write": 472})
+        self.assertEqual(self.session.response_diagnostics["cost"], 0.001514216)
+
+    def test_final_answer_guard_matches_only_the_whole_managed_history_envelope(self):
+        envelope = json.dumps({"scope": "historical_tool_location_index", "historical_only": True})
+        body = NATIVE_HISTORY_INDEX_PREFIX + envelope
+        for ordinary in ("我已经暂停装置；历史索引仅是来源入口。", "这是历史索引示例：\n" + body,
+                         body + "\n这不是我的最终行动结论。", "```json\n" + body + "\n```",
+                         NATIVE_HISTORY_INDEX_PREFIX + "{broken JSON",
+                         NATIVE_HISTORY_INDEX_PREFIX + "[]",
+                         NATIVE_HISTORY_INDEX_PREFIX + '{"scope":"another_scope","historical_only":true}',
+                         NATIVE_HISTORY_INDEX_PREFIX + '{"scope":"historical_tool_location_index","historical_only":false}',
+                         NATIVE_HISTORY_INDEX_PREFIX + '{"scope":"historical_tool_location_index","historical_only":true,"count":NaN}'):
+            with self.subTest(answer=ordinary):
+                response = {"info": {"id": "msg_ordinary", "role": "assistant", "finish": "stop",
+                    "time": {"completed": 1}}, "parts": [{"type": "text", "text": ordinary}]}
+                self.session.inference_finished({"session_id": "test-session"}, response)
+                self.assertEqual(self.session.complete_model_answer(response), ordinary)
+                self.assertTrue(self.session.response_diagnostics["validated_final"])
+        for artifact in (body, " \n" + body + "\n "):
+            with self.subTest(artifact=artifact):
+                response = {"info": {"id": "msg_artifact", "role": "assistant", "finish": "stop",
+                    "time": {"completed": 1}}, "parts": [{"type": "text", "text": artifact}]}
+                self.session.inference_finished({"session_id": "test-session"}, response)
+                with self.assertRaises(ConnectorError) as rejected:
+                    self.session.complete_model_answer(response)
+                self.assertEqual(rejected.exception.code, "InternalContextResponse")
+                self.assertFalse(self.session.response_diagnostics["validated_final"])
+
     async def test_unscoped_automatic_requires_explicit_goal_without_inference(self):
         self.session.entered = True
         self.session.status = "ready"
@@ -339,6 +413,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.launch = AsyncMock()
         self.session.stop_host = AsyncMock()
         self.session.turn = AsyncMock()
+        plugin = self.simulated_native_context_loaded()
         calls = []
 
         async def recovering(method, path, body=None, timeout=15):
@@ -349,6 +424,10 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
                 return {'healthy': True}
             if path == '/config/providers':
                 return {'providers': [{'id': 'provider', 'models': {'model': {}}}]}
+            if path == '/config':
+                return {'plugin': [plugin]}
+            if path == '/experimental/tool/ids':
+                return ['read']
             if path == '/session/test-session':
                 return {'id': 'test-session', 'permission': self.session.permissions()}
             if path == '/session/status':
@@ -377,6 +456,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.world = AsyncMock(return_value={'functions': []})
         self.session.inference_count = 5
         self.session.remember()
+        plugin = self.simulated_native_context_loaded()
         saved = self.session.memory_file.read_bytes()
         original_client = httpx.AsyncClient
         for status, code in ((404, 'SavedSessionMissing'), (500, 'OpenCodeError'),
@@ -391,6 +471,10 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
                     if request.url.path == '/config/providers':
                         return httpx.Response(200, json={'providers': [
                             {'id': 'provider', 'models': {'model': {}}}]})
+                    if request.url.path == '/config':
+                        return httpx.Response(200, json={'plugin': [plugin]})
+                    if request.url.path == '/experimental/tool/ids':
+                        return httpx.Response(200, json=['read'])
                     if request.url.path == '/session/test-session':
                         return httpx.Response(status, json={'detail': 'private upstream material'})
                     self.fail('Unexpected operation: ' + request.method + ' ' + request.url.path)
@@ -433,6 +517,24 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(env['XDG_' + kind + '_HOME'], str(session.runtime_profile / ('xdg-' + kind.lower())))
         self.assertEqual(env['TMPDIR'], str(session.runtime_profile / 'tmp'))
         self.assertEqual(env['OPENCODE_CONFIG_DIR'], str(session.profile / 'xdg-config/opencode'))
+        for flag in ('OPENCODE_DISABLE_PROJECT_CONFIG', 'OPENCODE_DISABLE_DEFAULT_PLUGINS',
+                     'OPENCODE_DISABLE_EXTERNAL_SKILLS', 'OPENCODE_DISABLE_CLAUDE_CODE'):
+            self.assertEqual(env[flag], 'true')
+        self.assertNotIn('--pure', spawn.await_args.args)
+        config = json.loads((session.profile / 'opencode.json').read_text())
+        self.assertEqual(config['plugin'], [session._native_context_plugin])
+        permission = {'*': 'deny', 'grove_world_*': 'allow', 'invalid': 'allow'}
+        tools = {'*': False, 'grove_world_*': True, 'invalid': True}
+        self.assertEqual(config['permission'], permission)
+        self.assertEqual(config['tools'], tools)
+        for agent in ('shared-grove', 'shared-grove-executor'):
+            self.assertEqual(config['agent'][agent]['permission'], permission)
+            self.assertEqual(config['agent'][agent]['tools'], tools)
+        for agent in ('shared-grove-blueprint', 'compaction'):
+            self.assertEqual(config['agent'][agent]['permission'], {'*': 'deny'})
+            self.assertEqual(config['agent'][agent]['tools'], {'*': False})
+        self.assertEqual(self.session.blueprint_permissions(), [
+            {'permission': '*', 'pattern': '*', 'action': 'deny'}])
         self.assertEqual(session.memory_file.read_bytes(), original)
 
     async def test_host_authentication_failure_is_not_hidden_as_initialization_timeout(self):
@@ -750,9 +852,10 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normal["construction"], scene["construction"])
         self.assertEqual(normal["processes"], scene["processes"])
         normal_map = companion_projection("map.viewport", scene)
-        self.assertEqual(normal_map["entities"][0]["simulation"], objects[0]["simulation"])
-        self.assertIn("anchors", normal_map["public_content"])
-        self.assertEqual(normal_map["construction"], scene["construction"])
+        self.assertNotIn("simulation", normal_map["entities"][0])
+        self.assertNotIn("anchors", normal_map["public_content"])
+        self.assertEqual(normal_map["entities"][0]["read_request"]["arguments"], {"entity_id": "public-0"})
+        self.assertEqual(normal_map["construction"]["material_totals"], scene["construction"]["material_totals"])
 
     async def test_preflight_binds_only_displayed_discovery_and_explicit_selected_details(self):
         self.session.entered = True
@@ -798,7 +901,11 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered["operation_id"], "one-move")
         self.assertEqual(delivered["result"]["changes"], ["走了一格。"])
         self.assertEqual(readback["player"], current["player"])
-        self.assertEqual(readback["entities"], [])
+        # The small initial map may omit discovery rows. A later action may
+        # supply those genuinely unpresented rows, never repeat known ones.
+        known=self.session.agent_observation(base)["versions"]["entity"]
+        self.assertLessEqual(len(readback["entities"]),8)
+        self.assertTrue(all(row["id"] not in known for row in readback["entities"]))
         self.assertEqual(readback["construction"]["material_totals"], {"wood": 12})
         self.assertEqual(readback["inventory"][0]["matter"][0]["quantity"], 12)
         self.assertNotIn("action_options", readback["inventory"][0])
@@ -1086,6 +1193,75 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(session_permissions_match([*expected, expected[0]], expected))
         self.assertFalse(session_permissions_match([*expected,
             {"permission": "bash", "pattern": "*", "action": "allow"}], expected))
+
+    async def test_saved_session_internal_diagnostic_upgrade_preserves_original_conversation(self):
+        expected = self.session.permissions()
+        previous = expected[:-1]
+        self.session.restore_permissions = True
+        self.session.inference_count = 7
+        self.session.messages = [{"role": "user", "text": "Keep my original preference."}]
+        self.session.remember()
+        original = self.session.memory_file.read_bytes()
+        # Native PATCH can append rules rather than replacing the old copies.
+        self.session.host = AsyncMock(side_effect=[
+            {"id": "test-session", "permission": [previous[0], *previous]},
+            {"id": "test-session"},
+            {"id": "test-session", "permission": [*previous, *expected]}])
+        await self.session.recover_session_permissions()
+        self.assertEqual([call.args for call in self.session.host.await_args_list], [
+            ("GET", "/session/test-session"),
+            ("PATCH", "/session/test-session", {"permission": expected}),
+            ("GET", "/session/test-session")])
+        self.assertEqual(expected[-1], {"permission": "invalid", "pattern": "*", "action": "allow"})
+        self.assertEqual((self.session.session_id, self.session.inference_count), ("test-session", 7))
+        self.assertEqual(self.session.messages, [{"role": "user", "text": "Keep my original preference."}])
+        self.assertEqual(self.session.memory_file.read_bytes(), original)
+        self.assertFalse(self.session.restore_permissions)
+
+    async def test_current_session_diagnostic_permissions_are_read_only_and_idempotent(self):
+        expected = self.session.permissions()
+        self.session.host = AsyncMock(return_value={"id": "test-session", "permission": expected})
+        await self.session.recover_session_permissions()
+        await self.session.recover_session_permissions()
+        self.assertEqual([call.args for call in self.session.host.await_args_list],
+            [("GET", "/session/test-session")] * 2)
+
+    async def test_internal_diagnostic_upgrade_rejects_foreign_or_changed_rules_even_with_restore_marker(self):
+        expected = self.session.permissions()
+        previous = expected[:-1]
+        for session in (
+                {"id": "foreign-session", "permission": previous},
+                {"id": "test-session", "permission": [*previous,
+                    {"permission": "bash", "pattern": "*", "action": "allow"}]},
+                {"id": "test-session", "permission": [*expected, previous[0]]},
+                {"id": "test-session", "permission": [*previous,
+                    {"permission": "invalid", "pattern": "*", "action": "deny"}]},
+                {"id": "test-session", "permission": [{"permission": "*", "pattern": "*", "action": "allow"}]},
+                {"id": "test-session"}, None):
+            with self.subTest(session=session):
+                self.session.restore_permissions = True
+                self.session.host = AsyncMock(return_value=deepcopy(session))
+                with self.assertRaises(ConnectorError) as rejected:
+                    await self.session.recover_session_permissions()
+                self.assertEqual(rejected.exception.code, "UnsafeSession")
+                self.session.host.assert_awaited_once_with("GET", "/session/test-session")
+                self.assertEqual(self.session.session_id, "test-session")
+                self.assertTrue(self.session.restore_permissions)
+
+    async def test_internal_diagnostic_upgrade_requires_readback_not_patch_acknowledgement(self):
+        expected = self.session.permissions()
+        previous = expected[:-1]
+        self.session.restore_permissions = True
+        self.session.host = AsyncMock(side_effect=[
+            {"id": "test-session", "permission": previous},
+            {"id": "test-session", "permission": expected},
+            {"id": "test-session", "permission": previous}])
+        with self.assertRaises(ConnectorError) as rejected:
+            await self.session.recover_session_permissions()
+        self.assertEqual(rejected.exception.code, "UnsafeSession")
+        self.assertEqual([call.args[0] for call in self.session.host.await_args_list], ["GET", "PATCH", "GET"])
+        self.assertTrue(self.session.restore_permissions)
+        self.assertEqual(self.session.session_id, "test-session")
 
     def test_packaged_browser_entry_and_foreign_origin_failure(self):
         app = create_connector_app(storage=self.manager.storage)

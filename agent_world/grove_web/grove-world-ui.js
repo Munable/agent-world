@@ -157,6 +157,12 @@ export function conditionObservationLines(observation,entity){
 export function ruleRuntimeObservationLines(creative,entity){
   if(!creative||creative.hidden===true)return [];
   const lines=[],deployment=creative.deployment,mechanical=creative.mechanical_observation;
+  if(creative.process?.status==='error'){
+    lines.push('自动规则已暂停：'+readableText(creative.process.error,'需要处理当前规则错误')+'。');
+    const diagnostic=creative.process.error_diagnostic;
+    if(diagnostic?.code==='field_range'&&Number.isFinite(diagnostic.attempted_value))lines.push('字段 '+readableSymbol(diagnostic.field)+' 的实际赋值 '+diagnostic.attempted_value+' 超出允许范围 '+diagnostic.min+' 至 '+diagnostic.max+'。');
+    if(creative.process.error_diagnostic_omitted)lines.push('精确错误位置未保存；现有错误不能当作正常运行结果。');
+  }
   for(const [name,semantics] of Object.entries(creative.fact_semantics||{}))if(semantics.meaning)lines.push(factLabel(name.replace(/^physical\./,''))+'：'+semantics.meaning);
   const transition=creative.automatic_field_change;
   if(transition&&Number.isInteger(transition.step)){
@@ -217,11 +223,18 @@ export function ruleRuntimeObservationLines(creative,entity){
     if(typeof mechanical.role==='string')lines.push('机械用途：'+({source:'动力源',gear:'齿轮传递',actuator:'执行器'}[mechanical.role]||factValue(mechanical.role))+'。');
     if(mechanical.role_meaning)lines.push(mechanical.role_meaning);
     if(mechanical.angle_unit==='logical_turns')lines.push('角度按累计圈数记录；速度是每个世界逻辑步的圈数。地图只播放两次确认读取之间的变化。');
-    const stored=mechanical.stored_state||{},values=[];
-    for(const key of ['position','angle','speed','energy','available_torque'])if(Number.isFinite(stored[key]))values.push(factLabel(key)+' '+stored[key]);
-    if(typeof stored.enabled==='boolean')values.push('保存启用值 '+factValue(stored.enabled));
+    const inputs=mechanical.current_inputs,stored=mechanical.saved_outputs?.values||mechanical.stored_state||{},values=[];
+    if(inputs&&typeof inputs==='object'){
+      const actual=[];
+      if(Number.isFinite(inputs.energy))actual.push('剩余能源 '+inputs.energy);
+      if(typeof inputs.enabled==='boolean')actual.push('启用值 '+factValue(inputs.enabled));
+      if(actual.length)lines.push('当前机械输入：'+actual.join('，')+'；添料后的输入不代表已经完成求解。');
+    }
+    for(const key of ['position','angle','speed','available_torque'])if(Number.isFinite(stored[key]))values.push(factLabel(key)+' '+stored[key]);
+    if(!inputs&&Number.isFinite(stored.energy))values.push('保存能源 '+stored.energy);
+    if(!inputs&&typeof stored.enabled==='boolean')values.push('保存启用值 '+factValue(stored.enabled));
     if(typeof stored.status==='string')values.push('保存状态 '+factValue(stored.status));
-    if(values.length)lines.push('机械保存状态：'+values.join('，')+'；保存的速度和位置是历史求解输出或初始值，不能断言当前正在运动。');
+    if(values.length)lines.push('机械保存输出：'+values.join('，')+'；这是历史求解输出或初始值，不能断言当前正在运动。');
     if(typeof mechanical.solver_eligible==='boolean')lines.push(mechanical.solver_eligible?'这次观察具备机械求解资格；能源、连接和实际运动仍须核对求解结果。':'这次观察不具备机械求解资格；保存的输出不代表当前参与求解。');
     if(Array.isArray(deployment?.mechanical_blockers)&&deployment.mechanical_blockers.length){
       const blockers={no_mechanical_definition:'未声明机械用途',not_admitted:'未获实例准入',not_intact:'物件不完整或已退役',program_error:'规则已暂停',no_public_location:'没有公开位置'};
@@ -249,6 +262,18 @@ export function domainObservationLines(entity){
   if(domain.state==='pressure')lines.push('相关作用域超过运行容量，自动变化已暂停。可以解除连接、停用规则或减少内容后恢复；其他地方继续运行。');
   if(domain.state==='error')lines.push('相关作用域自动运行受阻，原物件和材料保留；当前状态不是执行成功。');
   if(Number.isInteger(domain.last_applied_tick))lines.push('最近完成自动结算：世界时刻 '+domain.last_applied_tick+'。休眠期间没有虚构计算，恢复不补扣停顿期间的材料。');
+  return lines;
+}
+
+export function executionTaskSummaryLines(execution){
+  const summary=execution?.action_summary;
+  if(!summary||summary.task_id!==execution.task_id||summary.scope!=='current_task_retained_confirmed_actions')return [];
+  const coverage=summary.coverage||{},lines=[];
+  if(Number.isInteger(summary.confirmed_count))lines.push('本目标已确认 '+summary.confirmed_count+' 次行动，包含同一目标的各段执行；'+(coverage.receipt_history_complete===true?'回执历史完整。':'仅统计仍保留的回执，不能当作全部历史。'));
+  const costs=(Array.isArray(summary.material_costs)?summary.material_costs:[]).filter(row=>typeof row?.material==='string'&&Number.isFinite(row.quantity_u)&&row.quantity_u>=0);
+  if(costs.length)lines.push('本目标回执明确记录的消耗：'+costs.map(row=>materialLabel(row.material)+' '+row.quantity_u+' 份').join('，')+'；不包含未报告的成本、材料转移或自动消耗。');
+  if(coverage.operations_without_structured_costs>0||coverage.invalid_cost_operations>0||coverage.omitted_material_cost_rows>0)lines.push('部分行动没有完整成本明细；未列出不表示零消耗。');
+  if(coverage.unknown_count>0||coverage.committed_unconfirmed_count>0)lines.push('仍有行动结果待核对，未计入已确认汇总。');
   return lines;
 }
 export function reactionObservationLines(creative,entity){

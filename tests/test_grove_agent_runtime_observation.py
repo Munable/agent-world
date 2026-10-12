@@ -2,10 +2,83 @@
 from copy import deepcopy
 import unittest
 
-from agent_world.grove_agent_observation import _companion_scene_index, companion_projection
+from agent_world.grove_agent_observation import AgentObservations, _companion_scene_index, companion_projection
 
 
 class GroveAgentRuntimeObservationTests(unittest.TestCase):
+    def test_runtime_failure_location_survives_every_first_look(self):
+        diagnostic = {"code": "field_bounds", "path": "/types/device/rules/0/effects/0",
+            "type_id": "device", "rule_id": "advance", "phase": "reaction", "effect_index": 0,
+            "field": "position", "attempted_value": 21, "min": 0, "max": 20, "logical_step": 51}
+        entity = {"id": "device", "version": 8, "creative": {"definition_ref": "fixed", "type_id": "device",
+            "process": {"status": "error", "steps": 1, "error": "Field position exceeded max",
+                "error_diagnostic": diagnostic}}}
+        source = {"entities": [entity]}
+        original = deepcopy(source)
+        for preflight in (False, True):
+            with self.subTest(preflight=preflight):
+                process = _companion_scene_index(source, preflight=preflight)["entities"][0]["creative"]["process"]
+                self.assertEqual(process["error_diagnostic"], diagnostic)
+        observations = AgentObservations("person")
+        for function in ("grove.interact", "execution_checkpoint"):
+            with self.subTest(function=function):
+                delivered = observations.present(function, {"result": {"entity": entity}, "execution_readback": {
+                    "selected_inspection": {"entity": entity}, "entities": [entity]}})
+                process = delivered["execution_readback"]["selected_inspection"]["entity"]["creative"]["process"]
+                self.assertEqual(process["error_diagnostic"], diagnostic)
+        self.assertEqual(source, original)
+
+    def test_missing_exact_runtime_diagnostic_is_explicit_and_not_guessed(self):
+        for process in ({"status": "error", "error": "Rule failed", "error_diagnostic_omitted": "capacity"},
+                        {"status": "error", "error": "Rule failed"}):
+            with self.subTest(process=process):
+                summary = _companion_scene_index({"entities": [{"id": "failed", "creative": {
+                    "process": process}}]}, preflight=True)["entities"][0]["creative"]["process"]
+                self.assertNotIn("error_diagnostic", summary)
+                if "error_diagnostic_omitted" in process:
+                    self.assertEqual(summary["error_diagnostic_omitted"], "capacity")
+                else:
+                    self.assertIn("not saved", summary["error_diagnostic_projection"])
+                self.assertNotIn("rule_id", summary)
+
+    def test_current_port_bindings_survive_equal_program_deduplication(self):
+        bindings = {"input": "nearby-other-device"}
+        connections = [{"from": "shaft", "to": "output"}]
+        contract = {"status": "active", "beneficiary": "other-person"}
+        current = {"port_bindings": bindings, "connections": connections, "contract": contract}
+        entity = {"id": "connected", "version": 5, "state": {"program": deepcopy(current)},
+            "creative": {"definition_ref": "fixed", "type_id": "connected", **deepcopy(current)}}
+        payload = {"result": {"entity": entity}}
+        delivered = companion_projection("grove.interact", payload)["result"]["entity"]
+        self.assertEqual(delivered["state"]["program"], {})
+        for key, value in current.items():
+            self.assertEqual(delivered["creative"][key], value)
+        self.assertEqual(payload["result"]["entity"], entity)
+
+    def test_mechanical_projection_separates_current_inputs_and_saved_outputs(self):
+        inputs = {"energy": 10, "enabled": True, "drive_request": {"applies_from_step": 101}, "observed_tick": 100}
+        outputs = {"values": {"speed": 0, "angle": 360, "status": "no_energy"},
+            "last_output_change": {"step": 99, "historical": True}, "observed_tick": 100}
+        bare = {"energy": 10, "enabled": True, "speed": 0, "angle": 360, "status": "no_energy"}
+        entity = {"id": "source", "version": 8, "mechanical": deepcopy(bare),
+            "state": {"program": {"mechanical": deepcopy(bare)}},
+            "creative": {"definition_ref": "fixed", "type_id": "source", "mechanical": deepcopy(bare),
+                "mechanical_observation": {"current_inputs": inputs, "saved_outputs": outputs,
+                    "stored_state": deepcopy(bare), "last_solved": {"step": 99, "historical": True},
+                    "drive_request": inputs["drive_request"]}}}
+        raw = deepcopy(entity)
+        inspection = companion_projection("grove.inspect", {"entity": entity})["entity"]
+        self.assertNotIn("mechanical", inspection)
+        self.assertNotIn("mechanical", inspection["state"]["program"])
+        self.assertNotIn("mechanical", inspection["creative"])
+        observed = inspection["creative"]["mechanical_observation"]
+        self.assertEqual(observed["current_inputs"], inputs)
+        self.assertEqual(observed["saved_outputs"], outputs)
+        self.assertNotIn("stored_state", observed)
+        self.assertNotIn("drive_request", observed)
+        self.assertNotIn("last_solved", observed)
+        self.assertEqual(entity, raw)
+
     def test_runtime_summary_survives_repeated_scene_compaction(self):
         source = {"inventory": [{"id": "carried", "version": 7, "owner": "role_a",
             "creative": {"definition_ref": "immutable", "type_id": "motor",

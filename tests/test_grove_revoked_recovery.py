@@ -153,9 +153,13 @@ class RevokedExecutionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         original = await self.lose_original()
         self.session.world_read = self.session.first_response_success = True
         self.session.launch = AsyncMock()
+        # This test doubles the native boundary. Hook proof gates have their
+        # own contract tests and must still be called during recovery.
+        self.session.verify_native_context = AsyncMock()
         self.session.join = AsyncMock()
         self.session.watch_events = AsyncMock()
         await self.session.prepare()
+        self.session.verify_native_context.assert_awaited_once_with(initialize=True)
         await self.session.event_worker
         self.assertEqual(self.action_posts(), [original["envelope"], original["envelope"]])
         self.assertEqual(self.session.unknown, [])

@@ -62,7 +62,7 @@ class MaterialContactTests(unittest.TestCase):
         raw = definition()
         compiled = self.compile(raw)
         self.assertEqual(compiled["contact_reactions"][0]["reaction"]["heat"], 0)
-        catalog = self.h.read("A", "grove.rule_catalog")
+        catalog = self.h.read("A", "grove.rule_catalog", {"topic": "all"})
         self.assertEqual(catalog["builtin_materials"]["water"]["load_per_u"], REGISTRY.materials["water"].load_per_u)
         invalid = definition();invalid["contact_reactions"][0]["reaction"]["inputs"] = {"starter": 1, "water": 1}
         with self.assertRaisesRegex(ValueError, "water: 1u \\* load 2"):

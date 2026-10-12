@@ -179,7 +179,10 @@ def publish(ctx, reference, version_key, record):
 def definition_list(ctx, args):
     scope = _scope(args.get("author"), args.get("key"))
     page = ctx.list_state(scope, limit=args.get("limit", 8), after=args.get("after"), order="key")
-    return FunctionOutcome({"definitions": [item["value"] for item in page["items"]],
+    return FunctionOutcome({"definitions": [{**item["value"],
+            "author_name": m.public_player_name(ctx, item["value"].get("author"))} for item in page["items"]],
+        "author_name_meaning": "Current public names in this world, not names at publication. Null means no current known name; "
+            "names may coincide, so author remains the identity. Authors are not necessarily objects' operators or owners.",
         "has_more": page["has_more"], "next_cursor": page["next_cursor"],
         "filters": {key: args[key] for key in ("author", "key") if key in args},
         "order": "publication_sequence_desc", "storage": ctx.get_state(m.META, LEDGER_KEY, {}),

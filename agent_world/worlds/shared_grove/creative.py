@@ -15,6 +15,8 @@ from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 from agent_world.simulation import matter as sm
 from agent_world.simulation.declarations import declaration_semantics, has_event, phase_applications
 from agent_world.simulation.programs import compile_program, evaluate, plan_reaction, program_material_semantics, solve_mechanical
+from agent_world.simulation.program_diagnostics import (program_diagnostics, invalid_diagnostics,
+    ProgramEvaluationError, runtime_diagnostic)
 from agent_world.simulation.facts import FactUnavailable, PUBLIC_FACTS, fact_catalog, snapshot_facts
 from agent_world.simulation.execution import EXECUTION_SEMANTICS, execution_plan
 from agent_world.world_streams import StreamEvent
@@ -40,6 +42,9 @@ REF = {"type": "string", "minLength": 1, "maxLength": 128}
 VERSION = {"type": "integer", "minimum": 1}
 EMPTY = {"type": "object", "additionalProperties": False}
 DELEGATION = {"type": "string", "minLength": 16, "maxLength": 100}
+CATALOG_TOPICS = ("overview", "program", "materials", "components", "mechanical", "events", "contract", "physical", "ports", "all")
+CATALOG_ARGS = {"type": "object", "additionalProperties": False,
+                "properties": {"topic": {"type": "string", "enum": list(CATALOG_TOPICS)}}}
 ACTION_ARGS = {"type": "object", "additionalProperties": False,
     "required": ["action", "target_id", "expected_target_version", "expected_player_version"],
     "properties": {"action": {"type": "string", "minLength": 1, "maxLength": 80},
@@ -375,26 +380,45 @@ def _imported_interfaces(ctx, proposed):
     return interfaces
 
 
+def _compile_definition(ctx, raw):
+    """One canonical compiler for read-only validation and actual publication."""
+    proposed = deepcopy(raw)
+    resolved = {}
+    if isinstance(proposed, dict) and isinstance(proposed.get("material_imports"), dict):
+        for alias, binding in proposed["material_imports"].items():
+            if not isinstance(binding, dict) or set(binding) != {"definition_ref", "symbol"}:
+                continue  # The compiler reports the exact invalid shape.
+            if not isinstance(binding["definition_ref"], str) or not isinstance(binding["symbol"], str):
+                continue
+            reference, symbol, material = _resolve_material(ctx, binding["definition_ref"], binding["symbol"])
+            proposed["material_imports"][alias] = {"definition_ref": reference, "symbol": symbol}
+            resolved[alias] = material
+    interfaces = _imported_interfaces(ctx, proposed)
+    return compile_program(proposed, materials=REGISTRY.materials, body_materials=BODY_MATERIALS,
+                           max_custom_materials=MAX_CUSTOM_MATERIALS, imported_materials=resolved,
+                           fact_catalog={key: fact.type for key, fact in PUBLIC_FACTS.items()},
+                           component_catalog={key: REGISTRY.components[key] for key in PROGRAM_COMPONENTS},
+                           imported_interfaces=interfaces)
+
+
+def definition_validate(ctx, args):
+    """Check without publishing, generating, reserving or altering old definitions."""
+    try:
+        definition = _compile_definition(ctx, args["definition"])
+        if sm.encoded_size(definition) > 24576:
+            raise ValueError("program: 规则包超过24KiB，请拆成更小的实际能力包。")
+    except (ValueError, RuleViolation) as exc:
+        return FunctionOutcome({"valid": False, "diagnostics": invalid_diagnostics(exc),
+                                "world_changed": False, "publication_created": False})
+    return FunctionOutcome({"valid": True, "diagnostics": program_diagnostics(definition),
+                            "world_changed": False, "publication_created": False,
+                            "meaning": "语法和类型有效；风险诊断不证明永久运行安全，也不提供执行许可。"})
+
+
 def definition_publish(ctx, args):
     check_delegation(ctx, args)
     try:
-        proposed = deepcopy(args["definition"])
-        resolved = {}
-        if isinstance(proposed, dict) and isinstance(proposed.get("material_imports"), dict):
-            for alias, binding in proposed["material_imports"].items():
-                if not isinstance(binding, dict) or set(binding) != {"definition_ref", "symbol"}:
-                    continue  # The compiler reports the exact invalid shape.
-                if not isinstance(binding["definition_ref"], str) or not isinstance(binding["symbol"], str):
-                    continue
-                reference, symbol, material = _resolve_material(ctx, binding["definition_ref"], binding["symbol"])
-                proposed["material_imports"][alias] = {"definition_ref": reference, "symbol": symbol}
-                resolved[alias] = material
-        interfaces = _imported_interfaces(ctx, proposed)
-        definition = compile_program(proposed, materials=REGISTRY.materials, body_materials=BODY_MATERIALS,
-                                     max_custom_materials=MAX_CUSTOM_MATERIALS, imported_materials=resolved,
-                                     fact_catalog={key: fact.type for key, fact in PUBLIC_FACTS.items()},
-                                     component_catalog={key: REGISTRY.components[key] for key in PROGRAM_COMPONENTS},
-                                     imported_interfaces=interfaces)
+        definition = _compile_definition(ctx, args["definition"])
     except ValueError as exc:
         raise RuleViolation("定义未发表，世界没有改变：" + str(exc)) from exc
     encoded = json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
@@ -409,12 +433,14 @@ def definition_publish(ctx, args):
         if previous["definition_ref"] != ref:
             raise StateConflict("已发布的同作者／名称／版本不能覆盖；请递增version。旧物件仍引用原版本。")
         return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": True,
-                                "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition)})
+                                "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition),
+                                "diagnostics": program_diagnostics(definition)})
     publication.publish(ctx, ref, version_key, {"definition": definition, "author": ctx.actor_role_id, "hash": digest,
                                                "published_tick": step(ctx), "published_at": ctx.now,
                                                "execution_semantics": EXECUTION_SEMANTICS})
     return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": False,
                             "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition),
+                            "diagnostics": program_diagnostics(definition),
                             "instantiate": "cost_u: grove.fabrication_options then grove.fabricate with actual lot sources; cost: grove.content_submit with existing opportunity and builtin piece costs"})
 
 
@@ -424,10 +450,14 @@ def definition_read(ctx, args):
     if not value:
         raise RuleViolation("规则版本不存在；先发布并使用返回的definition_ref。")
     return FunctionOutcome({"definition_ref": args["definition_ref"], **value,
+        "author_name": m.public_player_name(ctx, value.get("author")),
+        "author_name_meaning": "Current public name in this world, not the name at publication. Null means no current known name; "
+            "names may coincide, so author remains the identity. The author is not necessarily an object's operator or owner.",
         "execution_semantics": execution_semantics(value),
         "execution_plan": execution_plan(value["definition"]),
         "material_semantics": program_material_semantics(value["definition"], args["definition_ref"], materials=REGISTRY.materials),
-        "declaration_semantics": declaration_semantics(value["definition"])})
+        "declaration_semantics": declaration_semantics(value["definition"]),
+        "diagnostics": program_diagnostics(value["definition"])})
 
 
 
@@ -610,6 +640,32 @@ def _put(entity, material, amount):
         raise RuleViolation("产物批次数量或容量越界；该原子反应未执行。") from exc
 
 
+def _evaluation_location(entity, source, *, effect_index=None):
+    source = source or {}
+    location = {"phase": source.get("phase", "manual")}
+    for key in ("rule_id", "action_id"):
+        if key in source:
+            location[key] = source[key]
+    if effect_index is not None:
+        location["effect_index"] = effect_index
+    type_id = entity["state"]["program"].get("type_id", "")
+    name = source.get("rule_id", source.get("action_id", ""))
+    location["path"] = ("program.types."+type_id+"."
+        + ("rules." if "rule_id" in source else "actions.")+name
+        + (f".effects[{effect_index}]" if effect_index is not None else ".when"))[:240]
+    return location
+
+
+def _evaluate_at(expr, context, location):
+    try:
+        return evaluate(expr, context)
+    except FactUnavailable:
+        raise  # Missing facts retain the current wait/rollback contract.
+    except ValueError as exc:
+        code = "division_by_zero" if "division by zero" in str(exc) else "expression_error"
+        raise ProgramEvaluationError(str(exc), {"code": code, **location}) from exc
+
+
 def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=None, accounts=None, supply=None, objects=None, drive_source=None):
     changed, reactions = False, []
     channels = set() if channels is None else channels
@@ -619,66 +675,76 @@ def _effects(ctx, entity, kind, effects, *, params=None, event=None, channels=No
             commit.record_account(ctx, category, material, amount, "creative_reaction")
         else:
             sm.accumulate_quantity(accounts, (category, material, "creative_reaction"), amount)
-    for effect in effects:
-        context = _context(entity, params, event, ctx=ctx, objects=objects)
-        if effect["op"] == "set":
-            value = evaluate(effect["value"], context)
-            field = kind["fields"][effect["field"]]
-            if field["type"] == "integer" and not field["min"] <= value <= field["max"]:
-                raise RuleViolation("规则字段" + effect["field"] + "结果越界，请修改表达式。")
-            changed |= entity["state"]["program"]["fields"][effect["field"]] != value
-            entity["state"]["program"]["fields"][effect["field"]] = value
-        elif effect["op"] == "drive":
-            enabled = evaluate(effect["enabled"], context)
-            changed |= _set_drive(ctx, entity, kind, enabled, source=drive_source)
-        elif effect["op"] == "react":
-            if effect["mode"] == "exclusive" and effect["channel"] in channels:
-                continue
-            if effect["mode"] == "exclusive":
-                channels.add(effect["channel"])
-            materials = {key: {"load_per_u": value.load_per_u} for key, value in REGISTRY.materials.items()}
-            pack, _ = _type(ctx, entity)
-            materials.update(pack["materials"])
-            registry = registry_for(entity)
-            materials.update({alias: {"load_per_u": registry.materials[identity].load_per_u}
-                              for alias, identity in entity["state"]["program"].get("material_aliases", {}).items()})
-            for symbol in supply:
-                identity = symbol if "#" in symbol else _material(entity, symbol)
-                if identity in registry.materials:
-                    materials[symbol] = {"load_per_u": registry.materials[identity].load_per_u}
-            available = reaction_available_quantities(entity, supply=supply)
-            from .definitions import mixture_capacity
-            actual_capacity = mixture_capacity(entity)
-            actual_capacity = sm.liquid_capacity(entity) if actual_capacity is None else actual_capacity
-            # Planner supply excludes this phase's products and escrow, while
-            # those real lots still occupy volume.
-            capacity = sm.reaction_capacity(actual_capacity, sum(context["quantities"].values()), sum(available.values()))
-            planned = plan_reaction(effect, available, materials, capacity)
-            if not planned["extent"]:
-                continue
-            for symbol, amount in planned["consume"].items():
-                material = _material(entity, symbol)
-                _take(entity, material, amount)
-                supply[symbol] -= amount
-                account("sinks", material, amount)
-            for symbol, amount in planned["produce"].items():
-                material = _material(entity, symbol)
-                _put(entity, material, amount)
-                account("sources", material, amount)
-            # Heat is a bounded authored state effect, not free mechanical energy.
-            if "temperature" in kind["fields"]:
-                field = kind["fields"]["temperature"]
-                value = entity["state"]["program"]["fields"]["temperature"] + planned["heat"]
-                if not field["min"] <= value <= field["max"]:
-                    raise RuleViolation("反应温度超出定义字段范围；整笔反应回滚。")
-                entity["state"]["program"]["fields"]["temperature"] = value
-            reactions.append(planned)
-            changed = True
-        else:
-            # An authored emitted signal is explicitly distinct from a verified
-            # physical event and cannot count as a delivery or another's consent.
-            entity["state"]["program"]["last_signal"] = {"name": effect["name"], "tick": step(ctx)}
-            changed = True
+    for effect_index, effect in enumerate(effects):
+        location = _evaluation_location(entity, drive_source, effect_index=effect_index)
+        try:
+            context = _context(entity, params, event, ctx=ctx, objects=objects)
+            if effect["op"] == "set":
+                value = _evaluate_at(effect["value"], context, {**location, "path": location["path"]+".value"})
+                field = kind["fields"][effect["field"]]
+                if field["type"] == "integer" and not field["min"] <= value <= field["max"]:
+                    raise ProgramEvaluationError("规则字段" + effect["field"] + "结果越界，请修改表达式。",
+                        {"code": "field_range", **location, "field": effect["field"],
+                         "attempted_value": value, "min": field["min"], "max": field["max"]})
+                changed |= entity["state"]["program"]["fields"][effect["field"]] != value
+                entity["state"]["program"]["fields"][effect["field"]] = value
+            elif effect["op"] == "drive":
+                enabled = _evaluate_at(effect["enabled"], context, {**location, "path": location["path"]+".enabled"})
+                changed |= _set_drive(ctx, entity, kind, enabled, source=drive_source)
+            elif effect["op"] == "react":
+                if effect["mode"] == "exclusive" and effect["channel"] in channels:
+                    continue
+                if effect["mode"] == "exclusive":
+                    channels.add(effect["channel"])
+                materials = {key: {"load_per_u": value.load_per_u} for key, value in REGISTRY.materials.items()}
+                pack, _ = _type(ctx, entity)
+                materials.update(pack["materials"])
+                registry = registry_for(entity)
+                materials.update({alias: {"load_per_u": registry.materials[identity].load_per_u}
+                                  for alias, identity in entity["state"]["program"].get("material_aliases", {}).items()})
+                for symbol in supply:
+                    identity = symbol if "#" in symbol else _material(entity, symbol)
+                    if identity in registry.materials:
+                        materials[symbol] = {"load_per_u": registry.materials[identity].load_per_u}
+                available = reaction_available_quantities(entity, supply=supply)
+                from .definitions import mixture_capacity
+                actual_capacity = mixture_capacity(entity)
+                actual_capacity = sm.liquid_capacity(entity) if actual_capacity is None else actual_capacity
+                # Planner supply excludes this phase's products and escrow, while
+                # those real lots still occupy volume.
+                capacity = sm.reaction_capacity(actual_capacity, sum(context["quantities"].values()), sum(available.values()))
+                planned = plan_reaction(effect, available, materials, capacity)
+                if not planned["extent"]:
+                    continue
+                for symbol, amount in planned["consume"].items():
+                    material = _material(entity, symbol)
+                    _take(entity, material, amount)
+                    supply[symbol] -= amount
+                    account("sinks", material, amount)
+                for symbol, amount in planned["produce"].items():
+                    material = _material(entity, symbol)
+                    _put(entity, material, amount)
+                    account("sources", material, amount)
+                # Heat is a bounded authored state effect, not free mechanical energy.
+                if "temperature" in kind["fields"]:
+                    field = kind["fields"]["temperature"]
+                    value = entity["state"]["program"]["fields"]["temperature"] + planned["heat"]
+                    if not field["min"] <= value <= field["max"]:
+                        raise ProgramEvaluationError("反应温度超出定义字段范围；整笔反应回滚。",
+                            {"code": "field_range", **location, "field": "temperature",
+                             "attempted_value": value, "min": field["min"], "max": field["max"]})
+                    entity["state"]["program"]["fields"]["temperature"] = value
+                reactions.append(planned)
+                changed = True
+            else:
+                # An authored emitted signal is explicitly distinct from a verified
+                # physical event and cannot count as a delivery or another's consent.
+                entity["state"]["program"]["last_signal"] = {"name": effect["name"], "tick": step(ctx)}
+                changed = True
+        except (FactUnavailable, ProgramEvaluationError):
+            raise
+        except (ValueError, RuleViolation) as exc:
+            raise ProgramEvaluationError(str(exc), {"code": "effect_error", **location}) from exc
     return changed, reactions
 
 
@@ -884,6 +950,8 @@ def tick(ctx):
         objects[eid] = deepcopy(original[eid])
         program = objects[eid]["state"]["program"]
         program["process"].update(status="error", error=str(error)[:180], last_tick=step(ctx))
+        program["process"].pop("error_diagnostic", None)
+        program["process"].pop("error_diagnostic_omitted", None)
         blocked_rules[eid] = []
         if mechanical_result is not None:
             program["mechanical"] = mechanical_result
@@ -891,6 +959,9 @@ def tick(ctx):
                 program["mechanical_last_solved"] = deepcopy(solved_markers[eid])
         if "mechanical" in program and mechanical_result is None:
             program["mechanical"].update(speed=0, available_torque=0, status="program_error", enabled=False)
+        detail = runtime_diagnostic(error, logical_step=step(ctx))
+        if detail is not None:
+            m.fit_program_error_diagnostic(objects[eid], detail)
         pending_accounts[eid] = {}
         phase_supply[eid] = _quantities(original[eid], include_burning=False)
         outcomes[:] = [item for item in outcomes if item[0] != eid or preserve_mechanical and item[1] == "mechanical"]
@@ -918,10 +989,12 @@ def tick(ctx):
         candidate = objects[eid]
         checkpoint = deepcopy(candidate), deepcopy(pending_accounts[eid]), deepcopy(phase_supply[eid]), set(channels)
         try:
-            if evaluate(rule["when"], _context(predicate_snapshot or view[eid], event=fact, ctx=ctx, objects=view)):
+            source = {"kind": "automatic_rule", "rule_id": rule["id"], "phase": rule["phase"]}
+            if _evaluate_at(rule["when"], _context(predicate_snapshot or view[eid], event=fact, ctx=ctx, objects=view),
+                            _evaluation_location(candidate, source)):
                 return _effects(ctx, candidate, specs[eid], rule["effects"], event=fact, channels=channels,
                                 accounts=pending_accounts[eid], supply=phase_supply[eid], objects=view,
-                                drive_source={"kind": "automatic_rule", "rule_id": rule["id"], "phase": rule["phase"]})[1]
+                                drive_source=source)[1]
         except FactUnavailable as exc:
             if fact is not None:
                 wait_event_batch(eid, exc)
@@ -1416,14 +1489,20 @@ def rule_action(ctx, args):
         from . import world_facts
         action_view = world_facts.freeze(ctx, {entity["id"]: entity})
         try:
-            if not evaluate(declared.get("when", True), _context(entity, params, ctx=ctx, objects=action_view)):
+            source = {"kind": "explicit_action", "action_id": action, "actor_role_id": ctx.actor_role_id}
+            if not _evaluate_at(declared.get("when", True), _context(entity, params, ctx=ctx, objects=action_view),
+                                _evaluation_location(entity, source)):
                 raise RuleViolation("此动作的实际前提尚未成立。")
             _effects(ctx, entity, spec, declared["effects"], params=params, objects=action_view,
-                     drive_source={"kind": "explicit_action", "action_id": action, "actor_role_id": ctx.actor_role_id})
+                     drive_source=source)
         except FactUnavailable as exc:
             raise RuleViolation("声明事实或端口当前不可读；本次动作未执行：" + str(exc)) from exc
+        except ProgramEvaluationError as exc:
+            raise RuleViolation(str(exc), details={"program_diagnostic": runtime_diagnostic(exc, logical_step=step(ctx))}) from exc
         program["process"].update(status="idle", last_tick=step(ctx))
         program["process"].pop("error", None)
+        program["process"].pop("error_diagnostic", None)
+        program["process"].pop("error_diagnostic_omitted", None)
         summary = "已执行已发布动作：" + declared["label"] + "。"
     if entity["lifecycle"] == "intact":
         _barrier(entity, spec, ctx=ctx, allow_unknown=True)
@@ -1609,6 +1688,56 @@ def action_options(ctx, player, entity):
     return options
 
 
+def _catalog_topic(catalog, topic):
+    if topic not in CATALOG_TOPICS:
+        raise RuleViolation("未知规则目录专题；使用overview或目录返回的topics。")
+    catalog["validation"] = {"function_id": "grove.definition_validate", "input": "{definition:proposed_program}",
+        "meaning": "Read-only syntax/type validation and bounded local range/zero-divisor advice before publication; "
+                   "valid is not a proof of perpetual safety. Publication/reading also returns derived diagnostics."}
+    metadata = {"topic": topic, "topics": [{"topic": name,
+        "read_request": {"function_id": "grove.rule_catalog", "arguments": {"topic": name}}}
+        for name in CATALOG_TOPICS],
+        "projection": {"scope": "selected_creation_topic", "complete_catalog": topic == "all",
+                       "meaning": "Omitted topics remain available through rule_catalog(topic); omissions do not remove capabilities."}}
+    if topic == "all":
+        return {**catalog, **metadata}
+    common = ("language_version", "execution_semantics", "definition_directory", "world_tick",
+              "definition_fields", "type_fields", "limits", "validation", "security")
+    result = {key: deepcopy(catalog[key]) for key in common}
+    result["definition_shape"] = {key: catalog["definition_shape"][key] for key in ("key", "name", "version", "types")}
+    result["expressions"] = {key: catalog["expressions"][key] for key in ("literals", "binary", "boolean")}
+    result["expressions"]["references"] = catalog["expressions"]["references"][:4]
+    result.update(rule=catalog["rule"], action=catalog["action"], effects=catalog["effects"])
+    result["execution_model"] = {key: catalog["execution_model"][key]
+                                 for key in ("automatic_rules", "manual_actions", "conditions", "time", "readback")}
+    if topic == "program":
+        result.update(phase_policy=catalog["phase_policy"], execution_model=catalog["execution_model"], steps=catalog["steps"])
+    elif topic == "materials":
+        result.update(builtin_materials=catalog["builtin_materials"], reaction=catalog["reaction"],
+                      definition_shape=catalog["definition_shape"], steps=catalog["steps"])
+        result["new_semantics"] = {key: catalog["new_semantics"][key]
+                                    for key in ("material_publication", "fuel_uses", "fabrication")}
+    elif topic == "components":
+        result["component_schema"] = catalog["component_schema"]
+    elif topic == "mechanical":
+        result["mechanical"] = catalog["mechanical"]
+        result["new_semantics"] = {key: catalog["new_semantics"][key] for key in ("drive", "fuel_uses")}
+        result["expressions"]["references"] = catalog["expressions"]["references"][:5]
+        result["execution_model"] = catalog["execution_model"]
+    elif topic == "events":
+        result["recorder"] = catalog["recorder"]
+        result["execution_model"] = catalog["execution_model"]
+        result["expressions"]["references"] = catalog["expressions"]["references"][:7]
+    elif topic == "contract":
+        result["contract"] = catalog["contract"]
+        result["expressions"]["references"] = catalog["expressions"]["references"][:7]
+    elif topic in {"physical", "ports"}:
+        result["public_facts"] = catalog["public_facts"]
+        result["expressions"] = catalog["expressions"]
+        result["new_semantics"] = {key: catalog["new_semantics"][key] for key in ("physical", "ports", "unknown")}
+    return {**result, **metadata}
+
+
 def rule_catalog(ctx, args):
     from agent_world.simulation.programs import (
         MECHANICAL_DEFAULTS, MECHANICAL_RANGES, PROGRAM_KEYS, PROGRAM_REQUIRED_KEYS, TYPE_KEYS, TYPE_REQUIRED_KEYS)
@@ -1622,7 +1751,7 @@ def rule_catalog(ctx, args):
                               for field, (kind, minimum, maximum) in REGISTRY.components[name].fields.items()
                               if field != "supports"}}
         for name in PROGRAM_COMPONENTS}
-    return FunctionOutcome({"language_version": 4, "execution_semantics": EXECUTION_SEMANTICS, "definition_directory": {"function_id": "grove.definition_list",
+    catalog = {"language_version": 4, "execution_semantics": EXECUTION_SEMANTICS, "definition_directory": {"function_id": "grove.definition_list",
         "read_function_id": "grove.definition_read", "seek_paged": True}, "world_tick": step(ctx),
         "builtin_materials": {key: {"name": value.name, "load_per_u": value.load_per_u,
             "combustible": value.combustible, "liquid": value.liquid} for key, value in REGISTRY.materials.items()},
@@ -1654,7 +1783,8 @@ def rule_catalog(ctx, args):
             "meaning": "Exact top-level fields accepted by the compiler. version belongs here, never inside a type. materials is optional and defaults to an empty object."},
         "type_fields": {"allowed": list(TYPE_KEYS), "required": list(TYPE_REQUIRED_KEYS),
             "exactly_one": ["cost", "cost_u"],
-            "meaning": "Each type requires name and body_material, plus exactly one cost path. cost_u must include a positive quantity of body_material; all input symbols must be actual eligible solid materials at formation."},
+            "meaning": "Each type requires name and body_material, plus exactly one cost path. cost_u must include a positive quantity of body_material; all input symbols must be actual eligible solid materials at formation.",
+            "state_boundaries": "body_material supplies matter, not undeclared components. Positive physical.wetness requires effective absorbent capacity and actual absorbed water. Custom fields are only declared state: fuel/angle do not alias mechanical.energy/angle; tone does not automatically change canvas colour. Only explicit supported bindings add those behaviors. Read the actual physical/mechanical facts and supported presentation."},
         "definition_shape": {"key": "lowercase_key", "name": "public name", "version": "positive integer; top-level only", "materials": "optional, default {}; local symbol:{name,feedstock:wood|stone|cloth|water,load_per_u:equal feedstock,combustible:boolean,liquid:boolean}; local and imported materials combined at most4. A new object name, appearance or capability does not require a new material; builtin materials can directly name body_material and cost/cost_u inputs",
             "material_imports": "optional alias:{definition_ref:actual immutable published program reference,symbol:declared or imported material symbol}. Pins original identity/physical properties; same display names do not match. References provide neither matter nor permission; consume/produce only actual lots with mass-balanced reactions. Cannot charge imported material.",
             "contact_reactions": "optional top-level [{id,activation?:material|installed,when:boolean_expression,reaction:{op:react,inputs,outputs,rate?:1..10,channel?,mode?:exclusive|independent,heat?:0}}], at most8. Default material activation consumes at least one locally declared material and travels with its canonical identity. installed activation may combine builtin/explicitly imported identities and requires grove.interact install_interaction on an eligible actual container; publishing alone activates nothing. At most2 installed definition references and8 reachable candidates per container. Only actual positive non-burning contained lots minus escrow are inputs; personal backpacks never react, closed internal containers may. Conditions freeze before authored rules; contact runs after authored stages on shared remaining inputs, products next step. Exclusive channels are per definition_ref. Outputs preserve canonical identity and mass; installation creates no matter and changes no global rules.",
@@ -1700,7 +1830,8 @@ def rule_catalog(ctx, args):
         "reaction": "sum(quantity*load_per_u) must match. Atomic maximal extent/rate/capacity; exclusive same channel substitutes, independent channels compete finite inputs; temperature field receives bounded heat; emitted signal does not prove consent/delivery",
         "steps": ["inspect actual materials first; visible custom lots carry exact material_import {definition_ref,symbol}, copy it into material_imports under a chosen alias. Builtin wood/stone/cloth use their existing symbols. Local materials create new identities, not same-named existing lots; publication creates no matter", "publish immutable definition with definition_publish; a future missing-material recipe may be published, but it cannot yet form an object. New local material production requires an independently constructible carrier, not one that already costs the missing material", "cost_u path: read fabrication_options, obtain eligible actual own lots, then fabricate with exact source entities/versions/lot IDs/u quantities; result enters inventory, use drop/attach to place it. Never use regional resources or content_submit instead", "cost path: claim generation_context layout; actual allowed_tiles/resources/budgets apply; content_submit object {definition_ref,type_id,x,y,name?,description?} pays regional material pieces", "inspect actual actions, source item/lot candidates and versions", "interact store moves a whole child, retaining its own matter; it does not feed the parent's contained reaction inputs", "interact transfer moves an existing lot by item_id/lot_id/amount into target_slot, preserving material identity and source remainder", "rule_action charge consumes a declared symbol's feedstock to prepare that local custom material; it is not transfer or reaction evidence. fuel consumes finite qualified lots; connect links actual objects; another identity can use the same definitions/objects"],
         "time": "all simulation windows/deadlines use clock.sequence; the background timer targets roughly one-second logical steps, subject to actual service delay and late-timer handling, not per player or model turn; reading/thinking/travel do not pause finite mechanical energy use; server downtime pauses, no wall-clock catch-up",
-        "security": "no arbitrary code, owner/position/security writes or author acceptance for other actors; normal human actions do not call a model"})
+        "security": "no arbitrary code, owner/position/security writes or author acceptance for other actors; normal human actions do not call a model"}
+    return FunctionOutcome(_catalog_topic(catalog, args.get("topic", "overview")))
 
 
 def specs():
@@ -1708,9 +1839,10 @@ def specs():
     return (
         *publication.specs(),
         *fabrication.specs(),
-        FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=5, access="read", description="Discover the bounded creation language and shared physical facts. For immutable publications page definition_list, then definition_read; this static catalog contains no full-history index."),
-        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=3, access="read", description="Read one immutable definition and its author/hash, with compiled canonical material bindings and consumption/production coefficients; existing instances pin this reference."),
-        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=6, authorize=_member, description="Compile immutable definitions with cost_u actual-source bodies, bounded components/ports/physical conditions and self drive control, or the existing piece cost. Optional local material uses qualifies fuel; material_imports pins original identities. Publication creates no matter, permission or consent. Discover precise shape and bounds with rule_catalog."),
+        FunctionSpec("grove.rule_catalog", rule_catalog, CATALOG_ARGS, version=6, access="read", description="Read creation syntax and discover capability topics. Default overview is compact; select program/materials/components/mechanical/events/contract/physical/ports, or explicit all for the complete catalog. Omitted topics remain supported. No full-history index."),
+        FunctionSpec("grove.definition_validate", definition_validate, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}}}, access="read", authorize=_member, description="Validate a proposed definition without publishing or creating matter. Uses the actual compiler and bounded local range/division diagnostics; valid is syntax/type validity, not perpetual safety or execution permission."),
+        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=4, access="read", description="Read one immutable definition and its author/hash, canonical material bindings and derived bounded risk diagnostics; existing instances pin the unchanged reference."),
+        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=7, authorize=_member, description="Compile and publish immutable definitions; returns advisory bounded diagnostics without changing the canonical definition or publication permission. Read definition_validate first when creating. Publication creates no matter, permission or consent. Discover precise syntax with rule_catalog topics."),
         FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=10, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Declared buttons and fuel/start/stop keep the chosen parameters and presented interaction guard: autonomous fields and mechanical outputs need not be chased each second; current real conditions are rechecked on submission. Other participants' edits, material/ownership/structure changes invalidate that guard. Fuel sources, bindings and contracts retain exact observed versions. Bindings do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
