@@ -44,6 +44,21 @@ assert.equal(conflict.pending().rejection.code,'StateConflict');
 await conflict.releaseRejected();assert.equal(conflict.pending(),null);
 console.log('Grove client: cancellation, original receipt/replay and material conflict recovery passed');
 
+// Repeated browser maps are authenticated queries, not durable view writes.
+{
+  let reads=0;
+  const mapClient=new GroveClient(async(path,options)=>{
+    assert.equal(path,'/v1/functions/map.viewport/invoke');
+    assert.equal(options.method,'POST');assert.ok(options.signal);
+    assert.equal(JSON.parse(options.body).operation_id,undefined);
+    reads++;
+    return reply({ok:true,result:{player:{x:reads,y:0},entities:[],clock:{sequence:reads}}});
+  },storage,null);
+  mapClient.token='existing-token';
+  for(let i=1;i<=4;i++)assert.equal(mapClient.unpackView(await mapClient.viewport()).player.x,i);
+  assert.equal(mapClient.world.view,null);assert.equal(mapClient.pending(),null);
+}
+
 // All read stages are bounded; cancelled/late replies cannot restore a view.
 {
   const {WorldClient}=await import(world);

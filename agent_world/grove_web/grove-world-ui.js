@@ -99,7 +99,7 @@ export function simulationStats(entity,backpackId){
 export function entityGlyph(entity){
   const glyph=entity?.presentation?.glyph;
   // A small text glyph cannot introduce HTML, a URL, or arbitrary scale.
-  if(typeof glyph==='string'&&glyph.length>0&&[...glyph].length<=3&&!/[\u0000-\u001f\u007f]/.test(glyph))return glyph;
+  if(typeof glyph==='string'&&glyph.trim().length>0&&[...glyph].length<=3&&!/\p{C}/u.test(glyph))return glyph;
   const capabilities=entity?.capabilities||[];
   if(capabilities.includes('container'))return '▣';
   if(capabilities.includes('water_source'))return '≈';
@@ -110,9 +110,41 @@ export function safePresentation(entity){
   const presentation=entity?.presentation||{};
   const shapes=new Set(['box','bowl','cloth','beam','stone','raft','part']);
   const fallback=(entity?.capabilities||[]).includes('container')?'box':'part';
-  return {shape:shapes.has(presentation.shape)?presentation.shape:fallback,
+  const result={shape:shapes.has(presentation.shape)?presentation.shape:fallback,
     color:typeof presentation.color==='string'&&/^#[0-9a-f]{6}$/i.test(presentation.color)?presentation.color:'#aaac8c',
     glyph:entityGlyph(entity),size:(entity?.composition?.size??presentation.size)===2?2:1};
+  if(['normal','folded'].includes(presentation.pose))result.pose=presentation.pose;
+  if(['resolved','unavailable','unmapped'].includes(presentation.binding_status))result.binding_status=presentation.binding_status;
+  const badge=presentation.badge;
+  if(badge&&typeof badge==='object'&&!Array.isArray(badge)){
+    const label=typeof badge.label==='string'&&[...badge.label].length<=12&&!/\p{C}/u.test(badge.label)?badge.label:'';
+    const known=badge.known===true&&(typeof badge.value==='boolean'||Number.isSafeInteger(badge.value)&&Math.abs(badge.value)<=1000000);
+    result.badge={label,value:known?badge.value:null,known};
+  }
+  return result;
+}
+export function presentationBadgeText(entity){
+  const badge=safePresentation(entity).badge;if(!badge)return '';
+  return (badge.label?badge.label+' ':'')+(badge.known?factValue(badge.value):'?');
+}
+export function presentationObservationLines(entity){
+  const presentation=entity?.presentation,observation=presentation?.observation;
+  if(!presentation||typeof presentation!=='object')return [];
+  const lines=[];
+  if(presentation.binding_status==='unavailable')lines.push('部分外观字段当前不可读，地图标为 ?；基底外观不代表默认字段或上一结果。');
+  else if(presentation.binding_status==='unmapped')lines.push('当前字段值未配置完整外观映射，地图标为 ? 并保留基底外观。');
+  if(observation&&Array.isArray(observation.bindings)){
+    const at=Number.isInteger(observation.tick)?'世界时刻 '+observation.tick+' · ':'';
+    const targets={color:'颜色',glyph:'符号',pose:'轮廓',badge:'数字／真假牌'};
+    for(const row of observation.bindings.slice(0,4)){
+      if(!row||!targets[row.target]||typeof row.field!=='string')continue;
+      const actual=row.known===true?factValue(row.value):'当前不可读';
+      const result=row.status==='resolved'?'已按声明显示':row.status==='unmapped'?'没有对应显示':'显示未知';
+      lines.push(at+targets[row.target]+' ← 声明字段 '+factLabel(row.field)+' '+actual+'；'+result+'。');
+    }
+    if(observation.bindings.length)lines.push('外观只对应已声明字段，不证明吸水、加热、运动或其他机制已发生。');
+  }
+  return lines;
 }
 const factLabels={definition_ref:'规则定义',type_id:'对象类型',fields:'当前属性',materials:'材料定义',material_definitions:'材料定义',mechanical:'机械状态',recorder:'记录状态',contract:'双方契约',connections:'当前连接',process:'过程状态与历史',last_reaction:'保存的上次反应',source_last_tick:'保存的过程逻辑步',observed_tick:'本次观察逻辑步',last_tick:'过程保存的逻辑步',steps:'累计反应步数',steps_meaning:'步数含义',historical:'历史记录',current_production:'是否本次生产',meaning:'含义',history:'已发生的记录',position:'位置',angle:'角度',speed:'速度',status:'状态',energy:'能量',available_torque:'可用扭矩',active:'正在运行',started_tick:'开始逻辑步',until_tick:'截止逻辑步',sequence:'事件序号',tick:'逻辑步',occurred_at:'发生时间',recorded_tick:'记录逻辑步',action:'行动',entity_id:'对象',actor:'行动者',read_tick:'读取逻辑步',reads:'实际读取',parties:'双方身份',terms_version:'条款版本',accepted:'已接受的身份',deadline_tick:'截止逻辑步',delivered:'已交付',quantity:'数量',material:'材料',beneficiary:'受益方',id:'标识',name:'名称',version:'版本',unit:'单位',temperature:'温度',pressure:'压力',progress:'进展',running:'运行中',remaining:'剩余量',capacity:'容量',amount:'数量',item_id:'投入物件',other_id:'另一个对象',connected_to:'连接至',direction:'方向',mode:'方式',output:'产物',inputs:'投入',outputs:'产出',rules:'规则',types:'类型',actions:'行动',conditions:'条件',effects:'效果',description:'说明',label:'名称',duration:'持续逻辑步',fuel:'燃料',work:'做功',torque:'扭矩',reaction:'反应',state:'当前状态',owner:'身份',scope:'范围'};
 Object.assign(factLabels,{definition_ref:'使用的规则',type_id:'物件种类',material_aliases:'材料称呼',material_imports:'引用的材料',source_last_tick:'上次反应的世界时刻',observed_tick:'本次观察的世界时刻',last_tick:'上次运行的世界时刻',started_tick:'开始的世界时刻',until_tick:'截止的世界时刻',tick:'世界时刻',recorded_tick:'记录的世界时刻',read_tick:'读取的世界时刻',deadline_tick:'截止的世界时刻',duration:'持续时刻数',terms_version:'当前条款记录',version:'更新记录',id:'引用的对象',entity_id:'关联物件',item_id:'所用物件',other_id:'关联对象',lot_id:'所选材料',target_id:'操作对象',material_id:'材料',symbol:'材料称呼',load_per_u:'每单位u载荷',per_extent:'每次所需',missing_for_one_extent:'还缺多少',available:'当前可用',slot:'材料位置',scope:'可见范围',snapshot_only:'当前观察',parameter_defaults:'默认参数',known:'是否读到',satisfied:'是否满足',intact:'结构完整',passable:'是否可通过',opened_sequence:'最近开放记录',started_event_sequence:'开始时的事件记录','barrier.active':'通道是否阻挡','barrier.opened_sequence':'通道最近开放记录','mechanical.position':'机械位置','mechanical.speed':'机械速度','mechanical.angle':'机械角度','mechanical.energy':'机械能量','mechanical.status':'机械状态'});
@@ -120,6 +152,7 @@ Object.assign(factLabels,{port:'绑定槽位',ports:'关联槽位',port_bindings
 Object.assign(factLabels,{physical:'真实物理',wetness:'湿度',burning:'是否燃烧','structure.integrity':'结构完整度','load.local':'本件载荷','load.total':'总载荷','load.supported':'承受载荷','load.limit':'承载上限','load.overload':'超出载荷',buoyancy:'浮力',can_float:'是否可浮',mechanical:'保存机械状态',automatic_rule_count:'自动声明数量',explicit_action_count:'显式行动数量',automatic_rules_projection:'自动声明读取范围',automatic_rules_truncated:'自动声明展示未完整'});
 Object.assign(factLabels,{error:'上次运行错误',blocked_reason:'等待原因',blocked_rules:'等待可读事实的声明',rule_id:'声明',phase:'阶段',reason:'原因'});
 Object.assign(factLabels,{status_meaning:'过程标记含义',last_tick_meaning:'过程记录时刻含义'});
+Object.assign(factLabels,{presentation:'声明外观',bindings:'外观绑定',binding_status:'外观读取状态',shape:'轮廓',color:'颜色',glyph:'符号',pose:'展开／折叠轮廓',badge:'数字／真假牌',cases:'精确值映射',display:'显示值',matched:'是否匹配显示',observation:'本次外观读取'});
 export const factLabel=key=>key===null||key===undefined?'属性':factLabels[key]||readableSymbol(String(key))||'属性';
 const valueLabels={...materialLabels,body:'本体',contained:'容纳的材料',surface:'表面',absorbed:'吸附',ground:'地面',held:'随身',attached:'绑定',private:'私人',public:'公共',intact:'完整',broken:'破损',consumed:'材料耗尽',idle:'闲置',running:'运行中',stopped:'已停止',active:'进行中',complete:'已完成',failed:'已失败',error:'已暂停',pending:'等待中',waiting:'等待材料或条件',awaiting_acceptance:'等待双方接受',unoffered:'尚未发起约定',no_source:'未接入动力',program_error:'规则已暂停',accepted:'已接受',released:'已领出',independent:'分别反应',exclusive:'择一反应',reaction:'材料反应',after:'反应之后',logical_matter:'材料份数',whole_entity:'整件物件',material_lot:'材料',role:'人物',entity:'物件',resource_node:'资源点',water_source:'水源',ignition:'火种',container:'容器',structure:'结构'};
 Object.assign(valueLabels,{unavailable_fact_or_port:'事实或绑定槽位当前不可读'});
@@ -510,6 +543,53 @@ export function visibleWaterQuantity(entity){
   if(summary?.visible!==true)return 0;
   return (summary.materials||[]).filter(row=>row.material==='water').reduce((total,row)=>
     total+(Number.isFinite(row.quantity)?Math.max(0,row.quantity):0),0);
+}
+
+// Directory references are discovery hints. Only the current nearby map can
+// supply an inspect target; directory.nearby and old detail caches cannot.
+export function publicWorkLocalTarget(work,world,fresh=false){
+  if(!fresh||typeof work?.entity_id!=='string'||!world?.bounds)return null;
+  const bounds=world.bounds;
+  return (world.entities||[]).find(entity=>entity.id===work.entity_id&&!entity.owner&&!entity.container&&
+    Number.isInteger(entity.x)&&Number.isInteger(entity.y)&&
+    entity.x>=bounds.min_x&&entity.x<=bounds.max_x&&entity.y>=bounds.min_y&&entity.y<=bounds.max_y)||null;
+}
+
+export function publicWorkFactLines(work){
+  const lines=[];
+  if(work?.contents_visibility==='hidden')lines.push('容器已关闭；内部字段未公开。');
+  else{
+    const fields=work?.fields&&typeof work.fields==='object'&&!Array.isArray(work.fields)?Object.entries(work.fields):[];
+    const visible=fields.filter(([,value])=>Number.isInteger(value)||typeof value==='boolean').slice(0,8);
+    if(visible.length)lines.push('保存字段：'+visible.map(([name,value])=>factLabel(name)+' '+factValue(value)).join('，'));
+    if(Number.isInteger(work?.fields_omitted_count)&&work.fields_omitted_count>0)lines.push('另有 '+work.fields_omitted_count+' 个字段，到附近读取详情。');
+  }
+  if(typeof work?.lifecycle==='string')lines.push('对象状态：'+factValue(work.lifecycle));
+  return lines;
+}
+
+export function publicWorkDirectoryLines(page){
+  if(!page)return ['展开后读取最近公开作品。'];
+  const filters=page.filters||{},lines=[];
+  if(filters.author)lines.push('按作者身份查找：'+filters.author);
+  else if(filters.author_name)lines.push('作者姓名：'+filters.author_name);
+  if(filters.name)lines.push('作品名称：'+filters.name);
+  if(!filters.author&&!filters.author_name&&!filters.name)lines.push('最近公开的顶层作品。');
+  if(page.index_build_complete!==true)lines.push('旧作品目录仍在建立；当前结果只含已索引作品，稍后可刷新。');
+  if(page.author_identity_required)lines.push('姓名不能区分作者，请按独立身份查看；同名作者的作品不会合并。');
+  if(!(page.works||[]).length&&!(page.author_matches||[]).length)lines.push('这一页没有符合条件的公开作品；空页不代表作品不存在。');
+  if(page.has_more)lines.push('还有后续目录页；这不是全部结果。');
+  return lines;
+}
+
+// Clip a directory marker to the view edge without moving the camera or
+// inventing remote terrain, an object sprite, or a walkable route.
+export function publicWorkMarkerGeometry(at,width,height,padding=56){
+  if(!Number.isFinite(at?.x)||!Number.isFinite(at?.y)||!(width>0)||!(height>0))return null;
+  const inset=Math.min(padding,width/4,height/4),cx=width/2,cy=height/2,dx=at.x-cx,dy=at.y-cy;
+  const offscreen=at.x<inset||at.x>width-inset||at.y<inset||at.y>height-inset;
+  const factor=offscreen?Math.min(dx?((width/2-inset)/Math.abs(dx)):Infinity,dy?((height/2-inset)/Math.abs(dy)):Infinity):1;
+  return {x:cx+dx*factor,y:cy+dy*factor,offscreen,angle:Math.atan2(dy,dx)};
 }
 
 export function receiptOutcomeLines(receipt){

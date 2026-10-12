@@ -78,17 +78,21 @@ export class GroveClient extends CommonsClient {
     if(inventory_after!==undefined&&inventory_after!==this.inventoryAfter){this.inventoryAfter=inventory_after;reset=true;}
     if(inventory_limit!==undefined&&inventory_limit!==this.inventoryLimit){this.inventoryLimit=inventory_limit;reset=true;}
     const args={radius,inventory_limit:this.inventoryLimit,...(this.inventoryAfter?{inventory_after:this.inventoryAfter}:{}),...(cx===undefined?{}:{cx,cy})};
-    try{return reset||!this.world.view?await this.world.loadView('grove.map',args):await this.world.syncView();}
+    // A map read needs no durable view cursor. The formal view/sync protocol
+    // remains available to its consumers; browser polling uses the existing
+    // authenticated read-only function, so a clock tick creates no view write.
+    try{return await this.world.query('map.viewport',args);}
     catch(error){
       if(this.inventoryAfter&&error.code==='RuleViolation'&&error.message?.includes('背包分页位置')){
         this.inventoryAfter=null;this.inventoryWasReset=true;this.world.view=null;
         delete args.inventory_after;
-        return this.world.loadView('grove.map',args);
+        return this.world.query('map.viewport',args);
       }
       throw error;
     }
   }
   unpackView(view) {
+    if(view?.result?.player)return view.result;
     if(!view?.snapshot)return null;
     return {...view.snapshot.meta,entities:Object.values(view.snapshot.entities),view_cursor:view.cursor};
   }

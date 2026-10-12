@@ -211,6 +211,8 @@ def save_player(ctx, player, expected_version=None):
     version = ctx.set_state(PLAYERS, player["id"], {k:v for k,v in player.items() if k != "version"},
                             expected_version=player.get("version") if expected_version is None else expected_version)
     player["version"] = version
+    from . import discovery
+    discovery.sync_author_name(ctx, player)
     return player
 
 
@@ -983,6 +985,9 @@ def write_candidates(ctx, batch):
         raise CapacityPressure("本域物理提交超过2MiB中预留给对象和空间索引的预算。")
     for scope, key, candidate, value, current_version in writes:
         candidate["version"] = ctx.set_state(scope, key, value, expected_version=current_version)
+        if scope == PLAYERS:
+            from . import discovery
+            discovery.sync_author_name(ctx, candidate)
 
 
 def public_location(ctx, entity):

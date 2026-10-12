@@ -19,6 +19,7 @@ class WorkDiagnostics:
         self._local = threading.local()
         self._count = 0
         self._phases = {}
+        self._kinds = {}
 
     @contextmanager
     def transaction(self, kind):
@@ -37,21 +38,28 @@ class WorkDiagnostics:
             with self._lock:
                 self._count += 1
                 self._recent.append(sample)
+                kind_total = self._kinds.setdefault(kind, {"count": 0, "seconds": 0.0, "max_seconds": 0.0,
+                                                         "phases": {}})
+                kind_total["count"] += 1
+                kind_total["seconds"] += sample["seconds"]
+                kind_total["max_seconds"] = max(kind_total["max_seconds"], sample["seconds"])
                 for name, elapsed in sample["phases"].items():
-                    total = self._phases.setdefault(name, {"count": 0, "seconds": 0.0, "max_seconds": 0.0})
-                    total["count"] += 1
-                    total["seconds"] += elapsed
-                    total["max_seconds"] = max(total["max_seconds"], elapsed)
-            if sample["seconds"] >= 1 and kind in {"action", "checkpoint", "timer", "maintenance", "wal-checkpoint"}:
+                    for totals in (self._phases, kind_total["phases"]):
+                        total = totals.setdefault(name, {"count": 0, "seconds": 0.0, "max_seconds": 0.0})
+                        total["count"] += 1
+                        total["seconds"] += elapsed
+                        total["max_seconds"] = max(total["max_seconds"], elapsed)
+            if sample["seconds"] >= 1 and kind in {"action", "checkpoint", "timer", "maintenance", "wal-checkpoint", "wal-status", "identity"}:
                 phases = sample["phases"]
                 logger.warning("world work slow started_at=%.6f started_utc=%s kind=%s function=%s "
                     "seconds=%.3f writer_wait=%.3f begin=%.3f handler=%.3f handler_cpu=%.3f "
-                    "managed=%.3f commit=%.3f wal_backfill=%.3f",
+                    "managed=%.3f commit=%.3f wal_backfill=%.3f wal_status=%.3f wal_pending=%s",
                     sample["started_at"], datetime.fromtimestamp(sample["started_at"], timezone.utc).isoformat(),
                     kind, sample.get("handler", "-"), sample["seconds"],
                     phases.get("writer_wait", 0), phases.get("begin", 0),
                     phases.get("handler", 0), phases.get("handler_cpu", 0), phases.get("managed", 0),
-                    phases.get("sqlite_commit", 0), phases.get("wal_backfill", 0))
+                    phases.get("sqlite_commit", 0), phases.get("wal_backfill", 0),
+                    phases.get("wal_status", 0), sample.get("pending_frames", "-"))
 
     @contextmanager
     def phase(self, name, *, cpu=False):
@@ -81,4 +89,5 @@ class WorkDiagnostics:
         with self._lock:
             return {"capacity": self._recent.maxlen, "transactions": self._count,
                     "phases": deepcopy(self._phases),
+                    "kinds": deepcopy(self._kinds),
                     "recent": deepcopy(list(self._recent)[-limit:]) if limit else []}

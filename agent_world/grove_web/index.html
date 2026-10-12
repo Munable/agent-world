@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#17271f"><title>溪源 · Agent World</title>
-  <link rel="stylesheet" href="/grove-static/grove.css?v=map-first">
+  <link rel="stylesheet" href="/grove-static/grove.css?v=discoverable-live-world-v1">
 </head>
 <body>
   <header class="masthead"><a class="brand" href="/"><span class="brand-icon" aria-hidden="true">◈</span><span><small>AGENT WORLD</small><strong>溪源</strong></span></a><p>一起动手，让这个地方变得不同。</p><span id="world-status" class="status-dot">等待进入</span></header>
@@ -41,6 +41,13 @@
           <p id="companion-update" class="companion-update" aria-live="polite" hidden></p>
           <div class="world-controls"><details class="map-legend-details"><summary>地图图例</summary><div class="map-legend"><span><i class="legend-person"></i>你</span><span><i class="legend-water"></i>可涉浅溪</span><span><i class="legend-walkway"></i>木板路</span><span><i class="legend-canopy"></i>遮雨棚</span><span><i class="legend-hearth"></i>石炉</span><span><i class="legend-node"></i>采集点</span><span><i class="legend-container"></i>容器</span></div></details><span class="small">改变会留在共同世界里</span></div>
           <div id="onboarding" class="onboarding"><span id="onboarding-copy">浅溪会弄湿木料和布。点物件查看状态与可用行动，再决定保留什么、改变什么。</span><button id="dismiss-onboarding" class="quiet" type="button" aria-label="收起玩法提示">×</button></div>
+          <details id="public-works-panel" class="card public-works-card"><summary class="section-heading"><h3>发现公开作品</h3><span id="public-works-summary" class="small">按作者或作品名称寻找</span></summary><div class="public-works-body">
+            <form id="public-works-form" class="public-works-search"><label>作者姓名<input id="public-works-author" type="text" maxlength="40" placeholder="可留空" autocomplete="off"></label><label>作品名称<input id="public-works-name" type="text" maxlength="80" placeholder="可留空" autocomplete="off"></label><button id="public-works-search" type="submit">查找</button><button id="public-works-recent" class="secondary" type="button">最近公开作品</button></form>
+            <p class="small">姓名与名称按完整文字查找；同名作者分别显示。这里只读取目录，不调用模型，不替你移动。</p>
+            <p id="public-works-note" class="small" role="status">展开后读取最近公开作品。</p><div id="public-works-list" class="public-works-list"></div>
+            <div class="public-works-pagination"><button id="public-works-previous" class="secondary" type="button" disabled>上一页</button><button id="public-works-next" class="secondary" type="button" disabled>下一页</button><button id="public-works-refresh" class="secondary" type="button">刷新这一页</button></div>
+            <p id="public-work-marker-note" class="small" role="status" hidden></p><button id="public-work-marker-clear" class="quiet" type="button" hidden>清除位置标记</button>
+          </div></details>
           <details class="card activity-card"><summary class="section-heading"><h3>共同留下的变化</h3><span id="activity-note" class="small">查看附近记录</span></summary><div id="activity-list" class="activity-list"><p class="small">正在读取附近的变化…</p></div></details>
           <details class="card public-content-card"><summary class="section-heading"><h3>共同现场与创作来源</h3><span id="public-content-note" class="small">正在读取公共内容</span></summary><div id="public-content-list" class="public-content-list" aria-live="polite"></div></details>
         </section>
@@ -82,6 +89,6 @@
       </div>
     </section>
   </main>
-<script type="module" src="/grove-static/grove.js?v=accurate-agent-facts-v1"></script>
+<script type="module" src="/grove-static/grove.js?v=discoverable-live-world-v1"></script>
 </body>
 </html>

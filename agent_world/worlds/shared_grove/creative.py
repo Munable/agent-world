@@ -42,7 +42,7 @@ REF = {"type": "string", "minLength": 1, "maxLength": 128}
 VERSION = {"type": "integer", "minimum": 1}
 EMPTY = {"type": "object", "additionalProperties": False}
 DELEGATION = {"type": "string", "minLength": 16, "maxLength": 100}
-CATALOG_TOPICS = ("overview", "program", "materials", "components", "mechanical", "events", "contract", "physical", "ports", "all")
+CATALOG_TOPICS = ("overview", "program", "materials", "components", "mechanical", "events", "contract", "physical", "ports", "presentation", "all")
 CATALOG_ARGS = {"type": "object", "additionalProperties": False,
                 "properties": {"topic": {"type": "string", "enum": list(CATALOG_TOPICS)}}}
 ACTION_ARGS = {"type": "object", "additionalProperties": False,
@@ -1719,6 +1719,8 @@ def _catalog_topic(catalog, topic):
                                     for key in ("material_publication", "fuel_uses", "fabrication")}
     elif topic == "components":
         result["component_schema"] = catalog["component_schema"]
+    elif topic == "presentation":
+        result["presentation"] = catalog["presentation"]
     elif topic == "mechanical":
         result["mechanical"] = catalog["mechanical"]
         result["new_semantics"] = {key: catalog["new_semantics"][key] for key in ("drive", "fuel_uses")}
@@ -1741,6 +1743,7 @@ def _catalog_topic(catalog, topic):
 def rule_catalog(ctx, args):
     from agent_world.simulation.programs import (
         MECHANICAL_DEFAULTS, MECHANICAL_RANGES, PROGRAM_KEYS, PROGRAM_REQUIRED_KEYS, TYPE_KEYS, TYPE_REQUIRED_KEYS)
+    from agent_world.simulation.presentation import presentation_catalog
     object_fields = "|".join(PUBLIC_FACTS)
     physical_fields = "|".join(name.removeprefix("physical.") for name in PUBLIC_FACTS if name.startswith("physical."))
     component_schema = {
@@ -1751,7 +1754,7 @@ def rule_catalog(ctx, args):
                               for field, (kind, minimum, maximum) in REGISTRY.components[name].fields.items()
                               if field != "supports"}}
         for name in PROGRAM_COMPONENTS}
-    catalog = {"language_version": 4, "execution_semantics": EXECUTION_SEMANTICS, "definition_directory": {"function_id": "grove.definition_list",
+    catalog = {"language_version": 5, "execution_semantics": EXECUTION_SEMANTICS, "presentation": presentation_catalog(), "definition_directory": {"function_id": "grove.definition_list",
         "read_function_id": "grove.definition_read", "seek_paged": True}, "world_tick": step(ctx),
         "builtin_materials": {key: {"name": value.name, "load_per_u": value.load_per_u,
             "combustible": value.combustible, "liquid": value.liquid} for key, value in REGISTRY.materials.items()},
@@ -1784,11 +1787,11 @@ def rule_catalog(ctx, args):
         "type_fields": {"allowed": list(TYPE_KEYS), "required": list(TYPE_REQUIRED_KEYS),
             "exactly_one": ["cost", "cost_u"],
             "meaning": "Each type requires name and body_material, plus exactly one cost path. cost_u must include a positive quantity of body_material; all input symbols must be actual eligible solid materials at formation.",
-            "state_boundaries": "body_material supplies matter, not undeclared components. Positive physical.wetness requires effective absorbent capacity and actual absorbed water. Custom fields are only declared state: fuel/angle do not alias mechanical.energy/angle; tone does not automatically change canvas colour. Only explicit supported bindings add those behaviors. Read the actual physical/mechanical facts and supported presentation."},
+            "state_boundaries": "body_material supplies matter, not undeclared components. Positive physical.wetness requires effective absorbent capacity and actual absorbed water. Custom fields are only declared state: fuel/angle do not alias mechanical.energy/angle; tone does not automatically change canvas colour. Optional presentation explicitly binds declared fields to finite colour/glyph/pose displays or a scalar badge; read topic=presentation. It grants no physical mechanism. Read the actual physical/mechanical facts."},
         "definition_shape": {"key": "lowercase_key", "name": "public name", "version": "positive integer; top-level only", "materials": "optional, default {}; local symbol:{name,feedstock:wood|stone|cloth|water,load_per_u:equal feedstock,combustible:boolean,liquid:boolean}; local and imported materials combined at most4. A new object name, appearance or capability does not require a new material; builtin materials can directly name body_material and cost/cost_u inputs",
             "material_imports": "optional alias:{definition_ref:actual immutable published program reference,symbol:declared or imported material symbol}. Pins original identity/physical properties; same display names do not match. References provide neither matter nor permission; consume/produce only actual lots with mass-balanced reactions. Cannot charge imported material.",
             "contact_reactions": "optional top-level [{id,activation?:material|installed,when:boolean_expression,reaction:{op:react,inputs,outputs,rate?:1..10,channel?,mode?:exclusive|independent,heat?:0}}], at most8. Default material activation consumes at least one locally declared material and travels with its canonical identity. installed activation may combine builtin/explicitly imported identities and requires grove.interact install_interaction on an eligible actual container; publishing alone activates nothing. At most2 installed definition references and8 reachable candidates per container. Only actual positive non-burning contained lots minus escrow are inputs; personal backpacks never react, closed internal containers may. Conditions freeze before authored rules; contact runs after authored stages on shared remaining inputs, products next step. Exclusive channels are per definition_ref. Outputs preserve canonical identity and mass; installation creates no matter and changes no global rules.",
-            "types": "symbol:{name,body_material:builtin|local|imported solid symbol, exactly one of cost:{wood:0..4,stone:0..4,cloth:0..4} or cost_u:{solid_symbol:1..200} (total<=200u, actual sources required),components?:object matching component_schema,ports?:{name:{fields:[typed public facts or authored.exported_field],source?:{definition_ref,type_id},label?}},fields?:{name:{type:integer|boolean,default,min?,max?}},exports?:[declared_field_name],container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[]}"},
+            "types": "symbol:{name,body_material:builtin|local|imported solid symbol, exactly one of cost:{wood:0..4,stone:0..4,cloth:0..4} or cost_u:{solid_symbol:1..200} (total<=200u, actual sources required),components?:object matching component_schema,ports?:{name:{fields:[typed public facts or authored.exported_field],source?:{definition_ref,type_id},label?}},fields?:{name:{type:integer|boolean,default,min?,max?}},exports?:[declared_field_name],container_capacity?:1..200,mechanical?,recorder?,contract?,barrier?:boolean_expression,rules?:[],actions?:[],presentation?:topic=presentation}"},
         "component_schema": {"type": "object", "additionalProperties": False, "properties": component_schema,
             "meaning": "Only these components and fields are authorable. Fields are optional overrides; instance construction supplies existing defaults. supports is derived from actual formed body lots, never an authored field."},
         "public_facts": fact_catalog(),
@@ -1839,10 +1842,10 @@ def specs():
     return (
         *publication.specs(),
         *fabrication.specs(),
-        FunctionSpec("grove.rule_catalog", rule_catalog, CATALOG_ARGS, version=6, access="read", description="Read creation syntax and discover capability topics. Default overview is compact; select program/materials/components/mechanical/events/contract/physical/ports, or explicit all for the complete catalog. Omitted topics remain supported. No full-history index."),
+        FunctionSpec("grove.rule_catalog", rule_catalog, CATALOG_ARGS, version=7, access="read", description="Read creation syntax and discover capability topics. Default overview is compact; select program/materials/components/mechanical/events/contract/physical/ports/presentation, or explicit all for the complete catalog. Omitted topics remain supported. No full-history index."),
         FunctionSpec("grove.definition_validate", definition_validate, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}}}, access="read", authorize=_member, description="Validate a proposed definition without publishing or creating matter. Uses the actual compiler and bounded local range/division diagnostics; valid is syntax/type validity, not perpetual safety or execution permission."),
-        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=4, access="read", description="Read one immutable definition and its author/hash, canonical material bindings and derived bounded risk diagnostics; existing instances pin the unchanged reference."),
-        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=7, authorize=_member, description="Compile and publish immutable definitions; returns advisory bounded diagnostics without changing the canonical definition or publication permission. Read definition_validate first when creating. Publication creates no matter, permission or consent. Discover precise syntax with rule_catalog topics."),
+        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=5, access="read", description="Read one immutable definition and its author/hash, canonical material bindings and derived bounded risk diagnostics; existing instances pin the unchanged reference."),
+        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=8, authorize=_member, description="Compile and publish immutable definitions; returns advisory bounded diagnostics without changing the canonical definition or publication permission. Read definition_validate first when creating. Publication creates no matter, permission or consent. Discover precise syntax with rule_catalog topics."),
         FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=10, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Declared buttons and fuel/start/stop keep the chosen parameters and presented interaction guard: autonomous fields and mechanical outputs need not be chased each second; current real conditions are rechecked on submission. Other participants' edits, material/ownership/structure changes invalidate that guard. Fuel sources, bindings and contracts retain exact observed versions. Bindings do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),

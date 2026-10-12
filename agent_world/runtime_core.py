@@ -86,6 +86,7 @@ from .runtime_views import RuntimeViews
 from .runtime_timers import RuntimeTimers
 from .runtime_checkpoints import RuntimeCheckpoints
 from .runtime_diagnostics import WorkDiagnostics
+from .writer_gate import WriterGate
 from .retention import RuntimeRetention
 from .runtime_streams import RuntimeStreams
 
@@ -98,17 +99,19 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._worlds: dict[str, Any] = {}
         self._function_options: dict[tuple[str, str, int], dict[str, Any]] = {}
-        self._lock = threading.RLock()
+        self._lock = WriterGate()
         self._registry_lock = threading.RLock()
         self._read_registries = {}
         self._changed = threading.Condition()
         self._handlers: dict[tuple[str, str, int], FunctionHandler] = {}
         self._checkpoint_first: dict[str, bool] = {}
+        self._work_selection_lock = threading.Lock()
         self._connection_lock = threading.Lock()
         self._idle_connections = {False: [], True: []}
         self._connection_idle_limit = 4
         self._connections_closed = False
         self._wal_autocheckpoint = 1000
+        self._wal_noop_supported = None
         self._work_timings = WorkDiagnostics()
         try:
             self._init_db()
@@ -145,17 +148,17 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
 
     @contextmanager
     def _conn(self, *, readonly: bool = False, serialized: bool = False, purpose: str | None = None):
-        timing = self._work_timings.transaction(purpose or ("read-head" if readonly else "write")) if serialized else nullcontext()
+        timing = self._work_timings.transaction(purpose or ("read-head" if readonly else "write")) if serialized or purpose else nullcontext()
         with timing:
-            with self._lease_connection(readonly=readonly, serialized=serialized) as conn:
+            with self._lease_connection(readonly=readonly, serialized=serialized, purpose=purpose) as conn:
                 yield conn
 
     def work_diagnostics(self, *, limit=32):
         """Host-only, bounded phase timings, independent of the database writer."""
-        return self._work_timings.snapshot(limit)
+        return {**self._work_timings.snapshot(limit), "writer": self._lock.snapshot()}
 
     @contextmanager
-    def _lease_connection(self, *, readonly: bool, serialized: bool):
+    def _lease_connection(self, *, readonly: bool, serialized: bool, purpose: str | None = None):
         with self._work_timings.phase("connection"):
             with self._connection_lock:
                 if self._connections_closed:
@@ -200,7 +203,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 conn.execute(f"PRAGMA wal_autocheckpoint={self._wal_autocheckpoint}")
             if serialized:
                 with self._work_timings.phase("writer_wait"):
-                    self._lock.acquire()
+                    self._lock.acquire(kind=purpose or "write")
                 try:
                     with transaction():
                         yield conn
@@ -258,6 +261,31 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 self._work_timings.annotate(**result)
                 return result
 
+    def wal_checkpoint_status(self):
+        """Read SQLite's WAL counters without copying or syncing frames.
+
+        Older SQLite hosts keep the original PASSIVE policy if NOOP is not
+        implemented. File length is never used as a backlog estimate.
+        """
+        if self._wal_noop_supported is False:
+            return None
+        with self._work_timings.transaction("wal-status"):
+            with self._conn() as c:
+                try:
+                    with self._work_timings.phase("wal_status"):
+                        row = c.execute("PRAGMA wal_checkpoint(NOOP)").fetchone()
+                except sqlite3.OperationalError as exc:
+                    if "unknown checkpoint mode" not in str(exc).lower() and "invalid checkpoint mode" not in str(exc).lower():
+                        raise
+                    self._wal_noop_supported = False
+                    return None
+                self._wal_noop_supported = True
+                busy, frames, checkpointed = row
+                result = {"busy": busy, "wal_frames": frames, "checkpointed_frames": checkpointed,
+                          "pending_frames": max(0, frames - checkpointed)}
+                self._work_timings.annotate(**result)
+                return result
+
     @staticmethod
     def _enable_wal(c):
         deadline = time.monotonic() + 5.0
@@ -282,7 +310,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 c.execute(statement)
 
     def _init_db(self) -> None:
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="initialize") as c:
             if c.execute("PRAGMA user_version").fetchone()[0] > 8:
                 raise WorldVersionMismatch("database schema is newer than this runtime")
             self._enable_wal(c)
@@ -593,13 +621,13 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         display_name: str,
         avatar_ref: str | None = None,
     ) -> dict[str, Any]:
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             return self._create_role_tx(c, display_name, avatar_ref)
 
     def get_role(self, role_id: str) -> dict[str, Any]:
         if not role_id:
             raise RoleNotFound("role_id is required")
-        with self._conn() as c:
+        with self._conn(readonly=True) as c:
             row = c.execute(
                 """SELECT role_id,display_name,avatar_ref,status,created_at,updated_at
                    FROM roles WHERE role_id=?""",
@@ -612,7 +640,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     def update_role_profile(self, role_id, *, display_name=_UNSET, avatar_ref=_UNSET,
                             identity_token=None, universe=None):
         identifier(role_id, "role_id")
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             c.execute("BEGIN IMMEDIATE")
             if identity_token is not None:
                 self._admit_actor_tx(c, universe, role_id, identity_token, require_control=True)
@@ -635,7 +663,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     def set_role_status(self, role_id: str, status: str) -> dict[str, Any]:
         if status not in {"active", "disabled"}:
             raise RoleInvalid("status must be active or disabled")
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             result = c.execute(
                 "UPDATE roles SET status=?,updated_at=? WHERE role_id=?",
                 (status, time.time(), role_id),
@@ -1099,7 +1127,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         raise InvalidIdentityToken("could not allocate a unique identity token")
 
     def issue_identity_token(self, universe, role_id, *, ttl_seconds=None, access_mode="control"):
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             c.execute("BEGIN IMMEDIATE")
             self._admit_actor_tx(c, universe, role_id)
             return self._issue_identity_token_tx(c, universe, role_id, ttl_seconds=ttl_seconds, access_mode=access_mode)
@@ -1173,7 +1201,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     def revoke_own_identity_token(self, universe: str, identity_token: str, token_id: str) -> dict[str, Any]:
         """Revoke one other credential of the same Principal and world atomically."""
         identifier(token_id, "token_id")
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             c.execute("BEGIN IMMEDIATE")
             identity = self._identity_metadata_tx(c, identity_token, universe=universe)
             self._admit_actor_tx(c, universe, identity["role_id"], identity_token, require_control=True)
@@ -1195,7 +1223,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
 
     def revoke_other_identity_tokens(self, universe: str, identity_token: str) -> dict[str, Any]:
         """Let a control credential close its own other sessions atomically."""
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             c.execute("BEGIN IMMEDIATE")
             identity = self._identity_metadata_tx(c, identity_token, universe=universe)
             self._admit_actor_tx(
@@ -1217,7 +1245,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
     def revoke_identity_token(self, token_id: str, *, expected_universe=None) -> bool:
         if not token_id:
             raise InvalidIdentityToken("token_id is required")
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             c.execute("BEGIN IMMEDIATE")
             row = c.execute("SELECT universe FROM identity_tokens WHERE token_id=?", (token_id,)).fetchone()
             if row is not None and expected_universe is not None and row["universe"] != expected_universe:
@@ -1230,7 +1258,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         return result.rowcount == 1
 
     def get_identity_token_metadata(self, token_id: str) -> dict[str, Any]:
-        with self._conn() as c:
+        with self._conn(readonly=True) as c:
             row = c.execute(
                 """SELECT token_id,universe,role_id,created_at,expires_at,revoked_at
                    FROM identity_tokens WHERE token_id=?""",
@@ -1305,7 +1333,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         identifier(operation_id, "operation_id")
         if ttl_seconds is not None:
             ttl_seconds = duration(ttl_seconds, "identity ttl_seconds", 315360000)
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             c.execute("BEGIN IMMEDIATE")
             try:
                 source = c.execute(
@@ -1405,7 +1433,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         identifier(universe, "universe")
         identifier(role_id, "role_id")
         ttl_seconds = duration(ttl_seconds, "join ttl_seconds")
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             c.execute("BEGIN IMMEDIATE")
             role = c.execute("SELECT status FROM roles WHERE role_id=?", (role_id,)).fetchone()
             if role is None:
@@ -1439,7 +1467,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             raise JoinTicketInvalid("invalid join ticket")
         ticket_hash = self._join_ticket_hash(ticket)
         now = time.time()
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             c.execute("BEGIN IMMEDIATE")
             try:
                 row = c.execute(
@@ -1534,7 +1562,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
 
     def revoke_join_ticket(self, ticket_id, *, expected_universe=None):
         identifier(ticket_id, "ticket_id")
-        with self._conn() as c:
+        with self._conn(serialized=True, purpose="identity") as c:
             c.execute("BEGIN IMMEDIATE")
             row = c.execute("SELECT universe FROM join_tickets WHERE ticket_id=?", (ticket_id,)).fetchone()
             if row is None:
@@ -1550,7 +1578,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             )
 
     def get_join_ticket_metadata(self, ticket_id: str) -> dict[str, Any]:
-        with self._conn() as c:
+        with self._conn(readonly=True) as c:
             row = c.execute(
                 """SELECT ticket_id,universe,role_id,created_at,expires_at,
                           used_at,used_token_id

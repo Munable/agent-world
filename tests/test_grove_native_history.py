@@ -92,6 +92,52 @@ class NativeHistoryTests(unittest.IsolatedAsyncioTestCase):
             await self.read()
         self.assertEqual(rejected.exception.code, "NativeHistorySourceMismatch")
 
+    async def test_error_and_non_json_outputs_do_not_block_safe_input_recovery(self):
+        self.action["parts"][0]["state"].update(status="error", output=None,
+            error="upstream headers contain private data", input={"observation_id": "secret", "action": "pour", "amount": 6})
+        page = await self.reader.call({"kind": "tool"})
+        self.assertEqual(page["entries"][0]["source"]["native_part_status"], "error")
+        self.assertFalse(page["entries"][0]["output_available"])
+        result = await self.read(section="input")
+        self.assertEqual(result["value"], {"action": "pour", "amount": 6})
+        self.assertNotIn("headers", json.dumps(result))
+        with self.assertRaises(ConnectorError):
+            await self.read()
+        self.action["parts"][0]["state"].update(status="completed", output="not a JSON envelope")
+        self.assertEqual((await self.read(section="input"))["value"]["amount"], 6)
+        with self.assertRaises(ConnectorError):
+            await self.read()
+
+    async def test_original_user_and_native_summary_text_have_private_source_reads(self):
+        part = self.user["parts"][0]
+        part.update(id="prt_usertext", sessionID=SESSION, messageID="msg_user")
+        summary = {"info": {"id": "msg_summary", "sessionID": SESSION, "role": "assistant", "summary": True},
+            "parts": [{"id": "prt_summary", "sessionID": SESSION, "messageID": "msg_summary",
+                "type": "text", "text": "模型的历史摘要，不是已发生的事实"}]}
+        self.messages["msg_summary"] = summary
+        self.page.return_value = {"messages": [self.user, summary], "next_cursor": None}
+        entries = (await self.reader.call({"kind": "all"}))["entries"]
+        self.assertEqual(len(entries), 2)
+        values = [await self.reader.call(entry["read"]["arguments"]) for entry in entries]
+        self.assertEqual(values[0]["value"], part["text"])
+        self.assertFalse(values[1]["source"]["world_evidence"])
+        self.assertTrue(all(value["source"]["private_session_source"] for value in values))
+        self.assertEqual(len((await self.reader.call({"kind": "user"}))["entries"]), 1)
+
+    async def test_invalid_tool_error_is_only_a_source_locator(self):
+        self.action["parts"][0].update(tool="invalid")
+        self.action["parts"][0]["state"].update(status="error",
+            input={"tool": "grove_interact", "error": "observation_id=private-token"})
+        entry = (await self.reader.call({"kind": "tool"}))["entries"][0]
+        self.assertEqual(entry["source"]["tool"], "invalid")
+        self.assertFalse(entry["input_available"])
+        self.assertIsNone(entry["input_read"])
+        self.assertEqual(entry["input_index"], {})
+        self.assertNotIn("private-token", json.dumps(entry))
+        with self.assertRaises(ConnectorError) as rejected:
+            await self.read(section="input")
+        self.assertEqual(rejected.exception.code, "NativeHistoryInputUnavailable")
+
     async def test_empty_filtered_page_keeps_the_official_before_cursor(self):
         self.page.side_effect = [
             {"messages": [self.user], "next_cursor": "opaque_native_before"},

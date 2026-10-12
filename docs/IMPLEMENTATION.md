@@ -1,21 +1,25 @@
 # L6：当前实现
 
-复核：2026-10-12。本文描述当前分支候选代码与公开表面，不记录本轮验收结论。当前源码范围、模型实验和交付检查统一见[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)，旧交付结果保留原范围。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-10-13。本文描述当前分支候选代码与公开表面，不记录本轮验收结论。当前源码范围、模型实验和交付检查统一见[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)，旧交付结果保留原范围。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
-当前结算恢复与事实反馈轮候选为0.32.3／world34／state24：package 版本来自`pyproject.toml`和`agent_world.__version__`，世界及状态版本来自`shared_grove.world.make_world()`。`simulation.execution`继续从原canonical定义推导读写与休眠计划；`shared_grove.execution`维护持久成员、依赖索引和活动前沿。新增`domains`保存真实相互作用域及局部活动索引，`scheduling`持久协调同一公共逻辑轮，Runtime current checkpoint分别提交协调与域工作。`events`保存局部消费者待处理序列与共享事件事实，`commit`仍拥有单次行动或单个域任务的候选批次和统一落库。运行实例与新源码的范围分别记录，见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
+当前可发现世界轮候选为0.34.0／world37／state25：package 版本来自`pyproject.toml`和`agent_world.__version__`，世界及状态版本来自`shared_grove.world.make_world()`。`simulation.execution`继续从原canonical定义推导读写与休眠计划；`shared_grove.execution`维护持久成员、依赖索引和活动前沿。新增`domains`保存真实相互作用域及局部活动索引，`scheduling`持久协调同一公共逻辑轮，Runtime current checkpoint分别提交协调与域工作。`events`保存局部消费者待处理序列与共享事件事实，`commit`仍拥有单次行动或单个域任务的候选批次和统一落库。运行实例与新源码的范围分别记录，见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
 
-- Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，候选版本0.32.3。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
+- Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，候选版本0.34.0。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
 - 物件整版本保持持久CAS；服务器交互修订区分自动派生输出和受保护事实变化。固定意图携带实际观察，提交仍裁决当前条件；原操作、资源、拓扑与定义不因暂忙或后续读取而替换。旧实体实际写入时补充修订，旧轮未结算任务通过state24同代次后继接续。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
-- 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
+- 同一 Runtime 的写事务由 SQLite `BEGIN IMMEDIATE` 与可重入 FIFO `WriterGate` 协调，等待者不被下一笔后台工作越过；规则注册另用 RLock。SQLite 同时只允许一个实际 writer，排队公平不能消除落盘延迟。
 - World Definition 以受信任、同步 Python 回调在 Runtime 进程内执行。
 - 组合入口可同时挂载 Web 产品原型、HTTP API、MCP、timer worker 和 retention maintenance。
 - Runtime 本身不调用模型，也没有用户 Agent 执行器。
 
-普通 HTTP 每次从请求 bearer 解析主体，不依赖上一段模型对话。当前 MCP 使用 `stateless_http=False`，`BearerIdentityMiddleware.sessions` 在进程内绑定 session_id 与 token_id；服务重启后客户端重新 initialize，但不改变用户身份或持久世界事实。组合入口对同一 SQLite 路径分别创建 HTTP、MCP 与产品页 Runtime，规则注册、锁及等待唤醒在进程内，世界状态和回执以数据库为准。这些通信／执行状态不保存用户的提示词、目的、私人记忆或模型推理进度。
+普通 HTTP 每次从请求 bearer 解析主体，不依赖上一段模型对话。当前 MCP 使用 `stateless_http=False`，`BearerIdentityMiddleware.sessions` 在进程内绑定 session_id 与 token_id；服务重启后客户端重新 initialize，但不改变用户身份或持久世界事实。组合入口将 HTTP、MCP、产品页及后台推进接到同一 Runtime，复用规则注册、写入排队和等待唤醒；独立进程仍由 SQLite 协调，世界状态和回执以数据库为准。这些通信／执行状态不保存用户的提示词、目的、私人记忆或模型推理进度。
+
+world37／state25 的 `shared_grove.discovery` 维护公开创作身份索引，按作者／名称分页；位置与公开资格每次从当前实体复核。旧实体按保存区块有界回填，目录不携带操作版本或授予远程操作。`simulation.presentation` 从显式声明的 int／bool 字段解析颜色、字样、姿态及数字标记；旧 canonical 定义与摘要不改。Agent 查看容器先获得可见子物索引，子物件完整状态和操作版本需单独 inspect；选中的物件与动作预览保持完整。区域历史通过真实引用按需读取，省略不等于不存在。
+
+原 Native 主会话的推理副本保留当前 user 及其完整工具轮，旧历史连同可选来源索引至多64KiB，并按当前请求让出空间；索引／旧外壳仍超可用空间时只省去完整旧推理parts，正式本人原会话历史工具仍可按需读取。无正式历史入口则拒绝发送，非白名单旧工具不承诺API原文可恢复。正式 SDK 发送前测量整个 JSON，硬上限128KiB。原 Native 输入、结果及用户原文保持，历史按本人身份和原会话有界查回。一次原生工具轮仍可能累计超过总预算，此时暂停而不截断当前结果；按字节提前收束与区分准备性读取／重复空转仍是后续调度问题。实际结论见当前研发记录，字节预算不冒充 token 上限。
 
 **以下0.20—0.22段落为历史工作轮说明，不是0.32候选验收结果。**
 
@@ -282,7 +286,7 @@ Shared Grove保存独立`cadence_anchor_at`：正常轮打开时锚定，封帧�
 
 活动Runtime的`work_diagnostics(limit=32)`与现有HTTP `/health?diagnostics=true`提供有界主机计时；默认health不包含诊断；带诊断的入口仅接受实际loopback连接源，不依据转发头放行，远程请求返回403。最近128笔宿主工作以内存保存，读取最多32笔，累计phase仅含固定阶段：连接、writer等待、BEGIN、handler wall／thread CPU、managed、COMMIT、回滚、两类维护及WAL回填。WAL回填独立于世界写锁，另记忙状态、总帧、已回填帧和待回填帧。记录只含受信handler标签、代次／提交水位、计数和时间，不保存调用参数、凭据、对象正文或异常详情；超过一秒的动作／定时／checkpoint／维护写出同类无参数慢日志。诊断读取不用数据库写锁，重启清零，不另建持久trace或调试服务。
 
-现有宿主维护线程同时承担SQLite官方PASSIVE回填，约一秒检查一次，独占租用连接但不取得Runtime写锁；世界声明retention或streams时仍每30s按原政策有界维护。仅该维护生命周期内，全部写连接在租用时设置wal_autocheckpoint=0；正常关闭或线程异常结束后后续租用恢复默认1000，裸Runtime保持默认策略。同步FULL不变、动作与域任务事务不合并，不在线强制RESTART/TRUNCATE或删WAL；PASSIVE的busy、log、checkpointed和pending帧及耗时进入有界主机诊断，busy=0不等于完整回填。长读快照仍可能阻止回填并使WAL增长，约一秒的检查间隔不是硬时间／空间保证。方法采用[SQLite官方WAL说明](https://sqlite.org/wal.html)与[PASSIVE接口语义](https://sqlite.org/c3ref/wal_checkpoint_v2.html)，不是外置盘专属逻辑。普通retention policy及one-shot历史契约保持原责任。
+现有宿主维护线程同时承担SQLite官方PASSIVE回填，约一秒通过官方NOOP查询真实待回填量；空积压跳过，前台繁忙时至多延后5秒获得一次维护机会，未变的受读快照限制积压不每秒重复回填。宿主SQLite不支持NOOP时沿原PASSIVE路径；其它查询错误不伪装成空积压。回填独占租用连接但不取得Runtime写锁；世界声明retention或streams时仍每30s按原政策有界维护。仅该维护生命周期内，全部写连接在租用时设置wal_autocheckpoint=0；正常关闭或线程异常结束后后续租用恢复默认1000，裸Runtime保持默认策略。同步FULL不变、动作与域任务事务不合并，不在线强制RESTART/TRUNCATE或删WAL；PASSIVE的busy、log、checkpointed和pending帧及耗时进入有界主机诊断，busy=0不等于完整回填。长读快照仍可能阻止回填并使WAL增长，约一秒的检查间隔不是硬时间／空间保证。方法采用[SQLite官方WAL说明](https://sqlite.org/wal.html)与[PASSIVE接口语义](https://sqlite.org/c3ref/wal_checkpoint_v2.html)，不是外置盘专属逻辑。普通retention policy及one-shot历史契约保持原责任。
 
 也可以分别运行 timer worker 和 retention maintenance CLI。导入 package 本身不会安装常驻系统服务。
 

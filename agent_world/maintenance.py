@@ -10,16 +10,55 @@ import time
 logger = logging.getLogger(__name__)
 
 
+class _WalBackfillSchedule:
+    """Yield to queued writes, but retry pinned/continuously busy WALs.
+
+    The deadline grants a maintenance opportunity; it cannot bound the IO
+    duration of PASSIVE or force a reader to release its snapshot.
+    """
+    def __init__(self, max_defer=5.0):
+        self.max_defer = max_defer
+        self.pending_since = None
+        self.last_status = None
+        self.last_attempt = None
+
+    def ready(self, status, *, writer_busy, now):
+        if status is None:
+            # SQLite hosts without NOOP retain the existing maintenance path.
+            return True
+        if not status["pending_frames"]:
+            self.pending_since = None
+            return False
+        if self.pending_since is None:
+            self.pending_since = now
+        signature = (status["wal_frames"], status["checkpointed_frames"])
+        if (signature == self.last_status and self.last_attempt is not None
+                and now - self.last_attempt < self.max_defer):
+            return False
+        return not writer_busy or now - self.pending_since >= self.max_defer
+
+    def completed(self, status, *, now):
+        self.last_status = (status["wal_frames"], status["checkpointed_frames"])
+        self.last_attempt = now
+        self.pending_since = now if status["pending_frames"] else None
+
+
 @asynccontextmanager
 async def retention_lifespan(runtime, universe):
     stop = threading.Event()
     with runtime.managed_wal_checkpoints():
         def run():
             next_retention = 0
+            backfill = _WalBackfillSchedule()
             try:
                 while not stop.is_set():
                     try:
-                        runtime.passive_wal_checkpoint()
+                        status = runtime.wal_checkpoint_status()
+                        writer = runtime._lock.snapshot()
+                        if (not stop.is_set() and backfill.ready(status,
+                                writer_busy=writer["active"] or bool(writer["waiting"]), now=time.monotonic())):
+                            result = runtime.passive_wal_checkpoint()
+                            backfill.completed(result, now=time.monotonic())
                     except Exception as exc:
                         logger.error("WAL backfill failed (%s); durable WAL retained", type(exc).__name__)
                     if time.monotonic() >= next_retention and not stop.is_set():

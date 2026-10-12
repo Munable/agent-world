@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,ruleSnapshotChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,domainObservationLines,reactionObservationLines,contactObservationLines,installedInteractionDefinition,interactionChoices,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines,executionTaskSummaryLines} from './grove-world-ui.js?v=accurate-agent-facts-v1';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,lifecycleLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,presentationBadgeText,presentationObservationLines,publicWorkLocalTarget,publicWorkFactLines,publicWorkDirectoryLines,publicWorkMarkerGeometry,actionIds,actionDescriptors,descriptorLabel,descriptorCandidates,candidateLabel,candidatePreviewLines,previewVersionsChanged,ruleSnapshotChanged,descriptorLots,quantityBounds,factLabel,factValue,creativeState,ruleChoices,conditionObservationLines,ruleRuntimeObservationLines,domainObservationLines,reactionObservationLines,contactObservationLines,installedInteractionDefinition,interactionChoices,operationIntentLabel,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines,executionTaskSummaryLines} from './grove-world-ui.js?v=discoverable-live-world-v1';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -28,6 +28,7 @@ let activeRainChunks=new Set();
 let goalDirty=false,executionReclaimBusy=false,hostCommandEpoch=0,manualControlRecoveryPending=false;
 let definitionReadEpoch=0,definitionReadBusy=false,definitionReadValue=null,definitionReadError=null,definitionReadRef=null,definitionReadOpen=false;
 let directoryEpoch=0,directoryBusy=false,directoryFilters={},directoryInputs={author:'',key:''},directoryPage=null,directoryCursors=[null],directoryError=null,directoryOpen=false,directoryDefinition=null,directoryDefinitionRef=null,directoryType=null,fabricationMenu=null,fabricationBusy=false,fabricationRows=[],fabricationError=null;
+let publicWorksEpoch=0,publicWorksBusy=false,publicWorksPage=null,publicWorksFilters={},publicWorksCursors=[null],publicWorksError=null,publicWorksReadAt=0,publicWorksRenderSignature='',publicWorkMarker=null;
 const factDisclosures=new Map();
 let activeActionKey=null,hostCommandKind=null,hostCommandFlight=null;
 const actionDrafts=new Map();
@@ -435,7 +436,7 @@ function acceptWorld(value){
     const inaccessible=!projected&&[403,404].includes(inspectionErrorStatus);
     if(!inaccessible&&inspectionFlight?.id!==selectedId&&(!projected||inspection?.entity?.version!==projected.version||previous&&(previous.x!==value.player.x||previous.y!==value.player.y)||previewVersionsChanged(inspection,[...ground(),...inventory()],value.player)||ruleSnapshotChanged(inspection,value.clock))){const captured=selectedId;select(captured,selectedFromBag,true).catch(fail);}
   }
-  renderInventory();renderSelection();renderActivity();renderPublicContent();renderPending();
+  renderInventory();renderSelection();renderActivity();renderPublicContent();renderPublicWorks();renderPending();
 }
 function renderPending(){
   if(!identity)return;let pending;try{pending=client.pending();}catch{return;}
@@ -737,6 +738,7 @@ function renderCreative(entity,previous=false){
   const section=node('section',undefined,'creative-state');section.append(node('h4',previous?'规则对象 · 上次已读状态':'规则对象 · 本次读取快照'),node('p','规则字段、组分、连接与记录来自服务器。条件属于下方读取步的快照；关联物件可能随后变化，可刷新现场重新核对。逻辑步不是现实经过的秒数，叙述不决定结果。','small'));
   const runtime=previous?entity.creative:(inspection?.creative||entity.creative);
   for(const line of ruleRuntimeObservationLines(runtime,entity))section.append(node('p',line,'small'));
+  for(const line of presentationObservationLines(entity))section.append(node('p',line,'small'));
   for(const line of reactionObservationLines(creative,entity))section.append(node('p',line,'small'));
   const runtimeFields=runtime?.mechanical_observation?['mechanical','drive_request','mechanical_last_solved']:[];
   const expanded=Object.fromEntries(Object.entries(creative).filter(([key])=>!['reaction_inputs','reaction_observations','reaction_observation_count','reaction_observations_projection','reaction_observations_truncated','contact_process','automatic_rules','deployment','mechanical_observation','fact_semantics','authored_field_units','automatic_field_change','automatic_field_change_status','published_exports','port_sources','interface_meaning','event_consumer',...runtimeFields].includes(key)));
@@ -1201,6 +1203,68 @@ async function interact(action,entity,itemId,amount,extra={},combination){
   },actionNames[action]||action);
 }
 function authorLabel(author){if(typeof author==='string')return (world?.players||[]).find(player=>player.id===author)?.name||(author.startsWith('awr_')?'世界中的另一位玩家':author);if(author&&typeof author==='object')return String(author.name||'创作者');return '创作者';}
+function publicWorksFiltersFromInputs(){
+  const author_name=$('public-works-author').value.trim(),name=$('public-works-name').value.trim();
+  return {...(author_name?{author_name}:{}),...(name?{name}:{})};
+}
+async function readPublicWorks({filters=publicWorksFilters,cursors=[null]}={}){
+  if(!playing||!current()||publicWorksBusy)return;
+  const epoch=session,reading=++publicWorksEpoch,requestedFilters={...filters},requestedCursors=[...cursors],after=requestedCursors.at(-1);
+  publicWorksBusy=true;publicWorksError=null;renderPublicWorks();
+  try{
+    const page=await client.query('grove.public_works',{...requestedFilters,limit:6,...(after?{after}:{})});
+    if(epoch!==session||reading!==publicWorksEpoch||!playing)return;
+    if(page?.scope!=='current_public_top_level_creations'||!Array.isArray(page.works))throw new Error('公开作品目录未能读取；原结果保留。');
+    publicWorksPage=page;publicWorksFilters=requestedFilters;publicWorksCursors=requestedCursors;publicWorksReadAt=Date.now();
+  }catch(error){if(epoch===session&&reading===publicWorksEpoch)publicWorksError=error.cancelled?'目录读取已中断；可重新读取。':error.message||'公开作品目录暂不可达。';}
+  finally{if(epoch===session&&reading===publicWorksEpoch){publicWorksBusy=false;renderPublicWorks();}}
+}
+function localPublicWork(work){return publicWorkLocalTarget(work,world,worldFresh&&Date.now()-lastWorldRead<8000);}
+function markPublicWork(work){
+  if(!Number.isInteger(work?.location?.x)||!Number.isInteger(work?.location?.y))return;
+  publicWorkMarker={entity_id:work.entity_id,name:work.name,location:{...work.location},read_at:publicWorksReadAt};renderPublicWorks();
+  announce('地图已标记目录位置。它不提供远处地形或通路；走到附近后再读取现场。');
+}
+async function selectPublicWork(work){
+  const entity=localPublicWork(work);
+  if(!entity){announce('当前附近地图没有读到这件作品。先靠近目录位置，再刷新现场。');return;}
+  stopWalking();await select(entity.id);
+}
+function renderPublicWorks(){
+  const page=publicWorksPage,works=page?.works||[],matches=page?.author_matches||[];
+  for(const id of ['public-works-search','public-works-recent','public-works-refresh'])$(id).disabled=publicWorksBusy||!playing||!current();
+  $('public-works-previous').disabled=publicWorksBusy||publicWorksCursors.length<2;
+  $('public-works-next').disabled=publicWorksBusy||page?.has_more!==true||!page.next_cursor;
+  $('public-works-summary').textContent=publicWorksBusy?'正在读取目录':page?'第 '+publicWorksCursors.length+' 页 · '+works.length+' 件公开作品':'按作者或作品名称寻找';
+  const notes=publicWorkDirectoryLines(page);
+  if(publicWorksBusy)notes.unshift('正在读取；下方保留上次结果。');
+  if(publicWorksError)notes.unshift('读取失败：'+publicWorksError+(page?' 下方仍是上次目录结果。':''));
+  if(publicWorksReadAt)notes.push('上次目录读取 '+new Date(publicWorksReadAt).toLocaleTimeString('zh-CN')+'；位置与字段之后可能改变。到场后再读详情。');
+  $('public-works-note').textContent=notes.join(' ');
+  const markerNote=$('public-work-marker-note');markerNote.hidden=!publicWorkMarker;$('public-work-marker-clear').hidden=!publicWorkMarker;
+  if(publicWorkMarker)markerNote.textContent='目录位置标记：'+(publicWorkMarker.name||'公开作品')+' · '+publicWorkMarker.location.x+'，'+publicWorkMarker.location.y+'（'+new Date(publicWorkMarker.read_at).toLocaleTimeString('zh-CN')+' 读取）。这不是路线，位置可能已变。';
+  const available=works.map(work=>!!localPublicWork(work));
+  const signature=JSON.stringify([page,publicWorksBusy,available]);
+  if(signature===publicWorksRenderSignature)return;publicWorksRenderSignature=signature;
+  const list=$('public-works-list');list.replaceChildren();
+  for(const match of matches){
+    if(typeof match.author!=='string')continue;
+    const card=node('article',undefined,'public-work-card');card.append(node('strong',match.name||'未提供公开姓名'),node('p','作者身份：'+match.author,'small public-work-author-id'));
+    card.append(button('查看这位作者的作品',()=>run(()=>readPublicWorks({filters:{author:match.author,...(publicWorksFilters.name?{name:publicWorksFilters.name}:{})}})),{secondary:true,disabled:publicWorksBusy}));list.append(card);
+  }
+  works.forEach((work,index)=>{
+    const card=node('article',undefined,'public-work-card');card.append(node('h4',work.name||'未命名作品'));
+    card.append(node('p','作者：'+(work.created_by_name||'未提供公开姓名'),'small'),node('p','作者身份：'+(work.created_by||'未读取'),'small public-work-author-id'));
+    const hasLocation=Number.isInteger(work.location?.x)&&Number.isInteger(work.location?.y);
+    card.append(node('p',hasLocation?'目录位置：'+work.location.x+'，'+work.location.y:'目录位置未读取','small'));
+    for(const text of publicWorkFactLines(work))card.append(node('p',text,'small'));
+    card.append(node('p',available[index]?'当前附近地图已读到；选择后读取详情。':'当前附近地图未读到；目录不提供远程操作。','small'));
+    const controls=node('div',undefined,'public-work-controls');
+    controls.append(button('标记这个位置',()=>markPublicWork(work),{secondary:true,disabled:!hasLocation}),button('选择附近物件',()=>run(()=>selectPublicWork(work)),{secondary:true,disabled:!available[index]}));
+    card.append(controls);list.append(card);
+  });
+}
+
 function renderPublicContent(){
   const content=world?.public_content;
   if(contentHistoryId!==content?.id){contentHistoryId=content?.id||null;contentHistoryPages=[];contentHistoryBusy=false;}
@@ -1273,13 +1337,16 @@ function drawEntity(e,now){
   ctx.save();ctx.translate(p.x,p.y);ctx.shadowColor='#24342755';ctx.shadowBlur=4;ctx.shadowOffsetY=3;
   if(state.destroyed){ctx.fillStyle='#5b6250';for(let i=0;i<4;i++){ctx.beginPath();ctx.ellipse((i-1.5)*s*.2,s*.2,s*.13,s*.06,i,0,Math.PI*2);ctx.fill();}}
   else if(state.kind==='composed'||e.presentation||state.program||e.creative){
-    const appearance=safePresentation(e);ctx.shadowBlur=3;
+    const appearance=safePresentation(e);ctx.shadowBlur=3;ctx.save();
+    // Drawing pose never changes world coordinates, selection or collision.
+    if(appearance.pose==='folded')ctx.scale(1,.4);
     if(appearance.shape==='bowl'){ctx.fillStyle=appearance.color;ctx.strokeStyle='#536451';ctx.beginPath();ctx.ellipse(0,s*.04,s*.47,s*.32,0,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.fillStyle=state.open?'#394b3c':'#b4b69c';ctx.beginPath();ctx.ellipse(0,-s*.06,s*.36,s*.19,0,0,Math.PI*2);ctx.fill();}
     else if(appearance.shape==='beam'){ctx.rotate(-.1);roundRect(-s*.52,-s*.18,s*1.04,s*.36,4,appearance.color,'#536451');}
     else if(appearance.shape==='cloth'){ctx.fillStyle=appearance.color;ctx.strokeStyle='#536451';ctx.beginPath();ctx.moveTo(-s*.42,-s*.28);ctx.lineTo(s*.34,-s*.37);ctx.lineTo(s*.44,s*.29);ctx.lineTo(-s*.35,s*.36);ctx.closePath();ctx.fill();ctx.stroke();}
     else if(appearance.shape==='raft'){roundRect(-s*.48,-s*.31,s*.96,s*.62,4,appearance.color,'#536451');ctx.strokeStyle='#647054';for(const y of [-.15,0,.15]){ctx.beginPath();ctx.moveTo(-s*.45,y*s);ctx.lineTo(s*.45,y*s);ctx.stroke();}}
     else{roundRect(-s*.4,-s*.36,s*.8,s*.72,appearance.shape==='stone'?8:4,appearance.color,'#536451');}
     ctx.shadowBlur=0;ctx.fillStyle='#f7f2d8';ctx.font='600 '+Math.round(s*.38)+'px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(appearance.glyph,0,0);ctx.textBaseline='alphabetic';
+    ctx.restore();
     if(e.relations?.parent?.relation==='attached'){ctx.fillStyle='#354f3c';ctx.font='600 12px system-ui';ctx.fillText('⌁',s*.4,s*.44);}
   }else if(state.recipe==='walkway'){
     roundRect(-tileSize*.47,-tileSize*.42,tileSize*.94,tileSize*.84,2,'#b89157','#5d5236');ctx.shadowBlur=0;ctx.strokeStyle='#665334';ctx.lineWidth=1.5;for(let i=-2;i<=2;i++){ctx.beginPath();ctx.moveTo(-tileSize*.44,i*tileSize*.15);ctx.lineTo(tileSize*.44,i*tileSize*.15);ctx.stroke();}ctx.fillStyle='#d1b97c';ctx.fillRect(-tileSize*.35,-tileSize*.41,3,tileSize*.82);ctx.fillRect(tileSize*.29,-tileSize*.41,3,tileSize*.82);
@@ -1325,6 +1392,9 @@ function drawEntity(e,now){
   const water=visibleWaterQuantity(e),wetness=Number.isFinite(e.simulation?.wetness)?e.simulation.wetness:0;
   if(water>0||wetness>0){ctx.fillStyle=water>0?'#74d4ee':'#8bbbdc';ctx.strokeStyle='#e0f4ff';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(s*.38,-s*.48);ctx.quadraticCurveTo(s*.2,-s*.2,s*.38,-s*.18);ctx.quadraticCurveTo(s*.57,-s*.2,s*.38,-s*.48);ctx.fill();ctx.stroke();if(water>0){ctx.font='600 10px system-ui';ctx.textAlign='center';ctx.fillStyle='#f0fbff';ctx.fillText(String(water)+'u',s*.39,-s*.55);}}
   if((state.burning||state.recipe==='hearth'&&state.lit)&&!state.destroyed){const f=1+Math.sin((worldFresh?now:0)/90+e.x)*.08;ctx.fillStyle='#f5a852';ctx.beginPath();ctx.moveTo(-s*.28,s*.1);ctx.quadraticCurveTo(-s*.36,-s*.27,-s*.05,-s*.66*f);ctx.quadraticCurveTo(s*.03,-s*.18,s*.22,-s*.42);ctx.quadraticCurveTo(s*.41,-s*.04,s*.2,s*.15);ctx.closePath();ctx.fill();ctx.fillStyle='#ffe6a1';ctx.beginPath();ctx.moveTo(-s*.12,s*.12);ctx.quadraticCurveTo(-s*.17,-s*.16,s*.03,-s*.35*f);ctx.quadraticCurveTo(s*.24,0,s*.1,s*.14);ctx.fill();}
+  const presentation=safePresentation(e),badge=presentationBadgeText(e);
+  if(badge&&!state.destroyed){ctx.font='600 10px system-ui';ctx.textAlign='center';ctx.fillStyle='#f8f0d8';ctx.fillText(badge,0,s*.75,tileSize*1.25);}
+  if(['unavailable','unmapped'].includes(presentation.binding_status)&&!state.destroyed){ctx.fillStyle='#ffe4a0';ctx.font='700 12px system-ui';ctx.textAlign='center';ctx.fillText('?',-s*.45,-s*.4);}
   if(blocks(e)){ctx.strokeStyle='#624633';ctx.lineWidth=2;ctx.setLineDash([4,3]);ctx.strokeRect(-tileSize*.45,-tileSize*.42,tileSize*.9,tileSize*.84);ctx.setLineDash([]);}
   if(selectedId===e.id){ctx.strokeStyle='#fff0bd';ctx.lineWidth=2.5;ctx.beginPath();ctx.ellipse(0,s*.25,s*.66,s*.35,0,0,Math.PI*2);ctx.stroke();}
   ctx.restore();
@@ -1336,6 +1406,17 @@ function drawPlayer(p,own,now){
   roundRect(at.x-s*.2,at.y-s*.04,s*.4,s*.44,5,own?'#f0d395':'#aec4d1','#4b5947');ctx.fillStyle='#ecd9ba';ctx.beginPath();ctx.arc(at.x,at.y-s*.16,s*.15,0,Math.PI*2);ctx.fill();ctx.fillStyle=own?'#405d46':'#5b6f81';ctx.beginPath();ctx.ellipse(at.x,at.y-s*.28,s*.23,s*.1,0,0,Math.PI*2);ctx.fill();
   if(own){ctx.strokeStyle='#f9edc3';ctx.lineWidth=2;ctx.beginPath();ctx.ellipse(at.x,at.y+s*.27,s*.35,s*.15,0,0,Math.PI*2);ctx.stroke();}
   ctx.font='600 11px system-ui';ctx.textAlign='center';ctx.fillStyle='#193b2f';ctx.fillText(own?'你':p.name||'旅人',at.x,at.y+s*.68);
+}
+function drawPublicWorkMarker(){
+  if(!publicWorkMarker)return;
+  const location=publicWorkMarker.location,at=publicWorkMarkerGeometry(screen(location.x,location.y),canvasWidth,canvasHeight);
+  if(!at)return;
+  ctx.save();ctx.translate(at.x,at.y);ctx.strokeStyle='#ffebaa';ctx.fillStyle='#ffebaa';ctx.lineWidth=2;
+  if(at.offscreen){ctx.rotate(at.angle);ctx.beginPath();ctx.moveTo(10,0);ctx.lineTo(-7,-7);ctx.lineTo(-7,7);ctx.closePath();ctx.fill();ctx.rotate(-at.angle);}
+  else{ctx.setLineDash([3,3]);ctx.strokeRect(-tileSize/2,-tileSize/2,tileSize,tileSize);ctx.setLineDash([]);}
+  const text='目录标记 '+location.x+'，'+location.y;ctx.font='11px system-ui';const width=ctx.measureText(text).width+12;
+  const left=Math.min(canvasWidth-8-width,Math.max(8,at.x-width/2))-at.x,top=(at.y>canvasHeight/2?-26:14);
+  ctx.fillStyle='#243a30ed';ctx.fillRect(left,top,width,20);ctx.fillStyle='#ffebaa';ctx.textAlign='left';ctx.textBaseline='middle';ctx.fillText(text,left+6,top+10);ctx.restore();
 }
 function draw(now){
   if(!playing||document.hidden){requestAnimationFrame(draw);return;}
@@ -1351,6 +1432,7 @@ function draw(now){
     for(const other of world.players||[])if(other.id!==p.id&&other.role_id!==client.roleId)drawPlayer(other,false,now);drawPlayer(p,true,now);
     if(activeRainChunks.size){ctx.strokeStyle='#deebde75';ctx.lineWidth=1;for(let i=0;i<35;i++){const x=(i*61)%canvasWidth,y=(now*.11+i*93)%canvasHeight,tx=Math.round((x-canvasWidth/2)/tileSize+camera.x),ty=Math.round((y-canvasHeight/2)/tileSize+camera.y);if(!rainsAt(tx,ty))continue;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x-4,y+11);ctx.stroke();}}
     const shade=ctx.createRadialGradient(canvasWidth/2,canvasHeight/2,canvasWidth*.12,canvasWidth/2,canvasHeight/2,Math.max(canvasWidth,canvasHeight)*.7);shade.addColorStop(0,'#172a1e00');shade.addColorStop(1,'#172a1e55');ctx.fillStyle=shade;ctx.fillRect(0,0,canvasWidth,canvasHeight);
+    drawPublicWorkMarker();
   }
   requestAnimationFrame(draw);
 }
@@ -1386,6 +1468,13 @@ $('inventory-panel').addEventListener('toggle',()=>{document.body.classList.togg
 $('inventory-first').addEventListener('click',()=>run(()=>changeInventoryPage('first')));
 $('inventory-previous').addEventListener('click',()=>run(()=>changeInventoryPage('previous')));
 $('inventory-next').addEventListener('click',()=>run(()=>changeInventoryPage('next')));
+$('public-works-panel').addEventListener('toggle',()=>{if($('public-works-panel').open&&!publicWorksPage&&!publicWorksBusy&&playing)run(()=>readPublicWorks());});
+$('public-works-form').addEventListener('submit',event=>{event.preventDefault();run(()=>readPublicWorks({filters:publicWorksFiltersFromInputs()}));});
+$('public-works-recent').addEventListener('click',()=>{$('public-works-author').value='';$('public-works-name').value='';run(()=>readPublicWorks({filters:{}}));});
+$('public-works-refresh').addEventListener('click',()=>run(()=>readPublicWorks({cursors:publicWorksCursors})));
+$('public-works-previous').addEventListener('click',()=>{if(publicWorksCursors.length>1)run(()=>readPublicWorks({cursors:publicWorksCursors.slice(0,-1)}));});
+$('public-works-next').addEventListener('click',()=>{if(publicWorksPage?.has_more&&publicWorksPage.next_cursor)run(()=>readPublicWorks({cursors:[...publicWorksCursors,publicWorksPage.next_cursor]}));});
+$('public-work-marker-clear').addEventListener('click',()=>{publicWorkMarker=null;renderPublicWorks();});
 $('agent-toggle').addEventListener('click',()=>{const open=!document.body.classList.contains('agent-open');rememberActionDrafts();if(open){openAgent();$('chat-text').focus({preventScroll:true});}else closePanels();});
 $('agent-close').addEventListener('click',()=>{closePanels();canvas.focus({preventScroll:true});});
 $('ask-selection').addEventListener('click',()=>run(async()=>{if(!world)return;const entity=selectedEntity(),tile=selectedTile,location=entityLocation(entity);const text=entity?'我正在看'+entity.name+'（'+(location.x??point().x)+'，'+(location.y??point().y)+'）。请读取当前现场，解释它能怎样用，以及不同办法的材料和环境取舍。':tile?'我正在看位置（'+tile.x+'，'+tile.y+'）。请读取当前现场，解释在这里走动或搭建设施有哪些取舍。':'请读取我身边的现场，解释我现在有哪些不同的办法。';openAgent();await hostCommand('prompt',{text,intent:$('host-intent').value.trim(),...(entity?{context_entity_id:entity.id}:{})});}));
@@ -1432,13 +1521,14 @@ $('generation-cancel').addEventListener('click',()=>run(async()=>{if(await hostC
 $('agent-disconnect').addEventListener('click',()=>run(async()=>{if(await hostCommand('disconnect',{})){clearTimeout(hostTimer);announce('Agent 已断开。仍可以亲手走动和操作。');}}));$('agent-reconnect').addEventListener('click',()=>run(restartHost));
 $('leave').addEventListener('click',()=>{
   worldFresh=false;mechanicalMotion.reset();lastWorldRead=0;
-  saveFabricationDraft();stopWalking();++session;++readEpoch;++hostReadEpoch;++inspectEpoch;++hostCommandEpoch;++definitionReadEpoch;++directoryEpoch;
+  saveFabricationDraft();stopWalking();++session;++readEpoch;++hostReadEpoch;++inspectEpoch;++hostCommandEpoch;++definitionReadEpoch;++directoryEpoch;++publicWorksEpoch;
   playing=false;entering=false;actionBusy=false;hostCommandBusy=false;executionReclaimBusy=false;
   chosenBuildMaterials.clear();touchedBuildChoices.clear();activeRainChunks.clear();factDisclosures.clear();actionDrafts.clear();activeActionKey=null;hostCommandKind=null;hostCommandFlight=null;
   clearTimeout(worldTimer);clearTimeout(hostTimer);client.cancel();client.token=null;identity=null;world=null;inspection=null;inspectionError=null;inspectionErrorStatus=null;inspectionFlight=null;selectedId=null;selectedTile=null;combinationCheckingForm=null;
   ledger.clear();streamCursor=null;lastSelectionSignature='';lastInventorySignature='';lastChatSignature='';lastGenerationSignature='';lastContentSignature='';contentHistoryId=null;contentHistoryPages=[];contentHistoryBusy=false;operationRecoveryBusy=false;inventoryPageBusy=false;inventoryPageCursors=[null];intentDirty=false;goalDirty=false;
   definitionReadBusy=false;definitionReadValue=null;definitionReadError=null;definitionReadRef=null;definitionReadOpen=false;$('rule-catalog-result').replaceChildren();$('rule-catalog-read').disabled=false;
   directoryBusy=false;directoryFilters={};directoryInputs={author:'',key:''};directoryPage=null;directoryCursors=[null];directoryError=null;directoryOpen=false;directoryDefinition=null;directoryDefinitionRef=null;directoryType=null;fabricationMenu=null;fabricationBusy=false;fabricationRows=[];fabricationError=null;
+  publicWorksBusy=false;publicWorksPage=null;publicWorksFilters={};publicWorksCursors=[null];publicWorksError=null;publicWorksReadAt=0;publicWorksRenderSignature='';publicWorkMarker=null;$('public-works-author').value='';$('public-works-name').value='';$('public-works-panel').open=false;renderPublicWorks();
   closePanels();document.body.classList.remove('playing');$('game').hidden=true;$('entry').hidden=false;$('world-status').textContent='已离开 · 可接续';$('entry-progress').replaceChildren();$('enter').disabled=false;
   announce('已离开网页。身份、目标进度与变化保留；已委托行动仍受这个目标的总额度约束。离开网页不等于收回行动权。');
 });

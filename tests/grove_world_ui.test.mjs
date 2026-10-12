@@ -111,6 +111,37 @@ assert.ok(partialReaction.some(line=>line.includes('可进行 2 次')));
 assert.ok(!partialReaction.some(line=>line.includes('容量不满足')));
 assert.deepEqual(ui.safePresentation({presentation:{shape:'<script>',color:'url(secret)',glyph:'<img src=x>'}}),
   {shape:'part',color:'#aaac8c',glyph:'◆',size:1});
+{
+  const entity={composition:{size:1},presentation:{shape:'cloth',color:'#112233',glyph:'■',size:2,pose:'folded',
+    badge:{label:'次数',value:1,known:true},binding_status:'resolved',observation:{tick:9,
+      bindings:[{target:'pose',field:'folded',value:true,known:true,matched:true,status:'resolved'}]}}};
+  assert.equal(ui.safePresentation(entity).size,1,'rendered size cannot replace the real composition footprint');
+  assert.equal(ui.safePresentation(entity).pose,'folded');
+  assert.equal(ui.presentationBadgeText(entity),'次数 1');
+  assert.ok(ui.presentationObservationLines(entity).some(line=>line.includes('声明字段')&&line.includes('世界时刻 9')));
+  entity.presentation.badge={label:'次数',value:999,known:false};
+  entity.presentation.binding_status='unavailable';
+  assert.equal(ui.presentationBadgeText(entity),'次数 ?','an unknown badge cannot reuse a previous actual number');
+  assert.ok(ui.presentationObservationLines(entity).some(line=>line.includes('当前不可读')));
+  entity.presentation.pose='teleport';entity.presentation.badge={label:'bad\u202e',value:Infinity,known:true};
+  assert.equal(ui.safePresentation(entity).pose,undefined);
+  assert.deepEqual(ui.safePresentation(entity).badge,{label:'',value:null,known:false});
+}
+{
+  const drawing=readFileSync(new URL('../agent_world/grove_web/grove.js',import.meta.url),'utf8');
+  const drawEntity=drawing.slice(drawing.indexOf('function drawEntity('),drawing.indexOf('function drawPlayer('));
+  const calls=[],canvasContext=new Proxy({}, {get:(_,name)=>(...args)=>{calls.push([name,...args]);},set:()=>true});
+  const context={ctx:canvasContext,tileSize:40,screen:()=>({x:0,y:0}),safePresentation:ui.safePresentation,
+    presentationBadgeText:ui.presentationBadgeText,caps:e=>e.capabilities||[],blocks:()=>false,
+    mechanicalMotion:{read:()=>null},visibleWaterQuantity:()=>0,worldFresh:true,selectedId:null,hoverTile:null};
+  vm.createContext(context);vm.runInContext(drawEntity,context);
+  const entity={id:'actual-object',x:1,y:2,state:{kind:'authored',burning:true},presentation:{shape:'cloth',color:'#112233',glyph:'■',pose:'folded',badge:{label:'次数',value:1,known:true}}};
+  context.drawEntity(entity,1000);
+  assert.ok(calls.some(([name,x,y])=>name==='scale'&&x===1&&y===.4),'folding changes a generic drawn outline');
+  assert.ok(calls.some(([name,text])=>name==='fillText'&&text==='次数 1'));
+  assert.ok(calls.some(([name])=>name==='quadraticCurveTo'),'actual burning remains drawn outside the authored pose');
+  assert.equal(entity.x,1);assert.equal(entity.y,2);assert.equal(entity.state.burning,true);
+}
 assert.deepEqual(ui.matterLots({matter:{lots:first.matter}}),[]);
 
 // A source's actual lots bound quantity; switching sources cannot retain a lot.
@@ -653,7 +684,8 @@ for(const [execution,label,detail,resume] of [
   const original=structuredClone(creative),selection=formNode('section');
   const context={inspection:{creative},node:formNode,$:()=>selection,factDisclosures:new Map(),
     factLabel:ui.factLabel,factValue:ui.factValue,creativeState:ui.creativeState,
-    ruleRuntimeObservationLines:ui.ruleRuntimeObservationLines,reactionObservationLines:ui.reactionObservationLines};
+    ruleRuntimeObservationLines:ui.ruleRuntimeObservationLines,reactionObservationLines:ui.reactionObservationLines,
+    presentationObservationLines:ui.presentationObservationLines};
   vm.createContext(context);vm.runInContext(extract('function appendFacts(','async function readRuleDefinition('),context);
   context.renderCreative({id:'moving-source',creative});
   const labels=selection.querySelectorAll('small,summary').map(node=>node.textContent);

@@ -39,6 +39,7 @@ _LIST_MEANING = (
 )
 TOOL_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {
     "mode": {"type": "string", "enum": ["list", "read"], "default": "list"},
+    "kind": {"type": "string", "enum": ["all", "tool", "user", "summary"], "default": "all"},
     "goal_query": {"type": "string", "minLength": 1, "maxLength": 500,
                    "description": "Literal substring of the original user request; not an Agent summary."},
     "tool": {"type": "string", "minLength": 1, "maxLength": 120,
@@ -49,7 +50,7 @@ TOOL_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {
     "limit": {"type": "integer", "minimum": 1, "maximum": _PAGE_SIZE},
     "message_id": {"type": "string", "pattern": r"^msg_[A-Za-z0-9]{1,100}$"},
     "part_id": {"type": "string", "pattern": r"^prt_[A-Za-z0-9]{1,100}$"},
-    "section": {"type": "string", "enum": ["output", "input"], "default": "output"},
+    "section": {"type": "string", "enum": ["output", "input", "text"], "default": "output"},
     "pointer": {"type": "string", "maxLength": 300,
                 "description": "An exact JSON Pointer within the filtered section, such as /execution_readback/entities. No query expressions or file paths."},
     "offset": {"type": "integer", "minimum": 0,
@@ -58,13 +59,13 @@ TOOL_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {
     "expected_filtered_sha256": {"type": "string", "pattern": r"^[a-f0-9]{64}$"},
 }}
 TOOL_DESCRIPTION = (
-    "Recover completed formal tool results from your own same dedicated native session. "
+    "Recover historical sources from your own same dedicated native session. kind selects tool, user, summary or all. "
     "Start with mode=list; optionally match the original user goal text, a tool, or an operation, "
     "and copy the complete next_request unchanged even when this page has no matches. "
     "A list page is only a location index, not the original result body; next_request means "
     "the listing has not ended. Entries identify original message_id/part_id and submission/readback "
     "times. Use the chosen entry.read to obtain actual recorded quantities and state. Use mode=read with those IDs to read "
-    "the filtered historical output (or section=input). Large outputs explicitly return a fragment with "
+    "the filtered historical output, section=input for structured tool arguments including errors, or section=text for original user/Native summary text. Large bodies return a fragment with "
     "next_read; alternatively select an exact JSON Pointer discovered in output_roots. "
     "Credential/authorization handles are removed. Source hashes identify the stored original; "
     "returned JSON and fragments are filtered evidence, not byte-exact original text. "
@@ -154,10 +155,10 @@ class NativeToolHistory:
             return []
         result = []
         for part in record["parts"]:
-            if not isinstance(part, dict) or part.get("type") != "tool" or part.get("tool") not in self.formal_tools:
+            if not isinstance(part, dict) or part.get("type") != "tool" or part.get("tool") not in self.formal_tools | {"invalid"}:
                 continue
             state = part.get("state")
-            if not isinstance(state, dict) or state.get("status") != "completed":
+            if not isinstance(state, dict) or state.get("status") not in {"completed", "error"}:
                 continue
             if (part.get("sessionID") != self.session_id or part.get("messageID") != record["info"]["id"] or
                     not isinstance(part.get("id"), str) or not _ID.fullmatch(part["id"]) or
@@ -175,6 +176,8 @@ class NativeToolHistory:
 
     @staticmethod
     def _output(part):
+        if part["state"].get("status") != "completed" or part.get("tool") == "invalid":
+            return None, None  # Arbitrary native error text is not a safe world envelope.
         text = part["state"].get("output")
         if not isinstance(text, str):
             return None, None
@@ -187,9 +190,9 @@ class NativeToolHistory:
     def _source(self, record, part, output):
         info, state = record["info"], part["state"]
         raw_time = state.get("time") if isinstance(state.get("time"), dict) else {}
-        source = {"kind": "native_completed_tool_part", "role_id": self.role_id,
+        source = {"kind": "native_completed_tool_part" if state.get("status") == "completed" else "native_error_tool_part", "role_id": self.role_id,
             "session_id": self.session_id, "message_id": info["id"], "part_id": part["id"],
-            "tool": part["tool"], "native_part_status": "completed", "historical_only": True,
+            "tool": part["tool"], "native_part_status": state["status"], "historical_only": True,
             "native_time": {key: raw_time[key] for key in ("start", "end", "compacted")
                             if type(raw_time.get(key)) in {int, float}}}
         if isinstance(part.get("callID"), str):
@@ -209,6 +212,31 @@ class NativeToolHistory:
                     ("clock", "observed_at", "public_events_observed_at") if key in readback}
         return source
 
+    def _text_parts(self, record):
+        role = record["info"].get("role")
+        kind = "user" if role == "user" else "summary" if role == "assistant" and record["info"].get("summary") is True else None
+        if kind is None:
+            return []
+        result = []
+        for part in record["parts"]:
+            if (not isinstance(part, dict) or part.get("type") != "text" or
+                    not isinstance(part.get("text"), str) or part.get("synthetic") or
+                    role == "user" and part["text"].startswith(self.prompt_prefixes)):
+                continue
+            if not isinstance(part.get("id"), str) or not _ID.fullmatch(part["id"]) or not part["id"].startswith("prt_"):
+                continue
+            if part.get("sessionID") != self.session_id or part.get("messageID") != record["info"]["id"]:
+                raise ConnectorError("NativeHistorySourceMismatch", "原文字片段不属于本人会话。", 409)
+            result.append((kind, part))
+        return result
+
+    def _text_source(self, record, part, kind):
+        return {"kind": "original_user_text" if kind == "user" else "native_assistant_summary",
+            "role_id": self.role_id, "session_id": self.session_id,
+            "message_id": record["info"]["id"], "part_id": part["id"],
+            "native_role": record["info"]["role"], "historical_only": True,
+            "world_evidence": False, "private_session_source": True}
+
     def _cursor(self, value):
         if value is None:
             return {"scope": self.scope, "before": None, "offset": 0, "messages": None, "filters": {},
@@ -219,9 +247,10 @@ class NativeToolHistory:
                     decoded["scope"] != self.scope or type(decoded["offset"]) is not int or
                     not 0 <= decoded["offset"] <= 10000 or not isinstance(decoded["filters"], dict) or
                     type(decoded["cutoff_ms"]) is not int or decoded["cutoff_ms"] <= 0 or
-                    set(decoded["filters"]) - {"goal_query", "tool", "operation_id"} or
+                    set(decoded["filters"]) - {"goal_query", "tool", "operation_id", "kind"} or
+                    decoded["filters"].get("kind", "all") not in {"all", "tool", "user", "summary"} or
                     any(not isinstance(item, str) or not 1 <= len(item) <=
-                        {"goal_query": 500, "tool": 120, "operation_id": 180}[key]
+                        {"goal_query": 500, "tool": 120, "operation_id": 180, "kind": 7}[key]
                         for key, item in decoded["filters"].items()) or
                     decoded["before"] is not None and (not isinstance(decoded["before"], str) or
                         not 1 <= len(decoded["before"]) <= 2000 or any(char.isspace() for char in decoded["before"])) or
@@ -239,12 +268,12 @@ class NativeToolHistory:
 
     async def list(self, arguments):
         cursor = self._cursor(arguments.get("cursor"))
-        filters = {key: arguments[key] for key in ("goal_query", "tool", "operation_id") if key in arguments}
+        filters = {key: arguments[key] for key in ("goal_query", "tool", "operation_id", "kind") if key in arguments}
         if arguments.get("cursor") and filters and filters != cursor["filters"]:
             raise ConnectorError("InvalidNativeHistoryCursor", "接续历史分页时请保留原过滤条件。", 422)
         filters = filters or cursor["filters"]
         tool = self.tool_names.get(filters.get("tool"), filters.get("tool"))
-        if tool and tool not in self.formal_tools:
+        if tool and tool not in self.formal_tools | {"invalid"}:
             raise ConnectorError("ToolDenied", "历史只提供本会话的正式工具结果。", 403)
         if cursor["messages"] is None:
             page = await self.read_page(_PAGE_SIZE, cursor["before"])
@@ -261,7 +290,18 @@ class NativeToolHistory:
         parents = {record["info"]["id"]: record for record in records}
         entries = []
         for record in records:
-            parts = self._completed_parts(record)
+            if filters.get("kind", "all") != "tool" and not tool and not filters.get("operation_id"):
+                for kind, part in self._text_parts(record):
+                    if filters.get("kind", "all") not in {"all", kind} or filters.get("goal_query") and filters["goal_query"] not in part["text"]:
+                        continue
+                    created = record["info"].get("time", {}).get("created")
+                    if type(created) in {int, float} and created > cursor["cutoff_ms"]:
+                        continue
+                    entries.append({"source": self._text_source(record, part, kind),
+                        "text_available": True, "source_text_bytes": len(part["text"].encode()),
+                        "read": {"tool": TOOL_NAME, "arguments": {"mode": "read",
+                            "message_id": record["info"]["id"], "part_id": part["id"], "section": "text"}}})
+            parts = self._completed_parts(record) if filters.get("kind", "all") in {"all", "tool"} else []
             if not parts:
                 continue
             parent_id = record["info"].get("parentID")
@@ -282,15 +322,19 @@ class NativeToolHistory:
                 if filters.get("operation_id") and (not isinstance(output, dict) or output.get("operation_id") != filters["operation_id"]):
                     continue
                 source = self._source(record, part, output)
-                inputs = part["state"].get("input", {})
+                input_available = part["tool"] != "invalid" and isinstance(part["state"].get("input"), dict)
+                inputs = part["state"].get("input", {}) if input_available else {}
                 inputs = filtered_evidence(inputs, tool_input=True) if isinstance(inputs, dict) else {}
                 entry = {"source": source, "input_index": {key: deepcopy(inputs[key]) for key in
                     ("action", "entity_id", "target_id", "item_id", "other_id", "amount") if isinstance(inputs, dict) and key in inputs},
-                    "input_complete": False, "goal_excerpt": goal[:600], "goal_excerpt_complete": len(goal) <= 600,
+                    "input_complete": False, "input_available": input_available,
+                    "input_read": {"tool": TOOL_NAME, "arguments": {"mode": "read", "message_id": source["message_id"], "part_id": source["part_id"], "section": "input"}} if input_available else None,
+                    "goal_excerpt": goal[:600], "goal_excerpt_complete": len(goal) <= 600,
                     "goal_source": {"message_id": parent_id, "kind": "original_user_request"}
                         if parent and parent["info"].get("role") == "user" else None,
                     "output_available": output is not None, "output_format_supported": output is not None,
                     "output_unavailable_reason": (None if output is not None else
+                        "native_error_or_invalid_not_a_world_envelope" if part["state"]["status"] == "error" or part["tool"] == "invalid" else
                         "native_output_placeholder" if text == "[Old tool result content cleared]" else
                         "stored_output_missing" if text is None else "stored_output_not_structured_json"),
                     "source_output_bytes": len(text.encode()) if text is not None else None,
@@ -344,7 +388,7 @@ class NativeToolHistory:
         if not isinstance(arguments, dict) or any(Draft202012Validator(TOOL_SCHEMA).iter_errors(arguments)):
             raise ConnectorError("InvalidArguments", "历史读取参数不符合正式工具声明。", 422)
         mode = arguments.get("mode", "list")
-        allowed = ({"mode", "goal_query", "tool", "operation_id", "cursor", "limit"} if mode == "list" else
+        allowed = ({"mode", "kind", "goal_query", "tool", "operation_id", "cursor", "limit"} if mode == "list" else
                    {"mode", "message_id", "part_id", "section", "pointer", "offset", "expected_source_sha256", "expected_filtered_sha256"})
         if set(arguments) - allowed:
             raise ConnectorError("InvalidArguments", "请分别使用历史列表参数或原片段读取参数。", 422)
@@ -376,34 +420,49 @@ class NativeToolHistory:
         if not message_id or not part_id:
             raise ConnectorError("InvalidArguments", "读取原工具结果须提供历史列表中的message_id和part_id。", 422)
         record = self._message(await self.read_message(message_id), message_id)
-        part = next((part for part in self._completed_parts(record) if part["id"] == part_id), None)
-        if part is None:
-            raise ConnectorError("NativeHistoryPartUnavailable", "原消息没有可读的正式完成工具片段；缺记录不证明从未发生。", 404)
-        text, output = self._output(part)
-        if text is None:
-            raise ConnectorError("NativeHistoryOutputUnavailable", "当前入口未取得原正文；没有用模型摘要替代。", 404)
-        if text == "[Old tool result content cleared]":
-            raise ConnectorError("NativeHistoryOutputUnavailable", "原会话返回占位文本，当前入口未取得原正文；没有用摘要替代。", 404)
-        if output is None:
-            raise ConnectorError("NativeHistoryFormatUnsupported", "原工具结果不是可核清授权字段的JSON封套；没有提供任意原文。", 422)
+        section, pointer = arguments.get("section", "output"), arguments.get("pointer", "")
+        if section == "text":
+            matched = next(((kind, part) for kind, part in self._text_parts(record) if part["id"] == part_id), None)
+            if matched is None:
+                raise ConnectorError("NativeHistoryPartUnavailable", "原消息没有可读的用户或原生摘要文字片段。", 404)
+            kind, part = matched
+            text, value = part["text"], part["text"]
+            source = self._text_source(record, part, kind)
+        else:
+            part = next((part for part in self._completed_parts(record) if part["id"] == part_id), None)
+            if part is None:
+                raise ConnectorError("NativeHistoryPartUnavailable", "原消息没有可读的正式终态工具片段；缺记录不证明从未发生。", 404)
+            text, output = self._output(part)
+            source = self._source(record, part, output)
+            if section == "input":
+                if part["tool"] == "invalid" or not isinstance(part["state"].get("input"), dict):
+                    raise ConnectorError("NativeHistoryInputUnavailable", "原生无效调用不提供任意错误正文；请重新读取正式工具的参数。", 404)
+                inputs = part["state"].get("input")
+                value = filtered_evidence(inputs, tool_input=True)
+                text = json.dumps(inputs, ensure_ascii=False, separators=(",", ":"))
+            else:
+                if text is None or text == "[Old tool result content cleared]":
+                    raise ConnectorError("NativeHistoryOutputUnavailable", "当前入口未取得原正文；没有用模型摘要替代。", 404)
+                if output is None:
+                    raise ConnectorError("NativeHistoryFormatUnsupported", "原工具结果不是可核清授权字段的JSON封套；没有提供任意原文。", 422)
+                value = output
         digest = hashlib.sha256(text.encode()).hexdigest()
         if arguments.get("expected_source_sha256") not in {None, digest}:
-            raise ConnectorError("NativeHistorySourceChanged", "原输出与续读指纹不同；没有拼接两份不同记录。", 409)
-        section, pointer = arguments.get("section", "output"), arguments.get("pointer", "")
-        value = output if section == "output" else filtered_evidence(part["state"].get("input"), tool_input=True)
+            raise ConnectorError("NativeHistorySourceChanged", "原所选部分与续读指纹不同；没有拼接两份不同记录。", 409)
         if pointer:
             value = self._select(value, pointer)
         fragment_source = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         filtered_digest = hashlib.sha256(fragment_source.encode()).hexdigest()
         if arguments.get("expected_filtered_sha256") not in {None, filtered_digest}:
             raise ConnectorError("NativeHistorySourceChanged", "过滤后的所选历史内容与续读指纹不同；没有拼接不同内容。", 409)
-        result = {"source": self._source(record, part, output), "meaning": _MEANING,
-            "source_output_sha256": digest,
-            "source_fingerprint_meaning": "SHA256 of the stored original output; returned evidence is filtered, not byte-exact.",
+        result = {"source": source, "meaning": _MEANING,
+            "source_sha256": digest,
+            "source_fingerprint_meaning": "SHA256 of the stored selected section (tool input uses canonical JSON); filtered tool evidence is not byte-exact original text.",
             "filtered_value_sha256": filtered_digest,
             "section": section, "pointer": pointer,
             "filtered_output_complete": not pointer and section == "output", "selected_value_complete": True,
             "value": value}
+        result["source_" + section + "_sha256"] = digest
         if not arguments.get("offset") and _agent_tool_text_fits(_agent_tool_text(result)):
             return result
         offset = arguments.get("offset", 0)

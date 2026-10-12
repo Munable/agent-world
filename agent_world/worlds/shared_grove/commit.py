@@ -30,6 +30,8 @@ def save_entity(ctx, entity, expected_version=None):
             # updating dependency and physics indexes. Reconcile each source
             # once per phase, not one full closure per changed object.
             return result
+        from . import discovery
+        discovery.sync_many(ctx, {result["id"]: result})
         from . import domains, execution
         domains.sync_entities(ctx, {result["id"]: result})
         execution.reconcile(ctx, result)
@@ -602,6 +604,8 @@ def _flush_batch(ctx, batch):
         from .creative import _check_instance_capacity
         _check_instance_capacity(ctx, activity.meta_get(ctx, "creative_instances", []))
     m.write_candidates(ctx, batch)
+    from . import discovery
+    discovery.sync_many(ctx, {eid: batch.entities[eid] for eid in batch.dirty_entities})
     for pid in sorted(batch.dirty_processes):
         process = batch.processes[pid]
         value = {k:v for k,v in process.items() if k != "version"}

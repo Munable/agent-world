@@ -25,9 +25,20 @@ class GroveNativeContextTests(unittest.IsolatedAsyncioTestCase):
 
     def proof(self, **changes):
         options = self.plugin[1]
+        guard = {"status": "installed", "runtime": "ai_sdk", "provider_id": "provider", "model_id": "model",
+            "historical_message_budget_bytes": 65536, "request_budget_bytes": 131072, "native_llm_allowed": False,
+            "installed_at_ms": 123, "attempt_count": 0, "sent_count": 0, "blocked_count": 0}
+        projection = changes.get("projection")
+        if isinstance(projection, dict):
+            body = json.dumps({"messages": [{"role": "user", "content": "fixture"}], "system": [], "tools": []})
+            guard.update(status="sent", session_id=projection.get("session_id"),
+                current_request_message_id=projection.get("current_request_message_id"), observed_at_ms=300,
+                request_sequence=1, attempt_count=1, sent_count=1, body_bytes=len(body.encode()),
+                body_sha256=hashlib.sha256(body.encode()).hexdigest(), system_bytes=2, messages_bytes=40, tools_bytes=2,
+                rejection=None)
         return {"status": "loaded", "version": NATIVE_CONTEXT_VERSION, "hook": NATIVE_CONTEXT_HOOK,
             "nonce": options["nonce"], "role_id": options["role_id"], "source_sha256": options["source_sha256"],
-            "process_id": 42, "loaded_at_ms": 123, **changes}
+            "process_id": 42, "loaded_at_ms": 123, "sdk_guard": guard, **changes}
 
     def loaded(self, proof=None):
         save_json(Path(self.plugin[1]["diagnostic_path"]), proof or self.proof())
@@ -90,6 +101,31 @@ class GroveNativeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.native_context["projection"], self.projection())
         self.assertEqual(self.session.inference_count, 0)
 
+    async def test_current_request_rejects_missing_foreign_and_stale_sdk_guards(self):
+        valid = self.proof(projection=self.projection())
+        for guard in (None, {**valid["sdk_guard"], "model_id": "other-model"},
+                      {**valid["sdk_guard"], "current_request_message_id": "previous-request"},
+                      {**valid["sdk_guard"], "observed_at_ms": 199}):
+            with self.subTest(guard=guard):
+                self.loaded({**valid, "sdk_guard": guard})
+                with self.assertRaises(ConnectorError) as rejected:
+                    await self.session.verify_native_context(request_message_id="this-request", request_started_at_ms=200)
+                self.assertEqual(rejected.exception.code, "NativeContextUnavailable")
+                self.assertEqual(self.session.inference_count, 0)
+
+    async def test_blocked_sdk_request_pauses_and_preserves_its_safe_diagnostic(self):
+        proof = self.proof(projection=self.projection())
+        proof["sdk_guard"].update(status="blocked", sent_count=0, blocked_count=1,
+            rejection="historical_messages_over_budget")
+        self.loaded(proof)
+        with self.assertRaises(ConnectorError) as rejected:
+            await self.session.verify_native_context(request_message_id="this-request", request_started_at_ms=200)
+        self.assertEqual(rejected.exception.code, "NativeContextBudgetExceeded")
+        self.assertEqual(self.session.native_context["sdk_guard"]["status"], "blocked")
+        self.assertEqual(self.session.native_context["sdk_guard"]["body_sha256"], proof["sdk_guard"]["body_sha256"])
+        self.assertEqual(self.session.native_context["projection"], self.projection())
+        self.assertEqual((self.session.inference_count, self.session.session_id), (0, "same-session"))
+
     async def test_deployed_file_tampering_and_linked_proof_are_rejected(self):
         self.loaded()
         target = self.session.profile / "grove-native-context.mjs"
@@ -107,17 +143,21 @@ class GroveNativeContextTests(unittest.IsolatedAsyncioTestCase):
             await self.session.verify_native_context()
 
     async def test_history_budget_counters_keep_current_input_separate_and_reject_invalid_bytes(self):
-        projection = self.projection(historical_tool_history_budget_bytes=32768,
+        projection = self.projection(historical_tool_history_budget_bytes=65536,
             historical_tool_history_bytes_after=18000, omitted_historical_tool_parts=12,
             omitted_historical_tool_input_bytes=120000, omitted_historical_tool_output_bytes=2200,
-            current_tool_input_bytes=45000, byte_unit="utf8",
-            budget_scope="readable_completed_formal_tool_pairs_only")
+            current_tool_input_bytes=80000, protected_message_bytes=80500,
+            managed_message_bytes_after=98500, historical_message_budget_bytes=65536,
+            historical_message_allowance_bytes=17804, fixed_request_reserve_bytes=32768, byte_unit="utf8",
+            budget_scope="historical_native_inference_projection")
         self.loaded(self.proof(projection=projection))
         await self.session.verify_native_context(request_message_id="this-request", request_started_at_ms=200)
         actual = self.session.native_context["projection"]
         for key in ("historical_tool_history_budget_bytes", "historical_tool_history_bytes_after",
                     "omitted_historical_tool_parts", "omitted_historical_tool_input_bytes",
-                    "omitted_historical_tool_output_bytes", "current_tool_input_bytes", "byte_unit", "budget_scope"):
+                    "omitted_historical_tool_output_bytes", "current_tool_input_bytes", "protected_message_bytes",
+                    "managed_message_bytes_after", "historical_message_budget_bytes", "historical_message_allowance_bytes",
+                    "fixed_request_reserve_bytes", "byte_unit", "budget_scope"):
             self.assertEqual(actual[key], projection[key])
         self.assertGreater(actual["current_tool_input_bytes"], actual["historical_tool_history_budget_bytes"])
         for invalid in (-1, True, "120000"):

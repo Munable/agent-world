@@ -69,7 +69,7 @@ class InspectionIndexTests(unittest.TestCase):
                     "version": 9, "preview": {"version_fingerprint": "a" * 64,
                         "physics": {"known": True, "overloaded": False}}}]}}]}
 
-    def test_default_small_read_preserves_all_facts_without_expanding_actions(self):
+    def test_default_small_read_keeps_selected_facts_and_child_read_paths_without_expanding_actions(self):
         raw = self.inspection()
         raw["action_options"][0]["input"]["candidates"][0]["preview"]["affected_structures"] = [
             {"id": "support", "current_state": {"diagnostics": "x" * 2000}}]
@@ -79,8 +79,14 @@ class InspectionIndexTests(unittest.TestCase):
         delivered = companion_projection("grove.inspect", payload)
         actual = delivered["result"]
         self.assertEqual(payload, original)
-        for field in ("entity", "player", "contents", "explanation", "new_inspection_fact", "available_actions"):
+        for field in ("entity", "player", "explanation", "new_inspection_fact", "available_actions"):
             self.assertEqual(actual[field], raw[field])
+        self.assertEqual(actual["contents"], [{"id": "stored", "owner": None,
+            "read_request": {"tool": "grove_inspect", "arguments": {"entity_id": "stored"}}}])
+        self.assertEqual(actual["contents_projection"]["scope"], "visible_child_index")
+        self.assertEqual(actual["contents_projection"]["visible_child_count"], 1)
+        for field in ("state", "version", "matter", "action_options"):
+            self.assertNotIn(field, actual["contents"][0])
         for field in ("world_id", "function_version", "snapshot_seq", "transport_metadata"):
             self.assertEqual(delivered[field], payload[field])
         self.assertTrue(actual["projection"]["complete_object_state"])
@@ -96,6 +102,9 @@ class InspectionIndexTests(unittest.TestCase):
                 "entity_id": "target", "action": "store", "candidate_id": "source"}}}])
         self.assertEqual(companion_projection("grove.inspect", delivered), delivered)
         self.assertLess(len(json.dumps(delivered)), len(json.dumps(payload)))
+        child = companion_projection("grove.inspect", {"entity": raw["contents"][0]})
+        self.assertEqual(child["entity"], raw["contents"][0])
+        self.assertEqual(payload, original)
 
     def test_default_index_never_binds_an_unpresented_version_or_preview(self):
         observations = AgentObservations("person")
@@ -139,6 +148,7 @@ class InspectionIndexTests(unittest.TestCase):
                         "others": [{"id": "other-person", "version": 6, "kind": "role"}]}},
             {"action": "fabricate", "function_id": "grove.fabricate", "choices": {
                 "sources": [{"id": "raw-source", "version": 9, "lots": [{"id": "material-lot", "quantity_u": 2}]}]}}]
+        original = deepcopy(inspection)
         observations = AgentObservations("person")
         supplied = observations.present("grove.inspect", inspection)
         offer, fabricate = supplied["action_options"]
@@ -148,8 +158,21 @@ class InspectionIndexTests(unittest.TestCase):
         self.assertEqual(fabricate["sources_index"], [{"id": "raw-source", "read_request": {
             "tool": "grove_inspect", "arguments": {"entity_id": "target", "action": "fabricate"}}}])
         bundle = observations.get(supplied["observation_id"])
-        self.assertEqual(bundle["versions"]["entity"], {"target": 7, "stored": 4})
+        self.assertEqual(bundle["versions"]["entity"], {"target": 7})
         self.assertEqual(bundle["versions"]["player"], {"person": 5})
+        self.assertEqual(supplied["entity"], inspection["entity"])
+        child_index = supplied["contents"][0]
+        self.assertEqual(child_index["read_request"], {
+            "tool": "grove_inspect", "arguments": {"entity_id": "stored"}})
+        for field in ("version", "state", "matter", "action_options"):
+            self.assertNotIn(field, child_index)
+        child_read = observations.present("grove.inspect", {"entity": inspection["contents"][0]},
+            base_id=supplied["observation_id"])
+        self.assertEqual(child_read["entity"], inspection["contents"][0])
+        self.assertEqual(observations.get(child_read["observation_id"])["versions"]["entity"],
+            {"target": 7, "stored": 4})
+        self.assertEqual(observations.get(supplied["observation_id"]), bundle)
+        self.assertEqual(inspection, original)
 
     def test_new_default_state_cannot_refresh_an_older_explicit_preview(self):
         observations = AgentObservations("person")

@@ -193,6 +193,52 @@ def _companion_public_content_index(public):
     return index
 
 
+def _companion_inspection_context(value):
+    """Keep discovery paths beside the selected object, not unrelated snapshots.
+
+    This runs before observation binding. A child's identity is enough to ask
+    for its own inspection, but must not supply unseen versions, lots or action
+    previews. The selected object's facts and options are untouched.
+    """
+    contents = value.get("contents")
+    if isinstance(contents, list):
+        rows = []
+        for child in contents:
+            if not isinstance(child, dict) or not isinstance(child.get("id"), str):
+                continue
+            row = {key: deepcopy(child[key]) for key in (
+                "id", "name", "material", "capabilities", "location", "x", "y", "owner",
+                "container", "physical_parent", "lifecycle", "created_by", "created_by_name",
+                "source", "presentation", "entity_kind") if key in child}
+            kind = child.get("state", {}).get("kind")
+            if isinstance(kind, str):
+                row["entity_kind"] = kind
+            row["read_request"] = {"tool": "grove_inspect", "arguments": {"entity_id": child["id"]}}
+            rows.append(row)
+        value["contents"] = rows
+        value["contents_projection"] = {"scope": "visible_child_index", "visible_child_count": len(rows),
+            "omitted_sections": ["child state, versions, lots and action previews"],
+            "meaning": "Discovery only; omitted facts are not absent. Read each child before acting. "
+                       "Selected action candidates retain their own complete facts and previews."}
+    public = value.get("public_content")
+    if isinstance(public, dict):
+        reference = {key: deepcopy(public[key]) for key in (
+            "id", "region", "version", "contribution_count", "outcome_count", "anchors_truncated") if key in public}
+        history = public.get("history")
+        if isinstance(history, dict):
+            reference.update({key: deepcopy(history[key]) for key in
+                ("contribution_count", "outcome_count") if key in history})
+        if isinstance(public.get("id"), str):
+            reference["read_request"] = {"tool": "grove_content_history",
+                                         "arguments": {"content_id": public["id"]}}
+        reference["discovery_read_request"] = {"tool": "map_viewport", "arguments": {}}
+        reference["projection"] = {"scope": "regional_content_reference",
+            "omitted_sections": ["regional anchors and historical pages"],
+            "meaning": "Regional context is unexpanded, not absent or action permission. "
+                       "History read starts at the latest page; follow its returned cursor."}
+        value["public_content"] = reference
+
+
 def _companion_chunk_terrain(chunk):
     """Encode only actual tiles: at most 16 rows and 256 unknown indexes."""
     if not isinstance(chunk, dict):
@@ -415,6 +461,8 @@ def _companion_scene_index(scene, *, preflight=False):
                             row["creative"]["process"] = _companion_creative_summary(creative)["process"]
                     else:
                         row["creative"] = _companion_creative_summary(creative)
+                if isinstance(entity.get("presentation"), dict):
+                    row["presentation"] = deepcopy(entity["presentation"])
                 if isinstance(entity.get("id"), str):
                     row["read_request"] = {"tool": "grove_inspect", "arguments": {"entity_id": entity["id"]}}
                 state = entity.get("state")
@@ -440,6 +488,8 @@ def _companion_scene_index(scene, *, preflight=False):
         else:
             index["public_content"] = _companion_public_content_index(public)
     if preflight:
+        index["public_works_read_request"] = {"tool": "grove_public_works", "arguments": {},
+            "meaning": "Find public creations and current coordinates by author_name or name; not online status or remote action permission."}
         index["projection"] = {
             "scope": "authorized_preflight_discovery", "complete_scene": False,
             "omitted_sections": ["full object state/actions/previews/lots", "construction recipes",
@@ -480,7 +530,7 @@ def _companion_selected_state_summary(inspection, *, compact=False):
     state = {key: deepcopy(entity[key]) for key in (
         "id", "version", "interaction_revision", "name", "x", "y", "location", "owner", "physical_parent",
         "material", "materials", "matter", "matter_unit", "material_quantity", "simulation",
-        "state", "mechanical", "creative", "capabilities", "container", "lifecycle",
+        "state", "mechanical", "creative", "presentation", "capabilities", "container", "lifecycle",
         "barrier_active", "contents_visibility", "content_summary", "relations", "created_by", "created_by_name", "source",
         "pour_target_slot", "execution_domain", "fabrication_materials", "material_eligibility",
         "acquisition", "acquisition_sources", "source_discovery_projection")
@@ -686,6 +736,7 @@ def companion_projection(function: str, payload: dict) -> dict:
         result["result"] = overview
         return result
     if function == "grove.inspect":
+        _companion_inspection_context(value)
         entity = value.get("entity")
         if isinstance(entity, dict):
             entity = _companion_current_entity(entity)

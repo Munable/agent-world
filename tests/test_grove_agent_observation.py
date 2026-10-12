@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_world.grove_agent_observation import (AgentObservations, blueprint_model_input,
-    companion_projection, execution_private_context, nearby_public_events)
+    companion_projection, execution_private_context, nearby_public_events, _companion_scene_index)
 from agent_world.grove_connector_errors import ConnectorError
 
 
@@ -18,6 +18,119 @@ INTERACT_SCHEMA = {
 
 
 class AgentObservationsTests(unittest.TestCase):
+    def test_public_directory_never_binds_remote_action_authority(self):
+        old = self.observations.present("map.viewport", self.scene(), preflight=True)["observation_id"]
+        directory = {"works": [{"entity_id": "remote", "name": "远处作品",
+            "location": {"x": 80, "y": 90}, "fields": {"signal": 2}, "nearby": False}],
+            "has_more": True, "index_build_complete": False}
+        projected = self.observations.present("grove.public_works", directory, base_id=old)
+        self.assertEqual(projected["works"], directory["works"])
+        self.assertNotIn("remote", self.observations.get(projected["observation_id"])["versions"]["entity"])
+
+    def test_actual_visual_binding_survives_bounded_scene_projection(self):
+        scene = self.scene()
+        presentation = {"shape": "cloth", "color": "#123456", "badge": "湿:3", "binding_status": "matched"}
+        scene["entities"][0]["presentation"] = presentation
+        projected = self.observations.present("map.viewport", scene, preflight=True)
+        self.assertEqual(projected["entities"][0]["presentation"], presentation)
+        self.assertEqual(_companion_scene_index(scene, preflight=True)["public_works_read_request"]["tool"], "grove_public_works")
+
+    def dense_inspection(self, *, selected=False):
+        children = [{"id": f"child-{index}", "version": 40 + index, "interaction_revision": index + 2,
+            "name": f"物件{index}", "material": "wood", "capabilities": ["portable"],
+            "container": "target", "physical_parent": {"id": "target", "relation": "contained"},
+            "state": {"kind": "authored", "program": {"fields": {"count": index}}},
+            "matter": [{"id": f"lot-{index}", "quantity": 10, "material": "wood"}],
+            "creative": {"fields": {"count": index}, "automatic_rules": [{"long_fact": "x" * 2500}]},
+            "presentation": {"badge": str(index)}} for index in range(6)]
+        entity = {"id": "target", "version": 77, "interaction_revision": 3,
+            "state": {"open": True, "contents": [child["id"] for child in children]},
+            "matter": [{"id": "body-lot", "quantity": 20, "material": "wood"}],
+            "creative": {"definition_ref": "pinned", "type_id": "box", "fields": {"count": 5},
+                "process": {"status": "error", "last_tick": 102, "observed_tick": 105},
+                "automatic_rules": [{"rule_id": "changed", "condition": {"known": False,
+                    "facts": [{"field": "physical.wetness", "available": False}], "checks": []}}],
+                "automatic_field_change": {"tick": 101, "before": {"count": 4}, "after": {"count": 5}}},
+            "presentation": {"badge": "5", "binding_status": "matched"}}
+        option = {"action": "store", "function_id": "grove.interact", "available": True,
+            "input": {"candidates": [{"id": "child-0", "version": 40,
+                "preview": {"version_fingerprint": "a" * 64, "physics": {"capacity_remaining": 9}}}]}}
+        value = {"player": {"id": "person", "version": 7}, "entity": entity,
+            "contents": children, "available_actions": ["store"], "action_options": [option],
+            "public_content": {"id": "region-content", "region": "0:0", "version": 9,
+                "history": {"cursor": {"contribution_before": 3}, "contribution_count": 8,
+                    "outcome_count": 5, "has_more_contributions": True},
+                "anchors_truncated": True, "anchors": [{"entity_id": "remote", "version": 600,
+                    "entity": {"id": "remote", "version": 600, "state": {"large": "y" * 3000}}}]}}
+        if selected:
+            value["action_options_projection"] = {"scope": "selected_declared_action", "action": "store",
+                "candidate_selection": {"candidate_id": "child-0"}}
+        return value
+
+    def test_inspection_indexes_children_and_region_without_binding_omitted_facts(self):
+        source = self.dense_inspection()
+        original = deepcopy(source)
+        projected = self.observations.present("grove.inspect", source)
+        self.assertEqual(source, original)
+        self.assertEqual(projected["entity"], source["entity"])
+        self.assertEqual(len(projected["contents"]), 6)
+        for child in projected["contents"]:
+            self.assertNotIn("version", child)
+            self.assertNotIn("interaction_revision", child)
+            self.assertNotIn("matter", child)
+            self.assertNotIn("state", child)
+            self.assertNotIn("creative", child)
+            self.assertEqual(child["read_request"], {"tool": "grove_inspect", "arguments": {"entity_id": child["id"]}})
+        self.assertEqual(projected["contents"][0]["presentation"], source["contents"][0]["presentation"])
+        self.assertEqual(projected["contents"][0]["entity_kind"], "authored")
+        self.assertEqual(companion_projection("grove.inspect", projected), projected)
+        public = projected["public_content"]
+        self.assertEqual((public["id"], public["version"], public["contribution_count"], public["outcome_count"]),
+            ("region-content", 9, 8, 5))
+        self.assertNotIn("anchors", public)
+        self.assertNotIn("history", public)
+        self.assertEqual(public["read_request"], {"tool": "grove_content_history",
+            "arguments": {"content_id": "region-content"}})
+        self.assertEqual(public["discovery_read_request"], {"tool": "map_viewport", "arguments": {}})
+        bundle = self.observations.get(projected["observation_id"])
+        self.assertEqual(bundle["versions"]["entity"], {"target": 77})
+        self.assertFalse(bundle.get("combination_previews"))
+        self.assertLess(len(self.observations.serialize(projected).encode()),
+            len(json.dumps(source, ensure_ascii=False).encode()) // 2)
+        child_read = self.observations.present("grove.inspect", {"entity": source["contents"][1]},
+            base_id=projected["observation_id"])
+        self.assertEqual(child_read["entity"]["matter"], source["contents"][1]["matter"])
+        self.assertEqual(self.observations.get(child_read["observation_id"])["versions"]["entity"]["child-1"], 41)
+
+    def test_selected_inspection_keeps_exact_action_preview_and_current_object_facts(self):
+        source = self.dense_inspection(selected=True)
+        original = deepcopy(source)
+        projected = self.observations.present("grove.inspect", source)
+        self.assertEqual(source, original)
+        self.assertEqual(projected["entity"], source["entity"])
+        self.assertEqual(projected["action_options"], source["action_options"])
+        self.assertEqual(projected["action_options_projection"], source["action_options_projection"])
+        bundle = self.observations.get(projected["observation_id"])
+        self.assertEqual(bundle["versions"]["entity"], {"target": 77, "child-0": 40})
+        bound = self.observations.bind("grove.interact", {"action": "store", "target_id": "target",
+            "item_id": "child-0"}, projected["observation_id"], INTERACT_SCHEMA)
+        self.assertEqual((bound["expected_target_version"], bound["expected_item_version"],
+            bound["expected_combination_fingerprint"]), (77, 40, "a" * 64))
+        with self.assertRaises(ConnectorError):
+            self.observations.bind("grove.interact", {"action": "store", "target_id": "target",
+                "item_id": "child-1"}, projected["observation_id"], INTERACT_SCHEMA)
+
+    def test_closed_inspection_does_not_turn_hidden_contents_into_empty_world_facts(self):
+        source = {"entity": {"id": "closed", "version": 12, "capabilities": ["container"],
+            "contents_visibility": "hidden", "state": {"open": False, "water": None}},
+            "contents": [], "public_content": None}
+        projected = companion_projection("grove.inspect", source)
+        self.assertEqual(projected["entity"], source["entity"])
+        self.assertEqual(projected["contents"], [])
+        self.assertEqual(projected["contents_projection"]["visible_child_count"], 0)
+        self.assertIsNone(projected["public_content"])
+        self.assertEqual(source["contents"], [])
+
     def test_public_rule_action_preserves_actual_actor_without_guessing_from_author(self):
         page = {"events": [
             {"event_id": "reset", "kind": "rule_action", "actor_role_id": "visitor", "seq": 4,

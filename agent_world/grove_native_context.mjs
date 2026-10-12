@@ -1,332 +1,352 @@
-// OpenCode's native inference hook. Stored messages are never edited here.
-// No model, network, world operation, or third-party dependency is used.
+// Only inference copies and the configured provider's official SDK fetch are managed.
+// Native DB records, original inputs, current user and current tool round stay intact.
 import { createHash, randomBytes } from "node:crypto";
 import { readFile, writeFile, rename, lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-const HOOK = "experimental.chat.messages.transform";
-const VERSION = 1;
+const HOOK = "experimental.chat.messages.transform", VERSION = 2;
 const AGENTS = new Set(["shared-grove", "shared-grove-executor"]);
-const HISTORICAL_SUMMARY_PREFIX = "[Grove历史原生摘要：仅作背景，不证明本轮行动或当前世界状态。"
+const GROVE_AGENTS = new Set([...AGENTS, "shared-grove-blueprint", "compaction"]);
+const SUMMARY_PREFIX = "[Grove历史原生摘要：仅作背景，不证明本轮行动或当前世界状态。"
   + "本轮确认动作只按当前task_action_summary的task_id与coverage判断。原偏好、引用和原文保留如下。]\n";
-const HISTORICAL_TOOL_PREFIX = "[Grove historical completed tool result: ";
-const HISTORICAL_INDEX_PREFIX = "[Grove native historical tool location index]\n";
-const HISTORY_BUDGET_BYTES = 32 * 1024;
-const HISTORY_INDEX_MAX_BYTES = 4096;
-const NATIVE_MESSAGE_ID = /^msg_[A-Za-z0-9]{1,100}$/;
-const NATIVE_PART_ID = /^prt_[A-Za-z0-9]{1,100}$/;
-const COMPACTED_OUTPUT = "[Old tool result content cleared]";
-
+const TOOL_PREFIX = "[Grove historical completed tool result: ";
+const INDEX_PREFIX = "[Grove native historical tool location index]\n";
+const HISTORY_BUDGET = 64 * 1024, REQUEST_BUDGET = 128 * 1024, FIXED_REQUEST_RESERVE = 32 * 1024, INDEX_MAX = 4096;
+const MESSAGE_ID = /^msg_[A-Za-z0-9]{1,100}$/, PART_ID = /^prt_[A-Za-z0-9]{1,100}$/;
+const CLEARED = "[Old tool result content cleared]";
 const bytes = value => Buffer.byteLength(value, "utf8");
+const jsonBytes = value => bytes(JSON.stringify(value) ?? "");
 const inputText = part => JSON.stringify(part.state?.input) ?? "";
-const modelOutput = part => part.state?.status === "completed"
-  ? part.state.time?.compacted ? COMPACTED_OUTPUT : part.state.output ?? ""
+const outputText = part => part.state?.status === "completed"
+  ? part.state.time?.compacted ? CLEARED : part.state.output ?? ""
   : part.state?.status === "error" ? part.state.error ?? "" : "[Tool execution was interrupted]";
-// Count both serialized message envelopes, with input string escaping as used
-// by the active compatible provider, rather than counting the raw bodies alone.
-const pairBytes = part => bytes(JSON.stringify([
-  { role: "assistant", tool_calls: [{ id: part.callID, type: "function",
-    function: { name: part.tool, arguments: inputText(part) } }], metadata: part.metadata },
-  { role: "tool", tool_call_id: part.callID, name: part.tool, content: modelOutput(part),
-    attachments: part.state.time?.compacted ? undefined : part.state.attachments },
-]));
-
+const isSummary = message => message.info.role === "assistant" && message.info.summary === true;
+const validSource = (message, part) => MESSAGE_ID.test(message.info.id) && PART_ID.test(part.id);
+const inputObject = part => part.state?.input && typeof part.state.input === "object" && !Array.isArray(part.state.input);
 function objectOutput(part) {
-  if (typeof part.state?.output !== "string") return null;
   try {
-    const value = JSON.parse(part.state.output);
+    const value = JSON.parse(part.state?.output);
     return value && typeof value === "object" && !Array.isArray(value) ? value : null;
   } catch { return null; }
 }
 
-function readableHistoricalPart(part, message, formalTools) {
-  return part.type === "tool" && formalTools.has(part.tool) && part.state?.status === "completed" &&
-    !message.info.error &&
-    NATIVE_MESSAGE_ID.test(message.info.id) && NATIVE_PART_ID.test(part.id) &&
-    part.state.input && typeof part.state.input === "object" && !Array.isArray(part.state.input) &&
-    objectOutput(part) !== null;
+// A conservative native inference document, not a wire/token estimate. SDK fetch
+// separately counts the actual complete provider JSON (including system/tools).
+function projectionBytes(messages) {
+  const selected = messages.flatMap(message => {
+    const parts = message.parts.filter(part => ["text", "reasoning", "tool", "file"].includes(part.type) &&
+      !(message.info.role === "user" && part.ignored));
+    return parts.length ? [{ role: message.info.role, parts: parts.map(part =>
+      part.type === "tool" && part.state?.time?.compacted ? { ...part,
+        state: { ...part.state, output: CLEARED, attachments: undefined } } : part) }] : [];
+  });
+  return selected.length ? jsonBytes(selected) : 0;
 }
 
 function historicalIndex(part, sessionID) {
-  if (part.type !== "text" || part.synthetic !== true || typeof part.text !== "string" ||
-      !part.text.startsWith(HISTORICAL_INDEX_PREFIX)) return null;
+  if (part.type !== "text" || part.synthetic !== true || typeof part.text !== "string" || !part.text.startsWith(INDEX_PREFIX)) return null;
   try {
-    const index = JSON.parse(part.text.slice(HISTORICAL_INDEX_PREFIX.length));
-    const counters = ["omitted_tool_parts", "omitted_input_bytes", "omitted_output_bytes", "omitted_output_characters"];
-    if (index.scope !== "historical_tool_location_index" || index.historical_only !== true ||
-        index.session_id !== sessionID || counters.some(key => !Number.isSafeInteger(index[key]) || index[key] < 0) ||
-        bytes(part.text) > HISTORY_INDEX_MAX_BYTES ||
-        index.list?.tool !== "native_tool_history" || index.list?.arguments?.mode !== "list") return null;
+    const index = JSON.parse(part.text.slice(INDEX_PREFIX.length));
+    const required = ["omitted_tool_parts", "omitted_input_bytes", "omitted_output_bytes", "omitted_output_characters"];
+    const optional = ["omitted_user_parts", "omitted_summary_parts", "omitted_text_bytes"];
+    if (index.scope !== "historical_tool_location_index" || index.historical_only !== true || index.session_id !== sessionID ||
+        bytes(part.text) > INDEX_MAX || index.list?.tool !== "native_tool_history" || index.list?.arguments?.mode !== "list" ||
+        required.some(key => !Number.isSafeInteger(index[key]) || index[key] < 0) ||
+        optional.some(key => index[key] !== undefined && (!Number.isSafeInteger(index[key]) || index[key] < 0))) return null;
     return index;
   } catch { return null; }
 }
-
-function sourceAnchor(candidate) {
-  const { message, part } = candidate;
-  const source = { message_id: message.info.id, part_id: part.id };
-  // Optional source fields are never shortened or invented. The exact IDs and
-  // native list/read remain sufficient when an unusual field is too large.
-  for (const [key, value] of Object.entries({ tool: part.tool, call_id: part.callID,
-    operation_id: objectOutput(part)?.operation_id })) {
-    if (typeof value === "string" && bytes(value) <= 256) source[key] = value;
+function anchor(item) {
+  const { message, part, kind } = item;
+  const value = { message_id: message.info.id, part_id: part.id, kind };
+  if (kind === "tool") value.native_status = part.state.status;
+  for (const [key, content] of Object.entries({ tool: part.tool, call_id: part.callID,
+    operation_id: part.tool === "invalid" ? undefined : objectOutput(part)?.operation_id })) {
+    if (typeof content === "string" && bytes(content) <= 256) value[key] = content;
   }
-  return source;
+  return value;
 }
-
+function omissionTotals(omitted, existing) {
+  const totals = {};
+  for (const [key, kind, field] of [
+    ["omitted_tool_parts", "tool"], ["omitted_user_parts", "user"], ["omitted_summary_parts", "summary"],
+    ["omitted_input_bytes", null, "inputBytes"], ["omitted_output_bytes", null, "outputBytes"],
+    ["omitted_output_characters", null, "outputCharacters"], ["omitted_text_bytes", null, "textBytes"],
+  ]) totals[key] = (existing?.[key] ?? 0) + omitted.reduce((sum, item) => sum + (kind ? Number(item.kind === kind) : item[field] ?? 0), 0);
+  return totals;
+}
 function locationIndex(sessionID, omitted, existing) {
-  const first = existing?.source_boundary?.first ?? sourceAnchor(omitted[0]);
-  const last = omitted.length ? sourceAnchor(omitted.at(-1)) : existing.source_boundary.last;
+  const first = existing?.source_boundary?.first ?? anchor(omitted[0]);
+  const last = omitted.length ? anchor(omitted.at(-1)) : existing.source_boundary.last;
   const index = { scope: "historical_tool_location_index", historical_only: true, session_id: sessionID,
-    meaning: "Source locations only, not original result bodies, current state or evidence of this task's execution. Recover the selected recorded input/output through native_tool_history; use current world tools before acting.",
-    omitted_tool_parts: (existing?.omitted_tool_parts ?? 0) + omitted.length,
-    omitted_input_bytes: (existing?.omitted_input_bytes ?? 0) + omitted.reduce((sum, item) => sum + item.inputBytes, 0),
-    omitted_output_bytes: (existing?.omitted_output_bytes ?? 0) + omitted.reduce((sum, item) => sum + item.outputBytes, 0),
-    omitted_output_characters: (existing?.omitted_output_characters ?? 0) + omitted.reduce((sum, item) => sum + item.outputCharacters, 0),
-    source_boundary: { first, last },
-    list: { tool: "native_tool_history", arguments: { mode: "list" } },
-    read: { tool: "native_tool_history", arguments: { mode: "read", message_id: last.message_id, part_id: last.part_id } },
-    input_read: { tool: "native_tool_history", arguments: { mode: "read", message_id: last.message_id,
-      part_id: last.part_id, section: "input" } } };
-  const text = HISTORICAL_INDEX_PREFIX + JSON.stringify(index);
-  if (bytes(text) > HISTORY_INDEX_MAX_BYTES) throw new Error("Native historical location index exceeds budget");
+    meaning: "Source locations only, not original result bodies, current state or evidence of this task's execution. Native tool status is delivery status, not a world outcome. Recover recorded formal inputs or original user/summary text through native_tool_history; invalid parts expose metadata only, and unsafe raw outputs/errors may be unavailable. Read current world facts before acting.",
+    source_boundary: { first, last }, list: { tool: "native_tool_history", arguments: { mode: "list", kind: "all" } } };
+  Object.assign(index, omissionTotals(omitted, existing));
+  const read = { mode: "read", message_id: last.message_id, part_id: last.part_id };
+  if (last.tool !== "invalid") {
+    index.read = { tool: "native_tool_history", arguments: { ...read, ...(last.kind && last.kind !== "tool" ? { section: "text" } : {}) } };
+    if (!last.kind || last.kind === "tool") index.input_read = { tool: "native_tool_history", arguments: { ...read, section: "input" } };
+  }
+  const text = INDEX_PREFIX + JSON.stringify(index);
+  if (bytes(text) > INDEX_MAX) throw new Error("Native history source index exceeds its budget");
   return { index, text };
 }
-
 async function writeDiagnostic(path, value) {
-  try {
-    if ((await lstat(path)).isSymbolicLink()) throw new Error("Linked context diagnostic");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
+  try { if ((await lstat(path)).isSymbolicLink()) throw new Error("Linked context diagnostic"); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
   const temporary = `${path}.${randomBytes(8).toString("hex")}.tmp`;
   await writeFile(temporary, JSON.stringify(value), { mode: 0o600, flag: "wx" });
   await rename(temporary, path);
 }
-
-// Retained history keeps the complete input/result and all authored references.
-// The marker changes only the model copy; it does not confer observation authority.
-function historicalOutput(part, messageID, sessionID, formalTools) {
-  if (!formalTools.has(part.tool) || part.state?.status !== "completed" ||
-      part.state.time?.compacted || typeof part.state.output !== "string") return null;
+function historicalOutput(part, messageID, sessionID, tools) {
+  if (!tools.has(part.tool) || part.state?.status !== "completed" || part.state.time?.compacted || typeof part.state.output !== "string") return part;
   const original = { session_id: sessionID, message_id: messageID, part_id: part.id };
   const historical = { historical_only: true,
     meaning: "Historical result, not current state. Only current task_action_summary with matching task_id and coverage establishes this task's actions.",
-    original,
-    read: { tool: "native_tool_history", arguments: {
-      mode: "read", message_id: messageID, part_id: part.id } } };
-  let output;
-  try { output = JSON.parse(part.state.output); } catch { /* Preserve a non-JSON body verbatim below its marker. */ }
-  if (!output || typeof output !== "object" || Array.isArray(output)) {
-    if (part.state.output.startsWith(HISTORICAL_TOOL_PREFIX)) return { output: part.state.output, reduced: false };
-    return { output: `${HISTORICAL_TOOL_PREFIX}${JSON.stringify({ ...historical,
-      scope: "historical_unstructured_tool_result", original_body_follows_unchanged: true })}]\n${part.state.output}`,
-      reduced: false };
-  }
-  const previous = output.native_context_projection;
-  if (previous?.historical_only === true && previous.original?.session_id === sessionID &&
-      previous.original?.message_id === messageID && previous.original?.part_id === part.id &&
-      ["historical_tool_result", "historical_tool_result_without_later_scene"].includes(previous.scope)) {
-    return { output: part.state.output };
-  }
-  output.native_context_projection = {
-    ...historical,
-    scope: "historical_tool_result", omitted_sections: [],
-  };
-  return { output: JSON.stringify(output) };
+    original, read: { tool: "native_tool_history", arguments: { mode: "read", message_id: messageID, part_id: part.id } } };
+  const value = objectOutput(part);
+  if (!value) return part.state.output.startsWith(TOOL_PREFIX) ? part : { ...part,
+    state: { ...part.state, output: `${TOOL_PREFIX}${JSON.stringify({ ...historical,
+      scope: "historical_unstructured_tool_result", original_body_follows_unchanged: true })}]\n${part.state.output}` } };
+  const previous = value.native_context_projection;
+  if (previous?.historical_only === true && previous.original?.session_id === sessionID && previous.original?.message_id === messageID &&
+      previous.original?.part_id === part.id && ["historical_tool_result", "historical_tool_result_without_later_scene"].includes(previous.scope)) return part;
+  value.native_context_projection = { ...historical, scope: "historical_tool_result", omitted_sections: [] };
+  return { ...part, state: { ...part.state, output: JSON.stringify(value) } };
 }
 
 export default async function GroveNativeContext(_input, options = {}) {
-  const source = await readFile(fileURLToPath(import.meta.url));
-  const sourceSha = createHash("sha256").update(source).digest("hex");
-  if (options.version !== VERSION || sourceSha !== options.source_sha256 ||
-      typeof options.nonce !== "string" || !/^[a-f0-9]{32}$/.test(options.nonce) ||
-      typeof options.role_id !== "string" || !options.role_id ||
-      typeof options.session_id !== "string" || !Array.isArray(options.machine_context_prefixes) ||
-      options.machine_context_prefixes.some(prefix => typeof prefix !== "string" || !prefix) ||
+  const sourceSha = createHash("sha256").update(await readFile(fileURLToPath(import.meta.url))).digest("hex");
+  if (options.version !== VERSION || sourceSha !== options.source_sha256 || typeof options.nonce !== "string" || !/^[a-f0-9]{32}$/.test(options.nonce) ||
+      typeof options.role_id !== "string" || !options.role_id || typeof options.session_id !== "string" ||
+      typeof options.model !== "string" || !/^[^/]+\/.+$/.test(options.model) ||
+      !Array.isArray(options.machine_context_prefixes) || options.machine_context_prefixes.some(prefix => typeof prefix !== "string" || !prefix) ||
       typeof options.diagnostic_path !== "string" || !options.diagnostic_path.startsWith("/") ||
-      !Array.isArray(options.formal_tools) || options.formal_tools.some(name => typeof name !== "string")) {
-    throw new Error("Invalid managed Grove context hook");
-  }
-  const formalTools = new Set(options.formal_tools);
-  const proof = { version: VERSION, status: "loaded", hook: HOOK,
-    source_sha256: sourceSha, nonce: options.nonce, role_id: options.role_id,
-    process_id: process.pid, loaded_at_ms: Date.now() };
-  await writeDiagnostic(options.diagnostic_path, proof);
+      !Array.isArray(options.formal_tools) || options.formal_tools.some(tool => typeof tool !== "string")) throw new Error("Invalid managed Grove context hook");
+  const slash = options.model.indexOf("/"), providerID = options.model.slice(0, slash), modelID = options.model.slice(slash + 1);
+  const tools = new Set([...options.formal_tools, "invalid"]);
+  const historyAvailable = tools.has("grove_world_native_tool_history") || tools.has("native_tool_history");
+  const runtime = process.env.OPENCODE_EXPERIMENTAL_NATIVE_LLM;
+  if (runtime !== undefined && !["false", "0", "no", "off"].includes(runtime.toLowerCase())) throw new Error("Grove SDK guard does not admit the native LLM runtime");
+  const proof = { version: VERSION, status: "loaded", hook: HOOK, source_sha256: sourceSha, nonce: options.nonce,
+    role_id: options.role_id, process_id: process.pid, loaded_at_ms: Date.now() };
+  let projection = null, request = null, sequence = 0, ownedFetch = null;
+  let guard = { status: "not_installed", runtime: "ai_sdk", provider_id: providerID, model_id: modelID,
+    historical_message_budget_bytes: HISTORY_BUDGET, request_budget_bytes: REQUEST_BUDGET, native_llm_allowed: false,
+    attempt_count: 0, sent_count: 0, blocked_count: 0 };
+  let queue = Promise.resolve();
+  const diagnostic = () => {
+    const value = { ...proof, sdk_guard: { ...guard }, ...(projection ? { projection: { ...projection } } : {}) };
+    queue = queue.then(() => writeDiagnostic(options.diagnostic_path, value)); return queue;
+  };
+  await diagnostic();
   return {
+    config: async config => {
+      if (config.model !== options.model) throw new Error("Grove SDK guard model configuration mismatch");
+      const provider = (config.provider ??= {})[providerID] ??= {};
+      const providerOptions = provider.options ??= {};
+      if (ownedFetch && providerOptions.fetch === ownedFetch) { await diagnostic(); return; }
+      const delegate = providerOptions.fetch ?? globalThis.fetch;
+      if (typeof delegate !== "function") throw new Error("Grove SDK guard fetch unavailable");
+      providerOptions.fetch = async (url, init) => {
+        if (!request || !GROVE_AGENTS.has(request.agent)) throw new Error("Grove SDK guard request association unavailable");
+        guard = { ...guard, ...request, observed_at_ms: Date.now(), attempt_count: guard.attempt_count + 1 };
+        let body;
+        try { body = typeof init?.body === "string" ? JSON.parse(init.body) : null; } catch { body = null; }
+        const supported = body && typeof body === "object" && Array.isArray(body.messages) && (init?.method ?? "POST").toUpperCase() === "POST";
+        guard = { ...guard, body_bytes: typeof init?.body === "string" ? bytes(init.body) : 0,
+          body_sha256: typeof init?.body === "string" ? createHash("sha256").update(init.body).digest("hex") : "",
+          system_bytes: supported ? jsonBytes(body.system) : 0, messages_bytes: supported ? jsonBytes(body.messages) : 0,
+          tools_bytes: supported ? jsonBytes(body.tools) : 0 };
+        const matched = AGENTS.has(request.agent) && projection?.agent === request.agent &&
+          projection.session_id === request.session_id && projection.current_request_message_id === request.current_request_message_id;
+        const projectionUnavailable = AGENTS.has(request.agent) && !matched;
+        const recoveryUnavailable = matched && projection.history_recovery_unavailable_parts > 0;
+        const sourceUnavailable = matched && projection.history_index_unavailable_parts > 0;
+        const historyOver = matched && projection.historical_tool_history_bytes_after > HISTORY_BUDGET;
+        const rejected = !supported || projectionUnavailable || recoveryUnavailable || sourceUnavailable || historyOver || guard.body_bytes > REQUEST_BUDGET;
+        guard = { ...guard, status: rejected ? "blocked" : "sent", rejection: !supported ? "unsupported_sdk_json" :
+          projectionUnavailable ? "managed_projection_unavailable" : recoveryUnavailable ? "history_recovery_unavailable" :
+          sourceUnavailable ? "history_source_index_unavailable" :
+          historyOver ? "historical_messages_over_budget" :
+          guard.body_bytes > REQUEST_BUDGET ? "provider_json_over_budget" : null,
+          blocked_count: guard.blocked_count + Number(rejected), sent_count: guard.sent_count + Number(!rejected) };
+        await diagnostic();
+        if (rejected) return new Response(JSON.stringify({ type: "error", error: { type: "grove_context_budget_exceeded",
+          message: "GroveContextBudgetExceeded: 原会话上下文超过字节预算或SDK格式无法核验；原记录和已确认行动保留，未发送本次Provider请求。" } }),
+          // Native classifies every 413 as context overflow and may compact.
+          // 422 is a nonretryable policy refusal with no overflow fallback.
+          { status: 422, headers: { "content-type": "application/json" } });
+        return delegate(url, init);
+      };
+      ownedFetch = providerOptions.fetch;
+      guard = { ...guard, status: "installed", installed_at_ms: Date.now() }; await diagnostic();
+    },
+    "chat.headers": async input => {
+      request = input.model?.providerID === providerID && input.model?.id === modelID && GROVE_AGENTS.has(input.agent) &&
+        typeof input.sessionID === "string" && typeof input.message?.id === "string" ? {
+          agent: input.agent, session_id: input.sessionID,
+          current_request_message_id: input.message.id, request_sequence: ++sequence } : null;
+    },
     [HOOK]: async (_hookInput, output) => {
       const messages = output.messages;
       if (!Array.isArray(messages)) throw new Error("Invalid native messages");
       const current = messages.findLast(message => message?.info?.role === "user");
-      if (!current || !AGENTS.has(current.info.agent) ||
-          current.parts.some(part => part.type === "compaction")) return;
+      if (!current || !AGENTS.has(current.info.agent) || current.parts.some(part => part.type === "compaction")) return;
       const sessionID = current.info.sessionID;
-      if (typeof sessionID !== "string" || typeof current.info.id !== "string" ||
-          (options.session_id && sessionID !== options.session_id) ||
-          messages.some(message => message?.info?.sessionID !== sessionID ||
-            !Array.isArray(message.parts) || message.parts.some(part =>
-              part.sessionID !== sessionID || part.messageID !== message.info.id))) {
-        throw new Error("Mixed native session in Grove context hook");
-      }
+      if (typeof sessionID !== "string" || typeof current.info.id !== "string" || (options.session_id && sessionID !== options.session_id) ||
+          messages.some(message => message?.info?.sessionID !== sessionID || !Array.isArray(message.parts) ||
+            message.parts.some(part => part.sessionID !== sessionID || part.messageID !== message.info.id))) throw new Error("Mixed native session in Grove context hook");
       const currentPosition = messages.indexOf(current);
       const isCurrent = (message, position) => position >= currentPosition || message.info.parentID === current.info.id;
-      const isSummary = message => message.info.summary === true &&
-        (message.info.agent === "compaction" || message.info.mode === "compaction");
-      const candidates = [], candidateParts = new Map();
-      let existingIndex = null;
+      const historicalBytes = projected => projectionBytes(projected.filter((message, position) => !isCurrent(message, position)));
+      const protectedBytes = projectionBytes(messages.filter((message, position) => isCurrent(message, position)));
+      // The complete current request is protected. Only the old source pool is
+      // bounded here; the SDK separately enforces the actual whole-request cap.
+      const historyAllowance = Math.min(HISTORY_BUDGET, Math.max(0, REQUEST_BUDGET - FIXED_REQUEST_RESERVE - protectedBytes));
+      const candidates = [], byPart = new Map(), base = new Map();
+      let existing = null, proseParts = 0, proseCharacters = 0, snapshotParts = 0, snapshotCharacters = 0;
       for (const [position, message] of messages.entries()) {
-        if (message.info.role !== "assistant" || isCurrent(message, position) || isSummary(message)) continue;
-        for (const part of message.parts) {
-          const index = historicalIndex(part, sessionID);
-          if (index && !message.info.error) {
-            if (existingIndex) throw new Error("Multiple native historical location indexes");
-            existingIndex = { message, part, index };
-          } else if (readableHistoricalPart(part, message, formalTools)) {
-            const historical = historicalOutput(part, message.info.id, sessionID, formalTools);
-            const projected = historical ? { ...part, state: { ...part.state, output: historical.output } } : part;
-            const candidate = { message, part, projected, marked: historical !== null,
-              inputBytes: bytes(inputText(part)), outputBytes: bytes(modelOutput(part)),
-              outputCharacters: modelOutput(part).length, pairBytes: pairBytes(projected) };
-            candidates.push(candidate);
-            candidateParts.set(part, candidate);
-          }
-        }
-      }
-      const retainedCandidates = new Set();
-      let retainedPairBytes = 0;
-      const existingIndexBytes = existingIndex ? bytes(existingIndex.part.text) : 0;
-      const allPairBytes = candidates.reduce((sum, item) => sum + item.pairBytes, 0);
-      const overflow = allPairBytes + existingIndexBytes > HISTORY_BUDGET_BYTES;
-      const allowance = HISTORY_BUDGET_BYTES - (overflow ? HISTORY_INDEX_MAX_BYTES : existingIndexBytes);
-      // Keep a contiguous recent suffix of complete native parts. One native
-      // tool part becomes BOTH the SDK call and result; never shorten its input
-      // or remove just one side of that pair. A single oversized pair is indexed.
-      for (let position = candidates.length - 1; position >= 0; position -= 1) {
-        const candidate = candidates[position];
-        if (retainedPairBytes + candidate.pairBytes > allowance) break;
-        retainedCandidates.add(candidate);
-        retainedPairBytes += candidate.pairBytes;
-      }
-      const omitted = candidates.filter(candidate => !retainedCandidates.has(candidate));
-      const indexProjection = omitted.length
-        ? locationIndex(sessionID, omitted, existingIndex?.index)
-        : existingIndex ? { index: existingIndex.index, text: existingIndex.part.text } : null;
-      const indexPart = indexProjection ? { id: existingIndex?.part.id ?? omitted[0].part.id,
-        sessionID, messageID: existingIndex?.message.info.id ?? omitted[0].message.info.id,
-        type: "text", synthetic: true, text: indexProjection.text } : null;
-      let proseParts = 0, proseCharacters = 0;
-      let historicalTools = 0, historicalSummaries = 0;
-      let snapshotParts = 0, snapshotCharacters = 0;
-      let unfoldableParts = 0, unfoldableInputBytes = 0, unfoldableOutputBytes = 0;
-      let currentToolParts = 0, currentInputBytes = 0, currentOutputBytes = 0;
-      for (const [position, message] of messages.entries()) {
-        if (isCurrent(message, position)) {
-          for (const part of message.parts) {
-            if (part.type !== "tool") continue;
-            currentToolParts += 1;
-            currentInputBytes += bytes(inputText(part));
-            currentOutputBytes += bytes(modelOutput(part));
-          }
-          continue;
-        }
-        if (message.info.role === "user" && message.info.id !== current.info.id &&
-            AGENTS.has(message.info.agent)) {
-          message.parts = message.parts.filter(part => {
-            const machine = part.type === "text" && typeof part.text === "string" &&
-              options.machine_context_prefixes.some(prefix => part.text.startsWith(`${prefix}\n`));
-            if (machine && !part.ignored) {
-              snapshotParts += 1;
-              snapshotCharacters += part.text.length;
-            }
-            return !machine;
-          });
-        }
-        if (message.info.role !== "assistant") continue;
-        // Native compaction is identified by native metadata, not by guessing
-        // whether its prose is a summary. Keep its mixed memory in full.
-        const nativeSummary = isSummary(message);
+        if (isCurrent(message, position)) { base.set(message, message.parts); continue; }
         const retained = [];
         for (const part of message.parts) {
-          if (part === existingIndex?.part) {
-            retained.push(omitted.length ? indexPart : part);
-            continue;
+          const index = historicalIndex(part, sessionID);
+          if (index && !message.info.error) { if (existing) throw new Error("Multiple native historical location indexes"); existing = { message, part, index }; continue; }
+          const machine = message.info.role === "user" && part.type === "text" && typeof part.text === "string" &&
+            options.machine_context_prefixes.some(prefix => part.text.startsWith(`${prefix}\n`));
+          if (machine || (message.info.role === "user" && part.ignored)) {
+            if (machine && !part.ignored) { snapshotParts++; snapshotCharacters += part.text.length; } continue;
           }
-          if (nativeSummary && part.type === "text" && typeof part.text === "string") {
-            historicalSummaries += 1;
-            retained.push(part.text.startsWith(HISTORICAL_SUMMARY_PREFIX) ? part :
-              { ...part, text: HISTORICAL_SUMMARY_PREFIX + part.text });
-            continue;
+          let kind = null, projected = part;
+          if (validSource(message, part)) {
+            if (message.info.role === "assistant" && part.type === "tool" && tools.has(part.tool) &&
+                ["completed", "error"].includes(part.state?.status) && (part.tool === "invalid" || inputObject(part))) {
+              kind = "tool"; projected = part.tool === "invalid" || !historyAvailable ? part : historicalOutput(part, message.info.id, sessionID, tools);
+            } else if (part.type === "text" && typeof part.text === "string" && !part.synthetic && (message.info.role === "user" || isSummary(message))) {
+              kind = message.info.role === "user" ? "user" : "summary";
+              if (kind === "summary" && !part.text.startsWith(SUMMARY_PREFIX)) projected = { ...part, text: SUMMARY_PREFIX + part.text };
+            }
           }
-          if (AGENTS.has(message.info.agent) && (part.type === "text" || part.type === "reasoning")) {
-            proseParts += 1;
-            proseCharacters += typeof part.text === "string" ? part.text.length : 0;
-            continue;
+          if (kind) {
+            const item = { message, part, projected, kind, inputBytes: kind === "tool" ? bytes(inputText(part)) : 0,
+              outputBytes: kind === "tool" ? bytes(outputText(part)) : 0, outputCharacters: kind === "tool" ? outputText(part).length : 0,
+              textBytes: kind === "tool" ? 0 : bytes(part.text) };
+            candidates.push(item); byPart.set(part, item); continue;
           }
-          const candidate = candidateParts.get(part);
-          if (candidate) {
-            if (retainedCandidates.has(candidate)) {
-              retained.push(candidate.projected);
-              if (candidate.marked) historicalTools += 1;
-            } else if (!existingIndex && candidate === omitted[0]) retained.push(indexPart);
-            continue;
+          if (!isSummary(message) && AGENTS.has(message.info.agent) && ["text", "reasoning"].includes(part.type)) {
+            proseParts++; proseCharacters += typeof part.text === "string" ? part.text.length : 0; continue;
           }
-          const historical = part.type === "tool"
-            ? historicalOutput(part, message.info.id, sessionID, formalTools) : null;
-          if (part.type === "tool" && formalTools.has(part.tool)) {
-            unfoldableParts += 1;
-            unfoldableInputBytes += bytes(inputText(part));
-            unfoldableOutputBytes += bytes(modelOutput(historical
-              ? { ...part, state: { ...part.state, output: historical.output } } : part));
-          }
-          if (historical !== null) {
-            historicalTools += 1;
-            // The host loaded these messages from storage into this inference.
-            // Replace only the model copy. The persisted state/input is intact.
-            retained.push({ ...part, state: { ...part.state, output: historical.output } });
-          } else retained.push(part);
+          retained.push(part);
         }
-        message.parts = retained;
+        base.set(message, retained);
       }
-      const kept = [...retainedCandidates];
-      const indexBytes = indexProjection ? bytes(indexProjection.text) : 0;
-      const omittedStats = indexProjection?.index;
-      const retainedInputBytes = kept.reduce((sum, item) => sum + item.inputBytes, 0);
-      const retainedOutputBytes = kept.reduce((sum, item) => sum + bytes(modelOutput(item.projected)), 0);
-      await writeDiagnostic(options.diagnostic_path, { ...proof,
-        projection: { session_id: sessionID, current_request_message_id: current.info.id,
-          observed_at_ms: Date.now(), omitted_assistant_parts: proseParts,
-          omitted_assistant_characters: proseCharacters, reduced_tool_parts: omittedStats?.omitted_tool_parts ?? 0,
-          historically_marked_tool_parts: historicalTools,
-          marked_native_summary_parts: historicalSummaries,
-          omitted_machine_snapshot_parts: snapshotParts,
-          omitted_machine_snapshot_characters: snapshotCharacters,
-          historical_tool_characters_before: candidates.reduce((sum, item) => sum + item.outputCharacters, 0) +
-            (existingIndex?.index.omitted_output_characters ?? 0),
-          historical_tool_characters_after: kept.reduce((sum, item) => sum + modelOutput(item.projected).length, 0),
-          historical_tool_history_budget_bytes: HISTORY_BUDGET_BYTES,
-          retained_historical_tool_parts: kept.length,
-          omitted_historical_tool_parts: omittedStats?.omitted_tool_parts ?? 0,
-          historical_tool_input_bytes_before: candidates.reduce((sum, item) => sum + item.inputBytes, 0) +
-            (existingIndex?.index.omitted_input_bytes ?? 0),
-          historical_tool_input_bytes_after: retainedInputBytes,
-          historical_tool_output_bytes_before: candidates.reduce((sum, item) => sum + item.outputBytes, 0) +
-            (existingIndex?.index.omitted_output_bytes ?? 0),
-          historical_tool_output_bytes_after: retainedOutputBytes,
-          omitted_historical_tool_input_bytes: omittedStats?.omitted_input_bytes ?? 0,
-          omitted_historical_tool_output_bytes: omittedStats?.omitted_output_bytes ?? 0,
-          historical_tool_index_bytes: indexBytes,
-          retained_historical_tool_pair_bytes: retainedPairBytes,
-          historical_tool_history_bytes_after: retainedPairBytes + indexBytes,
-          unfoldable_historical_tool_parts: unfoldableParts,
-          unfoldable_historical_tool_input_bytes: unfoldableInputBytes,
-          unfoldable_historical_tool_output_bytes: unfoldableOutputBytes,
-          current_tool_parts: currentToolParts,
-          current_tool_input_bytes: currentInputBytes,
-          current_tool_output_bytes: currentOutputBytes,
-          budget_scope: "readable_completed_formal_tool_pairs_only",
-          byte_unit: "utf8",
-          output_byte_meaning: "Native model-copy output strings; native-compacted outputs count their host placeholder, not the stored original body. Pair budget also counts serialized tool/call/input/output overhead. This is not provider token usage or a total context limit.",
-          character_unit: "utf16_code_units",
-          stored_originals_changed: false } });
+      // Native invalid embeds arbitrary validation text in input.error; only its
+      // source metadata is exposed, never a trusted recoverable formal input.
+      const kept = new Set(candidates.filter(item => item.part.tool !== "invalid"));
+      // Native drops some error assistant messages. Never put the only source
+      // entrance there, even when their recorded structured inputs are readable.
+      const safeOwner = (message, position) => !isCurrent(message, position) && !message.info.error &&
+        !isSummary(message) && ["assistant", "user"].includes(message.info.role) && MESSAGE_ID.test(message.info.id);
+      const indexOwner = (existing && safeOwner(existing.message, messages.indexOf(existing.message)) ? existing.message : null) ?? messages.find((message, position) =>
+        message.info.role === "assistant" && safeOwner(message, position)) ?? messages.find(safeOwner);
+      const indexPartID = existing?.part.id ?? `prt_grovehistory${createHash("sha256").update(sessionID).digest("hex").slice(0, 24)}`;
+      if (!indexOwner || !historyAvailable) for (const item of candidates) kept.add(item);
+      const assemble = index => {
+        return messages.map((message, position) => {
+          if (isCurrent(message, position)) return message;
+          const parts = [];
+          for (const part of message.parts) {
+            if (part === existing?.part) continue;
+            const item = byPart.get(part);
+            if (item) {
+              if (kept.has(item)) parts.push(item.projected);
+            } else if (base.get(message).includes(part)) parts.push(part);
+          }
+          if (index && message === indexOwner) parts.unshift({ id: indexPartID, messageID: message.info.id,
+            sessionID, type: "text", synthetic: true, text: index.text });
+          return { ...message, parts };
+        });
+      };
+      let omitted = candidates.filter(item => !kept.has(item));
+      let index = !historyAvailable ? null : omitted.length ? locationIndex(sessionID, omitted, existing?.index) :
+        existing ? { index: existing.index, text: existing.part.text } : null;
+      let projected = assemble(index);
+      const needsReduction = historicalBytes(projected) > historyAllowance && kept.size > 0;
+      if (needsReduction && indexOwner && historyAvailable) {
+        kept.clear();
+        // Each independent envelope conservatively includes its role overhead.
+        // Reserve the full index envelope once, avoiding quadratic serialization
+        // of the session while choosing a complete recent source suffix.
+        const allowance = Math.max(0, historyAllowance - historicalBytes(assemble(null)) - INDEX_MAX - 512);
+        let retainedBytes = 0;
+        for (let position = candidates.length - 1; position >= 0; position--) {
+          const item = candidates[position];
+          if (item.part.tool === "invalid") continue;
+          const cost = projectionBytes([{ info: item.message.info, parts: [item.projected] }]);
+          if (retainedBytes + cost > allowance) break;
+          kept.add(item); retainedBytes += cost;
+        }
+        omitted = candidates.filter(item => !kept.has(item));
+        index = omitted.length ? locationIndex(sessionID, omitted, existing?.index) :
+          existing ? { index: existing.index, text: existing.part.text } : null;
+        projected = assemble(index);
+      }
+      let budgetOmitted = [];
+      if (historicalBytes(projected) > historyAllowance && historyAvailable) {
+        // The formal history tool already exposes same-session mode=list. When
+        // even an index or unsupported old envelope cannot fit, omit all old
+        // inference parts rather than adding another placeholder. Native skips
+        // empty parts; removing each whole tool part removes call/result together.
+        budgetOmitted = projected.flatMap((message, position) => isCurrent(message, position) ? [] : message.parts);
+        kept.clear(); omitted = [...candidates]; index = null;
+        projected = projected.map((message, position) => isCurrent(message, position) ? message : { ...message, parts: [] });
+      }
+      const selected = candidates.filter(item => kept.has(item)), toolsKept = selected.filter(item => item.kind === "tool");
+      const unfoldable = projected.flatMap((message, position) => isCurrent(message, position) ? [] :
+        message.parts.filter(part => part.type === "tool" && !toolsKept.some(item => item.projected === part)));
+      const currentTools = messages.flatMap((message, position) => isCurrent(message, position) ? message.parts.filter(part => part.type === "tool") : []);
+      const total = (items, field) => items.reduce((sum, item) => sum + item[field], 0), idx = omissionTotals(omitted, existing?.index);
+      const budgetOmittedTools = budgetOmitted.filter(part => part.type === "tool");
+      const recoveryUnavailable = !historyAvailable && (existing || historicalBytes(projected) > historyAllowance);
+      projection = { session_id: sessionID, agent: current.info.agent, current_request_message_id: current.info.id, observed_at_ms: Date.now(),
+        omitted_assistant_parts: proseParts, omitted_assistant_characters: proseCharacters,
+        omitted_machine_snapshot_parts: snapshotParts, omitted_machine_snapshot_characters: snapshotCharacters,
+        reduced_tool_parts: idx?.omitted_tool_parts ?? 0, historically_marked_tool_parts: toolsKept.filter(item => item.projected !== item.part).length,
+        marked_native_summary_parts: selected.filter(item => item.kind === "summary").length,
+        historical_tool_characters_before: total(candidates, "outputCharacters") + (existing?.index.omitted_output_characters ?? 0),
+        historical_tool_characters_after: toolsKept.reduce((sum, item) => sum + outputText(item.projected).length, 0),
+        historical_tool_history_budget_bytes: HISTORY_BUDGET, retained_historical_tool_parts: toolsKept.length,
+        omitted_historical_tool_parts: idx?.omitted_tool_parts ?? 0, historical_tool_input_bytes_before: total(candidates, "inputBytes") + (existing?.index.omitted_input_bytes ?? 0),
+        historical_tool_input_bytes_after: total(toolsKept, "inputBytes"), historical_tool_output_bytes_before: total(candidates, "outputBytes") + (existing?.index.omitted_output_bytes ?? 0),
+        historical_tool_output_bytes_after: toolsKept.reduce((sum, item) => sum + bytes(outputText(item.projected)), 0),
+        omitted_historical_tool_input_bytes: idx?.omitted_input_bytes ?? 0, omitted_historical_tool_output_bytes: idx?.omitted_output_bytes ?? 0,
+        historical_tool_index_bytes: index && indexOwner ? bytes(index.text) : 0, retained_historical_tool_pair_bytes: toolsKept.reduce((sum, item) =>
+          sum + projectionBytes([{ info: item.message.info, parts: [item.projected] }]), 0),
+        historical_tool_history_bytes_after: historicalBytes(projected),
+        history_source_index_sent: Boolean(index && indexOwner), history_all_old_parts_omitted: budgetOmitted.length > 0,
+        history_recovery_tool_available: historyAvailable,
+        budget_omitted_historical_parts: budgetOmitted.length, budget_omitted_historical_tool_parts: budgetOmittedTools.length,
+        budget_omitted_unsupported_historical_tool_parts: budgetOmittedTools.filter(part => !tools.has(part.tool) ||
+          part.tool === "invalid" || !["completed", "error"].includes(part.state?.status) || !inputObject(part)).length,
+        history_recovery_unavailable_parts: recoveryUnavailable ? Math.max(1, projected.reduce((sum, message, position) =>
+          sum + (isCurrent(message, position) ? 0 : message.parts.length), 0)) : 0,
+        unfoldable_historical_tool_parts: unfoldable.length, unfoldable_historical_tool_input_bytes: unfoldable.reduce((sum, part) => sum + bytes(inputText(part)), 0),
+        unfoldable_historical_tool_output_bytes: unfoldable.reduce((sum, part) => sum + bytes(outputText(part)), 0),
+        current_tool_parts: currentTools.length, current_tool_input_bytes: currentTools.reduce((sum, part) => sum + bytes(inputText(part)), 0),
+        current_tool_output_bytes: currentTools.reduce((sum, part) => sum + bytes(outputText(part)), 0),
+        historical_message_budget_bytes: HISTORY_BUDGET, historical_message_allowance_bytes: historyAllowance,
+        fixed_request_reserve_bytes: FIXED_REQUEST_RESERVE, managed_message_bytes_after: projectionBytes(projected),
+        protected_message_bytes: protectedBytes,
+        retained_historical_user_parts: selected.filter(item => item.kind === "user").length, retained_historical_summary_parts: selected.filter(item => item.kind === "summary").length,
+        omitted_historical_user_parts: idx?.omitted_user_parts ?? 0, omitted_historical_summary_parts: idx?.omitted_summary_parts ?? 0,
+        omitted_historical_text_bytes: idx?.omitted_text_bytes ?? 0,
+        history_index_unavailable_parts: !indexOwner && budgetOmitted.length === 0 ? historicalBytes(projected) > HISTORY_BUDGET ? candidates.length :
+          candidates.filter(item => item.part.tool === "invalid").length : 0,
+        budget_scope: "historical_native_inference_projection", byte_unit: "utf8", character_unit: "utf16_code_units",
+        output_byte_meaning: "Compacted outputs count their native placeholder. With a declared history entrance, the old pool including an optional source index fits the adaptive allowance up to 64KiB; complete current messages are protected. If no old parts fit, native_tool_history mode=list remains the on-demand entrance. A missing entrance keeps the sources and refuses an unmet allowance. Unsupported old tools remain only in original storage; their bodies are not promised readable through that API. Managed message bytes are an observed native projection, not a total hard limit or provider token count. SDK guard alone measures and caps the actual complete provider JSON at 128KiB.",
+        stored_originals_changed: false };
+      // The native loop uses this same array reference after the hook returns.
+      messages.splice(0, messages.length, ...projected); await diagnostic();
     },
   };
 }

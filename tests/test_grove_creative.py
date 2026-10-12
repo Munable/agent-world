@@ -473,7 +473,9 @@ class CreativeWorldTests(unittest.TestCase):
         role = world.create_role("returning")["role_id"]
         world.call_function("w", "grove.join", role, {"name": "returning"}, operation_id="clock-join")
         self.time.return_value += 1
-        self.assertEqual(world.run_due_timers("w")["count"], 1)
+        work = world.run_due_timers("w")["processed"]
+        self.assertEqual(sum(item.get("checkpoint_key") == "grove.frame" for item in work), 1)
+        self.assertEqual({item.get("checkpoint_key") for item in work}, {"grove.frame", "grove.public_works.build"})
         clock = world.get_state("w", m.META, "clock")["value"]
         old_generation = world.get_checkpoint("w", "grove.frame")["generation"]
         player = world.get_state("w", m.PLAYERS, role)

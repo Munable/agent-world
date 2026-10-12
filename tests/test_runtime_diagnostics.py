@@ -29,6 +29,10 @@ class WorkDiagnosticsTests(unittest.TestCase):
         snapshot["phases"]["handler"]["count"] = 0
         self.assertEqual(len(timings.snapshot(4)["recent"]), 4)
         self.assertEqual(timings.snapshot(4)["phases"]["handler"]["count"], 10)
+        self.assertEqual(snapshot["kinds"]["checkpoint"]["count"], 10)
+        self.assertEqual(snapshot["kinds"]["checkpoint"]["phases"]["handler"]["count"], 10)
+        snapshot["kinds"]["checkpoint"]["count"] = 0
+        self.assertEqual(timings.snapshot(4)["kinds"]["checkpoint"]["count"], 10)
 
     def test_failure_and_slow_log_record_no_exception_detail(self):
         timings = WorkDiagnostics()

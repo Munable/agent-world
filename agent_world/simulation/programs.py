@@ -14,6 +14,7 @@ import re
 from .registry import MaterialDef
 from .facts import FACT_TYPES, PHYSICAL_TYPES, FactUnavailable, reference_value
 from .declarations import has_event
+from .presentation import compile_presentation
 
 MAX_EXPRESSION_DEPTH = 8
 MAX_EXPRESSION_NODES = 64
@@ -48,7 +49,7 @@ MECHANICAL_RANGES = {
 PROGRAM_KEYS = ("key", "name", "version", "materials", "material_imports", "types", "contact_reactions")
 PROGRAM_REQUIRED_KEYS = ("key", "name", "version", "types")
 TYPE_KEYS = ("name", "body_material", "cost", "cost_u", "components", "ports", "fields",
-             "exports", "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions")
+             "exports", "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions", "presentation")
 TYPE_REQUIRED_KEYS = ("name", "body_material")
 _RESERVED_ACTIONS = {
     "charge", "fuel", "connect", "disconnect", "start_recording", "stop_recording",
@@ -445,6 +446,8 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             _fail(at, "requires exactly one cost (builtin pieces) or cost_u (actual material units)")
         canonical = {"name": _text(spec["name"], at + ".name"), "body_material": spec["body_material"],
                      "fields": _fields(spec.get("fields", {}), at + ".fields"), "rules": [], "actions": []}
+        if "presentation" in spec:
+            canonical["presentation"] = compile_presentation(spec["presentation"], canonical["fields"], at + ".presentation")
         if "exports" in spec:
             canonical["exports"] = deepcopy(_list(spec["exports"], at + ".exports", 8))
             exported_interface(canonical)

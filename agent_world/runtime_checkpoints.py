@@ -137,9 +137,10 @@ class RuntimeCheckpoints:
         # Each writer rechecks its generation/status/time before committing.
         # New successors have later availability/ready order and join after
         # this page; visited retry generations cannot hide an independent key.
-        with self._conn(readonly=True, serialized=True, purpose="checkpoint-select") as c:
-            c.execute("BEGIN")
-            self._check_world_tx(c, universe)
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True, purpose="checkpoint-select") as c:
+            self._begin_registry_read(c, universe, registry)
+            self._check_world_tx(c, universe, registry=registry)
             now = time.time()
             rows = c.execute("""SELECT checkpoint_key,generation FROM world_checkpoints
                 WHERE universe=? AND status='pending' AND available_at<=? AND due_at<=?

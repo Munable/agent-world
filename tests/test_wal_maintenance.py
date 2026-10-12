@@ -5,10 +5,11 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+import sqlite3
+from unittest.mock import Mock, patch
 
 from agent_world import WorldRuntime
-from agent_world.maintenance import retention_lifespan
+from agent_world.maintenance import retention_lifespan, _WalBackfillSchedule
 
 
 class WalMaintenanceTests(unittest.TestCase):
@@ -67,6 +68,40 @@ class WalMaintenanceTests(unittest.TestCase):
             with self.runtime._conn(readonly=True) as reader:
                 self.assertEqual(reader.execute("SELECT value FROM wal_probe").fetchone()[0], 2)
 
+    def test_noop_reads_pending_frames_without_backfilling_or_waiting_for_runtime_writer(self):
+        with self.runtime.managed_wal_checkpoints():
+            self.runtime.passive_wal_checkpoint()
+            self.write(9)
+            results = []
+            with self.runtime._lock:
+                thread = threading.Thread(target=lambda: results.append(self.runtime.wal_checkpoint_status()))
+                thread.start()
+                thread.join(2)
+                self.assertFalse(thread.is_alive(), "NOOP waited for the application writer")
+            self.assertIsNotNone(results[0], "this runtime must implement SQLite's NOOP checkpoint mode")
+            before = results[0]
+            self.assertGreater(before["pending_frames"], 0)
+            self.assertEqual(self.runtime.wal_checkpoint_status(), before)
+            self.assertEqual(self.runtime.passive_wal_checkpoint()["pending_frames"], 0)
+            self.assertEqual(self.runtime.wal_checkpoint_status()["pending_frames"], 0)
+            with self.runtime._conn() as c:
+                self.assertEqual(c.execute("PRAGMA synchronous").fetchone()[0], 2)
+
+    def test_unknown_noop_mode_falls_back_without_masking_other_storage_errors(self):
+        from contextlib import nullcontext
+        connection = Mock()
+        connection.execute.side_effect = sqlite3.OperationalError("unknown checkpoint mode: NOOP")
+        with patch.object(self.runtime, "_conn", return_value=nullcontext(connection)):
+            self.assertIsNone(self.runtime.wal_checkpoint_status())
+            self.assertIsNone(self.runtime.wal_checkpoint_status())
+        connection.execute.assert_called_once_with("PRAGMA wal_checkpoint(NOOP)")
+        self.runtime._wal_noop_supported = None
+        connection.execute.side_effect = sqlite3.OperationalError("disk I/O error")
+        with patch.object(self.runtime, "_conn", return_value=nullcontext(connection)):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+                self.runtime.wal_checkpoint_status()
+        self.assertIsNone(self.runtime._wal_noop_supported)
+
     def test_passive_backfill_is_independent_of_runtime_writer(self):
         acquired = threading.Event()
         release = threading.Event()
@@ -103,12 +138,18 @@ class WalMaintenanceTests(unittest.TestCase):
             release.wait(3)
             return actual()
         async def exercise():
-            with patch.object(self.runtime, "passive_wal_checkpoint", side_effect=backfill):
+            finish_serving = asyncio.Event()
+            with patch.object(self.runtime, "passive_wal_checkpoint", side_effect=backfill), \
+                    patch.object(self.runtime, "wal_checkpoint_status", return_value={
+                        "busy": 0, "wal_frames": 1, "checkpointed_frames": 0, "pending_frames": 1}):
                 async def serve():
                     async with retention_lifespan(self.runtime, "unused"):
-                        await asyncio.sleep(0)
+                        await finish_serving.wait()
                 task = asyncio.create_task(serve())
                 self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                # End the actual lifespan only after the worker has entered
+                # maintenance. An already-ended lifespan may correctly skip IO.
+                finish_serving.set()
                 await asyncio.sleep(0)
                 self.assertFalse(task.done())
                 self.assertEqual(self.runtime._wal_autocheckpoint, 0)
@@ -134,6 +175,39 @@ class WalMaintenanceTests(unittest.TestCase):
                         self.assertEqual(c.execute("PRAGMA wal_autocheckpoint").fetchone()[0], 1000)
                         self.assertEqual(c.execute("PRAGMA synchronous").fetchone()[0], 2)
         asyncio.run(exercise())
+
+
+class WalBackfillScheduleTests(unittest.TestCase):
+    def status(self, frames, checkpointed):
+        return {"wal_frames": frames, "checkpointed_frames": checkpointed,
+                "pending_frames": frames-checkpointed}
+
+    def test_empty_and_unchanged_pinned_wal_do_not_trigger_repeated_passive(self):
+        schedule = _WalBackfillSchedule(max_defer=5)
+        self.assertFalse(schedule.ready(self.status(12, 12), writer_busy=False, now=0))
+        pending = self.status(15, 12)
+        self.assertTrue(schedule.ready(pending, writer_busy=False, now=1))
+        schedule.completed(pending, now=1)
+        self.assertFalse(schedule.ready(pending, writer_busy=False, now=2))
+        self.assertFalse(schedule.ready(pending, writer_busy=False, now=5.9))
+        # A released reader does not necessarily alter NOOP's counts; it still
+        # receives another PASSIVE opportunity at the bounded retry deadline.
+        self.assertTrue(schedule.ready(pending, writer_busy=False, now=6))
+        schedule.completed(self.status(15, 15), now=6)
+        self.assertFalse(schedule.ready(self.status(15, 15), writer_busy=False, now=20))
+
+    def test_continuous_writers_yield_one_maintenance_opportunity_by_deadline(self):
+        schedule = _WalBackfillSchedule(max_defer=5)
+        self.assertFalse(schedule.ready(self.status(15, 12), writer_busy=True, now=0))
+        self.assertFalse(schedule.ready(self.status(16, 12), writer_busy=True, now=4))
+        self.assertTrue(schedule.ready(self.status(17, 12), writer_busy=True, now=5))
+        schedule.completed(self.status(17, 17), now=5.5)
+        self.assertFalse(schedule.ready(self.status(18, 17), writer_busy=True, now=6))
+        self.assertTrue(schedule.ready(self.status(19, 17), writer_busy=False, now=7))
+
+    def test_unsupported_noop_keeps_the_existing_passive_fallback(self):
+        schedule = _WalBackfillSchedule()
+        self.assertTrue(schedule.ready(None, writer_busy=True, now=0))
 
 
 if __name__ == "__main__":

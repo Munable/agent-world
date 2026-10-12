@@ -133,17 +133,19 @@ class RuntimeTimers:
         integer(limit, "limit", 1, 100)
         if deadline is not None:
             duration(deadline, "worker monotonic deadline", 253402300799, zero=True)
-        with self._conn(readonly=True, serialized=True, purpose="work-select") as c:
-            c.execute("BEGIN")
-            self._check_world_tx(c, universe)
-            if universe not in self._worlds:
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True, purpose="work-select") as c:
+            self._begin_registry_read(c, universe, registry)
+            self._check_world_tx(c, universe, registry=registry)
+            if registry.definition is None:
                 raise WorldDefinitionError("worker requires the matching installed world")
             cutoff = time.time()
             candidates = c.execute("""SELECT timer_id FROM world_timers
                 WHERE universe=? AND status='pending' AND available_at<=? AND due_at<=?
                 ORDER BY available_at,timer_id LIMIT ?""", (universe, cutoff, cutoff, limit)).fetchall()
-            has_checkpoints = bool(self._worlds[universe].checkpoints)
-            # Operational fairness only; no world fact or extra history write.
+            has_checkpoints = bool(registry.definition.checkpoints)
+        # Operational fairness only; no world fact or extra history write.
+        with self._work_selection_lock:
             prefer_checkpoint = self._checkpoint_first.get(universe, False)
             self._checkpoint_first[universe] = not prefer_checkpoint
         processed, seen = [], set()
@@ -181,10 +183,11 @@ class RuntimeTimers:
     def next_due_work(self, universe):
         """Trusted worker wake time; two indexed head reads, never a queue scan."""
         identifier(universe, "universe")
-        with self._conn(readonly=True, serialized=True, purpose="work-next") as c:
-            c.execute("BEGIN")
-            self._check_world_tx(c, universe)
-            definition = self._worlds.get(universe)
+        registry = self._capture_registry(universe)
+        with self._conn(readonly=True, purpose="work-next") as c:
+            self._begin_registry_read(c, universe, registry)
+            self._check_world_tx(c, universe, registry=registry)
+            definition = registry.definition
             if definition is None:
                 raise WorldDefinitionError("worker requires the matching installed world")
             times = []

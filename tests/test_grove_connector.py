@@ -14,7 +14,7 @@ from starlette.testclient import TestClient
 
 from agent_world.grove_connector import (
     ConnectorError, ConnectorManager, GroveSession, create_connector_app, session_permissions_match,
-    NATIVE_HISTORY_INDEX_PREFIX,
+    NATIVE_HISTORY_INDEX_PREFIX, NATIVE_CONTEXT_VERSION,
 )
 from agent_world.grove_agent_observation import (
     companion_projection, _companion_chunk_terrain, _companion_scene_index, blueprint_model_input)
@@ -128,10 +128,12 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         """Only the loading boundary is doubled; preserve the recovery tests."""
         plugin = self.session.configure_native_context()
         options = plugin[1]
-        Path(options["diagnostic_path"]).write_text(json.dumps({"status": "loaded", "version": 1,
+        Path(options["diagnostic_path"]).write_text(json.dumps({"status": "loaded", "version": NATIVE_CONTEXT_VERSION,
             "hook": "experimental.chat.messages.transform", "nonce": options["nonce"],
             "role_id": self.session.role_id, "source_sha256": options["source_sha256"],
-            "process_id": 42, "loaded_at_ms": 1}))
+            "process_id": 42, "loaded_at_ms": 1, "sdk_guard": {
+                "status": "installed", "runtime": "ai_sdk", "provider_id": "provider", "model_id": "model",
+                "historical_message_budget_bytes": 65536, "request_budget_bytes": 131072, "native_llm_allowed": False}}))
         return plugin
 
     async def test_missing_transfer_inputs_report_parameters_without_trying_a_write(self):
@@ -619,16 +621,27 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             "version_fingerprint": "a"*64, "physics": {"known": True, "overloaded": True}}}]}}]
         original = {"result": {"entity": {"id": "box", "version": 7, "simulation": {"total": 160},
             "action_options": options, "available_actions": ["store"]}, "action_options": options,
-            "available_actions": ["store"], "contents": [], "public_content": {"version": 8},
+            "available_actions": ["store"], "contents": [], "public_content": {
+                "id": "content:0:0", "region": "0:0", "version": 8,
+                "history": {"cursor": "older-page", "outcome_count": 22}},
             "action_options_projection": {"scope": "selected_declared_action", "action": "store",
                                           "expanded_actions": ["store"]}}}
+        before = deepcopy(original)
         result = companion_projection("grove.inspect", original)["result"]
         self.assertNotIn("action_options", result["entity"])
         self.assertEqual(result["entity"]["field_references"]["action_options"], "#/action_options")
         self.assertEqual(result["action_options"], options)
         self.assertEqual(result["entity"]["simulation"], {"total": 160})
         self.assertEqual(result["public_content"]["version"], 8)
-        self.assertEqual(result["public_content"]["projection"]["scope"], "public_content_index")
+        self.assertEqual(result["public_content"]["projection"]["scope"], "regional_content_reference")
+        self.assertEqual(result["public_content"]["outcome_count"], 22)
+        self.assertEqual(result["public_content"]["read_request"], {
+            "tool": "grove_content_history", "arguments": {"content_id": "content:0:0"}})
+        self.assertNotIn("history", result["public_content"])
+        self.assertNotIn("cursor", result["public_content"]["read_request"]["arguments"])
+        self.assertEqual(result["public_content"]["discovery_read_request"], {
+            "tool": "map_viewport", "arguments": {}})
+        self.assertEqual(original, before)
         self.assertIn("action_options", original["result"]["entity"])
         original["result"]["entity"]["available_actions"] = ["close"]
         original["result"]["entity"]["action_options"] = [{"action": "close"}]
@@ -636,8 +649,8 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(differing["available_actions"], ["close"])
         self.assertEqual(differing["action_options"], [{"action": "close"}])
 
-    def test_region_index_preserves_discovery_without_repeating_snapshots_or_action_previews(self):
-        entity = {"id":"box", "version":7, "name":"Box", "x":3, "y":2,
+    def test_region_reference_keeps_latest_history_and_map_discovery_without_repeating_snapshots(self):
+        entity = {"id":"box", "version":7, "name":"Box", "x":3, "y":2, "material":"stone",
             "state":{"open":False,"program":{"definition_ref":"immutable","contract":{"status":"active"}}},
             "matter":[{"id":"original-lot","quantity":2}], "simulation":{"total":160}}
         options = [{"action":"store","available":False,"reason":"Overloaded",
@@ -649,16 +662,33 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         original = {"result":{"entity":entity,"action_options":options,"available_actions":[],"public_content":public,
             "action_options_projection": {"scope": "selected_declared_action", "action": "store",
                                           "expanded_actions": ["store"]}}}
+        before = deepcopy(original)
         actual = companion_projection("grove.inspect", original)["result"]
         self.assertEqual(actual["entity"],entity)
         self.assertEqual(actual["action_options"],options)
         index = actual["public_content"]
-        self.assertEqual(index["history"],public["history"])
-        self.assertEqual(index["anchors"][0]["entity_id"],"box")
-        self.assertNotIn("entity",index["anchors"][0])
-        self.assertNotIn("contributions",index)
-        self.assertIn("no cursor",index["projection"]["meaning"])
-        self.assertEqual(original["result"]["public_content"],public)
+        self.assertEqual({key: index[key] for key in ("id", "region", "version", "outcome_count")},
+            {"id": "content:0:0", "region": "0:0", "version": 8, "outcome_count": 22})
+        for field in ("history", "anchors", "contributions", "outcome_refs"):
+            self.assertNotIn(field, index)
+        latest_read = {"tool": "grove_content_history", "arguments": {"content_id": "content:0:0"}}
+        self.assertEqual(index["read_request"], latest_read)
+        self.assertNotIn("cursor", index["read_request"]["arguments"])
+        self.assertIn("latest page", index["projection"]["meaning"])
+        self.assertEqual(index["discovery_read_request"], {"tool": "map_viewport", "arguments": {}})
+        self.assertEqual(original, before)
+        map_source = {"entities": [entity], "public_content": public}
+        map_before = deepcopy(map_source)
+        viewport = companion_projection("map.viewport", map_source)
+        discovered = viewport["entities"][0]
+        self.assertEqual({key: discovered[key] for key in ("id", "name", "x", "y", "material")},
+            {"id": "box", "name": "Box", "x": 3, "y": 2, "material": "stone"})
+        self.assertEqual(discovered["read_request"], {
+            "tool": "grove_inspect", "arguments": {"entity_id": "box"}})
+        for field in ("state", "simulation", "action_options"):
+            self.assertNotIn(field, discovered)
+        self.assertEqual(viewport["public_content"]["read_request"], latest_read)
+        self.assertEqual(map_source, map_before)
         folded = blueprint_model_input({"public_content":index,"public_entities":[entity]})
         self.assertEqual(folded["public_entities"],[entity])
 

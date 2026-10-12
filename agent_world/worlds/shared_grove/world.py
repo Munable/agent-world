@@ -199,7 +199,13 @@ def initialize(ctx):
     commit.ensure_chunk(ctx, 0, 0)
     commit.ensure_chunk(ctx, -1, 0)
     domains.migrate(ctx)
+    resume_world(ctx)
+
+
+def resume_world(ctx):
     scheduling.resume(ctx)
+    from . import discovery
+    discovery.resume(ctx)
 
 
 def resume_clock(ctx):
@@ -288,8 +294,11 @@ def handbook(ctx, args):
 
 def bootstrap(ctx):
     value = handbook(ctx,{}).result
+    from . import discovery
     return {"world": value["world"], "title": value["title"], "player": value["player"],
-            "clock": value["clock"], "rules": value["rules"], "next_function": "grove.handbook"}
+            "clock": value["clock"], "rules": value["rules"], "next_function": "grove.handbook",
+            "public_works": {"function": "grove.public_works", "index_build_complete":
+                bool((ctx.get_state(discovery.CONTROL, "build") or {}).get("complete"))}}
 
 
 def _public_self(player):
@@ -1192,6 +1201,15 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
             if lot["slot"] == "body":
                 body[lot["material"]] = body.get(lot["material"], 0)+lot["quantity"]
         value["simulation"]["body"] = [{"material": material, "quantity": quantity} for material, quantity in body.items()]
+    from agent_world.simulation.presentation import resolve_presentation
+    from .definitions import instance_definition
+    _, display_type = instance_definition(ctx, entity)
+    value["presentation"] = resolve_presentation(
+        display_type.get("presentation") if display_type else None,
+        display_type.get("fields", {}) if display_type else {},
+        (value.get("creative") or {}).get("fields", {}),
+        size=value.get("composition", {}).get("size", 1), visible=not hidden,
+        detailed=detailed, tick=(value.get("creative") or {}).get("world_tick"))
     entity_registry = registry_for(entity)
     for lot in value["matter"]:
         lot["material_name"] = entity_registry.materials[lot["material"]].name
@@ -1229,7 +1247,6 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
         value.pop("action_options", None)
         value.pop("authored_description", None)
         value.pop("created_at", None)
-        value["presentation"] = {"size": value.get("composition", {}).get("size", 1)}
         value["barrier_active"] = bool(value.get("components", {}).get("barrier", {}).get("active", False))
         value.pop("composition", None)
         value.pop("components", None)
@@ -1388,7 +1405,7 @@ def _registered_entity_schema():
 
 def make_world(*, publication_budget=None):
     from .generation import generation_specs, generation_state_specs
-    from . import creative
+    from . import creative, discovery
     from .publication import DEFAULT_BUDGET, bind_budget
     budget = DEFAULT_BUDGET if publication_budget is None else publication_budget
     def migrate_creation(ctx):
@@ -1412,24 +1429,25 @@ def make_world(*, publication_budget=None):
     definition = WorldDefinition("shared-grove","溪源",(
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
-        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=14,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
+        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=15,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
         FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=12,authorize=member,description="按实际能力与归属操作物件。pickup/drop保留原对象与观察到的交互护栏，自动计数和机械派生输出不要求逐秒追版本；提交时仍重验真实归属、位置、可搬运和容器容量条件，其他参与者操作及材料、归属、结构变化使旧护栏失效。install_interaction/uninstall_interaction使用明确definition_ref在实际合法容器安装/卸载局部交互，安装不生产材料、不改全世界规则；读取inspect菜单与固定版本后提交。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。pour提供固定amount与target_slot时重验当前合法性；燃料或湿度改变版本不单独阻塞，去向改变、来源不足、容量不足或权限/距离改变仍原子拒绝，不换量、来源、目标或槽。"),
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
-        FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=4,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=36,state_version=24,
+        FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=5,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
+        *generation_specs(), *creative.specs(), *discovery.specs()),version=37,state_version=25,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs(),
-            *domains.state_specs(), *scheduling.state_specs()),
+            *domains.state_specs(), *scheduling.state_specs(), *discovery.state_specs()),
         state_authorizer=_state_authorizer,state_forget_authorizer=_state_forget_authorizer,
-        initialize=initialize,resume=scheduling.resume,bootstrap=bootstrap,
+        initialize=initialize,resume=resume_world,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
         migrations={**{target: lambda ctx: None for target in range(6, 23)},
-                    23: migrate_creation, 24: migrate_interaction_revisions},
+                    23: migrate_creation, 24: migrate_interaction_revisions, 25: discovery.begin},
         checkpoints=(CheckpointSpec("grove.frame",scheduling.tick,scheduling.CHECKPOINT_ARGS),
-                     CheckpointSpec("grove.domain",scheduling.advance_domain,scheduling.DOMAIN_ARGS)),
+                     CheckpointSpec("grove.domain",scheduling.advance_domain,scheduling.DOMAIN_ARGS),
+                     *discovery.checkpoint_specs()),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),
         entry_instructions="先读grove.handbook与grove.rule_catalog。人可亲自移动操作，或明确目标委托给自己的外部Agent实际读、计划、行动、读回和调整；随时收回。规则发布与实例生成分开，后者消耗真实区域资源。"
