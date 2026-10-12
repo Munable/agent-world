@@ -364,7 +364,7 @@ def advance_domain(ctx, target_tick, domain):
     ctx._grove_target_tick = target_tick
     changes, affected, outcomes = [], [], []
     try:
-        with commit.candidate_batch(ctx) as batch:
+        with commit.candidate_batch(ctx, origin="autonomous") as batch:
             processes = [p for pid in activity.active_process_ids(ctx)
                          if (p := activity.get_process(ctx, pid)) and p["status"] == "active"]
             if any(p.get("rules_version") != RULES_VERSION or p.get("rule_version") != 1 for p in processes):

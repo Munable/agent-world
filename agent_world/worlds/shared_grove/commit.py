@@ -558,7 +558,7 @@ def public_event(ctx, **fact):
 
 
 @contextmanager
-def candidate_batch(ctx):
+def candidate_batch(ctx, *, origin="interaction"):
     """Own one candidate view: flush on success, discard it on every exit.
 
     This is not a transaction. Runtime still owns atomic state, effects,
@@ -567,7 +567,9 @@ def candidate_batch(ctx):
     """
     if getattr(ctx, "_grove_batch", None) is not None:
         raise RuntimeError("A Grove candidate batch already has an owner.")
-    batch = m.CandidateBatch()
+    if origin not in {"interaction", "autonomous"}:
+        raise ValueError("Unknown trusted Grove write origin.")
+    batch = m.CandidateBatch(origin=origin)
     ctx._grove_batch = batch
     try:
         yield batch

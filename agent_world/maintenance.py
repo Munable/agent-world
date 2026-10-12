@@ -5,33 +5,46 @@ import asyncio
 from contextlib import asynccontextmanager, closing
 import logging
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def retention_lifespan(runtime, universe):
-    definition = runtime._worlds.get(universe)
     stop = threading.Event()
-    thread = None
-    if definition is not None and (definition.retention is not None or definition.streams):
+    with runtime.managed_wal_checkpoints():
         def run():
-            while not stop.is_set():
-                try:
-                    current_definition = runtime._worlds.get(universe)
-                    if current_definition is not None and current_definition.retention is not None:
-                        runtime.apply_retention(universe)
-                    runtime.apply_stream_retention(universe)
-                except Exception as exc:
-                    logger.error("retention sweep failed (%s)", type(exc).__name__)
-                stop.wait(30)
-        thread = threading.Thread(target=run, name="agent-world-retention", daemon=True)
+            next_retention = 0
+            try:
+                while not stop.is_set():
+                    try:
+                        runtime.passive_wal_checkpoint()
+                    except Exception as exc:
+                        logger.error("WAL backfill failed (%s); durable WAL retained", type(exc).__name__)
+                    if time.monotonic() >= next_retention and not stop.is_set():
+                        try:
+                            definition = runtime._worlds.get(universe)
+                            if definition is not None and definition.retention is not None:
+                                runtime.apply_retention(universe)
+                            if definition is not None and definition.streams:
+                                runtime.apply_stream_retention(universe)
+                        except Exception as exc:
+                            logger.error("retention sweep failed (%s)", type(exc).__name__)
+                        next_retention = time.monotonic() + 30
+                    stop.wait(1)
+            except BaseException as exc:
+                logger.critical("host maintenance stopped (%s); restoring SQLite automatic checkpoints", type(exc).__name__)
+            finally:
+                runtime.restore_auto_wal_checkpoints()
+        # Reuse the existing host-owned maintenance thread. PASSIVE may take
+        # real disk time, but neither request commits nor timers execute it.
+        thread = threading.Thread(target=run, name="agent-world-maintenance", daemon=True)
         thread.start()
-    try:
-        yield
-    finally:
-        stop.set()
-        if thread is not None:
+        try:
+            yield
+        finally:
+            stop.set()
             await asyncio.to_thread(thread.join)
 
 

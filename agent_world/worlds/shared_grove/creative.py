@@ -44,6 +44,7 @@ ACTION_ARGS = {"type": "object", "additionalProperties": False,
     "required": ["action", "target_id", "expected_target_version", "expected_player_version"],
     "properties": {"action": {"type": "string", "minLength": 1, "maxLength": 80},
         "target_id": ID, "expected_target_version": VERSION, "expected_player_version": VERSION,
+        "expected_target_interaction_revision": VERSION,
         "item_id": ID, "expected_item_version": VERSION, "other_id": ID, "expected_other_version": VERSION,
         "amount": {"type": "integer", "minimum": 1, "maximum": 10000},
         "material": {"type": "string", "minLength": 1, "maxLength": 180}, "terms_version": VERSION, "lot_id": ID,
@@ -1148,6 +1149,12 @@ def _finish_item(ctx, item, target):
         commit.save_entity(ctx, item)
 
 
+def fixed_intent_action(spec, action):
+    """Published buttons and finite source controls act on current conditions."""
+    return bool(spec and (action in {"fuel", "start", "stop"}
+                         or any(item["id"] == action for item in spec.get("actions", []))))
+
+
 def rule_action(ctx, args):
     from .world import _accessible, _public_self, _project_entity, viewport
     check_delegation(ctx, args)
@@ -1155,11 +1162,13 @@ def rule_action(ctx, args):
     m.check_player_version(player, args["expected_player_version"])
     entity = m.get_entity(ctx, args["target_id"])
     _accessible(ctx, player, entity, subject="target")
-    if entity["version"] != args["expected_target_version"]:
-        raise StateConflict("规则物件已变化，请读取最新版本。")
+    pack, spec = _type(ctx, entity)
+    m.check_entity_version(entity, args["expected_target_version"],
+        observed_interaction_revision=args.get("expected_target_interaction_revision"),
+        fixed_intent=fixed_intent_action(spec, args["action"]),
+        message="规则物件已变化，请读取最新版本。")
     if entity["lifecycle"] != "intact" and not (entity["lifecycle"] == "broken" and args["action"] == "release"):
         raise RuleViolation("规则物件已破损或耗尽。")
-    pack, spec = _type(ctx, entity)
     if not spec:
         if args["action"] == "charge":
             raise RuleViolation("普通物件没有本地声明材料的制备规则。charge需已发表定义的实际容器实例，消耗feedstock制备其声明材料；"
@@ -1493,6 +1502,9 @@ def action_options(ctx, player, entity):
         fields = {"action": {"const": action}, "target_id": ID, "expected_target_version": VERSION, "expected_player_version": VERSION}
         required = list(fields)
         args = {"action": action, "target_id": entity["id"], "expected_target_version": entity["version"]}
+        if fixed_intent_action(spec, action):
+            fields["expected_target_interaction_revision"] = VERSION
+            args["expected_target_interaction_revision"] = m.interaction_revision(entity)
         choices = choices or {}
         for name, key in (("items", "item_id"), ("others", "other_id"), ("materials", "material")):
             if name in choices:
@@ -1699,7 +1711,7 @@ def specs():
         FunctionSpec("grove.rule_catalog", rule_catalog, EMPTY, version=5, access="read", description="Discover the bounded creation language and shared physical facts. For immutable publications page definition_list, then definition_read; this static catalog contains no full-history index."),
         FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=3, access="read", description="Read one immutable definition and its author/hash, with compiled canonical material bindings and consumption/production coefficients; existing instances pin this reference."),
         FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=6, authorize=_member, description="Compile immutable definitions with cost_u actual-source bodies, bounded components/ports/physical conditions and self drive control, or the existing piece cost. Optional local material uses qualifies fuel; material_imports pins original identities. Publication creates no matter, permission or consent. Discover precise shape and bounds with rule_catalog."),
-        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=9, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Bindings need same-observation target/other versions and do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
+        FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=10, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Declared buttons and fuel/start/stop keep the chosen parameters and presented interaction guard: autonomous fields and mechanical outputs need not be chased each second; current real conditions are rechecked on submission. Other participants' edits, material/ownership/structure changes invalidate that guard. Fuel sources, bindings and contracts retain exact observed versions. Bindings do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
         FunctionSpec("grove.control_status", control_status, EMPTY, authorize=_member, access="read", description="Read own current goal and committed action count, without exposing grant token."),

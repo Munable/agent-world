@@ -49,6 +49,7 @@ INTERACT_ARGS = {"type": "object", "properties": {
                          "install_interaction", "uninstall_interaction"]},
     "target_id": ID, "item_id": ID, "expected_player_version": VERSION,
     "expected_target_version": VERSION, "expected_item_version": VERSION,
+    "expected_target_interaction_revision": VERSION, "expected_item_interaction_revision": VERSION,
     "expected_combination_fingerprint": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
     "amount": {"type": "integer", "minimum": 1, "maximum": 10000}, "lot_id": LOT_ID,
     "target_slot": {"enum": ["contained", "surface"]},
@@ -67,6 +68,7 @@ VIEW_ARGS = {"type": "object", "properties": {"cx": COORD, "cy": COORD,
     "inventory_limit": {"type": "integer", "minimum": 1, "maximum": 16}}, "additionalProperties": False}
 ENTITY_SCHEMA = {"type": "object", "properties": {
     "id": ID, "name": {"type": "string", "minLength": 1, "maxLength": 80},
+    "interaction_revision": VERSION,
     "x": NULL_COORD, "y": NULL_COORD, "material": {"enum": list(m.MATERIALS)},
     "capabilities": {"type": "array", "maxItems": len(m.CAPABILITIES), "uniqueItems": True,
                      "items": {"enum": sorted(m.CAPABILITIES)}},
@@ -200,7 +202,7 @@ def initialize(ctx):
     scheduling.resume(ctx)
 
 
-def resume_clock(ctx):
+def resume_clock(ctx, *, replace_domain_checkpoints=False):
     """Explicitly hand the saved clock to this reviewed world revision.
 
     Runtime keeps old-version timers blocked. Only the current clock task is
@@ -214,7 +216,7 @@ def resume_clock(ctx):
         pass
     else:
         ctx.cancel_timer(old_id)
-    scheduling.resume(ctx)
+    scheduling.resume(ctx, replace_domain_checkpoints=replace_domain_checkpoints)
 
 
 def handbook(ctx, args):
@@ -498,6 +500,7 @@ def _candidate(entity, lots=None):
     hidden = entity["owner"] is None and not entity["state"]["open"] and "container" in entity.get("components", {})
     water = "未公开" if hidden else str(entity["state"]["water"])+"u"
     value = {"id": entity["id"], "name": entity["name"], "version": entity["version"],
+             "interaction_revision": m.interaction_revision(entity),
              "entity_kind": entity["state"].get("kind"),
              "capabilities": list(entity["capabilities"]),
              "parent_container_id": entity.get("container"),
@@ -722,6 +725,8 @@ def _action_options(ctx, player, entity):
         action = option["action"]
         option["function_id"] = "grove.interact"
         option.update(label=labels[action], arguments={"action": action, "target_id": entity["id"], "expected_target_version": entity["version"]})
+        if action == "drop":
+            option["arguments"]["expected_target_interaction_revision"] = m.interaction_revision(entity)
         option["preconditions"] = [_access_observation(ctx, player, entity)]
         if "target_slot" in option:
             option["arguments"]["target_slot"] = option["target_slot"]
@@ -737,6 +742,10 @@ def _action_options(ctx, player, entity):
             item = m.get_entity(ctx, candidate["id"])
             candidate["preconditions"] = [_access_observation(ctx, player, item, subject="item")]
         fields = {"action", "target_id", "expected_player_version", "expected_target_version"}
+        if action == "drop":
+            # The menu selects a target; the keyboard/web route may submit the
+            # same observed object as item_id. Both use the same fixed intent.
+            fields.update({"expected_target_interaction_revision", "expected_item_interaction_revision"})
         if (option.get("input") or {}).get("candidates") or action in {"store", "retrieve", "fill", "pour", "ignite", "attach", "transfer", "tend", "fuel"}:
             fields.update({"item_id", "expected_item_version"})
         if action in {"fill", "pour", "transfer", "fuel"}:
@@ -838,22 +847,26 @@ def inspect(ctx, args):
     return FunctionOutcome(result)
 
 
-def _target(ctx, args, *, revalidate=False):
+def _target(ctx, args, *, revalidate=False, fixed_intent=False):
     eid = args.get("target_id") or args.get("item_id")
     if not eid:
         raise RuleViolation("此行动需要选择目标物件。")
     entity = m.get_entity(ctx, eid)
-    if not revalidate and args.get("expected_target_version") is not None and args["expected_target_version"] != entity["version"]:
-        raise StateConflict("目标物件已经变化，请刷新后再行动。")
+    if not revalidate and args.get("expected_target_version") is not None:
+        m.check_entity_version(entity, args["expected_target_version"],
+            observed_interaction_revision=args.get("expected_target_interaction_revision"),
+            fixed_intent=fixed_intent, message="目标物件已经变化，请刷新后再行动。")
     return entity
 
 
-def _own_item(ctx, player, args, capability=None, *, revalidate=False):
+def _own_item(ctx, player, args, capability=None, *, revalidate=False, fixed_intent=False):
     if not args.get("item_id"):
         raise RuleViolation("请从背包选择使用的物件。")
     item = m.get_entity(ctx, args["item_id"])
-    if not revalidate and args.get("expected_item_version") is not None and args["expected_item_version"] != item["version"]:
-        raise StateConflict("所选物件已经变化，请刷新后再行动。")
+    if not revalidate and args.get("expected_item_version") is not None:
+        m.check_entity_version(item, args["expected_item_version"],
+            observed_interaction_revision=args.get("expected_item_interaction_revision"),
+            fixed_intent=fixed_intent, message="所选物件已经变化，请刷新后再行动。")
     _accessible(ctx, player, item, subject="item")
     if item["owner"] != player["id"] or item.get("lifecycle") == "consumed" or item["state"].get("retired") or "personal" in item["capabilities"]:
         raise RuleViolation("须使用自己持有的可用物件。")
@@ -894,7 +907,7 @@ def interact(ctx, args):
     # or fuel amount. Current legality is rechecked inside this transaction;
     # implicit/default pours and other actions retain strict observed versions.
     revalidate_pour = action == "pour" and "amount" in args and "target_slot" in args
-    target = _target(ctx, args, revalidate=revalidate_pour)
+    target = _target(ctx, args, revalidate=revalidate_pour, fixed_intent=action == "drop")
     domains.guard_action(ctx, args, topology=action in {
         "pickup", "drop", "open", "close", "store", "retrieve", "attach", "detach", "launch",
         "install_interaction", "uninstall_interaction"})
@@ -929,7 +942,7 @@ def interact(ctx, args):
         _store(ctx, player, target, m.get_entity(ctx, player["backpack_id"]))
         summary = f"拿起了{target['name']}。"
     elif action in {"drop", "detach"}:
-        item = _own_item(ctx, player, {**args, "item_id": target["id"]}, "transport") if action == "drop" else target
+        item = _own_item(ctx, player, {**args, "item_id": target["id"]}, "transport", fixed_intent=True) if action == "drop" else target
         if "blocking" in item["capabilities"] and (m.is_safe(ctx, player["x"], player["y"]) or m.blocking_at(ctx, player["x"], player["y"], ignore=item["id"])):
             raise RuleViolation("安全区或已有障碍的位置不能放障碍。")
         if "blocking" in item["capabilities"] and len(m.public_players_near(ctx, player["x"], player["y"], radius=0)) > 1:
@@ -1065,6 +1078,7 @@ def _process_refs(ctx, entity):
 
 def _project_entity(ctx, player, entity, *, include_options=True, detailed=False):
     value = deepcopy(entity)
+    value["interaction_revision"] = m.interaction_revision(entity)
     execution_state = domains.observation(ctx, entity["id"])
     value["execution_domain"] = {key: execution_state[key] for key in
         ("state", "last_applied_tick", "pending_target_tick", "failure") if key in execution_state}
@@ -1252,6 +1266,30 @@ def build_function(ctx,args):
          "entity_id":entity["id"],"action":"build","recipe":args["recipe"]},key="build"),))
 
 
+def _content_anchor_index(content):
+    """Bound duplicate anchor snapshots without losing discovery or history."""
+    index = deepcopy(content)
+    rows = []
+    for anchor in index.get("anchors", []):
+        row = {key: value for key, value in anchor.items() if key != "entity"}
+        entity = anchor.get("entity")
+        if isinstance(entity, dict):
+            row.update({key: entity[key] for key in
+                ("name", "x", "y", "created_by", "source", "interaction_revision") if key in entity})
+            description = entity.get("authored_description")
+            if isinstance(description, str):
+                row["authored_description_excerpt"] = description[:160]
+                row["description_truncated"] = len(description) > 160
+        row["read_request"] = {"function": "grove.inspect", "arguments": {"entity_id": row["entity_id"]}}
+        rows.append(row)
+    index["anchors"] = rows
+    index["projection"] = {"scope": "regional_content_anchor_index", "full_anchor_state": False,
+        "omitted_sections": ["anchors[].entity snapshots"],
+        "meaning": "Authorized identities and bounded author excerpts, not object state or action previews. "
+                   "Read each anchor's grove.inspect request for current facts; history paging is unchanged."}
+    return index
+
+
 def viewport(ctx,args):
     from .generation import generation_opportunities, public_content
     player=m.get_player(ctx)
@@ -1297,7 +1335,12 @@ def viewport(ctx,args):
                           "radius_metric":"chebyshev","limits":{"hearths":building.MAX_HEARTHS,"growth":processes.MAX_GROWTH}}}
     # Keep both query and SDK projection comfortably below the96KiB view limit.
     while len(json.dumps(body,ensure_ascii=False,separators=(",",":")).encode())>90000:
-        if body["entities"]:
+        content = body.get("public_content")
+        if isinstance(content, dict) and any(isinstance(anchor.get("entity"), dict) for anchor in content.get("anchors", [])):
+            # Regional history repeats full nearby objects; shed that duplicate
+            # before removing visible map objects or an inventory page.
+            body["public_content"] = _content_anchor_index(content)
+        elif body["entities"]:
             body["entities"].pop()
             body["truncated"]=True
         elif body["changes"]:
@@ -1354,6 +1397,12 @@ def make_world(*, publication_budget=None):
         domains.migrate(ctx)
         resume_clock(ctx)
         ctx.world_resumed = True
+    def migrate_interaction_revisions(ctx):
+        # Entities acquire the optional revision on their next real change.
+        # Upgrade unfinished work in place; settled domains never run twice.
+        if not ctx.world_resumed:
+            resume_clock(ctx, replace_domain_checkpoints=True)
+            ctx.world_resumed = True
     def with_delegation(schema):
         schema = deepcopy(schema)
         schema["properties"]["delegation"] = creative.DELEGATION
@@ -1361,12 +1410,12 @@ def make_world(*, publication_budget=None):
     definition = WorldDefinition("shared-grove","溪源",(
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
-        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=13,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
-        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=10,authorize=member,description="按实际能力与归属操作物件。install_interaction/uninstall_interaction使用明确definition_ref在实际合法容器安装/卸载局部交互，安装不生产材料、不改全世界规则；读取inspect菜单与固定版本后提交。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。pour提供固定amount与target_slot时重验当前合法性；燃料或湿度改变版本不单独阻塞，去向改变、来源不足、容量不足或权限/距离改变仍原子拒绝，不换量、来源、目标或槽。"),
+        FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=14,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
+        FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=11,authorize=member,description="按实际能力与归属操作物件。drop保留原对象与观察到的交互护栏，自动计数和机械派生输出不要求逐秒追版本；提交时仍重验真实归属、位置与可搬运条件，其他参与者操作及材料、归属、结构变化使旧护栏失效。install_interaction/uninstall_interaction使用明确definition_ref在实际合法容器安装/卸载局部交互，安装不生产材料、不改全世界规则；读取inspect菜单与固定版本后提交。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。pour提供固定amount与target_slot时重验当前合法性；燃料或湿度改变版本不单独阻塞，去向改变、来源不足、容量不足或权限/距离改变仍原子拒绝，不换量、来源、目标或槽。"),
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
-        FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=3,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs()),version=33,state_version=23,
+        FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=4,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
+        *generation_specs(), *creative.specs()),version=34,state_version=24,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs(),
@@ -1375,7 +1424,8 @@ def make_world(*, publication_budget=None):
         initialize=initialize,resume=scheduling.resume,bootstrap=bootstrap,
         # All supported older revisions hand off once at the final migration.
         # Timer commands are staged until the migration transaction commits.
-        migrations={**{target: lambda ctx: None for target in range(6, 23)}, 23: migrate_creation},
+        migrations={**{target: lambda ctx: None for target in range(6, 23)},
+                    23: migrate_creation, 24: migrate_interaction_revisions},
         checkpoints=(CheckpointSpec("grove.frame",scheduling.tick,scheduling.CHECKPOINT_ARGS),
                      CheckpointSpec("grove.domain",scheduling.advance_domain,scheduling.DOMAIN_ARGS)),
         views=(ViewSpec("grove.map",map_project,VIEW_ARGS,authorize=member,renderer="shared-grove",streams=("grove.changes",)),),

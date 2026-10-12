@@ -31,6 +31,13 @@ class CapacityPressure(RuleViolation):
     """A known finite work budget, rather than an invalid world fact."""
 
 
+class DomainBusy(RuleViolation):
+    """This candidate rolled back while its related frame was unsettled."""
+
+    retryable = True
+    recovery = "wait_then_retry_same_operation"
+
+
 def _get(ctx, scope_name, key, default=None):
     from .execution import _get as read
     return read(ctx, scope_name, key, default)
@@ -645,6 +652,7 @@ def _tail_metadata_only(before, after):
     copies = [deepcopy(before), deepcopy(after)]
     for value in copies:
         value.pop("version", None)
+        value.pop("interaction_revision", None)
         program = value.get("state", {}).get("program", {})
         process = program.get("process", {})
         for key in ("status", "error", "event_gap"):
@@ -667,7 +675,9 @@ def assert_boundary(ctx, domain_rows, *, topology=False):
     if work and work["status"] == "preparing" and getattr(ctx, "_grove_domain_preparing", False):
         return
     if any(pending_in_frame(ctx, row) for row in rows.values()):
-        raise RuleViolation("相关世界作用域正在结算；请在当前轮结束后重试，原动作没有执行。")
+        raise DomainBusy("相关世界作用域正在结算；请在当前轮结束后重试，原动作没有执行。",
+            retry_after_seconds=0.1, details={"settlement": {
+                "state": "calculating", "target_tick": work["target_tick"], "operation_committed": False}})
     # Settled or newly woken groups already share a local frame boundary. A
     # distant unfinished domain must not stop their construction or connection.
 

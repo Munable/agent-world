@@ -1,6 +1,8 @@
 """Public connector errors shared by its narrow state components."""
 from __future__ import annotations
 
+import math
+
 
 def public_world_error_details(value):
     """Allow only the world's observable action facts, never upstream diagnostics."""
@@ -43,13 +45,25 @@ def public_world_error_details(value):
             water["unit"] = "u"
         if water:
             result["water_transfer"] = water
+    settlement = value.get("settlement")
+    if (isinstance(settlement, dict) and settlement.get("state") == "calculating"
+            and settlement.get("operation_committed") is False
+            and type(settlement.get("target_tick")) is int and settlement["target_tick"] >= 0):
+        result["settlement"] = {"state": "calculating", "target_tick": settlement["target_tick"],
+                                "operation_committed": False}
     return result or None
 
 
 class ConnectorError(Exception):
-    def __init__(self, code: str, message: str, status: int = 400, *, world_details=None, execution_outcome=None):
+    def __init__(self, code: str, message: str, status: int = 400, *, world_details=None, execution_outcome=None,
+                 retryable=None, recovery=None, retry_after_seconds=None):
         self.code, self.message, self.status = code, message, status
         self.world_details = public_world_error_details(world_details)
+        self.retryable = retryable if type(retryable) is bool else None
+        self.recovery = recovery if isinstance(recovery, str) and 0 < len(recovery) <= 128 else None
+        self.retry_after_seconds = (retry_after_seconds if type(retry_after_seconds) in (int, float)
+            and (type(retry_after_seconds) is int or math.isfinite(retry_after_seconds))
+            and retry_after_seconds >= 0 else None)
         # This is adapter-owned stage evidence, never a substitute world result.
         self.execution_outcome = None
         if isinstance(execution_outcome, dict):
@@ -61,5 +75,24 @@ class ConnectorError(Exception):
                          and type(value) is bool})
             if type(execution_outcome.get("commit_seq")) is int and execution_outcome["commit_seq"] >= 0:
                 safe["commit_seq"] = execution_outcome["commit_seq"]
+            for key in ("attempts", "busy_rejections"):
+                if type(execution_outcome.get(key)) is int and 0 <= execution_outcome[key] <= 16:
+                    safe[key] = execution_outcome[key]
+            if (type(execution_outcome.get("wait_seconds")) in (int, float)
+                    and math.isfinite(execution_outcome["wait_seconds"]) and execution_outcome["wait_seconds"] >= 0):
+                safe["wait_seconds"] = execution_outcome["wait_seconds"]
             self.execution_outcome = safe or None
         super().__init__(message)
+
+    def public_payload(self):
+        payload = {"error": self.code, "message": self.message,
+                   "retryable": self.retryable if self.retryable is not None else self.status >= 500}
+        if self.recovery is not None:
+            payload["recovery"] = self.recovery
+        if self.retry_after_seconds is not None:
+            payload["retry_after_seconds"] = self.retry_after_seconds
+        if self.world_details is not None:
+            payload["details"] = self.world_details
+        if self.execution_outcome is not None:
+            payload["execution_outcome"] = self.execution_outcome
+        return payload

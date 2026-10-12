@@ -45,7 +45,7 @@ def _wake_frame(ctx):
     return _schedule_frame(ctx, ctx.now)
 
 
-def resume(ctx):
+def resume(ctx, *, replace_domain_checkpoints=False):
     """Resume saved progress; downtime never generates missed physical ticks."""
     domains.migrate(ctx)
     clock = ctx.get_state(m.META, "clock", {"sequence": 0})
@@ -54,11 +54,15 @@ def resume(ctx):
     clock["last_tick_at"] = ctx.now
     ctx.set_state(m.META, "clock", clock)
     if work and work["status"] in {"preparing", "open"}:
+        # Pause the cadence across downtime without rewriting the original
+        # opening fact or replaying any already applied domain.
+        work["cadence_anchor_at"] = ctx.now
         for entry in work["pending"]:
             domain = domains.get(ctx, entry["domain_id"])
             if domain and domain["last_tick"] < work["target_tick"]:
                 checkpoint = _checkpoint(ctx, DOMAIN_PREFIX+domain["id"])
-                if checkpoint is None or checkpoint["status"] in {"blocked", "cancelled"}:
+                if (replace_domain_checkpoints or checkpoint is None
+                        or checkpoint["status"] in {"blocked", "cancelled"}):
                     entry["generation"] = _schedule_domain(ctx, domain, work)
         domains._set(ctx, domains.CONTROL, "frame", work)
     _schedule_frame(ctx, ctx.now if work and work["status"] in {"preparing", "open"} else ctx.now+1)
@@ -82,7 +86,8 @@ def _open(ctx):
             "high_water": domains._get(ctx, domains.CONTROL, "last_ordinal", 0),
             "event_cutoff": ctx.get_state(m.META, "creative_events", {"sequence": 0})["sequence"],
             "cursor": None, "finished_listing": False, "pending": [],
-            "settled": 0, "prepared": 0, "pressure": 0, "faults": 0, "opened_at": ctx.now}
+            "settled": 0, "prepared": 0, "pressure": 0, "faults": 0, "opened_at": ctx.now,
+            "cadence_anchor_at": ctx.now}
     # sequence denotes the public target; each object exposes its own applied
     # sequence. Publishing the target never claims its domains already settled.
     clock.update(completed_sequence=clock.get("completed_sequence", target-1),
@@ -151,7 +156,10 @@ def _close(ctx, work):
     clock = ctx.get_state(m.META, "clock")
     clock.update(completed_sequence=work["target_tick"], frame_status="closed", last_tick_at=ctx.now)
     ctx.set_state(m.META, "clock", clock)
-    _schedule_frame(ctx, ctx.now+1)
+    # One successor only. A slow frame starts its next successor promptly;
+    # elapsed wall time never creates extra physics steps to catch up.
+    anchor = work.get("cadence_anchor_at", work["opened_at"])
+    _schedule_frame(ctx, max(ctx.now, anchor+1))
 
 
 def tick(ctx, args):

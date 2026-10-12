@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import math
 import os
@@ -100,8 +101,18 @@ def create_app(
             return {} if role_id is None else {"role_id": role_id}
 
         @app.get("/health")
-        def health():
-            return {"ok": True, "version": PROTOCOL_VERSION, "universe": universe, "auth_required": auth_required}
+        def health(request: Request, diagnostics: bool = False):
+            result = {"ok": True, "version": PROTOCOL_VERSION, "universe": universe, "auth_required": auth_required}
+            if diagnostics:
+                try:
+                    local = bool(request.client and ipaddress.ip_address(request.client.host).is_loopback)
+                except ValueError:
+                    local = False
+                if not local:
+                    return JSONResponse({"error": "HostDiagnosticsOnly",
+                        "message": "Runtime work diagnostics are available only to the local host."}, status_code=403)
+                result["work_diagnostics"] = runtime.work_diagnostics(limit=32)
+            return result
 
         @app.get("/v1/whoami")
         async def whoami(request: Request):

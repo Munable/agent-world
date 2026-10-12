@@ -137,7 +137,7 @@ class RuntimeCheckpoints:
         # Each writer rechecks its generation/status/time before committing.
         # New successors have later availability/ready order and join after
         # this page; visited retry generations cannot hide an independent key.
-        with self._conn(readonly=True, serialized=True) as c:
+        with self._conn(readonly=True, serialized=True, purpose="checkpoint-select") as c:
             c.execute("BEGIN")
             self._check_world_tx(c, universe)
             now = time.time()
@@ -148,8 +148,9 @@ class RuntimeCheckpoints:
             return [candidate for candidate in candidates if candidate not in seen][:limit]
 
     def _run_one_checkpoint(self, universe, checkpoint_key, generation):
-        with self._conn(serialized=True) as c:
-            c.execute("BEGIN IMMEDIATE")
+        with self._conn(serialized=True, purpose="checkpoint") as c:
+            with self._work_timings.phase("begin"):
+                c.execute("BEGIN IMMEDIATE")
             self._check_world_tx(c, universe)
             now = time.time()
             row = c.execute("""SELECT * FROM world_checkpoints
@@ -172,6 +173,9 @@ class RuntimeCheckpoints:
             ctx.checkpoint = CheckpointInvocation(checkpoint_key, generation, row["due_at"], row["created_by"],
                 row["created_operation_id"], row["created_at"], attempt)
             arguments = json.loads(row["arguments_json"])
+            phase = arguments.get("phase") if isinstance(arguments, dict) else None
+            self._work_timings.annotate(handler=row["handler"], generation=generation,
+                                       task_phase=phase if phase in ("prepare", "advance") else None)
             c.execute("SAVEPOINT checkpoint_effects")
             try:
                 validate(spec.input_schema, arguments)
@@ -183,7 +187,8 @@ class RuntimeCheckpoints:
                         ctx.access = "write"
                     if allowed is not True:
                         raise PermissionDenied("checkpoint precondition is no longer authorized")
-                outcome = self._run_user_code(c, spec.handler, ctx, arguments)
+                with self._work_timings.phase("handler", cpu=True):
+                    outcome = self._run_user_code(c, spec.handler, ctx, arguments)
                 self._validate_outcome(outcome, {"output_schema": spec.output_schema})
                 receipt = self._commit_outcome_tx(c, ctx, outcome, json.loads(row["arguments_json"]),
                     journal_marker=marker, source="checkpoint", record_operation=False,
@@ -201,6 +206,8 @@ class RuntimeCheckpoints:
                     (generation, generation, json_text(receipt), receipt["commit_seq"], generation,
                      generation, attempt, generation, time.time(), generation, universe, checkpoint_key))
                 c.execute("RELEASE checkpoint_effects")
+                self._work_timings.annotate(status="completed", commit_seq=receipt["commit_seq"],
+                    ready_lag_seconds=max(0, now-row["available_at"]))
                 return {"checkpoint_key": checkpoint_key, "generation": generation,
                         "status": "completed", "attempt": attempt,
                         "ready_lag_seconds": max(0, now - row["available_at"]),
@@ -230,6 +237,8 @@ class RuntimeCheckpoints:
                                                    attempt=attempt, started_at=now)
 
     def _checkpoint_failure_tx(self, c, row, marker, status, code, operation_id, *, attempt, started_at):
+        self._work_timings.annotate(status=status, failure_code=code,
+            ready_lag_seconds=max(0, started_at-row["available_at"]))
         now = time.time()
         delay = min(86400, row["retry_delay"] * (2 ** max(0, attempt - 1)))
         commit_seq = self._record_commit_tx(c, row["universe"], marker, actor_role_id=CHECKPOINT_ACTOR,

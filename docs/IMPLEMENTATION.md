@@ -4,9 +4,10 @@
 
 ## 版本与运行形态
 
-分域计算与容量恢复轮候选为0.32.0／world33／state23：package 版本来自`pyproject.toml`和`agent_world.__version__`，世界及状态版本来自`shared_grove.world.make_world()`。`simulation.execution`继续从原canonical定义推导读写与休眠计划；`shared_grove.execution`维护持久成员、依赖索引和活动前沿。新增`domains`保存真实相互作用域及局部活动索引，`scheduling`持久协调同一公共逻辑轮，Runtime current checkpoint分别提交协调与域工作。`events`保存局部消费者待处理序列与共享事件事实，`commit`仍拥有单次行动或单个域任务的候选批次和统一落库。运行实例与新源码的范围分别记录，见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
+当前结算恢复与事实反馈轮候选为0.32.3／world34／state24：package 版本来自`pyproject.toml`和`agent_world.__version__`，世界及状态版本来自`shared_grove.world.make_world()`。`simulation.execution`继续从原canonical定义推导读写与休眠计划；`shared_grove.execution`维护持久成员、依赖索引和活动前沿。新增`domains`保存真实相互作用域及局部活动索引，`scheduling`持久协调同一公共逻辑轮，Runtime current checkpoint分别提交协调与域工作。`events`保存局部消费者待处理序列与共享事件事实，`commit`仍拥有单次行动或单个域任务的候选批次和统一落库。运行实例与新源码的范围分别记录，见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
 
-- Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，候选版本0.32.0。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
+- Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，候选版本0.32.3。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
+- 物件整版本保持持久CAS；服务器交互修订区分自动派生输出和受保护事实变化。固定意图携带实际观察，提交仍裁决当前条件；原操作、资源、拓扑与定义不因暂忙或后续读取而替换。旧实体实际写入时补充修订，旧轮未结算任务通过state24同代次后继接续。
 - Runtime protocol 常量：0.15；SDK API：1。
 - 持久存储：file-backed SQLite，WAL，foreign keys 开启；`:memory:` 被拒绝。
 - 同一数据库写事务由 SQLite `BEGIN IMMEDIATE` 与进程内 RLock 协调；SQLite 同时只允许一个实际 writer。
@@ -271,11 +272,17 @@ HTTP Runtime API 与 MCP 均拒绝重复 Authorization 请求头；已鉴权的�
 
 组合入口默认timer poll interval为1s，可关闭；TimerWorker默认batch为25，interval最低0.05s。one-shot仍使用单次sweep开始时固定的候选和原timer_id身份，后续排出的one-shot需下一次sweep；current checkpoint可以在同次sweep的有限预算中执行后继，按持久ready顺序及工作类别公平取候选。
 
-原worker每个时间片最多4个批次、100个选中工作，并以约100ms的monotonic deadline在各任务之间检查；已到期工作让出约10ms再续，空闲按`next_due_work`的索引队首时间等待、不超过配置interval，异常至多约100ms后复查。单个可信规则调用不能硬抢占，不能把该时间片写成绝对响应保证。每个任务都有独立事务，worker不为整个逻辑帧持有写锁，也不调用模型。
+原worker每个时间片先以`limit=1`且不传deadline给一个到期任务原子处理机会；即使候选选择writer等待已超过100ms，也不会反复只读队首、永不推进。之后最多4个批次，共≤100个选中工作，按原约100ms的monotonic deadline在任务之间让出；`run_due_timers`显式deadline语义不变。已到期工作让出约10ms再续，空闲按`next_due_work`的索引队首时间等待、不超过配置interval，异常至多约100ms后复查。单个可信规则调用不能硬抢占，不能把该时间片写成绝对响应保证。每个任务都有独立事务，worker不为整个逻辑帧持有写锁，也不调用模型。
 
-定义checkpoints的世界在原TimerWorker内接入新checkpoint历史回收，按实际checkpoint提交、state change和stream event数量给出有界预算；先释放过期stream引用，再回收checkpoint journal，空闲每30s有限补扫。默认旧提交超过近期4096个checkpoint commits的数量窗口或86400秒时具备回收资格，最新精确回执及其他实际引用继续保护。旧用户`operations`和精确Receipt不清理，checkpoint回收只删除新checkpoint来源的旧commit和关联`state_changes`；独立completeness floor明确标记历史已不完整，不伪装完整历史或降低同步revision。最新世界状态与代次水位不清理，因此删观察历史不重新执行旧代。
+定义checkpoints的世界在原TimerWorker内接入checkpoint历史回收，按实际checkpoint提交、state change和stream event数量累计两倍扫描／删除credit。累计64个提交、4096条change或512条流事件预算时触发，未达到批次也每30s最迟补扫，持续ready时同样执行。每轮最多6次有界pass；单pass扫描≤256个提交／5000条流事件、删除≤106496条change，在成功拿锁和BEGIN后计算约25ms计算预算，SQL单元间让出；空闲／尾批至少提供8个提交、8条流事件及4096条change的恢复预算。未完成credit和backlog保留至后续pass，触及fresh政策窗口时释放不再需要的credit。跨流按单个内存游标轮转，首流积压不能饿死其他流；重启丢失游标不会丢失持久候选资格。
 
-既有retention maintenance仍在世界声明retention或streams时按原方式运行，每30s有界维护；没有为分域计算新增另一层后台线程。普通retention policy及one-shot历史契约保持原责任。
+`apply_work_retention`以同一事务先释放过期stream引用，再回收checkpoint journal；既有`apply_stream_retention`／`apply_checkpoint_retention`复用相同事务helper，公共返回与各自策略保持原合同。域任务继续独立事务，没有合并世界帧写入或降低FULL。默认旧提交超过近期4096个checkpoint commits的数量窗口或86400秒时具备回收资格，最新精确回执及其他实际引用继续保护。旧用户`operations`和精确Receipt不清理，checkpoint回收只删除新checkpoint来源的旧commit和关联`state_changes`；独立completeness floor明确标记历史已不完整，不伪装完整历史或降低同步revision。最新世界状态与代次水位不清理，因此删观察历史不重新执行旧代。
+
+Shared Grove保存独立`cadence_anchor_at`：正常轮打开时锚定，封帧后后继due为`max(封帧时刻, 锚点+1s)`；恢复时只重锚节拍，不改原`opened_at`、逻辑目标、事件cutoff及已结算域。单个长事务或FULL持久化仍可能造成真实迟到，不提供硬实时保证。
+
+活动Runtime的`work_diagnostics(limit=32)`与现有HTTP `/health?diagnostics=true`提供有界主机计时；默认health不包含诊断；带诊断的入口仅接受实际loopback连接源，不依据转发头放行，远程请求返回403。最近128笔宿主工作以内存保存，读取最多32笔，累计phase仅含固定阶段：连接、writer等待、BEGIN、handler wall／thread CPU、managed、COMMIT、回滚、两类维护及WAL回填。WAL回填独立于世界写锁，另记忙状态、总帧、已回填帧和待回填帧。记录只含受信handler标签、代次／提交水位、计数和时间，不保存调用参数、凭据、对象正文或异常详情；超过一秒的动作／定时／checkpoint／维护写出同类无参数慢日志。诊断读取不用数据库写锁，重启清零，不另建持久trace或调试服务。
+
+现有宿主维护线程同时承担SQLite官方PASSIVE回填，约一秒检查一次，独占租用连接但不取得Runtime写锁；世界声明retention或streams时仍每30s按原政策有界维护。仅该维护生命周期内，全部写连接在租用时设置wal_autocheckpoint=0；正常关闭或线程异常结束后后续租用恢复默认1000，裸Runtime保持默认策略。同步FULL不变、动作与域任务事务不合并，不在线强制RESTART/TRUNCATE或删WAL；PASSIVE的busy、log、checkpointed和pending帧及耗时进入有界主机诊断，busy=0不等于完整回填。长读快照仍可能阻止回填并使WAL增长，约一秒的检查间隔不是硬时间／空间保证。方法采用[SQLite官方WAL说明](https://sqlite.org/wal.html)与[PASSIVE接口语义](https://sqlite.org/c3ref/wal_checkpoint_v2.html)，不是外置盘专属逻辑。普通retention policy及one-shot历史契约保持原责任。
 
 也可以分别运行 timer worker 和 retention maintenance CLI。导入 package 本身不会安装常驻系统服务。
 

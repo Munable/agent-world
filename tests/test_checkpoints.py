@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import contextmanager
 import concurrent.futures
 from pathlib import Path
 import sqlite3
@@ -29,49 +30,96 @@ class CheckpointMaintenanceTests(unittest.TestCase):
     def worker(self, *, enabled=True):
         runtime = Mock()
         runtime._worlds = {"u": SimpleNamespace(checkpoints=("work",) if enabled else ())}
+        runtime.apply_work_retention.return_value = {"stream_backlog": False, "checkpoint_backlog": False,
+            "stream_after": None, "stream_events_scanned": 0, "checkpoint_commits_scanned": 0,
+            "checkpoint_changes_removed": 0}
         return runtime, TimerWorker(runtime, "u")
 
     def test_active_sweep_reclaims_in_proportion_to_actual_commits_and_changes(self):
         runtime, worker = self.worker()
         worker._maintain_checkpoint_history({"commits": 25, "changes": 12800, "stream_events": 75})
-        runtime.apply_stream_retention.assert_called_once_with("u", limit=158)
-        runtime.apply_checkpoint_retention.assert_called_once_with("u", limit=58, change_limit=29696)
-        self.assertEqual(runtime.method_calls[0][0], "apply_stream_retention")
+        kwargs = runtime.apply_work_retention.call_args.kwargs
+        self.assertEqual((kwargs["limit"], kwargs["change_limit"], kwargs["stream_limit"]), (50, 25600, 150))
+        runtime.apply_work_retention.assert_called_once()
+        runtime.apply_stream_retention.assert_not_called()
+        runtime.apply_checkpoint_retention.assert_not_called()
+
+    def test_small_continuous_production_accumulates_before_a_maintenance_batch(self):
+        runtime, worker = self.worker()
+        with patch("time.monotonic", return_value=100):
+            worker._next_checkpoint_retention = 130
+            for _ in range(31):
+                worker._maintain_checkpoint_history({"commits": 1, "changes": 3})
+            runtime.apply_work_retention.assert_not_called()
+            worker._maintain_checkpoint_history({"commits": 1, "changes": 3})
+        self.assertEqual(runtime.apply_work_retention.call_args.kwargs["limit"], 64)
+        self.assertEqual(worker._maintenance_credit, {"commits": 0, "changes": 0, "stream_events": 0})
 
     def test_idle_retention_is_bounded_and_only_runs_at_the_slow_cadence(self):
         runtime, worker = self.worker()
         worker._next_checkpoint_retention = 130
         with patch("time.monotonic", return_value=100):
             worker._maintain_checkpoint_history({})
-        runtime.apply_checkpoint_retention.assert_not_called()
+        runtime.apply_work_retention.assert_not_called()
         with patch("time.monotonic", return_value=130):
             worker._maintain_checkpoint_history({})
-        runtime.apply_stream_retention.assert_called_once_with("u", limit=8)
-        runtime.apply_checkpoint_retention.assert_called_once_with("u", limit=8, change_limit=4096)
+        runtime.apply_work_retention.assert_called_once_with("u", stream_limit=8, limit=8,
+            change_limit=4096, time_budget=0.025, stream_after=None)
         self.assertEqual(worker._next_checkpoint_retention, 160)
 
     def test_world_without_checkpoints_does_not_opt_into_new_history_retention(self):
         runtime, worker = self.worker(enabled=False)
         worker._next_checkpoint_retention = 0
         worker._maintain_checkpoint_history({"commits": 1, "changes": 1})
-        runtime.apply_stream_retention.assert_not_called()
-        runtime.apply_checkpoint_retention.assert_not_called()
+        runtime.apply_work_retention.assert_not_called()
 
     def test_stream_cleanup_keeps_up_with_the_maximum_legal_event_production(self):
         runtime, worker = self.worker()
-        worker._maintain_checkpoint_history({"commits": 100, "changes": 51200, "stream_events": 12800})
-        self.assertEqual([call.kwargs["limit"] for call in runtime.apply_stream_retention.call_args_list],
-                         [5000, 5000, 5000, 5000, 5000, 608])
-        runtime.apply_checkpoint_retention.assert_called_once_with("u", limit=208, change_limit=106496)
+        base = runtime.apply_work_retention.return_value
+        runtime.apply_work_retention.side_effect = [
+            {**base, "stream_backlog": True, "stream_events_scanned": 5000} for _ in range(5)
+        ] + [{**base, "stream_events_scanned": 600}]
+        with patch("time.monotonic", return_value=100):
+            worker._maintain_checkpoint_history({"commits": 100, "changes": 51200, "stream_events": 12800})
+        self.assertEqual([call.kwargs["stream_limit"] for call in runtime.apply_work_retention.call_args_list],
+                         [5000, 5000, 5000, 5000, 5000, 600])
+        self.assertEqual(worker._maintenance_credit["stream_events"], 0)
+
+    def test_elapsed_budget_carries_unspent_credit_and_stream_cursor_into_next_pass(self):
+        runtime, worker = self.worker()
+        runtime.apply_work_retention.return_value = {"stream_backlog": True, "checkpoint_backlog": True,
+            "stream_after": "second", "stream_events_scanned": 4, "checkpoint_commits_scanned": 2,
+            "checkpoint_changes_removed": 10}
+        with patch("time.monotonic", side_effect=[100, 100, 100.1, 100.1]):
+            worker._maintain_checkpoint_history({"commits": 40, "changes": 100, "stream_events": 300})
+        self.assertEqual(worker._maintenance_credit, {"commits": 78, "changes": 190, "stream_events": 596})
+        self.assertTrue(worker._maintenance_backlog)
+        runtime.apply_work_retention.return_value = {"stream_backlog": False, "checkpoint_backlog": False,
+            "stream_after": "first", "stream_events_scanned": 1, "checkpoint_commits_scanned": 1,
+            "checkpoint_changes_removed": 1}
+        with patch("time.monotonic", return_value=101):
+            worker._maintain_checkpoint_history({})
+        self.assertEqual(runtime.apply_work_retention.call_args.kwargs["stream_after"], "second")
+        self.assertFalse(worker._maintenance_backlog)
+
+    def test_failed_maintenance_does_not_spend_credit_or_advance_cursor(self):
+        runtime, worker = self.worker()
+        runtime.apply_work_retention.side_effect = RuntimeError("failed")
+        with self.assertRaises(RuntimeError):
+            worker._maintain_checkpoint_history({"commits": 40, "changes": 100})
+        self.assertEqual(worker._maintenance_credit["commits"], 80)
+        self.assertIsNone(worker._maintenance_stream_after)
 
     def test_ready_queue_gets_another_batch_without_a_full_poll_delay(self):
         runtime, worker = self.worker(enabled=False)
-        runtime.run_due_timers.side_effect = [{"count": 25}, {"count": 8}]
+        runtime.run_due_timers.side_effect = [{"count": 1}, {"count": 8}]
         runtime.next_due_work.side_effect = [1000, 1001]
         with patch("time.time", return_value=1000), patch("time.monotonic", return_value=100):
             self.assertEqual(worker._run_ready_slice(), 1001)
         self.assertEqual(runtime.run_due_timers.call_count, 2)
-        self.assertEqual([call.kwargs["limit"] for call in runtime.run_due_timers.call_args_list], [25, 25])
+        self.assertEqual([call.kwargs["limit"] for call in runtime.run_due_timers.call_args_list], [1, 25])
+        self.assertNotIn("deadline", runtime.run_due_timers.call_args_list[0].kwargs)
+        self.assertIn("deadline", runtime.run_due_timers.call_args_list[1].kwargs)
 
     def test_ready_time_slice_has_both_work_count_and_elapsed_time_bounds(self):
         runtime, worker = self.worker(enabled=False)
@@ -79,7 +127,8 @@ class CheckpointMaintenanceTests(unittest.TestCase):
         runtime.next_due_work.return_value = 1000
         with patch("time.time", return_value=1000), patch("time.monotonic", return_value=100):
             worker._run_ready_slice()
-        self.assertEqual(runtime.run_due_timers.call_count, 4)
+        self.assertEqual(runtime.run_due_timers.call_count, 5)
+        self.assertEqual(sum(call.kwargs["limit"] for call in runtime.run_due_timers.call_args_list), 100)
         runtime.reset_mock()
         with patch("time.time", return_value=1000), patch("time.monotonic", side_effect=[100, 100.2]):
             worker._run_ready_slice()
@@ -370,12 +419,38 @@ class CheckpointTests(unittest.TestCase):
     def test_worker_deadline_yields_between_tasks_without_losing_pending_work(self):
         self.arm("a")
         self.arm("b")
-        with patch("time.monotonic", side_effect=[100, 100.2]):
+        clock = [100.0]
+        original = self.runtime._run_one_checkpoint
+        def advance_after_commit(*args, **kwargs):
+            result = original(*args, **kwargs)
+            clock[0] = 100.2
+            return result
+        with patch("time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(self.runtime, "_run_one_checkpoint", side_effect=advance_after_commit):
             result = self.runtime.run_due_timers("u", limit=25, deadline=100.1)
         self.assertEqual(result["count"], 1)
         self.assertEqual(self.runtime.get_checkpoint("u", "b")["status"], "pending")
         self.assertEqual(self.runtime.run_due_timers("u")["count"], 1)
         self.assertEqual((self.value("a"), self.value("b")), (1, 1))
+
+    def test_worker_selection_wait_cannot_use_up_every_atomic_work_opportunity(self):
+        self.arm("a")
+        self.arm("b")
+        clock = [100.0]
+        worker = TimerWorker(self.runtime, "u")
+        original = self.runtime._conn
+        @contextmanager
+        def delayed_select(**kwargs):
+            with original(**kwargs) as connection:
+                yield connection
+            if kwargs.get("purpose") == "work-select":
+                clock[0] = 100.2
+        with patch("time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(self.runtime, "_conn", side_effect=delayed_select):
+            worker._run_ready_slice()
+        self.assertEqual(self.value("a"), 1)
+        self.assertEqual(self.runtime.get_checkpoint("u", "b")["status"], "pending")
+        self.assertEqual(self.runtime.run_due_timers("u")["count"], 1)
 
     def test_generation_cas_replacement_cancel_and_restart_do_not_replay_old_work(self):
         self.arm(due=1005)

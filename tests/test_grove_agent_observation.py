@@ -4,7 +4,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from agent_world.grove_agent_observation import AgentObservations, blueprint_model_input, companion_projection
+from agent_world.grove_agent_observation import (AgentObservations, blueprint_model_input,
+    companion_projection, execution_private_context, nearby_public_events)
 from agent_world.grove_connector_errors import ConnectorError
 
 
@@ -17,6 +18,59 @@ INTERACT_SCHEMA = {
 
 
 class AgentObservationsTests(unittest.TestCase):
+    def test_public_rule_action_preserves_actual_actor_without_guessing_from_author(self):
+        page = {"events": [
+            {"event_id": "reset", "kind": "rule_action", "actor_role_id": "visitor", "seq": 4,
+                "payload": {"entity_id": "counter", "action": "reset", "summary": "归零"}},
+            {"event_id": "unseen", "kind": "rule_action", "actor_role_id": "elsewhere", "seq": 5,
+                "payload": {"entity_id": "unseen", "action": "reset"}},
+            {"event_id": "private", "kind": "move", "actor_role_id": "visitor", "seq": 6,
+                "payload": {"x": 0, "y": 0}}]}
+        events = nearby_public_events(page, {"x": 0, "y": 0}, [{"id": "counter", "created_by": "author"}])
+        self.assertEqual([row["event_id"] for row in events], ["reset"])
+        self.assertEqual(events[0]["actor_role_id"], "visitor")
+        self.assertNotIn("created_by", events[0])
+
+    def test_current_execution_context_does_not_reissue_historical_creation_intent(self):
+        stored = {"intent": "喜欢探索", "preferences": ["简短回复"],
+            "last_creation_request": "做个信号牌", "recent_user_requests": [
+                {"text": "做个信号牌", "purpose": "creation"}, {"text": "去附近走走"}]}
+        original = deepcopy(stored)
+        context = execution_private_context(stored, "去附近走走")
+        self.assertEqual(context["current_execution_goal"], "去附近走走")
+        self.assertEqual(context["preferences"], original["preferences"])
+        self.assertNotIn("last_creation_request", context)
+        self.assertNotIn("recent_user_requests", context)
+        self.assertEqual(context["projection"]["omitted_historical_request_count"], 2)
+        self.assertEqual(stored, original)
+
+    def test_actual_target_state_survives_action_and_checkpoint_projection_and_binds_only_presented_version(self):
+        prior = self.observations.present("map.viewport", self.scene(), preflight=True)["observation_id"]
+        actual = {"id": "target", "version": 24, "execution_domain": {"state": "settled", "last_applied_tick": 91},
+            "creative": {"fields": {"signal": 0}, "world_tick": 92, "mechanical_observation": {
+                "stored_state": {"angle": 3, "energy": 19}, "stored_output_is_history": True,
+                "observed_tick": 92, "meaning": "Saved output is not realtime motion"}}}
+        facts = {"player": {"id": "person", "version": 8}, "entities": [], "observed_at": 123,
+            "action_targets": [{"entity_id": "target", "observed_at": 122, "inspection": {"entity": actual}},
+                {"entity_id": "consumed", "observed_at": 122.5, "unavailable": {"code": "ResourceNotFound"}}],
+            "action_targets_meaning": "Separate current reads",
+            "task_action_summary": {"task_id": "task", "groups": [{"function": "grove.rule_action",
+                "action": "fuel", "count": 6, "last_operation_id": "original-fuel", "last_commit_seq": 17,
+                "last_confirmed_outcome": {"action_result": {"energy": 10}}}]}}
+        action = self.observations.present("grove.interact", {"result": {"entity": {"id": "target", "version": 23}},
+            "execution_readback": deepcopy(facts)}, base_id=prior, action_entity_ids=["target"])
+        self.assertEqual(action["execution_readback"]["action_targets"], facts["action_targets"])
+        self.assertEqual(action["execution_readback"]["task_action_summary"], facts["task_action_summary"])
+        self.assertEqual(self.observations.get(action["observation_id"])["versions"]["entity"]["target"], 24)
+        self.assertNotIn("consumed", self.observations.get(action["observation_id"])["versions"]["entity"])
+        self.assertEqual(self.observations.get(prior)["versions"]["entity"]["target"], 22)
+        checkpoint = self.observations.present("execution_checkpoint", {"status": "completed", "segment_finished": True,
+            "execution_readback": deepcopy(facts)}, base_id=action["observation_id"])
+        self.assertEqual(checkpoint["execution_readback"]["action_targets"], facts["action_targets"])
+        self.assertEqual(checkpoint["execution_readback"]["task_action_summary"], facts["task_action_summary"])
+        self.assertEqual(checkpoint["execution_readback"]["observed_at"], 123)
+        self.assertEqual(self.observations.get(checkpoint["observation_id"])["versions"]["entity"]["target"], 24)
+
     def test_checkpoint_supplies_new_opaque_observation_with_current_mechanical_facts(self):
         old = self.observations.present("map.viewport", self.scene(), preflight=True)["observation_id"]
         facts = self.scene()
@@ -39,6 +93,60 @@ class AgentObservationsTests(unittest.TestCase):
         return {"player": {"id": "person", "version": 7}, "entities": [
             {"id": "target", "version": 22, "pour_target_slot": "contained"},
             {"id": "source", "version": 8}]}
+
+    def test_interaction_guard_comes_from_the_chosen_observation_not_a_later_read_or_model_number(self):
+        scene = self.scene()
+        scene["entities"][0]["interaction_revision"] = 12
+        old = self.observations.present("map.viewport", scene, preflight=True)["observation_id"]
+        schema = {"properties": {"expected_player_version": {}, "expected_target_version": {},
+            "expected_target_interaction_revision": {}},
+            "required": ["expected_player_version", "expected_target_version"]}
+        latest = self.observations.present("grove.inspect", {
+            "entity": {"id": "target", "version": 25, "interaction_revision": 25}}, base_id=old)["observation_id"]
+        intent = {"action": "reset", "target_id": "target", "expected_target_version": 999,
+            "expected_target_interaction_revision": 999}
+        bound = self.observations.bind("grove.rule_action", intent, old, schema)
+        self.assertEqual((bound["expected_target_version"], bound["expected_target_interaction_revision"]), (22, 12))
+        fresh = self.observations.bind("grove.rule_action", intent, latest, schema)
+        self.assertEqual((fresh["expected_target_version"], fresh["expected_target_interaction_revision"]), (25, 25))
+        identity_only = self.observations.present("grove.inspect", {
+            "entity": {"id": "target", "version": 26}}, base_id=latest)["observation_id"]
+        legacy = self.observations.bind("grove.rule_action", intent, identity_only, schema)
+        self.assertEqual(legacy["expected_target_version"], 26)
+        self.assertNotIn("expected_target_interaction_revision", legacy)
+        self.assertEqual(intent["expected_target_interaction_revision"], 999)
+
+    def test_drop_item_shape_binds_the_same_presented_guard_and_legacy_does_not_invent_one(self):
+        schema = deepcopy(INTERACT_SCHEMA)
+        schema["required"] = ["expected_player_version", "expected_item_version"]
+        schema["properties"].update(expected_target_interaction_revision={}, expected_item_interaction_revision={})
+        scene = self.scene()
+        scene["entities"][0]["interaction_revision"] = 12
+        observation = self.observations.present("map.viewport", scene, preflight=True)["observation_id"]
+        bound = self.observations.bind("grove.interact", {"action": "drop", "item_id": "target"}, observation, schema)
+        self.assertEqual(bound["expected_item_version"], 22)
+        self.assertEqual(bound["expected_item_interaction_revision"], 12)
+        old = self.observations.present("map.viewport", self.scene(), preflight=True)["observation_id"]
+        legacy = self.observations.bind("grove.interact", {"action": "drop", "item_id": "target"}, old, schema)
+        self.assertNotIn("expected_item_interaction_revision", legacy)
+
+    def test_material_lot_in_an_entity_field_is_diagnosed_only_from_presented_facts(self):
+        observation = self.observations.present("grove.inspect", {
+            "player": {"id": "person", "version": 7},
+            "entity": {"id": "target", "version": 22},
+            "action_options": [{"action": "transfer", "input": {"candidates": [
+                {"id": "source", "version": 8, "lots": [{"id": "source:real", "quantity": 3}]}]}}]})["observation_id"]
+        with self.assertRaises(ConnectorError) as wrong:
+            self.observations.bind("grove.interact", {"action": "transfer", "target_id": "target",
+                "item_id": "source:real", "lot_id": "source:real"}, observation, INTERACT_SCHEMA)
+        self.assertEqual(wrong.exception.code, "ObservedVersionRequired")
+        self.assertIn("是材料lot_id", str(wrong.exception))
+        self.assertNotIn("source:real", self.observations.get(observation)["versions"]["entity"])
+        self.assertNotIn("source", self.observations.get(observation)["versions"]["entity"])
+        with self.assertRaises(ConnectorError) as unknown:
+            self.observations.bind("grove.interact", {"action": "transfer", "target_id": "target",
+                "item_id": "unknown:object"}, observation, INTERACT_SCHEMA)
+        self.assertNotIn("是材料lot_id", str(unknown.exception))
 
     def test_only_explicit_base_extends_an_observation_without_mutating_prior_facts(self):
         source = self.scene()
@@ -186,12 +294,14 @@ class AgentObservationsTests(unittest.TestCase):
         self.assertEqual(json.loads(self.observations.serialize(supplied)), supplied)
 
     def test_tool_schema_hides_guards_but_retains_authored_program_parameters(self):
-        authored = {"type": "object", "properties": {"expected_heat_version": {"type": "integer"}},
-            "required": ["expected_heat_version"]}
-        source = {"properties": {"expected_player_version": {}, "params": authored,
+        authored = {"type": "object", "properties": {"expected_heat_version": {"type": "integer"},
+            "expected_target_interaction_revision": {"type": "integer"}},
+            "required": ["expected_heat_version", "expected_target_interaction_revision"]}
+        source = {"properties": {"expected_player_version": {}, "expected_target_interaction_revision": {}, "params": authored,
             "continuation": {"properties": {"observed_anchor_version": {}, "content_id": {}}}}}
         supplied = self.observations.tool_schema(source)
         self.assertNotIn("expected_player_version", supplied["properties"])
+        self.assertNotIn("expected_target_interaction_revision", supplied["properties"])
         self.assertNotIn("observed_anchor_version", supplied["properties"]["continuation"]["properties"])
         self.assertEqual(supplied["properties"]["params"], authored)
         self.assertIn("expected_player_version", source["properties"])

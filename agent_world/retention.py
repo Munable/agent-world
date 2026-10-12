@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+import time
 
 from .runtime_contracts import identifier, integer, duration
 from .runtime_errors import WorldDefinitionError
@@ -115,62 +116,121 @@ class RuntimeRetention:
         The host supplies a work-proportional scan/change budget plus catch-up;
         its hard bounds apply even while recovering an old backlog.
         """
-        import time
+        self._checkpoint_retention_contract(universe, keep_commits, seconds, limit, change_limit)
+        with self._conn(serialized=True, purpose="maintenance") as c:
+            with self._work_timings.phase("begin"):
+                c.execute("BEGIN IMMEDIATE")
+            self._check_world_tx(c, universe)
+            with self._work_timings.phase("checkpoint_retention"):
+                result = self._apply_checkpoint_retention_tx(c, universe, keep_commits=keep_commits,
+                    seconds=seconds, limit=limit, change_limit=change_limit)
+        if result["checkpoint_changes_removed"]:
+            self.wake_waiters()
+        return {key: result[key] for key in ("checkpoint_commits_removed", "checkpoint_changes_removed",
+            "checkpoint_completeness_floor", "checkpoint_commit_floor", "scanned_through")}
+
+    @staticmethod
+    def _checkpoint_retention_contract(universe, keep_commits, seconds, limit, change_limit):
         identifier(universe, "universe")
         integer(keep_commits, "checkpoint retained commits", 0, 100000)
         duration(seconds, "checkpoint retention", 315360000, zero=True)
         integer(limit, "checkpoint retention batch", 1, 256)
         integer(change_limit, "checkpoint retained-change batch", 1, 106496)
-        removed_commits = removed_changes = 0
-        with self._conn(serialized=True) as c:
-            c.execute("BEGIN IMMEDIATE")
+
+    def apply_work_retention(self, universe, *, stream_limit=500, limit=64, change_limit=4096,
+                             keep_commits=4096, seconds=86400, time_budget=0.025, stream_after=None):
+        """One bounded maintenance commit; individual world tasks stay atomic.
+
+        Streams release foreign-key references before checkpoint collection.
+        Deadline checks yield between bounded SQL units, never abandon a
+        partial commit or change FULL durability. Scan counters let the host
+        retain unspent production credit when a pass leaves eligible backlog.
+        """
+        self._checkpoint_retention_contract(universe, keep_commits, seconds, limit, change_limit)
+        integer(stream_limit, "stream retention batch", 1, 5000)
+        duration(time_budget, "maintenance time budget", 1)
+        if stream_after is not None:
+            identifier(stream_after, "maintenance stream cursor")
+        with self._conn(serialized=True, purpose="maintenance") as c:
+            with self._work_timings.phase("begin"):
+                c.execute("BEGIN IMMEDIATE")
             self._check_world_tx(c, universe)
-            current = c.execute("SELECT floor,commit_floor,scan_after FROM checkpoint_history_floors WHERE universe=?",
-                                (universe,)).fetchone()
-            floor, commit_floor, scan_after = tuple(current) if current else (0, 0, 0)
-            boundary = c.execute("SELECT seq FROM world_commits WHERE universe=? AND source='checkpoint' "
-                                 "ORDER BY seq DESC LIMIT 1 OFFSET ?", (universe, keep_commits)).fetchone()
-            count_through = int(boundary[0]) if boundary else 0
-            rows = c.execute("SELECT seq,actor_role_id,operation_id,created_at,change_count FROM world_commits "
-                             "WHERE universe=? AND source='checkpoint' AND checkpoint_reclaimable=1 "
-                             "AND seq>? ORDER BY seq LIMIT ?",
-                             (universe, scan_after, limit)).fetchall()
-            now = time.time()
-            scanned = scan_after
-            reached_fresh = False
-            for row in rows:
-                if row['seq'] > count_through and row['created_at'] > now-seconds:
-                    reached_fresh = True
-                    break
-                references = (
-                    ("SELECT 1 FROM world_checkpoints WHERE universe=? AND latest_commit_seq=? LIMIT 1",
-                     (universe, row['seq'])),
-                    ("SELECT 1 FROM stream_events WHERE commit_seq=? LIMIT 1", (row['seq'],)),
-                    ("SELECT 1 FROM timer_transitions WHERE commit_seq=? LIMIT 1", (row['seq'],)),
-                    ("SELECT 1 FROM operations WHERE universe=? AND actor_role_id=? AND idempotency_key=? LIMIT 1",
-                     (universe, row['actor_role_id'], row['operation_id'])),
-                )
-                if any(c.execute(sql, params).fetchone() is not None for sql, params in references):
-                    scanned = int(row['seq'])
-                    c.execute("UPDATE world_commits SET checkpoint_reclaimable=0 WHERE seq=?", (row['seq'],))
-                    continue
-                if removed_changes + row['change_count'] > change_limit:
-                    break
-                scanned = int(row['seq'])
-                last = c.execute("SELECT MAX(seq) FROM state_changes WHERE commit_seq=?", (row['seq'],)).fetchone()[0]
-                removed_changes += c.execute("DELETE FROM state_changes WHERE commit_seq=?", (row['seq'],)).rowcount
-                removed_commits += c.execute("DELETE FROM world_commits WHERE seq=?", (row['seq'],)).rowcount
-                floor = max(floor, int(last) if last is not None else 0)
-                commit_floor = max(commit_floor, int(row['seq']))
-            if not rows or reached_fresh or (rows and scanned == rows[-1]['seq'] and len(rows) < limit):
-                scanned = 0
-            # No repeated journal entry: this is current maintenance position.
-            if (floor, commit_floor, scanned) != (tuple(current) if current else (0, 0, 0)):
-                c.execute("INSERT INTO checkpoint_history_floors(universe,floor,commit_floor,scan_after) VALUES(?,?,?,?) "
-                          "ON CONFLICT(universe) DO UPDATE SET floor=excluded.floor,commit_floor=excluded.commit_floor,"
-                          "scan_after=excluded.scan_after", (universe, floor, commit_floor, scanned))
-        if removed_changes:
+            # Lock wait is measured separately and cannot spend the entire GC
+            # budget: otherwise a busy writer can starve recovery forever.
+            deadline = time.monotonic() + time_budget
+            # Reserve a share for checkpoint reclaim even when streams are
+            # continuously busy; a SQL unit itself cannot be preempted.
+            stream_deadline = time.monotonic() + time_budget / 2
+            with self._work_timings.phase("stream_retention"):
+                streams = self._apply_stream_retention_tx(c, universe, limit=stream_limit,
+                    deadline=stream_deadline, shared_limit=True, after_stream=stream_after)
+            with self._work_timings.phase("checkpoint_retention"):
+                checkpoints = self._apply_checkpoint_retention_tx(c, universe, keep_commits=keep_commits,
+                    seconds=seconds, limit=limit, change_limit=change_limit, deadline=deadline)
+            self._work_timings.annotate(stream_events_removed=streams["stream_events_removed"],
+                checkpoint_commits_removed=checkpoints["checkpoint_commits_removed"],
+                checkpoint_changes_removed=checkpoints["checkpoint_changes_removed"])
+        if checkpoints["checkpoint_changes_removed"]:
             self.wake_waiters()
+        return {**streams, **checkpoints}
+
+    def _apply_checkpoint_retention_tx(self, c, universe, *, keep_commits, seconds, limit,
+                                       change_limit, deadline=None):
+        removed_commits = removed_changes = 0
+        current = c.execute("SELECT floor,commit_floor,scan_after FROM checkpoint_history_floors WHERE universe=?",
+                            (universe,)).fetchone()
+        floor, commit_floor, scan_after = tuple(current) if current else (0, 0, 0)
+        boundary = c.execute("SELECT seq FROM world_commits WHERE universe=? AND source='checkpoint' "
+                             "ORDER BY seq DESC LIMIT 1 OFFSET ?", (universe, keep_commits)).fetchone()
+        count_through = int(boundary[0]) if boundary else 0
+        rows = c.execute("SELECT seq,actor_role_id,operation_id,created_at,change_count FROM world_commits "
+                         "WHERE universe=? AND source='checkpoint' AND checkpoint_reclaimable=1 "
+                         "AND seq>? ORDER BY seq LIMIT ?", (universe, scan_after, limit)).fetchall()
+        now = time.time()
+        scanned = scan_after
+        inspected = 0
+        reached_fresh = stopped = False
+        for row in rows:
+            # Attempt one bounded unit even if a stream SQL unit was slow;
+            # continuous stream backlog must not starve checkpoint recovery.
+            if inspected and deadline is not None and time.monotonic() >= deadline:
+                stopped = True
+                break
+            if row['seq'] > count_through and row['created_at'] > now-seconds:
+                reached_fresh = True
+                break
+            references = (
+                ("SELECT 1 FROM world_checkpoints WHERE universe=? AND latest_commit_seq=? LIMIT 1",
+                 (universe, row['seq'])),
+                ("SELECT 1 FROM stream_events WHERE commit_seq=? LIMIT 1", (row['seq'],)),
+                ("SELECT 1 FROM timer_transitions WHERE commit_seq=? LIMIT 1", (row['seq'],)),
+                ("SELECT 1 FROM operations WHERE universe=? AND actor_role_id=? AND idempotency_key=? LIMIT 1",
+                 (universe, row['actor_role_id'], row['operation_id'])),
+            )
+            if any(c.execute(sql, params).fetchone() is not None for sql, params in references):
+                inspected += 1
+                scanned = int(row['seq'])
+                c.execute("UPDATE world_commits SET checkpoint_reclaimable=0 WHERE seq=?", (row['seq'],))
+                continue
+            if removed_changes + row['change_count'] > change_limit:
+                stopped = True
+                break
+            inspected += 1
+            scanned = int(row['seq'])
+            last = c.execute("SELECT MAX(seq) FROM state_changes WHERE commit_seq=?", (row['seq'],)).fetchone()[0]
+            removed_changes += c.execute("DELETE FROM state_changes WHERE commit_seq=?", (row['seq'],)).rowcount
+            removed_commits += c.execute("DELETE FROM world_commits WHERE seq=?", (row['seq'],)).rowcount
+            floor = max(floor, int(last) if last is not None else 0)
+            commit_floor = max(commit_floor, int(row['seq']))
+        backlog = stopped or (not reached_fresh and len(rows) == limit)
+        if not rows or reached_fresh or (not stopped and len(rows) < limit):
+            scanned = 0
+        # No repeated journal entry: this is current maintenance position.
+        if (floor, commit_floor, scanned) != (tuple(current) if current else (0, 0, 0)):
+            c.execute("INSERT INTO checkpoint_history_floors(universe,floor,commit_floor,scan_after) VALUES(?,?,?,?) "
+                      "ON CONFLICT(universe) DO UPDATE SET floor=excluded.floor,commit_floor=excluded.commit_floor,"
+                      "scan_after=excluded.scan_after", (universe, floor, commit_floor, scanned))
         return {"checkpoint_commits_removed": removed_commits, "checkpoint_changes_removed": removed_changes,
                 "checkpoint_completeness_floor": floor, "checkpoint_commit_floor": commit_floor,
-                "scanned_through": scanned}
+                "scanned_through": scanned, "checkpoint_commits_scanned": inspected,
+                "checkpoint_backlog": backlog}

@@ -124,6 +124,70 @@ assert.ok(ui.candidatePreviewLines({preview}).some(line=>line.includes('不保�
 // become private between selection and submission without revoking the user.
 const pageSource=readFileSync(new URL('../agent_world/grove_web/grove.js',import.meta.url),'utf8');
 const extract=(start,end)=>pageSource.slice(pageSource.indexOf(start),pageSource.indexOf(end));
+const actionVersionSource=extract('function observedActionVersion(','async function ruleAction(');
+const replyContext={matterLots:ui.matterLots,materialLabel:ui.materialLabel,slotLabel:ui.slotLabel,
+  lifecycleLabel:ui.lifecycleLabel,creativeState:ui.creativeState,factLabel:ui.factLabel,factValue:ui.factValue};
+vm.createContext(replyContext);
+vm.runInContext(extract('function currentAssistantReply(','function button('),replyContext);
+
+// An old native final remains readable history, but cannot become this request's reply.
+{
+  const message={role:'assistant',text:'原模型正文保持不变',task_id:'original-task',request_number:1,
+    response_message_id:'native-final',session_id:'native-session',time:1791781456};
+  const value={status:'ready',completed:true,message_id:'native-final',session_id:'native-session',
+    execution:{task_id:'original-task',requests_used:1,status:'completed'},messages:[message]};
+  assert.equal(replyContext.currentAssistantReply(value),message);
+  assert.ok(replyContext.agentMessageLabel(message,value).includes('本次委托回复'));
+  for(const changed of [
+    {...value,status:'paused'}, {...value,reclaim_in_progress:true}, {...value,unknown_operations:1},
+    {...value,completed:false}, {...value,message_id:'next-final'}, {...value,session_id:'other-session'},
+    {...value,execution:{...value.execution,status:'starting'}},
+    {...value,execution:{task_id:'next-task',requests_used:1}},
+    {...value,execution:{task_id:'original-task',requests_used:2}}
+  ])assert.equal(replyContext.currentAssistantReply(changed),null);
+  assert.ok(replyContext.agentMessageLabel(message,{...value,execution:{task_id:'next-task'}}).includes('历史委托'));
+  assert.ok(replyContext.agentMessageLabel(message,{...value,status:'paused'}).includes('本次委托历史'));
+  const legacy={role:'assistant',text:'旧正文'};
+  assert.equal(replyContext.currentAssistantReply({...value,messages:[legacy]}),null);
+  assert.ok(replyContext.agentMessageLabel(legacy,value).includes('请求来源未记录'));
+  const ordinary={...message,task_id:null,request_number:null};
+  assert.equal(replyContext.currentAssistantReply({...value,messages:[ordinary]}),ordinary);
+  assert.equal(replyContext.currentAssistantReply({...value,execution:{task_id:'next-task',status:'starting'},messages:[ordinary]}),null);
+  assert.equal(message.text,'原模型正文保持不变');
+}
+
+// Submission snapshots and independently read object facts never assert motion or goal success.
+{
+  const entity={id:'actual-target',name:'不以名称推断机制',version:7,matter:[{material:'wood',quantity:2,slot:'body'}],
+    state:{wetness:0},creative:{world_tick:15,fields:{ready:false},mechanical_observation:{stored_state:{energy:0,angle:24,speed:3,status:'stopped'}}}};
+  const execution={readback_actual:true,readback:{action_targets:[
+    {entity_id:entity.id,inspection:{entity},observed_at:1791781456},
+    {entity_id:'unreadable-target',unavailable:{code:'ResourceNotFound'},observed_at:1791781457}
+  ]}};
+  const lines=replyContext.actionTargetReadbackLines(execution);
+  assert.ok(lines.some(line=>line.includes('版本 7')&&line.includes('读取于')));
+  assert.ok(lines.some(line=>line.includes('物件详情读取步 15')));
+  assert.ok(lines.some(line=>line.includes('吸水饱和度 0%')));
+  assert.ok(lines.some(line=>line.includes('当前持续运动')&&line.includes('不证明')));
+  assert.ok(lines.some(line=>line.includes('旧状态不作为当前结果')));
+  assert.ok(lines.some(line=>line.includes('提交回执记录另列')));
+  assert.deepEqual(replyContext.objectFactLines({entity}),replyContext.objectFactLines({entity:{...entity,name:'另一个名字'}}));
+  assert.equal(replyContext.actionTargetReadbackLines({...execution,readback_actual:false}).length,0);
+  assert.equal(replyContext.objectFactLines({entity:{id:'unknown-state',name:'燃烧风车'}}).length,0);
+  const committed={id:'committed-target',state:{program:{fields:{ready:false},mechanical:{energy:0,angle:42,speed:3,status:'stopped'}}},
+    creative:{fields:{ready:true},mechanical_observation:{stored_state:{energy:10,angle:12,speed:3}}},
+    execution_domain:{state:'pressure',last_applied_tick:16,pending_target_tick:17,failure:{tick:17,code:'CapacityPressure',computed:false}}};
+  const committedLines=replyContext.objectFactLines({entity:committed});
+  assert.ok(committedLines.some(line=>line.includes('声明字段')&&line.includes('否')));
+  assert.ok(committedLines.some(line=>line.includes('角度 42')&&line.includes('不证明当前持续运动')));
+  assert.ok(!committedLines.some(line=>line.includes('角度 12')));
+  assert.ok(committedLines.some(line=>line.includes('自动结算状态：容量受阻')));
+  assert.ok(committedLines.some(line=>line.includes('最近完成结算的世界时刻 16')));
+  assert.ok(committedLines.some(line=>line.includes('等待完成结算的世界时刻 17')));
+  assert.ok(committedLines.some(line=>line.includes('该轮未计算完成')));
+  const settledLines=replyContext.objectFactLines({entity:{...committed,execution_domain:{state:'settled',last_applied_tick:18}}});
+  assert.ok(settledLines.some(line=>line.includes('自动结算状态：已结算')&&line.includes('不证明持续运动')));
+}
 // Keep selected IDs while the actual editors reconcile a fresh server projection.
 function formNode(tag,text,className){
   const listeners=new Map();
@@ -252,6 +316,7 @@ for(const action of ['fuel','charge']){
   if(action==='charge')choices.materials=[{id:'resin',name:'木合料',feedstock:'wood'},{id:'binder',name:'布合料',feedstock:'cloth'}];
   const initial={function_id:'grove.rule_action',action,label:action==='fuel'?'消耗木料储能':'制备已声明材料',available:true,
     arguments:{amount:1},choices,input_schema:{properties:{item_id:{type:'string'},amount:{type:'integer',minimum:1,maximum:10},
+      expected_target_interaction_revision:{type:'integer'},expected_item_interaction_revision:{type:'integer'},
       ...(action==='fuel'?{lot_id:{type:'string',minLength:1}}:{})},required:action==='fuel'?['amount','lot_id']:['amount']}};
   const context={inspection:{entity:target,action_options:[initial]},actionBusy:false,client:{pending:()=>null},node:formNode,$:()=>actions,
     actionKey:option=>option.action,descriptorLabel:ui.descriptorLabel,actionDescriptors:ui.actionDescriptors,
@@ -262,6 +327,7 @@ for(const action of ['fuel','charge']){
   vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('function renderRuleAction(','async function ruleAction('),context);
   context.renderRuleAction(initial,target,false);
   const form=actions.children[0],[items,materials]=form.querySelectorAll('select'),amount=form.querySelectorAll('input')[0];
+  assert.equal(form.querySelectorAll('input').length,1,'interaction revisions come from server metadata, never form fields');
   const intent=form.querySelectorAll('p').find(element=>element.className==='interaction-preview');
   items.value='wood';form.dispatchEvent({type:'change',target:items});if(materials)materials.value=action==='fuel'?'wood-lot':'resin';amount.value='2';form.dispatchEvent({type:'input'});
   assert.ok(intent.textContent.includes(action==='fuel'?'木料 添入 2 份木':'木料 的 2 份木'));assert.ok(!intent.textContent.includes('1 份'));
@@ -302,6 +368,7 @@ for(const status of [403,404,401])for(const kind of ['combination-target','ordin
   vm.createContext(context);
   vm.runInContext(extract('function fail(','const current=')+
     extract('async function perform(','async function move(')+
+    actionVersionSource+
     extract('async function interact(','function authorLabel('),context);
   await context.run(()=>context.interact(kind==='combination-target'?'store':'pour',target,'item',undefined,{},
     kind==='combination-target'?{form,fingerprint:'a'.repeat(64)}:undefined));
@@ -320,16 +387,87 @@ for(const status of [403,404,401])for(const kind of ['combination-target','ordin
 // and refuse the changed intent rather than silently pouring somewhere else.
 for(const targetSlot of ['surface','contained']){
   const target={id:'target',version:7},item={id:'item',version:4},writes=[];
-  const context={session:1,playing:true,selectedId:target.id,inspection:{entity:target},
+  const chosen={action:'pour',available:true,arguments:{target_slot:'surface'},input:{kind:'entity_quantity',candidates:[item],quantity:{min:1,max:3}}};
+  const context={session:1,playing:true,selectedId:target.id,inspection:{entity:target,available_actions:['pour'],action_options:[chosen]},
     stopWalking:()=>{},renderSelection:()=>{},point:()=>({version:3}),actionNames:{pour:'倒水'},
     actionIds:ui.actionIds,actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,
     descriptorCandidates:ui.descriptorCandidates,quantityBounds:ui.quantityBounds,
     client:{query:async(name,args)=>args.entity_id===item.id?{entity:item}:{entity:target,available_actions:['pour'],
       action_options:[{action:'pour',available:true,arguments:{target_slot:targetSlot},input:{kind:'entity_quantity',candidates:[item],quantity:{min:1,max:3}}}]}},
     perform:async(name,prepare)=>writes.push(await prepare(()=>true))};
-  vm.createContext(context);vm.runInContext(extract('async function interact(','function authorLabel('),context);
+  vm.createContext(context);vm.runInContext(actionVersionSource+extract('async function interact(','function authorLabel('),context);
   if(targetSlot==='contained'){await assert.rejects(context.interact('pour',target,item.id,2,{target_slot:'surface'}),/目标位置已改变/);assert.equal(writes.length,0);}
   else{await context.interact('pour',target,item.id,2,{target_slot:'surface'});assert.equal(writes[0].target_slot,'surface');assert.equal(writes[0].expected_target_version,7);assert.equal(writes[0].expected_item_version,4);}
+}
+
+// The displayed observation is frozen before the asynchronous preflight read.
+// Only actual server menu metadata opts a target into the interaction guard;
+// action names, fresh stamps and missing legacy metadata cannot invent it.
+for(const [action,declared,freshRevision,hasRevision] of [
+  ['start',true,5,true],['stop',true,9,true],['authored_toggle',true,5,true],
+  ['start',false,5,true],['connect',false,5,true],['start',true,5,false]]){
+  const target={id:'rule-target',version:8,...(hasRevision?{interaction_revision:5}:{})},writes=[];
+  const chosen={function_id:'grove.rule_action',action,available:true,arguments:{},
+    input_schema:{properties:declared?{expected_target_interaction_revision:{type:'integer'}}:{}}};
+  const context={session:1,playing:true,selectedId:target.id,inspection:{entity:target,action_options:[chosen]},
+    inspectEpoch:0,inspectionFlight:null,stopWalking:()=>{},renderSelection:()=>{},point:()=>({version:3}),
+    actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,ruleChoices:ui.ruleChoices,
+    client:{query:async()=>({entity:{...target,version:11,interaction_revision:freshRevision},action_options:[chosen]})},
+    perform:async(name,prepare)=>writes.push(await prepare(()=>true))};
+  vm.createContext(context);vm.runInContext(actionVersionSource+extract('async function ruleAction(','function renderInteractionEditor('),context);
+  await context.ruleAction(action,{...target,version:7,interaction_revision:4},{},chosen);
+  assert.equal(writes.length,1);assert.equal(writes[0].expected_target_version,8);
+  assert.equal(writes[0].expected_target_interaction_revision,declared&&hasRevision?5:undefined);
+  assert.equal(writes[0].expected_player_version,3);
+}
+
+// Fuel may recheck the target after automatic evolution, while the selected
+// material source and strict binding partner retain their displayed versions.
+for(const action of ['fuel','connect']){
+  const target={id:'rule-target',version:8,interaction_revision:5},source={id:'source',version:4,kind:'entity',
+    lots:[{id:'wood-lot',material:'wood',quantity:3,slot:'body'}]},writes=[];
+  const chosen={function_id:'grove.rule_action',action,available:true,arguments:{},
+    choices:action==='fuel'?{items:[source]}:{others:[source]},
+    input_schema:{properties:action==='fuel'?{expected_target_interaction_revision:{type:'integer'}}:{},required:action==='fuel'?['lot_id']:[]}};
+  const live={...chosen,choices:action==='fuel'?{items:[{...source,version:6}]}:{others:[{...source,version:6}]}};
+  const context={session:1,playing:true,selectedId:target.id,inspection:{entity:target,action_options:[chosen]},
+    inspectEpoch:0,inspectionFlight:null,stopWalking:()=>{},renderSelection:()=>{},point:()=>({version:3}),
+    actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,ruleChoices:ui.ruleChoices,descriptorLots:ui.descriptorLots,
+    client:{query:async(name,args)=>args.entity_id===source.id?{entity:{...source,version:6,interaction_revision:6}}:
+      {entity:{...target,version:11},action_options:[live]}},
+    perform:async(name,prepare)=>writes.push(await prepare(()=>true))};
+  vm.createContext(context);vm.runInContext(actionVersionSource+extract('async function ruleAction(','function renderInteractionEditor('),context);
+  await context.ruleAction(action,target,action==='fuel'?{item_id:source.id,lot_id:'wood-lot',amount:2}:{other_id:source.id},chosen);
+  assert.equal(writes[0].expected_target_version,8);
+  assert.equal(writes[0].expected_target_interaction_revision,action==='fuel'?5:undefined);
+  assert.equal(writes[0][action==='fuel'?'expected_item_version':'expected_other_version'],4);
+  assert.equal(writes[0].expected_item_interaction_revision,undefined);
+}
+
+for(const action of ['drop','pour'])for(const hasRevision of [true,false]){
+  const target={id:'target',version:8,...(hasRevision?{interaction_revision:5}:{})},source={id:'item',version:4},writes=[];
+  const chosen={action,available:true,input_schema:{properties:action==='drop'?{expected_item_interaction_revision:{type:'integer'}}:{}},
+    ...(action==='pour'?{arguments:{target_slot:'surface'},input:{kind:'entity_quantity',candidates:[source],quantity:{min:1,max:3}}}:{})};
+  const context={session:1,playing:true,selectedId:target.id,inspection:{entity:target,available_actions:[action],action_options:[chosen]},
+    stopWalking:()=>{},renderSelection:()=>{},point:()=>({version:3}),actionNames:{drop:'放下',pour:'倒水'},
+    actionIds:ui.actionIds,actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,
+    descriptorCandidates:ui.descriptorCandidates,quantityBounds:ui.quantityBounds,
+    client:{query:async(name,args)=>args.entity_id===source.id?{entity:{...source,version:6,interaction_revision:6}}:
+      {entity:{...target,version:11,interaction_revision:9},available_actions:[action],action_options:[chosen]}},
+    perform:async(name,prepare)=>writes.push(await prepare(()=>true))};
+  vm.createContext(context);vm.runInContext(actionVersionSource+extract('async function interact(','function authorLabel('),context);
+  await context.interact(action,{...target,version:7,interaction_revision:4},action==='pour'?source.id:undefined,
+    action==='pour'?2:undefined,action==='pour'?{target_slot:'surface'}:{});
+  assert.equal(writes.length,1);
+  if(action==='drop'){
+    assert.equal(writes[0].item_id,target.id);assert.equal(writes[0].expected_item_version,8);
+    assert.equal(writes[0].expected_item_interaction_revision,hasRevision?5:undefined);
+    assert.equal(writes[0].expected_target_version,undefined);
+  }else{
+    assert.equal(writes[0].expected_target_version,8);assert.equal(writes[0].expected_item_version,4);
+    assert.equal(writes[0].expected_target_interaction_revision,undefined);
+    assert.equal(writes[0].expected_item_interaction_revision,undefined);
+  }
 }
 
 // The same source and target remain visible; storing an object does not count
@@ -390,6 +528,7 @@ for(const [execution,label,detail,resume] of [
     node:()=>({append(){}})};
   vm.createContext(context);
   vm.runInContext(extract('function agentAdmission(','const point='),context);
+  vm.runInContext(extract('function currentAssistantReply(','function button('),context);
   vm.runInContext(extract('function renderExecution(){','async function reclaimExecution(){'),context);
   context.renderExecution();
   assert.equal(element('execution-status').textContent,label);

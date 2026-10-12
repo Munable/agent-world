@@ -6,13 +6,14 @@ formation, placement, binding and other-player actions use the real API.
 """
 from collections import deque
 from copy import deepcopy
+from dataclasses import replace
 import unittest
 from unittest.mock import patch
 
 from agent_world import WorldRuntime
 from agent_world.errors import RuleViolation
 from agent_world.worlds.shared_grove import make_world, model as m
-from agent_world.worlds.shared_grove import domains
+from agent_world.worlds.shared_grove import domains, scheduling
 import test_grove_creation as fixtures
 
 
@@ -182,14 +183,76 @@ class DomainProductContracts(unittest.TestCase):
         saved = deepcopy(self.h.entity(first))
         self.assertEqual(self.frame()["id"], work["id"])
         self.assertEqual(self.frame()["status"], "open")
+        self.h.time.return_value += 3600
+        resumed_at = self.h.time.return_value
         self.restart()
         self.assertEqual(self.h.entity(first), saved)
         self.assertEqual(self.frame()["id"], work["id"])
-        self.finish_frame(work["id"])
+        resumed = self.frame()
+        self.assertEqual(resumed["opened_at"], work["opened_at"])
+        self.assertEqual(resumed["cadence_anchor_at"], resumed_at)
+        self.assertEqual(resumed["event_cutoff"], work["event_cutoff"])
+        closed = self.finish_frame(work["id"])
+        self.assertEqual(self.h.world.get_checkpoint("w", scheduling.FRAME_KEY)["due_at"],
+                         max(closed["closed_at"], resumed_at+1))
         self.assertEqual(self.field(first), 1)
         self.assertEqual(self.field(second), 1)
         self.h.ticks(1)
         self.assertEqual([self.field(eid) for eid in counters], [2, 2])
+
+    def test_revision_upgrade_replaces_only_unfinished_old_version_checkpoints(self):
+        previous = replace(make_world(), version=33, state_version=23)
+        old = fixtures.CreationTests(methodName="runTest")
+        with patch("test_grove_creative.make_world", return_value=previous):
+            old.setUp()
+        self.addCleanup(old.doCleanups)
+        self.c, self.h = old, old.h
+        counters = self.two_counters()
+        work = self.begin_frame()
+        first, second = self.wait_one_counter(counters)
+        saved = deepcopy(self.h.entity(first))
+        unfinished = self.frame()["pending"]
+        self.assertTrue(unfinished)
+        prior_generations = {row["domain_id"]: row["generation"] for row in unfinished}
+
+        self.h.time.return_value += 3600
+        self.h.world = WorldRuntime(self.h.db)
+        self.h.world.install_world("w", make_world())
+        resumed = self.frame()
+        self.assertEqual(resumed["id"], work["id"])
+        self.assertEqual(resumed["target_tick"], work["target_tick"])
+        self.assertEqual(resumed["event_cutoff"], work["event_cutoff"])
+        self.assertEqual(self.h.entity(first), saved)
+        for row in resumed["pending"]:
+            domain = self.h.world.get_state("w", domains.DOMAINS, row["domain_id"])
+            if domain["value"]["last_tick"] < work["target_tick"]:
+                self.assertGreater(row["generation"], prior_generations[row["domain_id"]])
+        self.finish_frame(work["id"])
+        self.assertEqual([self.field(first), self.field(second)], [1, 1])
+        self.h.ticks(1)
+        self.assertEqual([self.field(eid) for eid in counters], [2, 2])
+
+    def test_fast_frame_waits_only_the_remaining_opening_period(self):
+        self.two_counters()
+        work = self.begin_frame()
+        closed = self.finish_frame(work["id"])
+        due = self.h.world.get_checkpoint("w", scheduling.FRAME_KEY)["due_at"]
+        self.assertEqual(due, max(closed["closed_at"], work["opened_at"]+1))
+        self.assertLessEqual(due, closed["closed_at"]+1)
+
+    def test_slow_frame_schedules_one_prompt_successor_without_replaying_missed_steps(self):
+        counters = self.two_counters()
+        work = self.begin_frame()
+        self.h.time.return_value += 20
+        closed = self.finish_frame(work["id"])
+        self.assertEqual(self.h.world.get_checkpoint("w", scheduling.FRAME_KEY)["due_at"], closed["closed_at"])
+        self.assertEqual([self.field(eid) for eid in counters], [1, 1])
+        result = self.h.world.run_due_timers("w", limit=1)
+        self.assertEqual(result["count"], 1)
+        successor = self.frame()
+        self.assertEqual(successor["target_tick"], work["target_tick"]+1)
+        self.assertEqual(successor["opened_at"], self.h.time.return_value)
+        self.assertEqual([self.field(eid) for eid in counters], [1, 1])
 
     def test_cross_domain_binding_waits_for_both_participants_current_frame(self):
         counters = self.two_counters()

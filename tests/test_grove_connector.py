@@ -22,6 +22,58 @@ from agent_world.worlds.shared_grove.world import INTERACT_ARGS
 
 
 class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_action_targets_are_exact_separate_reads_and_do_not_replace_selected_contract(self):
+        self.session.entered = True
+        self.session.catalog = {name: {"access": "read"} for name in ("map.viewport", "grove.inspect")}
+        self.session.world = AsyncMock(return_value={"events": []})
+        calls = []
+        async def invoke(function, arguments):
+            calls.append((function, deepcopy(arguments)))
+            if function == "map.viewport":
+                return {"result": {"player": {"id": "test-user", "x": 2, "y": 3},
+                    "entities": [], "inventory": [], "clock": {"sequence": 90}}}
+            identity = arguments["entity_id"]
+            if identity == "consumed-material":
+                raise ConnectorError("ResourceNotFound", "Original consumed lot", 404)
+            entity = {"id": identity, "version": 7, "execution_domain": {"state": "settled", "last_applied_tick": 90}}
+            if identity == "wheel":
+                entity["creative"] = {"world_tick": 91, "fields": {"signal": 0}, "mechanical_observation": {
+                    "stored_state": {"energy": 19, "angle": 3}, "stored_output_is_history": True, "observed_tick": 91}}
+            return {"result": {"entity": entity, "action_options": []}}
+        self.session.invoke = invoke
+        facts = await self.session.current_turn_facts(context_entity_id="original-contract", optional_selected=True,
+            action_entity_ids=["wheel", "consumed-material", "original-contract", "wheel"])
+        self.assertEqual([arguments.get("entity_id") for function, arguments in calls if function == "grove.inspect"],
+            ["original-contract", "wheel", "consumed-material"])
+        self.assertEqual(facts["selected_inspection"]["entity"]["id"], "original-contract")
+        targets = facts["action_targets"]
+        self.assertEqual([row["entity_id"] for row in targets], ["wheel", "consumed-material", "original-contract"])
+        self.assertEqual(targets[0]["inspection"]["entity"]["creative"]["mechanical_observation"]["stored_state"]["energy"], 19)
+        self.assertEqual(targets[0]["inspection"]["entity"]["execution_domain"]["last_applied_tick"], 90)
+        self.assertEqual(targets[1]["unavailable"]["code"], "ResourceNotFound")
+        self.assertNotIn("inspection", targets[1])
+        self.assertTrue(all(isinstance(row["observed_at"], float) for row in targets))
+
+    async def test_execution_reply_has_original_request_identity_and_reclaim_only_invalidates_current_qualification(self):
+        self.session.current_turn_facts = AsyncMock(return_value={"player": {"id": "test-user"}, "entities": []})
+        self.session.execution_controller.state.update(task_id="task-original", segment_id="segment-original",
+            status="running", request_status="idle_confirmed", requests_used=0, max_requests=2)
+        self.session.host = AsyncMock(return_value={"info": {"id": "msg_original", "role": "assistant", "finish": "stop",
+            "time": {"completed": 1}}, "parts": [{"type": "text", "text": "The model says the device is running."}]})
+        await self.session.turn("Observe current state", executing=True)
+        message = deepcopy(self.session.messages[-1])
+        self.assertEqual(message["task_id"], "task-original")
+        self.assertEqual(message["request_number"], 1)
+        self.assertEqual(message["response_message_id"], "msg_original")
+        self.assertEqual(message["session_id"], "test-session")
+        self.assertTrue(self.session.state()["completed"])
+        self.session._close_reclaim_admission()
+        self.session.status = "ready"  # A recovered transport cannot revive the old reply.
+        self.assertFalse(self.session.state()["completed"])
+        self.assertTrue(self.session.response_diagnostics["validated_final"])
+        self.assertEqual(self.session.messages[-1], message)
+        self.assertEqual(self.session.last_completion["message_id"], "msg_original")
+
     def test_scene_summary_preserves_current_fields_and_distinct_recorded_consequence(self):
         change = {"step": 9, "fields": {"signal": {"before": 1, "after": 0}}}
         creative = {"definition_ref": "public-definition", "type_id": "sensor",

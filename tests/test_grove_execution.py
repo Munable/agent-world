@@ -15,7 +15,7 @@ import httpx
 
 from agent_world.grove_connector import (ConnectorError, ConnectorManager, GroveSession, CURRENT_FACTS_INSTRUCTIONS,
     HISTORY_RECOVERY_INSTRUCTIONS, EXECUTION_INSTRUCTIONS, EXECUTOR_AGENT, MCP_NAME, create_connector_app,
-    _PREVIOUS_CURRENT_FACTS_INSTRUCTIONS, _CURRENT_CONTEXT_PREFIXES)
+    _PREVIOUS_CURRENT_FACTS_INSTRUCTIONS, _EARLY_CURRENT_FACTS_INSTRUCTIONS, _CURRENT_CONTEXT_PREFIXES)
 from agent_world.grove_native_history import NativeToolHistory
 
 
@@ -145,7 +145,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.receipts[operation] = result
         return deepcopy(result)
 
-    async def host(self, method, path, body=None, timeout=15):
+    async def host(self, method, path, body=None, timeout=15, *, include_page_cursor=False):
         if path.endswith("/abort"):
             self.assertFalse(self.session.execution_controller.active)
             self.aborts += 1
@@ -153,7 +153,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         if path == "/session/status":
             return {"test-session": {"type": "busy"}} if self.host_busy else {}
         if path.endswith("/message?limit=100"):
-            return []
+            return {"messages": [], "next_cursor": None} if include_page_cursor else []
         if method == "GET":
             return {"id": "test-session"}
         self.assertTrue(path.endswith("/message"))
@@ -464,12 +464,14 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         records = [{"info":{"id":mid,"sessionID":"test-session","role":role},"parts":[p for p in parts if p["messageID"]==mid]}
                    for mid,role in (("u","user"),("a","assistant"))]
         patches = []
-        async def native(method,path,body=None,timeout=15):
+        async def native(method,path,body=None,timeout=15, *, include_page_cursor=False):
             if method == "PATCH":
                 patches.append(deepcopy(body))
                 part = next(p for p in parts if p["id"]==body["id"])
                 part.clear(); part.update(deepcopy(body)); return body
-            return records if path.endswith("?limit=100") else next(r for r in records if r["info"]["id"]==path.rsplit("/",1)[-1])
+            if path.endswith("?limit=100"):
+                return {"messages": records, "next_cursor": None} if include_page_cursor else records
+            return next(r for r in records if r["info"]["id"]==path.rsplit("/",1)[-1])
         self.session.host = native
         self.session.execution_controller.state["request_status"] = "idle_confirmed"
         await self.session.compact_execution_context()
@@ -499,6 +501,74 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.session.execution_controller.state["request_status"] = "running"
         with self.assertRaises(ConnectorError): await self.session.compact_execution_context()
         self.assertEqual(len(patches),3)
+
+    async def test_native_large_action_snapshots_backfill_without_deleting_receipts_or_dialogue(self):
+        def record(identity, role, parts):
+            return {"info": {"id": identity, "sessionID": "test-session", "role": role}, "parts": [
+                {"sessionID": "test-session", "messageID": identity, **part} for part in parts]}
+        snapshot = {"observed_at": 2, "entities": [{"id": "wheel", "state": {"machine_padding": "x" * 5000}}]}
+        action = {"ok": True, "operation_id": "original-fuel", "commit_seq": 77,
+            "result": {"action_result": {"stored_energy_after": 20}}, "execution_readback": snapshot}
+        checkpoint = {"task_id": "test-task", "status": "blocked", "segment_finished": True,
+            "world_facts_changed": False, "execution_readback": snapshot}
+        def tool(identity, name, output):
+            return {"id": identity, "type": "tool", "tool": MCP_NAME + "_" + name,
+                "state": {"status": "completed", "input": {"target_id": "original-wheel"},
+                    "output": json.dumps(output), "time": {"start": 1, "end": 2}}}
+        latest = [record("msg_latest", "assistant", [
+            tool("prt_action", "grove_rule_action", action), tool("prt_checkpoint", "execution_checkpoint", checkpoint),
+            tool("prt_error", "grove_rule_action", {**action, "ok": False, "error": "RuleViolation"}),
+            tool("prt_definition", "grove_definition_publish", {**action, "definition": {"original": True}}),
+            tool("prt_claim", "grove_generation_context", {"opportunity": {"id": "original-live-claim"}})])]
+        older = [record("msg_old", "user", [
+            {"id": "prt_old", "type": "text", "text": _EARLY_CURRENT_FACTS_INSTRUCTIONS + "\n{}"},
+            {"id": "prt_human", "type": "text", "text": "下列现场事实是连接器在本次提问后刚用本人权限读取的。请解释这句话。"}])]
+        oldest = [record("msg_oldest", "user", [
+            {"id": "prt_oldest", "type": "text", "text": CURRENT_FACTS_INSTRUCTIONS + "\n{}"}])]
+        records = {row["info"]["id"]: row for row in latest + older + oldest}
+        originals = deepcopy(records)
+        pages, patches = [], []
+        async def native(method, path, body=None, timeout=15, *, include_page_cursor=False):
+            if method == "PATCH":
+                patches.append(body["id"])
+                parts = records[body["messageID"]]["parts"]
+                index = next(index for index, part in enumerate(parts) if part["id"] == body["id"])
+                parts[index] = deepcopy(body)
+                return deepcopy(body)
+            if "/message?" in path:
+                pages.append(path)
+                self.assertTrue(include_page_cursor)
+                if "before=older2" in path:
+                    return {"messages": deepcopy(oldest), "next_cursor": None}
+                if "before=older1" in path:
+                    return {"messages": deepcopy(older), "next_cursor": "older2"}
+                return {"messages": deepcopy(latest), "next_cursor": "older1"}
+            return deepcopy(records[path.rsplit("/", 1)[-1]])
+        self.session.host = native
+        self.session.execution_controller.state["request_status"] = "idle_confirmed"
+        await self.session.compact_execution_context()
+        self.assertEqual(patches, ["prt_action", "prt_checkpoint", "prt_old"])
+        self.assertEqual(len(pages), 2)
+        for index in (0, 1):
+            part = records["msg_latest"]["parts"][index]
+            original = originals["msg_latest"]["parts"][index]
+            self.assertEqual(part["state"]["output"], original["state"]["output"])
+            self.assertEqual(part["state"]["input"], original["state"]["input"])
+            self.assertIn("compacted", part["state"]["time"])
+        for index in (2, 3, 4):
+            self.assertEqual(records["msg_latest"]["parts"][index], originals["msg_latest"]["parts"][index])
+        self.assertEqual(records["msg_old"]["parts"][1], originals["msg_old"]["parts"][1])
+        self.assertEqual(records["msg_old"]["parts"][0]["text"], originals["msg_old"]["parts"][0]["text"])
+        progress = self.session.execution["context_pruning"]["native_backfill"]
+        self.assertEqual(progress, {"session_id": "test-session", "cursor": "older2", "complete": False,
+            "frontier_message_id": "msg_latest"})
+        await self.session.compact_execution_context()
+        self.assertEqual(patches[-1], "prt_oldest")
+        self.assertTrue(self.session.execution["context_pruning"]["native_backfill"]["complete"])
+        count = len(patches)
+        await self.session.compact_execution_context()
+        self.assertEqual(len(patches), count)
+        self.assertEqual(len(pages), 5)  # One latest page after old history converged.
 
     async def test_early_confirmed_progress_remains_usable_after_many_rejected_attempts(self):
         self.session.execution_controller.receipt("grove.move", "original-confirmed-action", {"commit_seq":7}, status="confirmed")
@@ -545,7 +615,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         original_host = self.session.host
         self.summary_calls = 0
         messages = []
-        async def host(method, path, body=None, timeout=15):
+        async def host(method, path, body=None, timeout=15, *, include_page_cursor=False):
             if path == "/config":
                 return {"compaction": {"auto": False, "tail_turns": 0}, "agent": {
                     "compaction": {"disable": False, "model": self.session.model,
@@ -553,7 +623,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
                     EXECUTOR_AGENT: {"prompt": EXECUTION_INSTRUCTIONS,
                         "permission": {"*": "deny", MCP_NAME + "_*": "allow"}}}}
             if path.endswith("/message?limit=100"):
-                return deepcopy(messages)
+                return {"messages": deepcopy(messages), "next_cursor": None} if include_page_cursor else deepcopy(messages)
             if path.endswith("/summarize"):
                 self.summary_calls += 1
                 self.assertEqual(body, {"providerID": "provider", "modelID": "model", "auto": False})
@@ -569,7 +639,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
                 if interrupted:
                     raise httpx.ReadTimeout("Original summary response interrupted")
                 return True
-            return await original_host(method, path, body, timeout)
+            return await original_host(method, path, body, timeout, include_page_cursor=include_page_cursor)
         self.session.host = host
 
     async def test_summary_consumes_budget_and_is_verified_before_fresh_facts_and_grant(self):

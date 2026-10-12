@@ -600,8 +600,9 @@ class RuntimeFunctions:
             integer(expected_version, "expected_version", 1)
         if activity_claim is not None and not isinstance(activity_claim, dict):
             raise InvalidArguments("activity_claim must be an object")
-        with self._conn(serialized=True) as c:
-            c.execute("BEGIN IMMEDIATE")
+        with self._conn(serialized=True, purpose="action") as c:
+            with self._work_timings.phase("begin"):
+                c.execute("BEGIN IMMEDIATE")
             now = time.time()  # Admission time is AFTER the database write lock.
             identity = self._admit_actor_tx(c, universe, actor_role_id, identity_token, require_control=True)
             old = c.execute(
@@ -650,7 +651,9 @@ class RuntimeFunctions:
                 now=now,
             )
             self._authorize_function_tx(c, ctx, arguments)
-            outcome = self._run_user_code(c, handler, ctx, arguments)
+            self._work_timings.annotate(handler=function_id)
+            with self._work_timings.phase("handler", cpu=True):
+                outcome = self._run_user_code(c, handler, ctx, arguments)
             self._validate_outcome(outcome, desc)
             # Expiry during rule evaluation cannot turn into a late unauthorized commit.
             identity = self._admit_actor_tx(c, universe, actor_role_id, identity_token, require_control=True)
@@ -667,6 +670,13 @@ class RuntimeFunctions:
                            activity_id=None, source="action", extra_receipt=None, credential_id=None,
                            record_operation=True):
         """One effect/receipt path shared by immediate actions and durable timers."""
+        with self._work_timings.phase("managed"):
+            return self._commit_outcome_body_tx(c, ctx, outcome, arguments, journal_marker=journal_marker,
+                activity_id=activity_id, source=source, extra_receipt=extra_receipt,
+                credential_id=credential_id, record_operation=record_operation)
+
+    def _commit_outcome_body_tx(self, c, ctx, outcome, arguments, *, journal_marker,
+                                activity_id, source, extra_receipt, credential_id, record_operation):
         self._validate_managed_state_changes_tx(c, ctx, journal_marker)
         transitions = self._apply_timer_commands_tx(c, ctx)
         self._apply_checkpoint_commands_tx(c, ctx)

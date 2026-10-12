@@ -23,6 +23,9 @@ class TimerWorker:
         self._stop = threading.Event()
         self._thread = None
         self._next_checkpoint_retention = time.monotonic() + 30
+        self._maintenance_credit = {"commits": 0, "changes": 0, "stream_events": 0}
+        self._maintenance_backlog = False
+        self._maintenance_stream_after = None
 
     def start(self):
         if self._thread is not None:
@@ -53,43 +56,67 @@ class TimerWorker:
         deadline = time.monotonic() + 0.1
         remaining = 100
         due_at = None
-        for _ in range(4):
+        for batch in range(5):
             if self._stop.is_set():
                 break
-            limit = min(self.batch_size, remaining)
-            result = self.runtime.run_due_timers(self.universe, limit=limit, deadline=deadline)
+            # One atomic opportunity is guaranteed even if selecting ready
+            # work waits for a busy writer. Later batches retain the original
+            # absolute deadline, so contention never creates a catch-up loop.
+            limit = 1 if batch == 0 else min(self.batch_size, remaining)
+            result = (self.runtime.run_due_timers(self.universe, limit=limit) if batch == 0 else
+                      self.runtime.run_due_timers(self.universe, limit=limit, deadline=deadline))
             remaining -= limit
-            self._maintain_checkpoint_history(result.get("checkpoint_work", {}))
+            self._credit_checkpoint_work(result.get("checkpoint_work", {}))
             due_at = self.runtime.next_due_work(self.universe)
             if (remaining <= 0 or due_at is None or due_at > time.time()
                     or time.monotonic() >= deadline):
                 break
+        # Maintenance has its own short budget. It must not be postponed
+        # forever by a continuously ready work queue, nor run between every
+        # domain checkpoint. No task transaction is combined with another.
+        self._maintain_checkpoint_history({})
         return due_at
+
+    def _credit_checkpoint_work(self, work):
+        for name in self._maintenance_credit:
+            self._maintenance_credit[name] += 2 * work.get(name, 0)
 
     def _maintain_checkpoint_history(self, work):
         definition = self.runtime._worlds.get(self.universe)
-        if definition is None or not definition.checkpoints:
+        if definition is None or not definition.checkpoints or self._stop.is_set():
             return
+        self._credit_checkpoint_work(work)
         now = time.monotonic()
-        commits = work.get("commits", 0)
-        if not commits and now < self._next_checkpoint_retention:
+        credit = self._maintenance_credit
+        periodic = now >= self._next_checkpoint_retention
+        batched = credit["commits"] >= 64 or credit["changes"] >= 4096 or credit["stream_events"] >= 512
+        if not periodic and not batched and not self._maintenance_backlog:
             return
-        # Reuse the host worker and size cleanup from actual production. The
-        # slower idle sweep catches up after restart; world handlers never GC
-        # another transaction's history. Streams release references first.
-        self._next_checkpoint_retention = now + 30
-        stream_budget = 2 * work.get("stream_events", 0) + 8
-        # A managed outcome has at most 128 events and a sweep at most 100
-        # commits, so six API-sized passes cover the largest legal production.
+        # Keep the production ledger across bounded passes. Recovery allowance
+        # also makes progress after restart and when the next whole commit has
+        # more changes than the residual credit. Reaching fresh policy windows
+        # discharges credit: retaining those rows is not unresolved GC work.
+        deadline = now + 0.025
         for _ in range(6):
-            limit = min(5000, stream_budget)
-            self.runtime.apply_stream_retention(self.universe, limit=limit)
-            stream_budget -= limit
-            if stream_budget <= 0:
+            result = self.runtime.apply_work_retention(self.universe,
+                stream_limit=min(5000, max(8, credit["stream_events"])),
+                limit=min(256, max(8, credit["commits"])),
+                change_limit=min(106496, max(4096, credit["changes"])),
+                time_budget=max(0.001, min(0.025, deadline-time.monotonic())),
+                stream_after=self._maintenance_stream_after)
+            self._maintenance_stream_after = result["stream_after"]
+            stream_backlog = result["stream_backlog"]
+            checkpoint_backlog = result["checkpoint_backlog"]
+            credit["stream_events"] = (max(0, credit["stream_events"]-result["stream_events_scanned"])
+                                       if stream_backlog else 0)
+            credit["commits"] = (max(0, credit["commits"]-result["checkpoint_commits_scanned"])
+                                 if checkpoint_backlog else 0)
+            credit["changes"] = (max(0, credit["changes"]-result["checkpoint_changes_removed"])
+                                 if checkpoint_backlog else 0)
+            self._maintenance_backlog = stream_backlog or checkpoint_backlog
+            if not self._maintenance_backlog or self._stop.is_set() or time.monotonic() >= deadline:
                 break
-        self.runtime.apply_checkpoint_retention(self.universe,
-            limit=min(256, 2 * commits + 8),
-            change_limit=min(106496, 2 * work.get("changes", 0) + 4096))
+        self._next_checkpoint_retention = time.monotonic() + 30
 
     def stop(self):
         self._stop.set()

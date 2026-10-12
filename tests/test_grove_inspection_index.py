@@ -3,7 +3,7 @@ from copy import deepcopy
 import json
 import unittest
 
-from agent_world.grove_agent_observation import AgentObservations, companion_projection
+from agent_world.grove_agent_observation import AgentObservations, companion_projection, _companion_inspection_index
 from agent_world.grove_connector_errors import ConnectorError
 
 
@@ -13,6 +13,36 @@ INTERACT_SCHEMA = {"properties": {key: {} for key in (
 
 
 class InspectionIndexTests(unittest.TestCase):
+    def test_limit_projection_deduplicates_only_equal_fields_and_process_without_losing_domain_or_conditions(self):
+        raw = self.inspection()
+        fields = {"signal": 0}
+        process = {"status": "waiting", "steps": 7, "observed_tick": 91}
+        raw["entity"]["state"]["program"] = {"fields": deepcopy(fields), "process": deepcopy(process)}
+        creative = raw["entity"]["creative"]
+        creative.update(fields=deepcopy(fields), process=deepcopy(process), definition_ref="pinned-definition", type_id="sensor")
+        domain = {"state": "calculating", "last_applied_tick": 90, "pending_target_tick": 91, "failure": None}
+        raw["entity"]["execution_domain"] = deepcopy(domain)
+        before = deepcopy(raw)
+        index = _companion_inspection_index(raw)
+        self.assertEqual(index["entity"]["creative"]["fields"], fields)
+        self.assertEqual(index["entity"]["creative"]["process"], process)
+        self.assertEqual(index["entity"]["execution_domain"], domain)
+        self.assertEqual(index["entity"]["state"]["program"], {})
+        expected = deepcopy(creative["automatic_rules"])
+        expected[0]["condition"].pop("expression")
+        self.assertEqual(index["entity"]["creative"]["automatic_rules"], expected)
+        self.assertIn("state.program.fields (same values in entity.creative.fields)", index["projection"]["omitted_sections"])
+        self.assertEqual(raw, before)
+        raw["entity"]["state"]["program"]["fields"]["signal"] = 1
+        unequal = _companion_inspection_index(raw)
+        self.assertEqual(unequal["entity"]["state"]["program"]["fields"], {"signal": 1})
+        self.assertEqual(unequal["entity"]["creative"]["fields"], fields)
+        default = companion_projection("grove.inspect", before)
+        self.assertEqual(default["entity"]["state"]["program"], before["entity"]["state"]["program"])
+        observed = AgentObservations("person").present("execution_checkpoint", {"execution_readback": {
+            "selected_inspection": before}})
+        self.assertEqual(observed["execution_readback"]["selected_inspection"]["entity"]["execution_domain"], domain)
+
     def inspection(self):
         return {"player": {"id": "person", "version": 5}, "entity": {
             "id": "target", "version": 7, "name": "Public vessel", "owner": None,

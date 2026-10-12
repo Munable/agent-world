@@ -160,25 +160,64 @@ class RuntimeStreams:
 
     def apply_stream_retention(self, universe, *, limit=500):
         integer(limit,'stream retention batch',1,5000)
-        with self._conn(serialized=True) as c:
-            c.execute('BEGIN IMMEDIATE'); self._check_world_tx(c,universe)
-            definition=self._worlds.get(universe)
-            removed=0
-            for spec in definition.streams if definition else ():
-                # The policy window bounds this reverse seek. Never COUNT the
-                # lifetime history just to retire one small contiguous prefix.
-                boundary=c.execute('SELECT seq FROM stream_events WHERE universe=? AND stream=? '
-                    'ORDER BY seq DESC LIMIT 1 OFFSET ?', (universe,spec.name,spec.max_events)).fetchone()
-                excess_through=int(boundary[0]) if boundary else 0
-                rows=c.execute('SELECT seq,created_at FROM stream_events WHERE universe=? AND stream=? ORDER BY seq LIMIT ?',
-                               (universe,spec.name,limit)).fetchall()
-                through=None
-                for row in rows:
-                    if row['seq']<=excess_through or row['created_at']<=time.time()-spec.retention_seconds:
-                        through=row['seq']
-                    else:
-                        break
-                if through is not None:
-                    removed+=c.execute('DELETE FROM stream_events WHERE universe=? AND stream=? AND seq<=?',(universe,spec.name,through)).rowcount
-                    c.execute('UPDATE stream_heads SET floor=MAX(floor,?) WHERE universe=? AND stream=?',(through,universe,spec.name))
-            return {'stream_events_removed':removed}
+        with self._conn(serialized=True, purpose="maintenance") as c:
+            with self._work_timings.phase("begin"):
+                c.execute('BEGIN IMMEDIATE')
+            self._check_world_tx(c,universe)
+            with self._work_timings.phase("stream_retention"):
+                result = self._apply_stream_retention_tx(c, universe, limit=limit)
+        return {'stream_events_removed': result['stream_events_removed']}
+
+    def _apply_stream_retention_tx(self, c, universe, *, limit, deadline=None, shared_limit=False,
+                                   after_stream=None):
+        """Release stream references before checkpoint GC in the same transaction.
+
+        The public stream API retains its per-stream limit. Host maintenance
+        shares one scan budget across streams; no history-sized COUNT or scan.
+        """
+        definition = self._worlds.get(universe)
+        specs = tuple(definition.streams) if definition else ()
+        if shared_limit and after_stream is not None:
+            names = [spec.name for spec in specs]
+            if after_stream in names:
+                offset = names.index(after_stream)+1
+                specs = specs[offset:]+specs[:offset]
+        removed = scanned = 0
+        backlog = False
+        last_stream = after_stream
+        now = time.time()
+        for spec in specs:
+            budget = limit - scanned if shared_limit else limit
+            if budget <= 0 or (last_stream != after_stream and deadline is not None
+                              and time.monotonic() >= deadline):
+                backlog = True
+                break
+            last_stream = spec.name
+            boundary = c.execute('SELECT seq FROM stream_events WHERE universe=? AND stream=? '
+                'ORDER BY seq DESC LIMIT 1 OFFSET ?', (universe, spec.name, spec.max_events)).fetchone()
+            excess_through = int(boundary[0]) if boundary else 0
+            rows = c.execute('SELECT seq,created_at FROM stream_events WHERE universe=? AND stream=? ORDER BY seq LIMIT ?',
+                             (universe, spec.name, budget)).fetchall()
+            through = None
+            fresh = False
+            inspected = 0
+            for row in rows:
+                if inspected and deadline is not None and time.monotonic() >= deadline:
+                    backlog = True
+                    break
+                inspected += 1
+                if row['seq'] <= excess_through or row['created_at'] <= now - spec.retention_seconds:
+                    through = row['seq']
+                else:
+                    fresh = True
+                    break
+            scanned += inspected
+            if through is not None:
+                removed += c.execute('DELETE FROM stream_events WHERE universe=? AND stream=? AND seq<=?',
+                                     (universe, spec.name, through)).rowcount
+                c.execute('UPDATE stream_heads SET floor=MAX(floor,?) WHERE universe=? AND stream=?',
+                          (through, universe, spec.name))
+            if not fresh and rows and (inspected < len(rows) or len(rows) == budget):
+                backlog = True
+        return {'stream_events_removed': removed, 'stream_events_scanned': scanned,
+                'stream_backlog': backlog, 'stream_after': last_stream}

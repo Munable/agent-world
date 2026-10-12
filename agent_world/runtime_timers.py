@@ -133,7 +133,7 @@ class RuntimeTimers:
         integer(limit, "limit", 1, 100)
         if deadline is not None:
             duration(deadline, "worker monotonic deadline", 253402300799, zero=True)
-        with self._conn(readonly=True, serialized=True) as c:
+        with self._conn(readonly=True, serialized=True, purpose="work-select") as c:
             c.execute("BEGIN")
             self._check_world_tx(c, universe)
             if universe not in self._worlds:
@@ -181,7 +181,7 @@ class RuntimeTimers:
     def next_due_work(self, universe):
         """Trusted worker wake time; two indexed head reads, never a queue scan."""
         identifier(universe, "universe")
-        with self._conn(readonly=True, serialized=True) as c:
+        with self._conn(readonly=True, serialized=True, purpose="work-next") as c:
             c.execute("BEGIN")
             self._check_world_tx(c, universe)
             definition = self._worlds.get(universe)
@@ -202,8 +202,9 @@ class RuntimeTimers:
             return min(times) if times else None
 
     def _run_one_timer(self, universe, cutoff, timer_id):
-        with self._conn(serialized=True) as c:
-            c.execute("BEGIN IMMEDIATE")
+        with self._conn(serialized=True, purpose="timer") as c:
+            with self._work_timings.phase("begin"):
+                c.execute("BEGIN IMMEDIATE")
             self._check_world_tx(c, universe)
             now = min(cutoff, time.time())  # Recheck after lock acquisition; never fire early after a clock rollback.
             row = c.execute("""SELECT * FROM world_timers WHERE universe=? AND status='pending'
@@ -237,7 +238,9 @@ class RuntimeTimers:
                         ctx.access = "write"
                     if allowed is not True:
                         raise PermissionDenied("timer precondition is no longer authorized")
-                outcome = self._run_user_code(c, spec.handler, ctx, arguments)
+                self._work_timings.annotate(handler=spec.name)
+                with self._work_timings.phase("handler", cpu=True):
+                    outcome = self._run_user_code(c, spec.handler, ctx, arguments)
                 self._validate_outcome(outcome, desc)
                 receipt = self._commit_outcome_tx(c, ctx, outcome, json.loads(row["arguments_json"]),
                     journal_marker=marker, source="timer", extra_receipt={"timer_id": tid, "due_at": row["due_at"],

@@ -8,7 +8,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from .runtime_contracts import (
     identifier,
     duration,
@@ -85,6 +85,7 @@ from .runtime_journal import RuntimeJournal
 from .runtime_views import RuntimeViews
 from .runtime_timers import RuntimeTimers
 from .runtime_checkpoints import RuntimeCheckpoints
+from .runtime_diagnostics import WorkDiagnostics
 from .retention import RuntimeRetention
 from .runtime_streams import RuntimeStreams
 
@@ -107,6 +108,8 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         self._idle_connections = {False: [], True: []}
         self._connection_idle_limit = 4
         self._connections_closed = False
+        self._wal_autocheckpoint = 1000
+        self._work_timings = WorkDiagnostics()
         try:
             self._init_db()
         except BaseException:
@@ -141,20 +144,32 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             conn.close()
 
     @contextmanager
-    def _conn(self, *, readonly: bool = False, serialized: bool = False):
-        with self._connection_lock:
-            if self._connections_closed:
-                raise RuntimeError("WorldRuntime is closed")
-            pool = self._idle_connections[readonly]
-            conn = pool.pop() if pool else None
-        if conn is None:
-            conn = self._open_connection(readonly)
-            # close() may run while opening the handle outside the pool lock.
+    def _conn(self, *, readonly: bool = False, serialized: bool = False, purpose: str | None = None):
+        timing = self._work_timings.transaction(purpose or ("read-head" if readonly else "write")) if serialized else nullcontext()
+        with timing:
+            with self._lease_connection(readonly=readonly, serialized=serialized) as conn:
+                yield conn
+
+    def work_diagnostics(self, *, limit=32):
+        """Host-only, bounded phase timings, independent of the database writer."""
+        return self._work_timings.snapshot(limit)
+
+    @contextmanager
+    def _lease_connection(self, *, readonly: bool, serialized: bool):
+        with self._work_timings.phase("connection"):
             with self._connection_lock:
-                shutdown = self._connections_closed
-            if shutdown:
-                conn.close()
-                raise RuntimeError("WorldRuntime is closed")
+                if self._connections_closed:
+                    raise RuntimeError("WorldRuntime is closed")
+                pool = self._idle_connections[readonly]
+                conn = pool.pop() if pool else None
+            if conn is None:
+                conn = self._open_connection(readonly)
+                # close() may run while opening outside the pool lock.
+                with self._connection_lock:
+                    shutdown = self._connections_closed
+                if shutdown:
+                    conn.close()
+                    raise RuntimeError("WorldRuntime is closed")
         closed = False
 
         @contextmanager
@@ -163,11 +178,13 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
             try:
                 yield conn
                 if conn.in_transaction:
-                    conn.commit()
+                    with self._work_timings.phase("sqlite_commit"):
+                        conn.commit()
             except BaseException:
                 try:
                     if conn.in_transaction:
-                        conn.rollback()
+                        with self._work_timings.phase("rollback"):
+                            conn.rollback()
                 finally:
                     # A failed rollback must close the active transaction
                     # while the caller still holds the transaction lock.
@@ -177,10 +194,18 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 raise
 
         try:
+            if not readonly:
+                # Host maintenance owns PASSIVE checkpointing while it is
+                # alive. Otherwise retain SQLite's default automatic policy.
+                conn.execute(f"PRAGMA wal_autocheckpoint={self._wal_autocheckpoint}")
             if serialized:
-                with self._lock:
+                with self._work_timings.phase("writer_wait"):
+                    self._lock.acquire()
+                try:
                     with transaction():
                         yield conn
+                finally:
+                    self._lock.release()
             else:
                 with transaction():
                     yield conn
@@ -202,6 +227,36 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                         pool.append(conn)
                 if not reusable:
                     conn.close()
+
+    @contextmanager
+    def managed_wal_checkpoints(self):
+        """Disable commit-hook checkpoints only for a live host maintainer."""
+        with self._connection_lock:
+            if self._connections_closed or self._wal_autocheckpoint == 0:
+                raise RuntimeError("WAL maintenance is already active or Runtime is closed")
+            self._wal_autocheckpoint = 0
+        try:
+            yield
+        finally:
+            self.restore_auto_wal_checkpoints()
+
+    def restore_auto_wal_checkpoints(self):
+        # Also called if the managed maintenance thread exits unexpectedly.
+        # Checked-out handles remain exclusive; subsequent writer leases
+        # restore SQLite's hook before accepting another transaction.
+        with self._connection_lock:
+            self._wal_autocheckpoint = 1000
+
+    def passive_wal_checkpoint(self):
+        """Backfill durable WAL without holding the world writer or waiting for readers."""
+        with self._work_timings.transaction("wal-checkpoint"):
+            with self._conn() as c:
+                with self._work_timings.phase("wal_backfill"):
+                    busy, frames, checkpointed = c.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                result = {"busy": busy, "wal_frames": frames, "checkpointed_frames": checkpointed,
+                          "pending_frames": max(0, frames - checkpointed)}
+                self._work_timings.annotate(**result)
+                return result
 
     @staticmethod
     def _enable_wal(c):

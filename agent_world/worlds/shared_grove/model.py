@@ -67,6 +67,7 @@ class CandidateBatch:
     entity_records: dict[str, dict] = field(default_factory=dict)
     indexed_entities: dict[str, dict] = field(default_factory=dict)
     pending_reconcile: set[str] = field(default_factory=set)
+    origin: str = "interaction"
 
 
 def liquid_quantity(entity, slot="contained", registry=None):
@@ -573,7 +574,12 @@ def normalize_entity(entity):
         raise RuleViolation("表面和受湿水合计不能超过10000u。")
     if len(value["matter"])+len(missing) > sm.MAX_LOTS:
         raise RuleViolation("8个物质槽还须为真实吸水、储水和表面接触预留位置。")
-    reserved_bytes = 64 + future_control_bytes(state.get("program", {}))
+    # Existing records already reserved this space for server-side growth.
+    # The lazy interaction guard consumes that reserve instead of charging old
+    # admitted content again; the remainder still covers counter digit growth.
+    revision_bytes = (sm.encoded_size({"interaction_revision": value["interaction_revision"]}) - 1
+        if "interaction_revision" in value else 0)
+    reserved_bytes = max(0, 64 - revision_bytes) + future_control_bytes(state.get("program", {}))
     for slot, bound in missing:
         reserved = {"id": sm.lot_identifier(value["id"], ("water", slot, bound, None, None)), "material": "water",
                     "quantity": sm.MAX_QUANTITY, "slot": slot, "role": "substance", "burning": False}
@@ -622,6 +628,65 @@ def future_water_slots(value, registry):
     return future
 
 
+def interaction_revision(entity):
+    """Server guard for interaction facts; old records adopt their saved version."""
+    revision = entity.get("interaction_revision", entity.get("version", 1))
+    if type(revision) is not int or revision < 1:
+        raise RuleViolation("物件交互版本不是合法的服务器记录。")
+    return revision
+
+
+def _interaction_basis(entity):
+    """Exclude only known autonomous outputs, never material/relationship facts.
+
+    Unknown metadata stays in this projection. A new mechanism must explicitly
+    justify which of its saved outputs may evolve between read and fixed intent.
+    """
+    value = deepcopy({key: item for key, item in entity.items()
+                      if key not in {"version", "interaction_revision"}})
+    program = value.get("state", {}).get("program")
+    if isinstance(program, dict):
+        for key in ("fields", "mechanical", "mechanical_last_solved", "drive_request", "event_cursor"):
+            program.pop(key, None)
+        process = program.get("process")
+        if isinstance(process, dict):
+            for key in ("steps", "last_tick"):
+                process.pop(key, None)
+    return value
+
+
+def _entity_write_revision(previous, value, *, origin):
+    """Compute once against the persisted preimage, ignoring supplied metadata."""
+    if previous is None:
+        return 1
+    revision = interaction_revision(previous)
+    before = {key: item for key, item in previous.items() if key not in {"version", "interaction_revision"}}
+    after = {key: item for key, item in value.items() if key not in {"version", "interaction_revision"}}
+    changed = before != after
+    if changed and (origin != "autonomous" or _interaction_basis(previous) != _interaction_basis(value)):
+        # The protected change's storage version is also the observation floor.
+        # Do not splice an ancient snapshot onto a newer interaction guard.
+        return previous["version"] + 1
+    return revision
+
+
+def check_entity_version(entity, expected, *, observed_interaction_revision=None, fixed_intent=False,
+                         message="物件已经变化，请刷新后再行动。"):
+    """A stable interaction guard permits evolution, not unseen external edits.
+
+    The caller still rechecks current action semantics and commits by the current
+    storage version. No cached preview or client revision supplies permission.
+    """
+    if expected == entity["version"]:
+        return
+    if (fixed_intent and "interaction_revision" in entity and type(expected) is int
+            and interaction_revision(entity) <= expected < entity["version"]
+            and type(observed_interaction_revision) is int
+            and observed_interaction_revision == interaction_revision(entity)):
+        return
+    raise StateConflict(message)
+
+
 def store_entity(ctx, entity, expected_version=None):
     """Return the normalized entity and whether storage accepted a change."""
     value = normalize_entity(entity)
@@ -638,6 +703,8 @@ def store_entity(ctx, entity, expected_version=None):
     expected = entity.get("version") if expected_version is None else expected_version
     if previous and expected is not None and previous["version"] != expected:
         raise StateConflict("物件已经变化，请刷新后再行动。")
+    value["interaction_revision"] = _entity_write_revision(previous, value,
+        origin=batch.origin if batch is not None else "interaction")
     if previous and value == {k:v for k,v in previous.items() if k != "version"} and not (batch is not None and value["id"] in batch.dirty_entities):
         entity.update(previous)
         return previous, False
@@ -867,6 +934,11 @@ def write_candidates(ctx, batch):
         for key in sorted(dirty):
             rec = ctx.get_state_record(scope, key)
             value = {k:v for k,v in cache[key].items() if k != "version"}
+            if scope == ENTITIES:
+                previous = {**rec["value"], "version": rec["version"]} if rec["exists"] else None
+                value["interaction_revision"] = _entity_write_revision(previous, value, origin=batch.origin)
+                candidate = cache[key]
+                candidate["interaction_revision"] = value["interaction_revision"]
             estimate += sm.encoded_size(value)+sm.encoded_size(rec["value"] if rec["exists"] else None)+256
             writes.append((scope, key, cache[key], value, rec["version"]))
     # 600KiB covers bounded process/meta/outcome rows and Runtime journal framing.

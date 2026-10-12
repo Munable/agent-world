@@ -24,6 +24,42 @@ _AGENT_TOOL_MAX_BYTES = 48 * 1024
 _AGENT_TOOL_MAX_LINES = 1800
 
 
+def execution_private_context(context: dict, goal: str) -> dict:
+    """Keep preferences, without reissuing retired creation requests as intent."""
+    result = deepcopy(context)
+    historical = {key: result.pop(key) for key in ("last_creation_request", "recent_user_requests") if key in result}
+    result["current_execution_goal"] = goal
+    result["projection"] = {"scope": "current_execution_preferences",
+        "omitted_historical_request_count": len(historical.get("recent_user_requests", [])),
+        "historical_creation_request_omitted": "last_creation_request" in historical,
+        "meaning": "The original private requests and dialogue remain stored in this same session. "
+                   "They are historical background, not renewed goals. Only the current granted goal "
+                   "is active; retained preferences are not world facts or action authorization."}
+    return result
+
+
+def nearby_public_events(page: dict, player: dict, entities: list) -> list:
+    """Keep actual actor records; a visible object's author is not its operator."""
+    visible = {row["id"] for row in entities if isinstance(row, dict) and isinstance(row.get("id"), str)}
+    result = []
+    for event in page.get("events", []):
+        value = event.get("payload", {})
+        kind = event.get("kind")
+        x, y = value.get("x"), value.get("y")
+        located = (type(x) is int and type(y) is int and
+            max(abs(x - player["x"]), abs(y - player["y"])) <= 8)
+        known_public_action = kind == "rule_action" and value.get("entity_id") in visible
+        if (kind not in {"interact", "build", "content_published", "content_extended", "outcome", "rule_action"}
+                or not (located or known_public_action)):
+            continue
+        row = {key: deepcopy(event[key]) for key in
+            ("event_id", "seq", "actor_role_id", "kind", "occurred_at") if key in event}
+        row["payload"] = {key: deepcopy(value[key]) for key in ("x", "y", "action", "entity_id", "recipe", "summary",
+            "content_id", "content_version", "contribution", "outcome_refs", "anchors", "parts") if key in value}
+        result.append(row)
+    return result
+
+
 def blueprint_model_input(payload: dict) -> dict:
     """Remove repeated declarations only from the model's copy of facts."""
     model_input = deepcopy(payload)
@@ -234,14 +270,14 @@ def _companion_creative_summary(creative):
     mechanical = creative.get("mechanical_observation")
     if isinstance(mechanical, dict):
         observation = {key: deepcopy(mechanical[key]) for key in (
-            "role", "role_meaning", "angle_unit", "travel", "pitch", "solver_eligible", "stored_output_is_history", "pending_next_step", "observed_tick")
+            "role", "role_meaning", "angle_unit", "travel", "pitch", "solver_eligible", "stored_output_is_history", "pending_next_step", "observed_tick", "meaning")
             if key in mechanical}
         stored = mechanical.get("stored_state")
         if isinstance(stored, dict):
             observation["stored_state"] = {key: deepcopy(stored[key]) for key in
                 ("position", "angle", "speed", "energy", "enabled", "status", "available_torque")
                 if key in stored}
-        for key, fields in (("last_solved", ("step", "historical")),
+        for key, fields in (("last_solved", ("step", "historical", "meaning")),
                             ("drive_request", ("enabled", "requested_step", "applies_from_step"))):
             record = mechanical.get(key)
             if record is None and key in mechanical:
@@ -263,7 +299,8 @@ def _companion_scene_index(scene, *, preflight=False):
     index = {key: deepcopy(scene[key]) for key in (
         "player", "players", "nearby_players", "clock", "bounds", "inventory_total",
         "inventory_next", "truncated", "region_entity_count", "selected_inspection", "observed_at",
-        "world_results", "selected_inspection_unavailable") if key in scene}
+        "world_results", "selected_inspection_unavailable", "action_targets", "action_targets_meaning",
+        "task_action_summary", "public_events") if key in scene}
     if isinstance(scene.get("chunks"), list):
         index["chunks"] = [_companion_chunk_terrain(chunk) for chunk in scene["chunks"]]
     construction = scene.get("construction")
@@ -285,10 +322,10 @@ def _companion_scene_index(scene, *, preflight=False):
                     rows.append(deepcopy(entity))
                     continue
                 row = {key: deepcopy(entity[key]) for key in (
-                    "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
+                    "id", "version", "interaction_revision", "name", "x", "y", "location", "owner", "physical_parent",
                     "entity_ref", "material", "capabilities", "container", "lifecycle", "created_by",
                     "source", "barrier_active", "contents_visibility", "content_summary", "matter_unit",
-                    "pour_target_slot") if key in entity}
+                    "pour_target_slot", "execution_domain") if key in entity}
                 if "container" in entity:
                     row["parent_container_id"] = entity["container"]
                 kind = entity.get("state", entity.get("discovery_state", {})).get("kind")
@@ -374,7 +411,7 @@ def _companion_scene_index(scene, *, preflight=False):
     return index
 
 
-def _companion_selected_state_summary(inspection):
+def _companion_selected_state_summary(inspection, *, compact=False):
     """Automatic write readback reports state; explicit inspect owns previews."""
     entity = inspection.get("entity") if isinstance(inspection, dict) else None
     if not isinstance(entity, dict):
@@ -383,12 +420,23 @@ def _companion_selected_state_summary(inspection):
     # Copy actual authorized values, including physical lots and program state.
     # A new object must not inherit inspection-local references to omitted actions.
     state = {key: deepcopy(entity[key]) for key in (
-        "id", "version", "name", "x", "y", "location", "owner", "physical_parent",
+        "id", "version", "interaction_revision", "name", "x", "y", "location", "owner", "physical_parent",
         "material", "materials", "matter", "matter_unit", "material_quantity", "simulation",
         "state", "mechanical", "creative", "capabilities", "container", "lifecycle",
         "barrier_active", "contents_visibility", "content_summary", "relations", "created_by", "source",
-        "pour_target_slot")
+        "pour_target_slot", "execution_domain")
         if key in entity}
+    if compact:
+        creative = state.get("creative")
+        if isinstance(creative, dict):
+            state["creative"] = _companion_creative_summary(creative)
+            if "contract" in creative:
+                state["creative"]["contract"] = deepcopy(creative["contract"])
+        program = state.get("state", {}).get("program")
+        if isinstance(program, dict):
+            state["state"]["program"] = {key: deepcopy(program[key]) for key in
+                ("fields", "mechanical", "drive_request", "mechanical_last_solved", "contract",
+                 "port_bindings", "connections") if key in program}
     summary = {"entity": state, "projection": {
         "scope": "selected_object_state",
         "omitted_sections": ["action_options", "action previews", "inspection contents and public history"],
@@ -780,7 +828,8 @@ def _companion_action_projection(result, *, base_id=None, versions=None, entity_
 
     compact = {key: readback[key] for key in (
         "player", "clock", "bounds", "inventory", "inventory_total", "inventory_next", "truncated",
-        "observed_at", "selected_inspection", "selected_inspection_unavailable", "world_results") if key in readback}
+        "observed_at", "selected_inspection", "selected_inspection_unavailable", "world_results",
+        "action_targets", "action_targets_meaning", "task_action_summary", "public_events") if key in readback}
     construction = readback.get("construction")
     if isinstance(construction, dict):
         compact["construction"] = {key: construction[key] for key in ("material_totals", "unit")
@@ -858,6 +907,12 @@ def _companion_action_projection(result, *, base_id=None, versions=None, entity_
         row = selected["entity"]
         if isinstance(row.get("id"), str):
             current[row["id"]] = (row, "#/execution_readback/selected_inspection/entity")
+    for index, target in enumerate(compact.get("action_targets", [])):
+        if not isinstance(target, dict):
+            continue
+        row = target.get("inspection", {}).get("entity")
+        if isinstance(row, dict) and row.get("id") == target.get("entity_id"):
+            current[row["id"]] = (row, f"#/execution_readback/action_targets/{index}/inspection/entity")
     reads = {}
     for entity in [value.get("entity"), *direct]:
         if (not isinstance(entity, dict) or not isinstance(entity.get("id"), str) or
@@ -929,6 +984,17 @@ def _companion_inspection_index(payload, *, preserve_facts=False):
              _companion_selected_state_summary({"entity": entity})["entity"])
     state.pop("action_options", None)
     creative = state.get("creative")
+    duplicate_state = []
+    if not preserve_facts and isinstance(creative, dict):
+        program = state.get("state", {}).get("program")
+        if isinstance(program, dict):
+            # The server exposes the same current fields and process twice.
+            # Keep their complete authorized creative values, not two copies,
+            # before considering any loss of condition facts or domain state.
+            for field in ("fields", "process"):
+                if field in program and field in creative and program[field] == creative[field]:
+                    program.pop(field)
+                    duplicate_state.append(f"state.program.{field} (same values in entity.creative.{field})")
     if not preserve_facts and isinstance(creative, dict) and isinstance(creative.get("automatic_rules"), list):
         # The pinned definition is independently readable. Keep every current
         # fact/comparison, omitting only the duplicate immutable expressions.
@@ -946,8 +1012,7 @@ def _companion_inspection_index(payload, *, preserve_facts=False):
                 "read_request": {"tool": "grove_definition_read", "arguments": {
                     "definition_ref": creative["definition_ref"]}},
                 "type_id": creative["type_id"],
-                "meaning": "Current verdicts, facts and checks remain. Only immutable expression trees are omitted; "
-                           "read the pinned type_id/rule_id or indexed drive effect from this definition."}
+                "meaning": "Current verdicts, facts and checks remain; read omitted expressions from the pinned definition."}
     outlines = []
     for option in options:
         if not isinstance(option, dict) or not isinstance(option.get("action"), str):
@@ -961,14 +1026,30 @@ def _companion_inspection_index(payload, *, preserve_facts=False):
         choices = option.get("choices") or {}
         candidates = [*candidates, *choices.get("items", []), *choices.get("others", [])]
         if candidates:
-            outline["candidates_index"] = [{key: deepcopy(candidate[key]) for key in
-                ("id", "name", "kind", "available", "reason") if key in candidate} | {"read_request": {
-                    "tool": "grove_inspect", "arguments": request["arguments"] | {"candidate_id": candidate["id"]}}}
-                for candidate in candidates if isinstance(candidate, dict) and isinstance(candidate.get("id"), str)]
+            outline["candidates_index"] = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str):
+                    continue
+                row = {key: deepcopy(candidate[key]) for key in
+                    ("id", "name", "kind", "available", "reason") if key in candidate}
+                row["read_request"] = {"tool": "grove_inspect", "arguments":
+                    request["arguments"] | {"candidate_id": candidate["id"]}}
+                # These identifiers describe the indexed batch kind; amounts,
+                # entity versions and previews still require the precise read.
+                if preserve_facts and isinstance(candidate.get("lots"), list):
+                    row["lot_index"] = [{"id": lot["id"]} for lot in candidate["lots"]
+                        if isinstance(lot, dict) and isinstance(lot.get("id"), str)]
+                outline["candidates_index"].append(row)
         elif isinstance(option.get("candidates_index"), list):
             # A transport-limit fallback can receive an already indexed read.
             # Keep its genuine paths; omission must not erase discovery.
             outline["candidates_index"] = deepcopy(option["candidates_index"])
+            if not preserve_facts:
+                # Optional diagnostic IDs give way to actual conditions and
+                # exact expansion paths at the existing transport boundary.
+                for row in outline["candidates_index"]:
+                    if isinstance(row, dict):
+                        row.pop("lot_index", None)
         sources = choices.get("sources", [])
         if sources:
             # inspect candidate_id selects input.candidates and items/others,
@@ -987,12 +1068,11 @@ def _companion_inspection_index(payload, *, preserve_facts=False):
         "available_actions": deepcopy(value.get("available_actions", entity.get("available_actions", []))),
         "action_options_projection": {"scope": "authorized_action_index", "expanded_actions": [],
             "requested_projection": deepcopy(projection),
-            "meaning": "Index, not permission/safety/success. Inputs, candidate versions/conditions and previews "
-                       "unprovided/unbound; use read_request."},
+            "meaning": "Index only; inputs and previews are unprovided/unbound. Use read_request."},
         "projection": {"scope": "object_state_and_action_index", "complete_inspection": False,
             "complete_object_state": preserve_facts,
             "omitted_sections": ["expanded action inputs and previews"] + ([] if preserve_facts else
-                ["child snapshots", "public content history"])}})
+                ["child snapshots", "public content history", *duplicate_state])}})
     if "explanation" in value:
         index["explanation"] = deepcopy(value["explanation"])
     if "result" not in payload:
@@ -1016,7 +1096,8 @@ def _bounded_agent_projection(function, payload):
         result = deepcopy(payload)
         facts = result.get("execution_readback", {})
         retained = {key: deepcopy(facts[key]) for key in (
-            "player", "clock", "selected_inspection", "selected_inspection_unavailable", "world_results") if key in facts}
+            "player", "clock", "observed_at", "selected_inspection", "selected_inspection_unavailable", "world_results",
+            "action_targets", "action_targets_meaning", "task_action_summary", "public_events") if key in facts}
         retained["projection"] = {"scope": "checkpoint_current_selected_facts", "complete_scene": False,
             "omitted_sections": [key for key in facts if key not in retained and key != "projection"],
             "read_request": {"tool": "map_viewport", "arguments": {}},
@@ -1085,7 +1166,7 @@ def _bounded_agent_projection(function, payload):
     # This response omits expanded state explicitly and retains the real receipt.
     result = {key: deepcopy(payload[key]) for key in (
         "operation_id", "function_id", "ok", "status", "commit_seq", "actor_role_id",
-        "function_version", "replayed", "execution_control", "confirmed_outcome") if key in payload}
+        "function_version", "replayed", "execution_control", "confirmed_outcome", "busy_recovery") if key in payload}
     operation_result = payload.get("result")
     if isinstance(operation_result, dict):
         receipt_fields = {key: deepcopy(operation_result[key]) for key in
@@ -1096,6 +1177,8 @@ def _bounded_agent_projection(function, payload):
     readback = payload.get("execution_readback", {})
     compact = {}
     if isinstance(readback, dict):
+        if "observed_at" in readback:
+            compact["observed_at"] = deepcopy(readback["observed_at"])
         player = readback.get("player")
         if isinstance(player, dict):
             compact["player"] = {key: deepcopy(player[key]) for key in
@@ -1103,12 +1186,25 @@ def _bounded_agent_projection(function, payload):
         selected = readback.get("selected_inspection", {})
         entity = selected.get("entity") if isinstance(selected, dict) else None
         if isinstance(entity, dict):
-            identity = {key: deepcopy(entity[key]) for key in ("id", "version", "pour_target_slot") if key in entity}
+            identity = {key: deepcopy(entity[key]) for key in ("id", "version", "interaction_revision", "pour_target_slot") if key in entity}
             compact["selected_inspection"] = {"entity": identity,
                 "projection": {"scope": "selected_identity_only", "state_and_previews_included": False}}
             if isinstance(identity.get("id"), str):
                 compact["selected_inspection"]["read_request"] = {
                     "tool": "grove_inspect", "arguments": {"entity_id": identity["id"]}}
+        targets = readback.get("action_targets")
+        if isinstance(targets, list):
+            compact["action_targets"] = []
+            for target in targets:
+                if not isinstance(target, dict):
+                    continue
+                row = {key: deepcopy(target[key]) for key in ("entity_id", "observed_at", "unavailable") if key in target}
+                entity = target.get("inspection", {}).get("entity")
+                if isinstance(entity, dict) and entity.get("id") == row.get("entity_id"):
+                    row["inspection"] = {"entity": {key: deepcopy(entity[key]) for key in ("id", "version", "interaction_revision") if key in entity},
+                        "projection": {"scope": "action_target_identity_only", "state_and_previews_included": False},
+                        "read_request": {"tool": "grove_inspect", "arguments": {"entity_id": entity["id"]}}}
+                compact["action_targets"].append(row)
     result["execution_readback"] = compact
     result["projection"] = {"scope": "write_receipt_and_read_entries", "expanded_state_included": False,
         "world_verdict_included": False, "goal_result_included": False,
@@ -1120,6 +1216,10 @@ def _bounded_agent_projection(function, payload):
                    "metadata does not verify physical success or the person's natural-language goal."}
     result["read_requests"] = [{"tool": "map_viewport", "arguments": {}},
                                {"tool": "grove_control_status", "arguments": {}}]
+    for target in compact.get("action_targets", []):
+        request = target.get("inspection", {}).get("read_request")
+        if request:
+            result["read_requests"].append(deepcopy(request))
     # Keep each available verdict whole when it fits, or explicitly mark it
     # unprovided; never turn call success into a goal/contract verdict.
     omitted_verdicts = set()
@@ -1160,6 +1260,11 @@ def _agent_version_field(name):
     return match.group(1) if match else "anchor" if name == "observed_anchor_version" else None
 
 
+def _agent_interaction_revision_field(name):
+    return {"expected_target_interaction_revision": "target",
+            "expected_item_interaction_revision": "item"}.get(name)
+
+
 def agent_tool_schema(schema, *, function=None):
     """Hide only optimistic snapshot guards from this connector's MCP input."""
     result = deepcopy(schema)
@@ -1171,12 +1276,13 @@ def agent_tool_schema(schema, *, function=None):
         source_row = function == "grove.fabricate" and path == ("sources", "[]")
         properties = value.get("properties", {})
         for key in list(properties):
-            if (guarded and _agent_version_field(key)) or (source_row and key == "expected_entity_version"):
+            if (guarded and (_agent_version_field(key) or _agent_interaction_revision_field(key))) or (source_row and key == "expected_entity_version"):
                 properties.pop(key)
             else:
                 visit(properties[key], (*path, key))
         if guarded and isinstance(value.get("required"), list):
-            value["required"] = [key for key in value["required"] if not _agent_version_field(key)]
+            value["required"] = [key for key in value["required"]
+                                 if not (_agent_version_field(key) or _agent_interaction_revision_field(key))]
         elif source_row and isinstance(value.get("required"), list):
             value["required"] = [key for key in value["required"] if key != "expected_entity_version"]
         for branch in ("oneOf", "anyOf", "allOf"):
@@ -1229,7 +1335,8 @@ def _project_agent_menus(value):
             option["mcp_tool"] = function.replace(".", "_")
             option["input_schema"] = agent_mcp_schema(option["input_schema"], function=function)
         if isinstance(option.get("arguments"), dict):
-            option["arguments"] = {key: item for key, item in option["arguments"].items() if not _agent_version_field(key)}
+            option["arguments"] = {key: item for key, item in option["arguments"].items()
+                                   if not (_agent_version_field(key) or _agent_interaction_revision_field(key))}
             if function == "grove.fabricate":
                 for source in option["arguments"].get("sources", []):
                     if isinstance(source, dict):
@@ -1310,7 +1417,21 @@ class AgentObservations:
 
         def remember(kind, value, id_key="id", version_key="version"):
             if isinstance(value, dict) and isinstance(value.get(id_key), str) and type(value.get(version_key)) is int and value[version_key] > 0:
+                previous = bundle["versions"][kind].get(value[id_key])
                 bundle["versions"][kind][value[id_key]] = value[version_key]
+                if kind == "entity":
+                    revisions = bundle.setdefault("interaction_revisions", {})
+                    revision = value.get("interaction_revision")
+                    if type(revision) is int and 0 < revision <= value[version_key]:
+                        revisions[value[id_key]] = revision
+                    elif previous != value[version_key]:
+                        revisions.pop(value[id_key], None)
+                    # Diagnose an actual presented lot copied into an entity
+                    # field, without deriving its carrier or binding a version.
+                    for key in ("matter", "lots"):
+                        for lot in value.get(key, []) if isinstance(value.get(key), list) else []:
+                            if isinstance(lot, dict) and isinstance(lot.get("id"), str):
+                                bundle.setdefault("presented_lot_ids", {})[lot["id"]] = True
 
         def rows(value):
             return value if isinstance(value, list) else []
@@ -1319,6 +1440,11 @@ class AgentObservations:
             for option in values if isinstance(values, list) else []:
                 if not isinstance(option, dict):
                     continue
+                for candidate in rows(option.get("candidates_index")):
+                    if isinstance(candidate, dict):
+                        for lot in rows(candidate.get("lot_index")):
+                            if isinstance(lot, dict) and isinstance(lot.get("id"), str):
+                                bundle.setdefault("presented_lot_ids", {})[lot["id"]] = True
                 # These are current server-generated choices, not authored
                 # descriptions, program fields, schemas or historical receipts.
                 inputs = option.get("input", {})
@@ -1405,6 +1531,9 @@ class AgentObservations:
                     bundle["continuation_bases"][opportunity["id"]] = deepcopy(opportunity["continuation_basis"])
             scene(value.get("viewport"))
             scene(value.get("selected_inspection"))
+            for target in rows(value.get("action_targets")):
+                if isinstance(target, dict):
+                    scene(target.get("inspection"))
 
         scene(result.get("result", result))
         scene(result.get("execution_readback"))
@@ -1437,6 +1566,8 @@ class AgentObservations:
                 root.setdefault("target_slot", slot)
 
         def missing(subject, identity):
+            if subject in {"target", "item", "other", "entity"} and isinstance(identity, str) and identity in bundle.get("presented_lot_ids", {}):
+                raise ConnectorError("ObservedVersionRequired", f"此观察展示的{identity}是材料lot_id，不是承载材料的物件id。{subject}_id需复制已展示的物件id，lot_id另填该物件的真实批次id；不会猜测或替换来源。", 409)
             raise ConnectorError("ObservedVersionRequired", f"此观察中没有{subject} {identity or ''}的版本；请先读取该对象，并引用新返回的observation_id。", 409)
 
         def fixed_basis(node, subject):
@@ -1456,6 +1587,17 @@ class AgentObservations:
                 return node
             props = schema.get("properties", {})
             for key, field in props.items():
+                interaction_subject = _agent_interaction_revision_field(key) if not path else None
+                if interaction_subject:
+                    node.pop(key, None)
+                    identity = node.get(interaction_subject + "_id")
+                    if function == "grove.interact" and (interaction_subject == "target"
+                            or interaction_subject == "item" and root.get("action") == "drop"):
+                        identity = root.get("target_id") or root.get("item_id")
+                    revision = bundle.get("interaction_revisions", {}).get(identity)
+                    if type(revision) is int and revision > 0:
+                        node[key] = revision
+                    continue
                 subject = _agent_version_field(key) if path in {(), ("continuation",)} else None
                 if function == "grove.fabricate" and path == ("sources", "[]") and key == "expected_entity_version":
                     subject = "entity"

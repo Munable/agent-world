@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from agent_world import (CheckpointSpec, FunctionOutcome, FunctionSpec, StateRule,
@@ -127,6 +128,72 @@ class CheckpointStorageTests(unittest.TestCase):
             self.runtime.apply_checkpoint_retention("stream", keep_commits=0, seconds=0)
         self.assertEqual(len(self.rows("SELECT * FROM world_commits WHERE universe='stream' AND source='checkpoint'")), 1)
         self.assertEqual(self.runtime.get_checkpoint_receipt("stream", "running")["result"], {"n": 4})
+
+    def test_combined_maintenance_releases_stream_references_then_reclaims_in_one_commit(self):
+        self.runtime.install_world("combined", world(emit=True))
+        for _ in range(4):
+            self.runtime.run_due_timers("combined", limit=1)
+        latest = self.runtime.get_checkpoint_receipt("combined", "running")
+        with patch("time.time", return_value=time.time()+120):
+            result = self.runtime.apply_work_retention("combined", keep_commits=0, seconds=0, time_budget=1)
+        self.assertEqual(result["stream_events_removed"], 4)
+        self.assertEqual(result["checkpoint_commits_removed"], 3)
+        self.assertEqual(self.runtime.get_checkpoint_receipt("combined", "running"), latest)
+        sample = self.runtime.work_diagnostics()["recent"][-1]
+        self.assertEqual(sample["kind"], "maintenance")
+        self.assertIn("stream_retention", sample["phases"])
+        self.assertIn("checkpoint_retention", sample["phases"])
+        self.assertIn("sqlite_commit", sample["phases"])
+
+    def test_combined_failure_rolls_back_reference_release_and_floors(self):
+        self.runtime.install_world("rollback", world(emit=True))
+        for _ in range(4):
+            self.runtime.run_due_timers("rollback", limit=1)
+        before_stream = self.rows("SELECT * FROM stream_events WHERE universe='rollback'")
+        before_heads = self.rows("SELECT * FROM stream_heads WHERE universe='rollback'")
+        before_commits = self.rows("SELECT * FROM world_commits WHERE universe='rollback'")
+        with patch("time.time", return_value=time.time()+120), \
+                patch.object(self.runtime, "_apply_checkpoint_retention_tx", side_effect=RuntimeError("private detail")):
+            with self.assertRaises(RuntimeError):
+                self.runtime.apply_work_retention("rollback", keep_commits=0, seconds=0, time_budget=1)
+        self.assertEqual(self.rows("SELECT * FROM stream_events WHERE universe='rollback'"), before_stream)
+        self.assertEqual(self.rows("SELECT * FROM stream_heads WHERE universe='rollback'"), before_heads)
+        self.assertEqual(self.rows("SELECT * FROM world_commits WHERE universe='rollback'"), before_commits)
+
+    def test_shared_stream_budget_rotates_so_one_busy_stream_cannot_starve_another(self):
+        def two_streams(ctx, args):
+            outcome = advance(ctx, args)
+            return FunctionOutcome(outcome.result, events=(
+                StreamEvent("shared", "advanced", outcome.result, key="first"),
+                StreamEvent("second", "advanced", outcome.result, key="second")))
+        definition = world(emit=True)
+        definition = replace(definition,
+            checkpoints=(replace(definition.checkpoints[0], handler=two_streams),),
+            streams=definition.streams+(StreamSpec("second", public=True, max_events=8, retention_seconds=60),))
+        self.runtime.install_world("fair", definition)
+        for _ in range(4):
+            self.runtime.run_due_timers("fair", limit=1)
+        with patch("time.time", return_value=time.time()+120):
+            first = self.runtime.apply_work_retention("fair", stream_limit=1, time_budget=1)
+            second = self.runtime.apply_work_retention("fair", stream_limit=1, time_budget=1,
+                stream_after=first["stream_after"])
+        self.assertEqual((first["stream_after"], second["stream_after"]), ("shared", "second"))
+        self.assertEqual(len(self.rows("SELECT seq FROM stream_events WHERE universe='fair' AND stream='shared'")), 3)
+        self.assertEqual(len(self.rows("SELECT seq FROM stream_events WHERE universe='fair' AND stream='second'")), 3)
+
+    def test_slow_stream_pass_does_not_starve_a_bounded_checkpoint_unit(self):
+        self.tick(4)
+        original = self.runtime._apply_stream_retention_tx
+        clock = [100.0]
+        def slow_stream(*args, **kwargs):
+            result = original(*args, **kwargs)
+            clock[0] += 1
+            return result
+        with patch("time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(self.runtime, "_apply_stream_retention_tx", side_effect=slow_stream):
+            result = self.runtime.apply_work_retention("u", keep_commits=0, seconds=0, time_budget=.025)
+        self.assertEqual(result["checkpoint_commits_removed"], 1)
+        self.assertTrue(result["checkpoint_backlog"])
 
     def test_actual_commit_and_change_budgets_outpace_sustained_high_change_generations(self):
         self.runtime.install_world("wide", world(width=300))

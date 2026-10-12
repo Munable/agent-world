@@ -12,13 +12,32 @@ import asyncio
 import contextlib
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 import secrets
 import time
 from typing import Awaitable, Callable
 
 from jsonschema import Draft202012Validator
 
+from .grove_agent_observation import AGENT_ACTION_FUNCTIONS
 from .grove_connector_errors import ConnectorError
+
+
+MAX_ACTION_TARGETS = 4
+MAX_ACTION_SUMMARY_BYTES = 8 * 1024
+
+
+def action_entity_ids(arguments, payload=None):
+    """Only formal action/receipt identity fields, never authored prose or rules."""
+    arguments = arguments if isinstance(arguments, dict) else {}
+    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    candidates = [arguments.get(key) for key in ("target_id", "entity_id", "other_id", "item_id")]
+    entities = result.get("entities", [])
+    candidates += [entity.get("id") for entity in [result.get("entity"),
+        *(entities[:MAX_ACTION_TARGETS] if isinstance(entities, list) else [])] if isinstance(entity, dict)]
+    return list(dict.fromkeys(identity for identity in candidates
+        if isinstance(identity, str) and 1 <= len(identity) <= 256))[:MAX_ACTION_TARGETS]
 
 
 def confirmed_outcome(payload):
@@ -36,7 +55,21 @@ def confirmed_outcome(payload):
     entity = result.get("entity")
     if isinstance(entity, dict):
         facts["entity"] = {key: deepcopy(entity[key]) for key in
-            ("id", "name", "version", "x", "y", "owner", "container", "physical_parent", "lifecycle") if key in entity}
+            ("id", "name", "version", "x", "y", "owner", "container", "physical_parent", "lifecycle",
+             "material_quantity", "mechanical", "execution_domain") if key in entity}
+        if isinstance(entity.get("matter"), list):
+            facts["entity"]["matter"] = [{key: deepcopy(lot[key]) for key in
+                ("material", "slot", "quantity", "role", "burning") if key in lot}
+                for lot in entity["matter"][:8] if isinstance(lot, dict)]
+            facts["entity"]["matter_total"] = len(entity["matter"])
+        state = entity.get("state")
+        if isinstance(state, dict):
+            facts["entity"]["state"] = {key: deepcopy(value) for key, value in state.items()
+                if value is None or isinstance(value, (str, bool, int, float))}
+            program = state.get("program")
+            if isinstance(program, dict):
+                facts["entity"]["state"]["program"] = {key: deepcopy(program[key]) for key in
+                    ("fields", "mechanical", "drive_request", "mechanical_last_solved") if key in program}
     action = result.get("action_result")
     if isinstance(action, dict):
         facts["action_result"] = deepcopy(action)
@@ -52,7 +85,8 @@ def confirmed_outcome(payload):
 class ExecutionPorts:
     """Narrow adapters; closures may resolve the current transport at call time.
 
-    read accepts kind="receipt"/"facts" and operation_id/context_entity_id.
+    read accepts kind="receipt"/"facts" and operation_id/context_entity_id,
+    plus bounded action_entity_ids for independent exact current target reads.
     native_segment accepts kind="execute"/"compact"/"history", a goal and an
     optional context_entity_id. recover settles original operations without
     replay; unknown_operations exposes the transport's original journal.
@@ -84,7 +118,7 @@ class ExecutionController:
             "readback_actions_count": None, "no_progress_segments": 0,
             "segment_id": "", "checkpoint": None, "goal_result": None, "segments": [], "phase_timings": [],
             "context_result_reference": None, "context_reference_attempted": True, "world_results": [],
-            "settlement": None,
+            "settlement": None, "action_entity_ids": [],
             "history_recovery": {"requested": False, "status": "not_started", "attempts": 0},
             "budget_extensions": [],
             "progress": {"summary": "", "next_intent": "", "evidence": []},
@@ -113,12 +147,52 @@ class ExecutionController:
 
     def snapshot(self) -> dict:
         """Adapters observe owned task state; nested records are never write ports."""
-        return deepcopy(self.state) | {"remaining_actions": self.remaining_actions}
+        return deepcopy(self.state) | {"remaining_actions": self.remaining_actions,
+            "action_summary": self.action_summary()}
+
+    def action_summary(self) -> dict:
+        """Group this task's retained confirmed actions, never its current state."""
+        task = self.state.get("task_id")
+        groups, confirmed = {}, 0
+        for receipt in self.state.get("receipts", []):
+            if (not task or receipt.get("task_id") != task or receipt.get("status") != "confirmed" or
+                    receipt.get("function") not in AGENT_ACTION_FUNCTIONS):
+                continue
+            targets = tuple(receipt.get("action_entity_ids", []))
+            key = (receipt["function"], receipt.get("action"), receipt.get("action_id"), targets)
+            group = groups.pop(key, {"function": receipt["function"],
+                "action_entity_ids": list(targets), "count": 0})
+            group.update(count=group["count"] + 1, last_operation_id=receipt["operation_id"],
+                last_commit_seq=receipt.get("commit_seq"))
+            for field in ("action", "action_id"):
+                if field in receipt:
+                    group[field] = receipt[field]
+            # An older group's outcome cannot stand in for a missing last one.
+            group.pop("last_confirmed_outcome", None)
+            if "confirmed_outcome" in receipt:
+                group["last_confirmed_outcome"] = deepcopy(receipt["confirmed_outcome"])
+            groups[key] = group
+            confirmed += 1
+        summary = {"task_id": task, "scope": "current_task_retained_confirmed_actions",
+            "confirmed_count": confirmed, "total_groups": len(groups),
+            "omitted_groups": max(0, len(groups) - 8), "groups": list(groups.values())[-8:],
+            "meaning": "Only this person's retained confirmed actions in this task's bounded receipt ledger. "
+                "Outcomes describe each group's last original commit, not current state, cumulative material "
+                "totals, other people's actions or goal verification. Omitted groups or receipts do not "
+                "mean an action never happened."}
+        # Keep complete recent groups, including their exact original outcome.
+        # Indented JSON bounds both compact prompts and native tool rendering.
+        while summary["groups"] and len(json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")) > MAX_ACTION_SUMMARY_BYTES:
+            summary["groups"].pop(0)
+            summary["omitted_groups"] += 1
+        return summary
 
     def value(self, field: str, default=None):
         """Read one current fact without copying the whole saved world readback."""
         if field == "remaining_actions":
             return self.remaining_actions
+        if field == "action_summary":
+            return self.action_summary()
         return deepcopy(self.state.get(field, default))
 
     def archived_snapshots(self) -> list[dict]:
@@ -129,6 +203,7 @@ class ExecutionController:
         if isinstance(saved, dict):
             self.state.update(deepcopy(saved))
             self.state.pop("remaining_actions", None)
+            self.state.pop("action_summary", None)
         self.archive = deepcopy(archive[-8:]) if isinstance(archive, list) else []
         if not isinstance(delegation, str):
             raise ValueError("invalid execution delegation")
@@ -243,7 +318,7 @@ class ExecutionController:
         # Preserve the public state shape and the fixed per-request budget.
         self.state.update(status="starting", goal=goal.strip(), max_actions=maximum, actions_count=0,
             delegation_active=False, grant_version=None, control_status=None,
-            receipts=[], readback=None, readback_actual=False, error=None,
+            receipts=[], readback=None, readback_actual=False, error=None, action_entity_ids=[],
             task_id="grove-task-" + secrets.token_hex(16), context_entity_id=selected,
             requests_used=0, max_requests=request_budget, request_status="idle", stop_reason="", resume_allowed=False,
             grant_action_offset=0, pending_grant_action_offset=None, grant_operation_id=None,
@@ -338,8 +413,18 @@ class ExecutionController:
             segment_id = (existing or {}).get("segment_id", owner.get("segment_id", ""))
         value = {"function": function, "operation_id": operation, "status": status,
             "commit_seq": (payload or {}).get("commit_seq"), "task_id": task_id, "segment_id": segment_id}
+        arguments = (operation_record or {}).get("envelope", {}).get("arguments", {})
+        for field in ("action", "action_id"):
+            if isinstance(arguments.get(field), str):
+                value[field] = arguments[field]
         if status in {"committed", "confirmed"} and (outcome := confirmed_outcome(payload)) is not None:
             value["confirmed_outcome"] = outcome
+        if status in {"committed", "confirmed"}:
+            targets = ((existing or {}).get("action_entity_ids", []) if operation_record is None else [])
+            targets = targets or action_entity_ids(arguments, payload)
+            if targets:
+                value["action_entity_ids"] = targets
+                self._remember_action_targets(owner, targets)
         if existing is not None:
             existing.update(value)
         else:
@@ -349,6 +434,13 @@ class ExecutionController:
             self.state.update(status="unknown", resume_allowed=False)
         self._persist()
         return value
+
+    @staticmethod
+    def _remember_action_targets(owner, targets):
+        # Most recently touched real objects remain readable at checkpoints and
+        # recovery. The user's original selected contract is a separate fact.
+        owner["action_entity_ids"] = list(dict.fromkeys(
+            [*targets, *owner.get("action_entity_ids", [])]))[:MAX_ACTION_TARGETS]
 
     def phase(self, phase: str, started: float, *, status="confirmed", error=None):
         value = {"phase": phase, "request": self.state.get("requests_used", 0),
@@ -533,10 +625,12 @@ class ExecutionController:
         if self.unresolved or self.state.get("request_status") != "idle_confirmed":
             raise ConnectorError("ExecutionContextBusy", "先核对原请求与回执，才能整理旧现场上下文。", 409)
 
-    def context_pruned(self, *, parts: int, snapshot_characters: int, tool_characters: int):
+    def context_pruned(self, *, parts: int, snapshot_characters: int, tool_characters: int, native_backfill=None):
         self.state["context_pruning"] = {"parts": parts, "superseded_snapshot_chars": snapshot_characters,
             "superseded_tool_output_chars": tool_characters,
             "scope": "Native original text/output retained; user goals, definitions, writes and receipts unchanged."}
+        if native_backfill is not None:
+            self.state["context_pruning"]["native_backfill"] = deepcopy(native_backfill)
         self._persist()
 
     def reclaim_interrupted(self, error: dict, *, persistence_failed=False):
@@ -631,7 +725,7 @@ class ExecutionController:
         if segment_id != self.state.get("segment_id"):
             raise ConnectorError("StaleExecutionSegment", "执行段标识不匹配；此调用没有执行，请读取当前执行段状态。", 409)
 
-    async def readback(self, *, context_entity_id=None):
+    async def readback(self, *, context_entity_id=None, action_entity_ids=None):
         started = time.monotonic()
         # A previous successful read is history while this new read is pending.
         self.state["readback_actual"] = False
@@ -643,7 +737,12 @@ class ExecutionController:
         control = await self.ports.invoke("grove.control_status", {})
         self.update_control(control.get("result", control))
         selected = context_entity_id if context_entity_id is not None else self.state.get("context_entity_id")
-        facts = await self.ports.read("facts", context_entity_id=selected)
+        targets = self.state.get("action_entity_ids", []) if action_entity_ids is None else action_entity_ids
+        arguments = {"context_entity_id": selected}
+        if targets:
+            arguments["action_entity_ids"] = targets
+        facts = await self.ports.read("facts", **arguments)
+        facts["task_action_summary"] = self.action_summary()
         unavailable = facts.get("selected_inspection_unavailable", {})
         self.selection_unavailable(unavailable.get("entity_id"), unavailable.get("code"))
         self.state["world_results"] = self.world_results(facts)
@@ -682,7 +781,9 @@ class ExecutionController:
                 raise exc
         try:
             self.phase("mcp_write", started)
-            facts = await self.readback()
+            targets = action_entity_ids(arguments, result)
+            self._remember_action_targets(self.state, targets)
+            facts = await self.readback(action_entity_ids=targets)
             projection = deepcopy(result)
             if (outcome := confirmed_outcome(result)) is not None:
                 projection["confirmed_outcome"] = outcome

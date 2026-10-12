@@ -6,6 +6,7 @@ semantics. They do not claim a model or player completed the world experience.
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
+import json
 import unittest
 from unittest.mock import Mock, AsyncMock
 
@@ -27,6 +28,182 @@ CHECKPOINT_SCHEMA = {"type": "object", "required": ["task_id", "execution_segmen
 
 
 class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    def test_task_action_summary_keeps_fuel_after_moves_without_inferring_from_current_energy(self):
+        self.start(max_actions=64)
+        task = self.controller.state["task_id"]
+        arguments = {"action": "fuel", "target_id": "wheel", "item_id": "wood", "amount": 5}
+        record = {"task_id": task, "segment_id": "fuel-segment", "envelope": {"arguments": arguments}}
+        payload = {"commit_seq": 7, "result": {"entity": {"id": "wheel", "version": 2,
+            "state": {"program": {"mechanical": {"energy": 5}}}},
+            "action_result": {"action": "fuel", "stored_energy_after": 5,
+                "costs": [{"entity_id": "wood", "quantity_u": 5}]}}}
+        self.controller.receipt("grove.rule_action", "original-fuel", payload,
+            status="committed", operation_record=record)
+        # Recovery reads have no original argument envelope; classification and
+        # both real source/target identities must survive the confirmation.
+        self.controller.receipt("grove.rule_action", "original-fuel", payload, status="confirmed")
+        for index in range(12):
+            self.controller.receipt("grove.move", "move-" + str(index), {"commit_seq": 8 + index},
+                status="confirmed", operation_record={"task_id": task, "envelope": {"arguments": {"dx": 1}}})
+        self.controller.state["readback"] = {"entity": {"id": "wheel", "energy": 0}}
+        before = deepcopy(self.controller.state)
+        summary = self.controller.action_summary()
+        self.assertEqual(summary["scope"], "current_task_retained_confirmed_actions")
+        self.assertEqual((summary["confirmed_count"], summary["total_groups"], summary["omitted_groups"]), (13, 2, 0))
+        fuel, moves = summary["groups"]
+        self.assertEqual((fuel["function"], fuel["action"], fuel["action_entity_ids"]),
+            ("grove.rule_action", "fuel", ["wheel", "wood"]))
+        self.assertEqual((fuel["count"], fuel["last_operation_id"], fuel["last_commit_seq"]), (1, "original-fuel", 7))
+        self.assertEqual(fuel["last_confirmed_outcome"]["action_result"]["stored_energy_after"], 5)
+        self.assertEqual(moves["count"], 12)
+        self.assertEqual(self.controller.state, before)
+        fuel["last_confirmed_outcome"]["action_result"]["stored_energy_after"] = 99
+        self.assertEqual(self.controller.action_summary()["groups"][0]["last_confirmed_outcome"]["action_result"]["stored_energy_after"], 5)
+        self.assertEqual(self.controller.value("action_summary"), self.controller.snapshot()["action_summary"])
+
+    def test_task_action_summary_excludes_old_tasks_and_unconfirmed_or_non_actions(self):
+        self.start()
+        old_task = self.controller.state["task_id"]
+        old_record = {"task_id": old_task, "envelope": {"arguments": {"action": "fuel", "target_id": "old-wheel"}}}
+        self.controller.receipt("grove.rule_action", "old-fuel", {"commit_seq": 1},
+            status="confirmed", operation_record=old_record)
+        self.controller.state.update(status="paused", request_status="idle_confirmed")
+        self.start(goal="Current exploration")
+        task = self.controller.state["task_id"]
+        self.controller.receipt("grove.rule_action", "late-old-fuel", {"commit_seq": 2},
+            status="confirmed", operation_record=old_record)
+        for status in ("committed", "unknown", "rejected"):
+            self.controller.receipt("grove.rule_action", status, {"commit_seq": 3}, status=status,
+                operation_record={"task_id": task, "envelope": {"arguments": {"action": "fuel", "target_id": "wheel"}}})
+        for function in ("grove.control_grant", "grove.definition_publish", "grove.content_submit"):
+            self.controller.receipt(function, function, {"commit_seq": 4}, status="confirmed",
+                operation_record={"task_id": task})
+        # Legacy records without action classification still group by their
+        # actual function and object identities, not by guessed action names.
+        self.controller.receipt("grove.interact", "legacy-action", {"commit_seq": 5,
+            "result": {"entity": {"id": "cup"}}}, status="confirmed", task_id=task)
+        summary = self.controller.action_summary()
+        self.assertEqual(summary["confirmed_count"], 1)
+        self.assertEqual(summary["groups"][0]["action_entity_ids"], ["cup"])
+        self.assertNotIn("action", summary["groups"][0])
+        self.assertNotIn("action_id", summary["groups"][0])
+        self.assertEqual(len(self.controller.archive[-1]["receipts"]), 2)
+
+    def test_task_action_summary_has_explicit_group_limit_and_preserves_original_action_ids(self):
+        self.start(max_actions=64)
+        task = self.controller.state["task_id"]
+        for index in range(11):
+            self.controller.receipt("grove.rule_action", "switch-" + str(index), {"commit_seq": index + 1},
+                status="confirmed", operation_record={"task_id": task, "envelope": {"arguments": {
+                    "action_id": "switch", "target_id": "marker-" + str(index)}}})
+        self.controller.receipt("grove.rule_action", "switch-again", {"commit_seq": 12}, status="confirmed",
+            operation_record={"task_id": task, "envelope": {"arguments": {"action_id": "switch", "target_id": "marker-0"}}})
+        summary = self.controller.action_summary()
+        self.assertEqual((summary["confirmed_count"], summary["total_groups"], summary["omitted_groups"]), (12, 11, 3))
+        self.assertEqual(len(summary["groups"]), 8)
+        self.assertEqual(summary["groups"][-1]["action_entity_ids"], ["marker-0"])
+        self.assertEqual(summary["groups"][-1]["action_id"], "switch")
+        self.assertEqual(summary["groups"][-1]["count"], 2)
+        self.assertEqual(summary["groups"][-1]["last_operation_id"], "switch-again")
+        self.assertIn("bounded receipt ledger", summary["meaning"])
+        self.assertIn("do not mean an action never happened", summary["meaning"])
+
+    async def test_action_summary_readback_is_host_owned_and_restore_recomputes_it(self):
+        await self.running()
+        action = await self.controller.write("grove.move", {}, segment_id="current-segment")
+        summary = action["execution_readback"]["task_action_summary"]
+        self.assertEqual(summary["confirmed_count"], 1)
+        self.assertEqual(summary["groups"][0]["last_operation_id"], action["operation_id"])
+        saved = self.controller.snapshot()
+        saved["action_summary"] = {"confirmed_count": 999}
+        self.controller.restore(saved)
+        self.assertNotIn("action_summary", self.controller.state)
+        self.assertEqual(self.controller.snapshot()["action_summary"], summary)
+
+    def test_task_action_summary_byte_budget_omits_whole_groups_without_changing_receipts(self):
+        self.start()
+        task = self.controller.state["task_id"]
+        oversized = {"commit_seq": 1, "result": {"action_result": {"recorded_text": "真实" * 3000}}}
+        self.controller.receipt("grove.rule_action", "large-original", oversized, status="confirmed",
+            operation_record={"task_id": task, "envelope": {"arguments": {"action_id": "record", "target_id": "recorder"}}})
+        self.controller.receipt("grove.move", "small-original", {"commit_seq": 2}, status="confirmed",
+            operation_record={"task_id": task, "envelope": {"arguments": {"dx": 1}}})
+        before = deepcopy(self.controller.state)
+        summary = self.controller.action_summary()
+        self.assertLessEqual(len(json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")), 8 * 1024)
+        self.assertEqual((summary["confirmed_count"], summary["total_groups"], summary["omitted_groups"]), (2, 2, 1))
+        self.assertEqual(summary["groups"][0]["last_operation_id"], "small-original")
+        self.assertEqual(self.controller.state, before)
+        # A large latest group is not represented by a misleading empty result.
+        self.controller.receipt("grove.rule_action", "large-latest", oversized, status="confirmed",
+            operation_record={"task_id": task, "envelope": {"arguments": {"action_id": "record", "target_id": "recorder"}}})
+        summary = self.controller.action_summary()
+        self.assertEqual((summary["confirmed_count"], summary["total_groups"], summary["omitted_groups"]), (3, 2, 2))
+        self.assertEqual(summary["groups"], [])
+
+    async def test_actual_action_readback_keeps_selection_and_distinguishes_commit_from_later_state(self):
+        await self.running()
+        self.controller.state["context_entity_id"] = "original-contract"
+        current_energy = 19
+        reads = []
+        original_invoke, original_read = self.invoke, self.read
+        async def invoke(function, arguments, **kwargs):
+            if function != "grove.rule_action":
+                return await original_invoke(function, arguments, **kwargs)
+            self.control["actions_count"] += 1
+            payload = {"ok": True, "operation_id": "actual-fuel", "commit_seq": 77,
+                "result": {"entity": {"id": "actual-wheel", "version": 4,
+                    "state": {"program": {"fields": {"signal": 0}, "mechanical": {"energy": 20, "angle": 0}}}},
+                    "action_result": {"stored_energy_after": 20}}}
+            self.receipts["actual-fuel"] = deepcopy(payload)
+            owner = self.controller.operation_owner(function, arguments, model_write=True)
+            self.controller.receipt(function, "actual-fuel", payload, status="committed",
+                operation_record={"envelope": {"arguments": arguments}, **owner})
+            return payload
+        async def read(kind, **kwargs):
+            if kind == "receipt":
+                return await original_read(kind, **kwargs)
+            reads.append(deepcopy(kwargs))
+            return {"selected_inspection": {"entity": {"id": "original-contract", "version": 3}},
+                "action_targets": [{"entity_id": "actual-wheel", "observed_at": 123,
+                    "inspection": {"entity": {"id": "actual-wheel", "version": 5,
+                        "state": {"program": {"mechanical": {"energy": current_energy, "angle": 3}}}}}},
+                    {"entity_id": "spent-lot", "unavailable": {"code": "ResourceNotFound"}, "observed_at": 124}],
+                "observed_at": 125}
+        self.controller.ports = replace(self.controller.ports, invoke=invoke, read=read)
+        reply = await self.controller.write("grove.rule_action", {"target_id": "actual-wheel", "item_id": "spent-lot"},
+            segment_id="current-segment")
+        self.assertEqual(reads[0], {"context_entity_id": "original-contract", "action_entity_ids": ["actual-wheel", "spent-lot"]})
+        self.assertEqual(reply["confirmed_outcome"]["entity"]["state"]["program"]["mechanical"]["energy"], 20)
+        self.assertEqual(reply["execution_readback"]["action_targets"][0]["inspection"]["entity"]["state"]["program"]["mechanical"]["energy"], 19)
+        self.assertEqual(self.controller.state["context_entity_id"], "original-contract")
+        current_energy = 17
+        checkpoint = await self.controller.checkpoint({"task_id": self.controller.state["task_id"],
+            "execution_segment_id": "current-segment", "status": "completed", "summary": "The model says energy is still 20",
+            "next_intent": "", "evidence_operation_ids": ["actual-fuel"]}, schema=CHECKPOINT_SCHEMA)
+        self.assertEqual(checkpoint["execution_readback"]["action_targets"][0]["inspection"]["entity"]["state"]["program"]["mechanical"]["energy"], 17)
+        self.assertEqual(checkpoint["goal_result"]["verification"]["status"], "unverified")
+        self.assertEqual(checkpoint["goal_result"]["summary"], "The model says energy is still 20")
+        self.assertEqual(len(reads), 2)
+
+    def test_recovered_action_targets_stay_with_original_task_and_are_bounded(self):
+        self.start()
+        task = self.controller.state["task_id"]
+        self.controller.state.update(status="paused", request_status="idle_confirmed")
+        self.start(goal="Replacement")
+        current = self.controller.state["task_id"]
+        record = {"task_id": task, "envelope": {"arguments": {"target_id": "old-target", "item_id": "old-source"}}}
+        self.controller.receipt("grove.interact", "recovered-original", {"commit_seq": 9},
+            status="confirmed", operation_record=record)
+        self.assertEqual(self.controller.state["task_id"], current)
+        self.assertEqual(self.controller.state["action_entity_ids"], [])
+        self.assertEqual(self.controller.archive[-1]["action_entity_ids"], ["old-target", "old-source"])
+        for index in range(9):
+            self.controller.receipt("grove.interact", "new-" + str(index), {"commit_seq": 10 + index},
+                status="confirmed", operation_record={"task_id": current,
+                    "envelope": {"arguments": {"target_id": "target-" + str(index)}}})
+        self.assertEqual(self.controller.state["action_entity_ids"], ["target-8", "target-7", "target-6", "target-5"])
+
     async def running(self):
         self.start()
         await self.invoke("grove.control_grant", {"goal": self.controller.state["goal"], "max_actions": 4})
@@ -48,7 +225,7 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.controller.checkpoint({"task_id": self.controller.state["task_id"],
                     "execution_segment_id": "current-segment", "status": status, "summary": "old fuel 16",
                     "next_intent": "", "evidence_operation_ids": [action["operation_id"]]}, schema=CHECKPOINT_SCHEMA)
-                self.assertEqual(result["execution_readback"], fresh)
+                self.assertEqual(result["execution_readback"], fresh | {"task_action_summary": self.controller.action_summary()})
                 self.assertFalse(result["world_facts_changed"])
                 self.assertFalse(self.controller.active)
                 with self.assertRaises(ConnectorError) as sealed:

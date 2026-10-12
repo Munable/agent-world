@@ -73,6 +73,83 @@ function messageNode(text){
   for(const match of value.matchAll(/\*\*([^*\n]+)\*\*/g)){el.append(document.createTextNode(value.slice(offset,match.index)),node('strong',match[1]));offset=match.index+match[0].length;}
   el.append(document.createTextNode(value.slice(offset)));return el;
 }
+function currentAssistantReply(value){
+  if(value?.status!=='ready'||value.completed!==true||value.reclaim_in_progress||Number(value.unknown_operations)>0||
+    ['starting','running','unknown'].includes(value.execution?.status))return null;
+  const message=[...(value.messages||[])].reverse().find(item=>item.role==='assistant'&&item.text);
+  if(!message||!Object.hasOwn(message,'task_id')||!message.response_message_id||message.response_message_id!==value.message_id||
+    !message.session_id||message.session_id!==(value.response_session_id||value.session_id))return null;
+  if(message.task_id&&(value.execution?.status!=='completed'||message.task_id!==value.execution?.task_id||message.request_number!==value.execution?.requests_used))return null;
+  return message;
+}
+function agentMessageLabel(message,value){
+  if(message.role==='user')return '你';
+  if(message.role==='event')return '现场变化';
+  const sessionMatches=message.session_id&&message.session_id===(value.response_session_id||value.session_id);
+  const taskMatches=message.task_id&&message.task_id===value.execution?.task_id;
+  const request=Number.isInteger(message.request_number)?'第 '+message.request_number+' 段':'';
+  const isCurrent=currentAssistantReply(value)===message;
+  const source=isCurrent?(taskMatches?'本次委托回复':'本次交谈回复'):taskMatches&&sessionMatches?'本次委托历史':message.task_id?'历史委托':sessionMatches&&message.response_message_id?'交谈历史':'历史回复 · 请求来源未记录';
+  const at=Number.isFinite(message.time)?new Date(message.time*1000).toLocaleString('zh-CN'):'';
+  return ['你的 Agent',source,request,at].filter(Boolean).join(' · ');
+}
+function objectFactLines(inspection){
+  const entity=inspection?.entity;if(!entity)return [];
+  const lines=[],lots=matterLots(entity),creative=creativeState(inspection,entity),program=entity.state?.program;
+  if(Number.isFinite(entity.x)&&Number.isFinite(entity.y))lines.push('在地面 '+entity.x+'，'+entity.y);
+  else if(entity.container)lines.push('在容器内');
+  else if(entity.owner)lines.push('由人物持有');
+  if(Array.isArray(entity.matter))lines.push('材料：'+(lots.length?lots.slice(0,8).map(lot=>slotLabel(lot.slot)+' '+materialLabel(lot.material,entity)+' '+lot.quantity+'u').join('，'):'没有可见材料'));
+  if(lots.length>8)lines.push('此处只列前 8 个材料批次；完整材料见物件详情。');
+  const wetness=entity.simulation?.wetness??entity.state?.wetness;
+  if(Number.isFinite(wetness))lines.push('吸水饱和度 '+wetness+'%');
+  const lifecycle=lifecycleLabel(entity);if(lifecycle)lines.push(lifecycle);
+  const fields=program?.fields??creative?.fields;
+  if(fields&&typeof fields==='object'&&!Array.isArray(fields)){
+    const values=Object.entries(fields).filter(([,value])=>['string','number','boolean'].includes(typeof value)).slice(0,8);
+    if(values.length)lines.push('声明字段：'+values.map(([name,value])=>factLabel(name)+' '+factValue(value)).join('，'));
+  }
+  const saved=program?.mechanical||creative?.mechanical_observation?.stored_state||creative?.mechanical;
+  if(saved&&typeof saved==='object'){
+    const values=['energy','angle','position','speed'].filter(name=>Number.isFinite(saved[name])).map(name=>factLabel(name)+' '+saved[name]);
+    if(typeof saved.status==='string')values.push('状态 '+factValue(saved.status));
+    if(values.length)lines.push('机械保存值：'+values.join('，')+'；单次保存值不证明当前持续运动。');
+  }
+  const domain=entity.execution_domain;
+  if(domain&&typeof domain==='object'){
+    const labels={settled:'已结算',sleeping:'休眠',calculating:'结算中',pressure:'容量受阻',error:'运行受阻'};
+    if(typeof domain.state==='string')lines.push('自动结算状态：'+(labels[domain.state]||factValue(domain.state))+'；此状态不证明持续运动。');
+    if(Number.isInteger(domain.last_applied_tick))lines.push('最近完成结算的世界时刻 '+domain.last_applied_tick);
+    if(Number.isInteger(domain.pending_target_tick))lines.push('等待完成结算的世界时刻 '+domain.pending_target_tick);
+    if(domain.failure&&typeof domain.failure==='object'){
+      const failure=domain.failure,at=Number.isInteger(failure.tick)?'世界时刻 '+failure.tick+'：':'';
+      lines.push('已记录结算失败：'+at+(typeof failure.code==='string'?factValue(failure.code):'原因未提供')+(failure.computed===false?'；该轮未计算完成。':''));
+    }
+  }
+  return lines;
+}
+function actionTargetReadbackLines(execution){
+  if(execution.readback_actual!==true)return [];
+  const entries=execution.readback?.action_targets;
+  if(!Array.isArray(entries))return [];
+  const lines=[];
+  for(const entry of entries.slice(0,8)){
+    const entity=entry.inspection?.entity;
+    if(!entity||entity.id!==entry.entity_id){
+      lines.push('本任务操作对象：本次详情未能读取'+(entry.unavailable?.message?'（'+entry.unavailable.message+'）':'')+'；旧状态不作为当前结果。');
+      continue;
+    }
+    const version=Number.isInteger(entity.version)?' · 版本 '+entity.version:'';
+    const at=Number.isFinite(entry.observed_at)?' · 读取于 '+new Date(entry.observed_at*1000).toLocaleString('zh-CN'):'';
+    lines.push('最近读取操作对象：'+(entity.name||'物件')+version+at);
+    lines.push(...objectFactLines(entry.inspection));
+    const creative=creativeState(entry.inspection,entity),tick=creative?.world_tick??creative?.mechanical_observation?.observed_tick;
+    lines.push(Number.isInteger(tick)?'物件详情读取步 '+tick:'物件详情未提供读取步。');
+  }
+  if(entries.length>8)lines.push('此处只展示 8 个已读操作对象。');
+  if(entries.length)lines.push('以上是各对象独立读取的事实，读取后仍可能变化；提交回执记录另列。');
+  return lines;
+}
 function button(text,handler,{disabled=false,secondary=false}={}){const el=node('button',text,secondary?'secondary':'');el.type='button';el.disabled=disabled;el.addEventListener('click',()=>handler());return el;}
 function announce(text,error=false){const el=$(error?'error':'notice');el.textContent=text;el.hidden=!text;if(!error&&text)setTimeout(()=>{if(el.textContent===text)el.hidden=true;},6500);}
 function fail(error){if(error.cancelled)return;const message=['Failed to fetch','Load failed','NetworkError when attempting to fetch resource.'].includes(error.message)?(client.pending()?'连接中断。重连后先核对原操作结果。':'连接中断，请检查连接后重试。'):error.message||String(error);announce(message,true);if(error.status===401||error.status===403){client.token=null;held=null;walkPath=[];$('reconnect-world').hidden=false;$('world-status').textContent='网页需要重连';$('movement-feedback').textContent='授权失效：同钥重连后继续。';}renderPending();}
@@ -181,7 +258,7 @@ async function pollHost(){
 }
 function scheduleHost(delay=1200){clearTimeout(hostTimer);if(current()&&(entering||playing)&&host?.status!=='disconnected')hostTimer=setTimeout(pollHost,delay);}
 function renderHost(){
-  if(!host)return;const busy=hostCommandBusy||host.reclaim_in_progress===true||['connecting','thinking'].includes(host.status);
+  if(!host)return;const busy=hostCommandBusy||executionReclaimBusy||host.reclaim_in_progress===true||['connecting','thinking'].includes(host.status);
   const execution=host.execution;
   // Recovery is asynchronous: clear the local gate only from settled receipts
   // and a closed world grant, never from the /recover acknowledgement alone.
@@ -201,13 +278,13 @@ function renderHost(){
   applyAdmission('generation-send',creation);$('generation-recover').hidden=!generationPending;$('generation-recover').disabled=busy;renderGeneration();
   $('generation-cancel').hidden=!busy||!['claiming','generating','correcting','publishing'].includes(host.generation?.status);
   const messages=host.messages||[];
-  const lastReply=[...messages].reverse().find(m=>!['user','event'].includes(m.role)&&m.text);
+  const lastReply=currentAssistantReply(host);
   const failed=host.status==='error';
   $('companion-update').hidden=!failed&&!busy&&!lastReply;
   $('companion-update').textContent=manualControlRecoveryPending?'原行动结果尚未核对；恢复连接后先核对原回执，再继续行动。':failed?'当前 Agent 请求未完成：'+previewMessage(host.error?.message||'回应暂不可用，请打开“目标与交谈”查看。'):busy?'你的 Agent 正在看现场。你可以继续走动与操作。':lastReply?'Agent 回应：'+previewMessage(lastReply.text):'';
-  const signature=JSON.stringify(messages);
-  if(signature!==lastChatSignature){lastChatSignature=signature;$('agent-messages').replaceChildren(...messages.slice(-12).map(m=>{const el=node('div',undefined,'chat-message '+(m.role==='user'?'user':m.role==='event'?'event':'agent'));el.append(node('small',m.role==='user'?'你':m.role==='event'?'现场变化':'你的 Agent'),messageNode(m.text));return el;}));$('agent-messages').scrollTop=$('agent-messages').scrollHeight;}
-  if(!messages.length&&host.text)$('agent-messages').replaceChildren(messageNode(host.text));
+  const signature=JSON.stringify([messages,host.status,host.completed,host.message_id,host.execution?.task_id,host.execution?.requests_used,host.session_id,host.response_session_id,host.reclaim_in_progress]);
+  if(signature!==lastChatSignature){lastChatSignature=signature;$('agent-messages').replaceChildren(...messages.slice(-12).map(m=>{const el=node('div',undefined,'chat-message '+(m.role==='user'?'user':m.role==='event'?'event':'agent'));if(m.task_id)el.dataset.taskId=m.task_id;if(m.response_message_id)el.dataset.messageId=m.response_message_id;el.append(node('small',agentMessageLabel(m,host)),messageNode(m.text));return el;}));$('agent-messages').scrollTop=$('agent-messages').scrollHeight;}
+  if(!messages.length&&host.text)$('agent-messages').replaceChildren(node('small','历史回复 · 请求来源未记录'),messageNode(host.text));
   $('auto-summary').textContent='普通操作与现场刷新不调用模型；提问、创作与明确委托使用你自己的模型连接。';
   const progress=(host.progress||[]).slice(-6);const entrySignature=JSON.stringify([host.status,progress,host.error]);
   if(entrySignature!==lastHostSignature){lastHostSignature=entrySignature;$('entry-progress').replaceChildren(...progress.map(p=>node('p',p.message||p.kind||'')));if(host.error)$('entry-progress').append(node('p',host.error.message,'error-text'));}
@@ -261,8 +338,18 @@ function renderExecution(){
   if(lastConfirmed)progressNodes.push(node('p','最后已确认行动：'+(functionLabels[lastConfirmed.function]||'世界行动')+(Number.isInteger(lastConfirmed.commit_seq)?' · 记录 '+lastConfirmed.commit_seq:''),'small'));
   $('execution-progress').replaceChildren(...progressNodes);$('execution-progress').hidden=progressNodes.length===0;
   const receipts=Array.isArray(execution.receipts)?execution.receipts:[],receiptLabels={committed:'已保存',confirmed:'已核对',rejected:'已拒绝',unknown:'待核对'};
-  $('execution-actions').replaceChildren(...receipts.slice(-8).map(receipt=>{const row=node('div',undefined,'execution-receipt');row.append(node('strong',(functionLabels[receipt.function]||'世界行动')+' · '+(receiptLabels[receipt.status]||receipt.status||'状态未读')));for(const line of receiptOutcomeLines(receipt))row.append(node('p',line,'small'));if(receipt.confirmed_outcome)row.append(node('p','以上是这次提交时的确认结果'+(Number.isInteger(receipt.commit_seq)?' · 记录 '+receipt.commit_seq:''),'small'));return row;}));
+  $('execution-actions').replaceChildren(...receipts.slice(-8).map(receipt=>{
+    const row=node('div',undefined,'execution-receipt');row.append(node('strong',(functionLabels[receipt.function]||'世界行动')+' · '+(receiptLabels[receipt.status]||receipt.status||'状态未读')));
+    for(const line of receiptOutcomeLines(receipt))row.append(node('p',line,'small'));
+    const outcome=receipt.confirmed_outcome;
+    if(['committed','confirmed'].includes(receipt.status)&&outcome?.kind==='server_receipt'){
+      for(const line of objectFactLines({entity:outcome.entity}))row.append(node('p',line,'small'));
+      row.append(node('p','以上是这次提交时的程序确认结果'+(Number.isInteger(receipt.commit_seq)?' · 记录 '+receipt.commit_seq:'')+'，不代表最新现场。','small'));
+    }
+    return row;
+  }));
   if(receipts.length>8)$('execution-actions').append(node('p','显示最近 8 个回执，共 '+receipts.length+' 个；它们记录行动，不替代当前现场。','small'));
+  for(const line of actionTargetReadbackLines(execution))$('execution-actions').append(node('p',line,'small'));
   for(const line of executionReadbackLines(execution))$('execution-actions').append(node('p',line,'small'));
   applyAdmission('execution-start',goalAdmission);
   const additionalControl=$('execution-additional-requests'),additionalLimit=Math.max(0,8-(execution.max_requests||0));
@@ -801,7 +888,7 @@ function renderRuleAction(descriptor,entity,disabled){
   const conditions=node('div',undefined,'rule-action-conditions');form.append(conditions);let lastConditionSignature=null;
   const fields=[],unsupported=[],fixed=descriptor.arguments||{},topSchema=descriptor.input_schema||{type:'object',properties:{},required:[]};
   const candidateKeys={item_id:'items',other_id:'others',material:'materials'};
-  const generatedFields=new Set(['action','target_id','expected_target_version','expected_player_version','expected_item_version','expected_other_version','params','delegation']);
+  const generatedFields=new Set(['action','target_id','expected_target_version','expected_target_interaction_revision','expected_player_version','expected_item_version','expected_item_interaction_revision','expected_other_version','params','delegation']);
   let topProperties=Object.fromEntries(Object.entries(topSchema.properties||{}).filter(([key])=>!generatedFields.has(key)));
   if(descriptor.action==='bind_port'&&topProperties.port)topProperties={port:topProperties.port,...topProperties};
   for(const [argument,key] of Object.entries(candidateKeys))if(Object.hasOwn(descriptor.choices||{},key)&&!topProperties[argument])topProperties[argument]={type:'string',title:factLabel(argument)};
@@ -889,8 +976,23 @@ function renderRuleAction(descriptor,entity,disabled){
   form.addEventListener('submit',event=>{event.preventDefault();if(submit.disabled)return;const live=liveDescriptor(),values=readValues(live);if(values.errors.length)return;run(()=>ruleAction(descriptor.action,entity,values.result,live));});
   restoreActionDraft(form,update);update();$('selection-actions').append(form);
 }
+function observedActionVersion(entity,descriptor,subject='target'){
+  if(!Number.isInteger(entity?.version)||entity.version<1)throw new Error('所选对象的观察版本尚未取得，请重新读取后选择。');
+  const guard={['expected_'+subject+'_version']:entity.version},revisionKey='expected_'+subject+'_interaction_revision';
+  // Only a server-declared action may use the actual observed revision. A
+  // client never infers one from an action name, storage version or user input.
+  if(Object.hasOwn(descriptor?.input_schema?.properties||{},revisionKey)&&Number.isInteger(entity.interaction_revision)&&entity.interaction_revision>=1&&entity.interaction_revision<=entity.version)guard[revisionKey]=entity.interaction_revision;
+  return guard;
+}
 async function ruleAction(action,entity,values,chosenDescriptor){
   stopWalking();const epoch=session;
+  const observed=inspection?.entity?.id===entity.id&&!inspection.reading?inspection:null;
+  const observedDescriptor=actionDescriptors(observed).find(option=>option.function_id==='grove.rule_action'&&option.action===action)||chosenDescriptor;
+  const targetGuard=observedActionVersion(observed?.entity||entity,observedDescriptor),sourceObservations={};
+  for(const [argument,key] of [['item_id','items'],['other_id','others']]){
+    const candidate=ruleChoices(observedDescriptor,key,values.port).find(candidate=>candidate.id===values[argument]);
+    if(candidate)sourceObservations[argument]={id:candidate.id,version:candidate.version};
+  }
   async function readEntity(id){
     try{return await client.query('grove.inspect',{entity_id:id});}
     catch(error){if(epoch!==session||!playing)return null;if(![403,404].includes(error.status))throw error;const message='对象当前不可访问：'+(error.message||id)+' 本次行动尚未提交，请重新选择。';
@@ -903,12 +1005,14 @@ async function ruleAction(action,entity,values,chosenDescriptor){
     inspection=latest;const live=actionDescriptors(latest).find(option=>option.function_id==='grove.rule_action'&&option.action===action);renderSelection();
     if(!live||live.available===false)throw new Error(live?.reason||'当前行动资格已改变，请重新选择。');
     if(chosenDescriptor.arguments?.terms_version!==live.arguments?.terms_version){announce('契约条款已改变，尚未提交。请读取当前条款，再选择是否接受。');$('movement-feedback').textContent='条款已改变，这次行动尚未提交。';return null;}
-    const args={...values,action,target_id:entity.id,expected_target_version:latest.entity.version,expected_player_version:point().version};
+    const args={...values,action,target_id:entity.id,...targetGuard,expected_player_version:point().version};
     if(Object.hasOwn(live.arguments||{},'terms_version'))args.terms_version=chosenDescriptor.arguments.terms_version;
-    for(const [argument,key,versionKey] of [['item_id','items','expected_item_version'],['other_id','others','expected_other_version']]){
+    for(const [argument,key] of [['item_id','items'],['other_id','others']]){
       const id=values[argument];if(!id)continue;const candidate=ruleChoices(live,key,values.port).find(candidate=>candidate.id===id);if(!candidate)throw new Error('所选对象已不在当前槽位或候选中，尚未提交。');
-      if(candidate.kind==='role'){if(Number.isInteger(candidate.version))args[versionKey]=candidate.version;}
-      else{const item=await readEntity(id);if(!isCurrent()||!item)return null;args[versionKey]=item.entity.version;}
+      if(candidate.kind!=='role'){const item=await readEntity(id);if(!isCurrent()||!item)return null;}
+      // New reads recheck availability, but cannot authorize a newer source
+      // than the one the person selected. Fuel and binding sources stay strict.
+      Object.assign(args,observedActionVersion(sourceObservations[argument],null,argument==='item_id'?'item':'other'));
     }
     if(action==='bind_port'&&!live.input_schema?.properties?.port?.enum?.includes(values.port))throw new Error('原槽位当前不可用，尚未提交。请重新选择。');
     if(live.input_schema?.required?.includes('lot_id')||values.lot_id){const lot=descriptorLots(live,values.item_id).find(value=>value.id===values.lot_id),amount=values.amount??values.params?.amount;if(!lot||!Number.isInteger(amount)||amount<1||amount>lot.quantity)throw new Error('原燃料批次或数量已改变，尚未提交。请重新选择。');}
@@ -973,7 +1077,7 @@ function renderInteractionEditor(descriptor,entity,disabled){
 }
 function renderDescriptorAction(descriptor,entity,disabled){
   if(descriptor.available===false)return;
-  const generated=['action','target_id','expected_target_version','expected_player_version','expected_item_version','expected_other_version','params','delegation','terms_version'];
+  const generated=['action','target_id','expected_target_version','expected_target_interaction_revision','expected_player_version','expected_item_version','expected_item_interaction_revision','expected_other_version','params','delegation','terms_version'];
   const needsInput=['install_interaction','uninstall_interaction'].includes(descriptor.action)||!!descriptor.input||descriptor.function_id==='grove.rule_action'&&(Object.keys(descriptor.choices||{}).some(key=>(descriptor.choices[key]||[]).length)||Object.keys(descriptor.params_schema?.properties||{}).length||Object.keys(descriptor.input_schema?.properties||{}).some(key=>!generated.includes(key)));
   const choose=()=>{rememberActionDrafts();activeActionKey=actionKey(descriptor);lastSelectionSignature='';renderSelection();};
   if(needsInput){const option=button(descriptorLabel(descriptor)+'…',choose,{disabled,secondary:true});option.classList.add('action-option');$('selection-actions').append(option);return;}
@@ -1028,6 +1132,11 @@ async function interact(action,entity,itemId,amount,extra={},combination){
   stopWalking();
   if(amount!==undefined&&(!Number.isInteger(amount)||amount<1)){announce('请输入大于零的整数数量。',true);return;}
   const interactionEpoch=session;
+  const observed=inspection?.entity?.id===entity.id&&!inspection.reading?inspection:null;
+  const observedDescriptor=actionDescriptors(observed).find(option=>option.action===action&&option.function_id!=='grove.rule_action');
+  const targetGuard=observedActionVersion(observed?.entity||entity,observedDescriptor,action==='drop'?'item':'target');
+  const selectedCandidate=descriptorCandidates(observedDescriptor||{}).find(candidate=>candidate.id===itemId);
+  const itemObservation=selectedCandidate?{id:selectedCandidate.id,version:selectedCandidate.version}:null;
   async function readInteractionEntity(id,label){
     try{return await client.query('grove.inspect',{entity_id:id});}
     catch(error){
@@ -1062,8 +1171,8 @@ async function interact(action,entity,itemId,amount,extra={},combination){
     }
   }
   await perform('grove.interact',async(isCurrent)=>{
-    // Processes may change an object while a person is choosing water/tool inputs.
-    // Read immediately before publishing the operation, rather than retain a closure's old version.
+    // Recheck current eligibility while keeping the version/revision displayed
+    // at submission. A later read must not conceal another person's changes.
     const latest=checkedCombination||await readInteractionEntity(entity.id,'目标物件');
     if(!isCurrent()||!latest)return null;
     if(selectedId===entity.id){inspection=latest;renderSelection();}
@@ -1083,9 +1192,9 @@ async function interact(action,entity,itemId,amount,extra={},combination){
     if(combination)args.expected_combination_fingerprint=combination.fingerprint;
     if(extra.target_slot!==undefined&&extra.target_slot!==descriptor?.arguments?.target_slot)throw new Error('所选材料的目标位置已改变，尚未提交。请按当前状态重新选择。');
     if(extra.target_slot===undefined&&['contained','surface'].includes(descriptor?.arguments?.target_slot))args.target_slot=descriptor.arguments.target_slot;
-    if(action==='drop')args.item_id=entity.id;else{args.target_id=entity.id;args.expected_target_version=latest.entity.version;if(itemId)args.item_id=itemId;}
-    if(item)args.expected_item_version=item.version;
-    if(action==='drop')args.expected_item_version=latest.entity.version;
+    Object.assign(args,targetGuard);
+    if(action==='drop')args.item_id=entity.id;else{args.target_id=entity.id;if(itemId)args.item_id=itemId;}
+    if(item)Object.assign(args,observedActionVersion(itemObservation,null,'item'));
     if(amount!==undefined)args.amount=amount;
     return args;
   },actionNames[action]||action);
@@ -1101,7 +1210,7 @@ function renderPublicContent(){
   $('public-content-note').textContent='这处地点的共同记录';
   list.append(node('p','这是当前获准读取的一页公共记录。物件详情显示当前事实；创作说明保留发表时的想法，不代表结果已发生。','small'));
   const anchorSection=node('section',undefined,'content-section');anchorSection.append(node('h4','同一现场的对象'));
-  for(const anchor of anchors){const entity=anchor.entity,row=node('div',undefined,'content-anchor');row.append(button(entity?.name||anchor.entity_id,()=>run(()=>select(anchor.entity_id)),{secondary:true}),node('p',entity?stateLine(entity):'当前状态需查看物件','small'),node('small','原对象 '+anchor.entity_id+' · 版本 '+(entity?.version??anchor.version),'fact-reference'));anchorSection.append(row);}
+  for(const anchor of anchors){const entity=anchor.entity,row=node('div',undefined,'content-anchor');row.append(button(entity?.name||anchor.name||anchor.entity_id,()=>run(()=>select(anchor.entity_id)),{secondary:true}),node('p',entity?stateLine(entity):'当前状态需查看物件','small'),node('small','原对象 '+anchor.entity_id+' · 版本 '+(entity?.version??anchor.version),'fact-reference'));anchorSection.append(row);}
   if(!anchors.length)anchorSection.append(node('p','当前页没有可见对象。','small'));list.append(anchorSection);
   if(content.anchors_truncated)list.append(node('p','这里仅列部分获准读取的公共对象。其他对象仍可从地图或记录中选择查看。','small'));
   const contributionSection=node('section',undefined,'content-section');contributionSection.append(node('h4',(page?'历史页 · ':'当前页 · ')+'作者留下的贡献'));

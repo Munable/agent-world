@@ -190,6 +190,7 @@ def _input_fingerprint(ctx, sources):
             source = m.get_entity(ctx, eid, required=False)
             if source is not None:
                 source.pop("version", None)
+                source.pop("interaction_revision", None)
                 program = source.get("state", {}).get("program", {})
                 program.pop("process", None)
                 program.pop("event_cursor", None)
