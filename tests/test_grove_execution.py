@@ -13,10 +13,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
-from agent_world.grove_connector import (ConnectorError, ConnectorManager, GroveSession, CURRENT_FACTS_INSTRUCTIONS,
-    HISTORY_RECOVERY_INSTRUCTIONS, EXECUTION_INSTRUCTIONS, EXECUTOR_AGENT, MCP_NAME, create_connector_app,
-    _PREVIOUS_CURRENT_FACTS_INSTRUCTIONS, _EARLY_CURRENT_FACTS_INSTRUCTIONS, _CURRENT_CONTEXT_PREFIXES)
-from agent_world.grove_native_history import NativeToolHistory
+from agent_world.grove_connector import (ConnectorError, ConnectorManager, GroveSession,
+    HISTORY_RECOVERY_INSTRUCTIONS, EXECUTION_INSTRUCTIONS, EXECUTOR_AGENT, create_connector_app)
 
 
 class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
@@ -125,7 +123,8 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         if function == "grove.control_grant":
             self.grants.append(deepcopy(args))
             self.control = {"status": "active", "goal": args["goal"], "max_actions": args["max_actions"],
-                "actions_count": 0, "delegation": "fixture-grant", "version": len(self.grants)}
+                "actions_count": 0, "delegation": "fixture-grant",
+                "grant_id": "grove-grant-" + str(len(self.grants)).zfill(32), "version": len(self.grants)}
         elif function == "grove.control_revoke":
             self.control.update(status="revoked", delegation="")
         elif function == "grove.move":
@@ -163,6 +162,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
             "time": {"completed": self.requests}}, "parts": [{"type": "text", "text": "Observed progress."}]}
 
     async def checkpoint(self, status):
+        self.model_request_fixture()
         evidence = [item["operation_id"] for item in self.session.execution["receipts"]
                     if item["status"] == "confirmed"][-8:]
         return await self.session.tool_call("execution_checkpoint", {"task_id": "test-task", "status": status,
@@ -172,10 +172,19 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
             "evidence_operation_ids": evidence})
 
     async def move(self):
+        self.model_request_fixture()
         observed = self.session.present_agent_result("map.viewport", await self.session.current_turn_facts())
         await self.session.tool_call("grove_move", {"dx": 1, "dy": 0,
             "observation_id": observed["observation_id"],
             "execution_segment_id": self.session.execution["segment_id"]})
+
+    def model_request_fixture(self):
+        # Direct tool fixtures carry the same host-owned request boundary as a
+        # real turn. User/tool arguments never supply this authority record.
+        if self.session.active_native_request is None and self.session.execution_controller.active:
+            self.session.active_native_request = {"purpose": "execution", "world_write_authorized": True,
+                "session_id": self.session.session_id, "task_id": self.session.execution["task_id"],
+                "segment_id": self.session.execution["segment_id"]}
 
     async def test_one_goal_spans_two_requests_and_completion_has_real_evidence(self):
         async def segment(number):
@@ -443,132 +452,28 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("仍在运行", self.session.execution["error"]["message"])
         self.assertEqual((self.requests, len(self.grants)), (0, 0))
 
-    async def test_native_context_pruning_keeps_original_audit_and_never_changes_writes(self):
-        task = deepcopy(self.session.execution)
-        parts = [
-            {"id":"facts", "sessionID":"test-session", "messageID":"u", "type":"text", "text":CURRENT_FACTS_INSTRUCTIONS+"\n{}"},
-            {"id":"goal", "sessionID":"test-session", "messageID":"u", "type":"text", "text":task["goal"]},
-            {"id":"read", "sessionID":"test-session", "messageID":"a", "type":"tool", "tool":"grove_world_grove_inspect",
-             "state":{"status":"completed", "input":{"entity_id":"original"}, "output":"original snapshot", "time":{"start":1,"end":2}}},
-            {"id":"write", "sessionID":"test-session", "messageID":"a", "type":"tool", "tool":"grove_world_grove_rule_action",
-             "state":{"status":"completed", "input":{"action":"accept"}, "output":"original receipt", "time":{"start":1,"end":2}}},
-            {"id":"claim", "sessionID":"test-session", "messageID":"a", "type":"tool", "tool":"grove_world_grove_generation_context",
-             "state":{"status":"completed", "input":{"entity_id":"original"},
-                      "output":"{\"opportunity\":{\"opportunity_id\":\"original-claim\",\"version\":3}}",
-                      "time":{"start":1,"end":2}}},
-            {"id":"old-facts", "sessionID":"test-session", "messageID":"u", "type":"text",
-             "text":_PREVIOUS_CURRENT_FACTS_INSTRUCTIONS+"\n{\"old\":\"unchanged audit\"}"},
-            {"id":"ordinary", "sessionID":"test-session", "messageID":"u", "type":"text",
-             "text":"下列现场事实是连接器在本次提问后刚用本人权限读取的。请解释这句话是什么意思。"}]
-        original = deepcopy(parts)
-        records = [{"info":{"id":mid,"sessionID":"test-session","role":role},"parts":[p for p in parts if p["messageID"]==mid]}
-                   for mid,role in (("u","user"),("a","assistant"))]
-        patches = []
-        async def native(method,path,body=None,timeout=15, *, include_page_cursor=False):
-            if method == "PATCH":
-                patches.append(deepcopy(body))
-                part = next(p for p in parts if p["id"]==body["id"])
-                part.clear(); part.update(deepcopy(body)); return body
-            if path.endswith("?limit=100"):
-                return {"messages": records, "next_cursor": None} if include_page_cursor else records
-            return next(r for r in records if r["info"]["id"]==path.rsplit("/",1)[-1])
-        self.session.host = native
-        self.session.execution_controller.state["request_status"] = "idle_confirmed"
-        await self.session.compact_execution_context()
-        self.assertEqual([p["id"] for p in patches],["facts","old-facts","read"])
-        self.assertEqual(parts[0]["text"],original[0]["text"])
-        self.assertTrue(parts[0]["ignored"])
-        self.assertEqual(parts[1],original[1])
-        self.assertEqual(parts[2]["state"]["output"],original[2]["state"]["output"])
-        self.assertEqual(parts[2]["state"]["input"],original[2]["state"]["input"])
-        self.assertIn("compacted",parts[2]["state"]["time"])
-        self.assertEqual(parts[3],original[3])
-        # The next segment can submit its existing claim without spending
-        # another delegated action to rediscover the original id/version.
-        self.assertEqual(parts[4],original[4])
-        self.assertTrue(parts[5]["ignored"])
-        self.assertEqual(parts[5]["text"],original[5]["text"])
-        self.assertEqual(parts[6],original[6])
-        # Both generated headers are excluded from recovered user goals, but
-        # a person's ordinary words sharing the opening sentence remain.
-        reader = NativeToolHistory(role_id="test-user", session_id="test-session",
-            read_page=AsyncMock(), read_message=AsyncMock(), formal_tools={},
-            prompt_prefixes=_CURRENT_CONTEXT_PREFIXES)
-        self.assertEqual(reader._goal(records[0]), task["goal"]+"\n"+parts[6]["text"])
-        self.assertEqual((self.session.execution["task_id"],self.session.execution["requests_used"]),(task["task_id"],task["requests_used"]))
-        await self.session.compact_execution_context()
-        self.assertEqual(len(patches),3)
-        self.session.execution_controller.state["request_status"] = "running"
-        with self.assertRaises(ConnectorError): await self.session.compact_execution_context()
-        self.assertEqual(len(patches),3)
-
-    async def test_native_large_action_snapshots_backfill_without_deleting_receipts_or_dialogue(self):
-        def record(identity, role, parts):
-            return {"info": {"id": identity, "sessionID": "test-session", "role": role}, "parts": [
-                {"sessionID": "test-session", "messageID": identity, **part} for part in parts]}
-        snapshot = {"observed_at": 2, "entities": [{"id": "wheel", "state": {"machine_padding": "x" * 5000}}]}
-        action = {"ok": True, "operation_id": "original-fuel", "commit_seq": 77,
-            "result": {"action_result": {"stored_energy_after": 20}}, "execution_readback": snapshot}
-        checkpoint = {"task_id": "test-task", "status": "blocked", "segment_finished": True,
-            "world_facts_changed": False, "execution_readback": snapshot}
-        def tool(identity, name, output):
-            return {"id": identity, "type": "tool", "tool": MCP_NAME + "_" + name,
-                "state": {"status": "completed", "input": {"target_id": "original-wheel"},
-                    "output": json.dumps(output), "time": {"start": 1, "end": 2}}}
-        latest = [record("msg_latest", "assistant", [
-            tool("prt_action", "grove_rule_action", action), tool("prt_checkpoint", "execution_checkpoint", checkpoint),
-            tool("prt_error", "grove_rule_action", {**action, "ok": False, "error": "RuleViolation"}),
-            tool("prt_definition", "grove_definition_publish", {**action, "definition": {"original": True}}),
-            tool("prt_claim", "grove_generation_context", {"opportunity": {"id": "original-live-claim"}})])]
-        older = [record("msg_old", "user", [
-            {"id": "prt_old", "type": "text", "text": _EARLY_CURRENT_FACTS_INSTRUCTIONS + "\n{}"},
-            {"id": "prt_human", "type": "text", "text": "下列现场事实是连接器在本次提问后刚用本人权限读取的。请解释这句话。"}])]
-        oldest = [record("msg_oldest", "user", [
-            {"id": "prt_oldest", "type": "text", "text": CURRENT_FACTS_INSTRUCTIONS + "\n{}"}])]
-        records = {row["info"]["id"]: row for row in latest + older + oldest}
-        originals = deepcopy(records)
-        pages, patches = [], []
+    async def test_execution_segments_keep_native_originals_and_never_patch_parts(self):
+        originals = [{"info": {"id": "msg_original", "role": "assistant", "sessionID": "test-session"},
+            "parts": [{"id": "prt_original", "type": "tool", "state": {"status": "completed",
+                "input": {"target_id": "original-object"}, "output": "original full receipt and snapshot"}}]}]
+        before = deepcopy(originals)
+        host = self.session.host
         async def native(method, path, body=None, timeout=15, *, include_page_cursor=False):
-            if method == "PATCH":
-                patches.append(body["id"])
-                parts = records[body["messageID"]]["parts"]
-                index = next(index for index, part in enumerate(parts) if part["id"] == body["id"])
-                parts[index] = deepcopy(body)
-                return deepcopy(body)
-            if "/message?" in path:
-                pages.append(path)
-                self.assertTrue(include_page_cursor)
-                if "before=older2" in path:
-                    return {"messages": deepcopy(oldest), "next_cursor": None}
-                if "before=older1" in path:
-                    return {"messages": deepcopy(older), "next_cursor": "older2"}
-                return {"messages": deepcopy(latest), "next_cursor": "older1"}
-            return deepcopy(records[path.rsplit("/", 1)[-1]])
+            self.assertNotEqual(method, "PATCH")
+            if path.endswith("/message?limit=100"):
+                return {"messages": deepcopy(originals), "next_cursor": None} if include_page_cursor else deepcopy(originals)
+            return await host(method, path, body, timeout, include_page_cursor=include_page_cursor)
+        async def segment(number):
+            await self.move()
+            await self.checkpoint("continue" if number == 1 else "completed")
         self.session.host = native
-        self.session.execution_controller.state["request_status"] = "idle_confirmed"
-        await self.session.compact_execution_context()
-        self.assertEqual(patches, ["prt_action", "prt_checkpoint", "prt_old"])
-        self.assertEqual(len(pages), 2)
-        for index in (0, 1):
-            part = records["msg_latest"]["parts"][index]
-            original = originals["msg_latest"]["parts"][index]
-            self.assertEqual(part["state"]["output"], original["state"]["output"])
-            self.assertEqual(part["state"]["input"], original["state"]["input"])
-            self.assertIn("compacted", part["state"]["time"])
-        for index in (2, 3, 4):
-            self.assertEqual(records["msg_latest"]["parts"][index], originals["msg_latest"]["parts"][index])
-        self.assertEqual(records["msg_old"]["parts"][1], originals["msg_old"]["parts"][1])
-        self.assertEqual(records["msg_old"]["parts"][0]["text"], originals["msg_old"]["parts"][0]["text"])
-        progress = self.session.execution["context_pruning"]["native_backfill"]
-        self.assertEqual(progress, {"session_id": "test-session", "cursor": "older2", "complete": False,
-            "frontier_message_id": "msg_latest"})
-        await self.session.compact_execution_context()
-        self.assertEqual(patches[-1], "prt_oldest")
-        self.assertTrue(self.session.execution["context_pruning"]["native_backfill"]["complete"])
-        count = len(patches)
-        await self.session.compact_execution_context()
-        self.assertEqual(len(patches), count)
-        self.assertEqual(len(pages), 5)  # One latest page after old history converged.
+        self.model_segment = segment
+        goal, identity = self.session.execution["goal"], self.session.session_id
+        await self.session.execute_goal(goal)
+        self.assertEqual(originals, before)
+        self.assertEqual((self.requests, len(self.attempts)), (2, 2))
+        self.assertEqual((self.session.execution["goal"], self.session.session_id), (goal, identity))
+        self.assertEqual(self.session.execution["goal_result"]["evidence_operation_ids"], self.attempts)
 
     async def test_early_confirmed_progress_remains_usable_after_many_rejected_attempts(self):
         self.session.execution_controller.receipt("grove.move", "original-confirmed-action", {"commit_seq":7}, status="confirmed")
@@ -739,7 +644,7 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         app.state.connector.authorized = Mock(return_value=self.session)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=self.manager.local_url,
                 headers={"Authorization": "Bearer fixture-bearer"}) as client:
-            response = await client.post("/connector/execute-resume", json={"task_id": "test-task", "additional_requests": 7})
+            response = await client.post("/connector/execute-resume", json={"task_id": "test-task", "additional_requests": 9})
             self.assertEqual(response.status_code, 400)
             self.session.execution_controller.state["history_recovery"]["status"] = "uncertain"
             response = await client.post("/connector/execute-resume", json={"task_id": "test-task", "additional_requests": 2})

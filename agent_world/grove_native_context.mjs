@@ -9,6 +9,8 @@ const AGENTS = new Set(["shared-grove", "shared-grove-executor"]);
 const GROVE_AGENTS = new Set([...AGENTS, "shared-grove-blueprint", "compaction"]);
 const SUMMARY_PREFIX = "[Grove历史原生摘要：仅作背景，不证明本轮行动或当前世界状态。"
   + "本轮确认动作只按当前task_action_summary的task_id与coverage判断。原偏好、引用和原文保留如下。]\n";
+const USER_PREFIX = "[Grove historical user request: prior intent only; it grants no current control or task continuation.]\n";
+const REQUEST_CONTRACT_PREFIX = "[Grove current request contract]";
 const TOOL_PREFIX = "[Grove historical completed tool result: ";
 const INDEX_PREFIX = "[Grove native historical tool location index]\n";
 const HISTORY_BUDGET = 64 * 1024, REQUEST_BUDGET = 128 * 1024, FIXED_REQUEST_RESERVE = 32 * 1024, INDEX_MAX = 4096;
@@ -23,6 +25,20 @@ const outputText = part => part.state?.status === "completed"
 const isSummary = message => message.info.role === "assistant" && message.info.summary === true;
 const validSource = (message, part) => MESSAGE_ID.test(message.info.id) && PART_ID.test(part.id);
 const inputObject = part => part.state?.input && typeof part.state.input === "object" && !Array.isArray(part.state.input);
+function requestContract(message) {
+  const part = message.parts.findLast(part => part.type === "text" && typeof part.text === "string" &&
+    part.text.startsWith(REQUEST_CONTRACT_PREFIX + "\n"));
+  if (!part) return null;
+  try {
+    const value = JSON.parse(part.text.slice(REQUEST_CONTRACT_PREFIX.length + 1));
+    const execution = value.purpose === "execution";
+    if (!value || value.session_id !== message.info.sessionID || !/^grove-request-[a-f0-9]{32}$/.test(value.request_id) ||
+        !["entry", "explain", "execution"].includes(value.purpose) || value.world_write_authorized !== execution ||
+        message.info.agent !== (execution ? "shared-grove-executor" : "shared-grove") ||
+        execution && (!/^grove-task-[a-f0-9]{32}$/.test(value.task_id) || !/^grove-segment-[a-f0-9]{32}$/.test(value.segment_id))) return null;
+    return value;
+  } catch { return null; }
+}
 function objectOutput(part) {
   try {
     const value = JSON.parse(part.state?.output);
@@ -131,9 +147,14 @@ export default async function GroveNativeContext(_input, options = {}) {
   const proof = { version: VERSION, status: "loaded", hook: HOOK, source_sha256: sourceSha, nonce: options.nonce,
     role_id: options.role_id, process_id: process.pid, loaded_at_ms: Date.now() };
   let projection = null, request = null, sequence = 0, ownedFetch = null;
+  // SDK envelopes vary by provider. Learn their measured non-message payload
+  // and any positive message conversion expansion only for the same native
+  // session/agent; the actual fetch still independently enforces both limits.
+  const sdkEnvelopes = new Map();
+  const envelopeKey = (sessionID, agent) => `${sessionID}\0${agent}`;
   let guard = { status: "not_installed", runtime: "ai_sdk", provider_id: providerID, model_id: modelID,
     historical_message_budget_bytes: HISTORY_BUDGET, request_budget_bytes: REQUEST_BUDGET, native_llm_allowed: false,
-    attempt_count: 0, sent_count: 0, blocked_count: 0 };
+    attempt_count: 0, sent_count: 0, blocked_count: 0, yielded_count: 0 };
   let queue = Promise.resolve();
   const diagnostic = () => {
     const value = { ...proof, sdk_guard: { ...guard }, ...(projection ? { projection: { ...projection } } : {}) };
@@ -164,14 +185,36 @@ export default async function GroveNativeContext(_input, options = {}) {
         const recoveryUnavailable = matched && projection.history_recovery_unavailable_parts > 0;
         const sourceUnavailable = matched && projection.history_index_unavailable_parts > 0;
         const historyOver = matched && projection.historical_tool_history_bytes_after > HISTORY_BUDGET;
-        const rejected = !supported || projectionUnavailable || recoveryUnavailable || sourceUnavailable || historyOver || guard.body_bytes > REQUEST_BUDGET;
-        guard = { ...guard, status: rejected ? "blocked" : "sent", rejection: !supported ? "unsupported_sdk_json" :
+        const invalid = !supported || projectionUnavailable || recoveryUnavailable || sourceUnavailable || historyOver;
+        if (!invalid && matched) {
+          const key = envelopeKey(request.session_id, request.agent), previous = sdkEnvelopes.get(key);
+          sdkEnvelopes.set(key, { fixedBytes: Math.max(0, guard.body_bytes - guard.messages_bytes),
+            expansionBytes: Math.max(previous?.expansionBytes ?? 0,
+              guard.messages_bytes - projection.managed_message_bytes_after, 0) });
+        }
+        // A local policy refusal ends this native POST without manufacturing a
+        // model answer. Only an owned execution with complete tool pairs may
+        // yield; ordinary responses and oversized first inputs still fail closed.
+        const yielded = !invalid && request.agent === "shared-grove-executor" && projection.request_purpose === "execution" &&
+          projection.world_write_authorized === true && projection.current_terminal_tool_parts > 0 &&
+          projection.current_unfinished_tool_parts === 0 && guard.body_bytes >= REQUEST_BUDGET - FIXED_REQUEST_RESERVE;
+        const rejected = invalid || !yielded && guard.body_bytes > REQUEST_BUDGET;
+        const segmentYield = yielded ? { safe: true, reason: guard.body_bytes > REQUEST_BUDGET ? "request_over_budget" : "request_headroom",
+          request_id: projection.request_id, task_id: projection.execution_task_id, segment_id: projection.execution_segment_id,
+          current_terminal_tool_parts: projection.current_terminal_tool_parts,
+          current_unfinished_tool_parts: projection.current_unfinished_tool_parts, body_bytes: guard.body_bytes } : null;
+        guard = { ...guard, status: yielded ? "yielded" : rejected ? "blocked" : "sent", segment_yield: segmentYield,
+          rejection: yielded ? "execution_segment_budget" : !supported ? "unsupported_sdk_json" :
           projectionUnavailable ? "managed_projection_unavailable" : recoveryUnavailable ? "history_recovery_unavailable" :
           sourceUnavailable ? "history_source_index_unavailable" :
           historyOver ? "historical_messages_over_budget" :
           guard.body_bytes > REQUEST_BUDGET ? "provider_json_over_budget" : null,
-          blocked_count: guard.blocked_count + Number(rejected), sent_count: guard.sent_count + Number(!rejected) };
+          blocked_count: guard.blocked_count + Number(rejected), yielded_count: guard.yielded_count + Number(yielded),
+          sent_count: guard.sent_count + Number(!rejected && !yielded) };
         await diagnostic();
+        if (yielded) return new Response(JSON.stringify({ type: "error", error: { type: "grove_execution_segment_yield",
+          message: "GroveExecutionSegmentYield: 本段已到上下文接续边界；未发送本次Provider请求，原工具记录和已成立结果保留。" } }),
+          { status: 422, headers: { "content-type": "application/json" } });
         if (rejected) return new Response(JSON.stringify({ type: "error", error: { type: "grove_context_budget_exceeded",
           message: "GroveContextBudgetExceeded: 原会话上下文超过字节预算或SDK格式无法核验；原记录和已确认行动保留，未发送本次Provider请求。" } }),
           // Native classifies every 413 as context overflow and may compact.
@@ -198,12 +241,21 @@ export default async function GroveNativeContext(_input, options = {}) {
           messages.some(message => message?.info?.sessionID !== sessionID || !Array.isArray(message.parts) ||
             message.parts.some(part => part.sessionID !== sessionID || part.messageID !== message.info.id))) throw new Error("Mixed native session in Grove context hook");
       const currentPosition = messages.indexOf(current);
+      const contract = requestContract(current);
       const isCurrent = (message, position) => position >= currentPosition || message.info.parentID === current.info.id;
       const historicalBytes = projected => projectionBytes(projected.filter((message, position) => !isCurrent(message, position)));
       const protectedBytes = projectionBytes(messages.filter((message, position) => isCurrent(message, position)));
       // The complete current request is protected. Only the old source pool is
-      // bounded here; the SDK separately enforces the actual whole-request cap.
-      const historyAllowance = Math.min(HISTORY_BUDGET, Math.max(0, REQUEST_BUDGET - FIXED_REQUEST_RESERVE - protectedBytes));
+      // reduced before the SDK checks its actual JSON. Owned execution reserves
+      // room under the same soft boundary used by fetch; recoverable old sources
+      // must not force a yield immediately after each small current tool result.
+      const ownedExecution = contract?.purpose === "execution" && contract.world_write_authorized === true;
+      const projectionTarget = ownedExecution ? REQUEST_BUDGET - FIXED_REQUEST_RESERVE : REQUEST_BUDGET;
+      const envelope = sdkEnvelopes.get(envelopeKey(sessionID, current.info.agent));
+      const sdkFixedBytes = envelope?.fixedBytes ?? FIXED_REQUEST_RESERVE;
+      const sdkExpansionBytes = envelope?.expansionBytes ?? 0;
+      const historyAllowance = Math.min(HISTORY_BUDGET, Math.max(0,
+        projectionTarget - sdkFixedBytes - sdkExpansionBytes - protectedBytes));
       const candidates = [], byPart = new Map(), base = new Map();
       let existing = null, proseParts = 0, proseCharacters = 0, snapshotParts = 0, snapshotCharacters = 0;
       for (const [position, message] of messages.entries()) {
@@ -225,6 +277,7 @@ export default async function GroveNativeContext(_input, options = {}) {
             } else if (part.type === "text" && typeof part.text === "string" && !part.synthetic && (message.info.role === "user" || isSummary(message))) {
               kind = message.info.role === "user" ? "user" : "summary";
               if (kind === "summary" && !part.text.startsWith(SUMMARY_PREFIX)) projected = { ...part, text: SUMMARY_PREFIX + part.text };
+              if (kind === "user" && !part.text.startsWith(USER_PREFIX)) projected = { ...part, text: USER_PREFIX + part.text };
             }
           }
           if (kind) {
@@ -305,10 +358,20 @@ export default async function GroveNativeContext(_input, options = {}) {
       const unfoldable = projected.flatMap((message, position) => isCurrent(message, position) ? [] :
         message.parts.filter(part => part.type === "tool" && !toolsKept.some(item => item.projected === part)));
       const currentTools = messages.flatMap((message, position) => isCurrent(message, position) ? message.parts.filter(part => part.type === "tool") : []);
+      const ownedTools = messages.flatMap(message => message.info.role === "assistant" && message.info.parentID === current.info.id
+        ? message.parts.filter(part => part.type === "tool") : []);
+      const terminalTools = ownedTools.filter(part => ["completed", "error"].includes(part.state?.status));
       const total = (items, field) => items.reduce((sum, item) => sum + item[field], 0), idx = omissionTotals(omitted, existing?.index);
       const budgetOmittedTools = budgetOmitted.filter(part => part.type === "tool");
       const recoveryUnavailable = !historyAvailable && (existing || historicalBytes(projected) > historyAllowance);
       projection = { session_id: sessionID, agent: current.info.agent, current_request_message_id: current.info.id, observed_at_ms: Date.now(),
+        request_purpose: contract?.purpose ?? null, request_id: contract?.request_id ?? null,
+        execution_task_id: contract?.task_id ?? null, execution_segment_id: contract?.segment_id ?? null,
+        world_write_authorized: contract?.world_write_authorized === true,
+        request_projection_target_bytes: projectionTarget, sdk_fixed_request_bytes: sdkFixedBytes,
+        sdk_message_expansion_bytes: sdkExpansionBytes,
+        sdk_envelope_source: envelope ? "previous_matching_sdk_body" : "initial_fixed_reserve",
+        current_terminal_tool_parts: terminalTools.length, current_unfinished_tool_parts: ownedTools.length - terminalTools.length,
         omitted_assistant_parts: proseParts, omitted_assistant_characters: proseCharacters,
         omitted_machine_snapshot_parts: snapshotParts, omitted_machine_snapshot_characters: snapshotCharacters,
         reduced_tool_parts: idx?.omitted_tool_parts ?? 0, historically_marked_tool_parts: toolsKept.filter(item => item.projected !== item.part).length,
@@ -343,7 +406,7 @@ export default async function GroveNativeContext(_input, options = {}) {
         history_index_unavailable_parts: !indexOwner && budgetOmitted.length === 0 ? historicalBytes(projected) > HISTORY_BUDGET ? candidates.length :
           candidates.filter(item => item.part.tool === "invalid").length : 0,
         budget_scope: "historical_native_inference_projection", byte_unit: "utf8", character_unit: "utf16_code_units",
-        output_byte_meaning: "Compacted outputs count their native placeholder. With a declared history entrance, the old pool including an optional source index fits the adaptive allowance up to 64KiB; complete current messages are protected. If no old parts fit, native_tool_history mode=list remains the on-demand entrance. A missing entrance keeps the sources and refuses an unmet allowance. Unsupported old tools remain only in original storage; their bodies are not promised readable through that API. Managed message bytes are an observed native projection, not a total hard limit or provider token count. SDK guard alone measures and caps the actual complete provider JSON at 128KiB.",
+        output_byte_meaning: "Compacted outputs count their native placeholder. With a declared history entrance, the old pool including an optional source index fits the adaptive allowance up to 64KiB; complete current messages are protected. Owned execution budgets old sources below the 96KiB soft boundary after the complete current round and measured same-session/agent SDK envelope; initial SDK reserve is 32KiB. Ordinary requests budget below the 128KiB hard boundary. If no old parts fit, native_tool_history mode=list remains the on-demand entrance. A missing entrance keeps the sources and refuses an unmet allowance. Unsupported old tools remain only in original storage; their bodies are not promised readable through that API. Managed message bytes are an observed native projection, not a total hard limit or provider token count. SDK guard alone measures and caps the actual complete provider JSON at 128KiB.",
         stored_originals_changed: false };
       // The native loop uses this same array reference after the hook returns.
       messages.splice(0, messages.length, ...projected); await diagnostic();

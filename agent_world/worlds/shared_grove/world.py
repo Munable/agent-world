@@ -20,6 +20,8 @@ from . import building
 from . import domains, scheduling
 from .definitions import COMBUSTION_CADENCE_TICKS, COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for, material_import
 
+WORLD_VERSION = 38
+
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 ID = {"type": "string", "minLength": 1, "maxLength": 128}
 LOT_ID = {"type": "string", "minLength": 1, "maxLength": 180}
@@ -1405,7 +1407,7 @@ def _registered_entity_schema():
 
 def make_world(*, publication_budget=None):
     from .generation import generation_specs, generation_state_specs
-    from . import creative, discovery
+    from . import creative, discovery, client_projection
     from .publication import DEFAULT_BUDGET, bind_budget
     budget = DEFAULT_BUDGET if publication_budget is None else publication_budget
     def migrate_creation(ctx):
@@ -1434,7 +1436,7 @@ def make_world(*, publication_budget=None):
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=5,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
-        *generation_specs(), *creative.specs(), *discovery.specs()),version=37,state_version=25,
+        *generation_specs(), *creative.specs(), *discovery.specs(), *client_projection.specs()),version=WORLD_VERSION,state_version=25,
         state_rules=(StateRule(m.PLAYERS,"",PLAYER_SCHEMA),StateRule(m.ENTITIES,"",_registered_entity_schema()),
             StateRule(m.CHUNKS,"",CHUNK_SCHEMA),StateRule(m.PROCESSES,"",PROCESS_SCHEMA,history="metadata"),
             StateRule(m.META,"",{},history="metadata"),*generation_state_specs(),*creative.state_specs(),

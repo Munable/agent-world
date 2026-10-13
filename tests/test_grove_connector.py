@@ -141,6 +141,8 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.execution_controller.active = True
         self.session.execution_controller.delegation = {"fixture": True}
         self.session.execution_controller.state.update(task_id="task", segment_id="segment", status="running", delegation_active=True)
+        self.session.active_native_request = {"purpose": "execution", "world_write_authorized": True,
+            "session_id": self.session.session_id, "task_id": "task", "segment_id": "segment"}
         self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
         self.session.invoke = AsyncMock()
         with self.assertRaises(ConnectorError) as rejected:
@@ -529,9 +531,14 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         tools = {'*': False, 'grove_world_*': True, 'invalid': True}
         self.assertEqual(config['permission'], permission)
         self.assertEqual(config['tools'], tools)
-        for agent in ('shared-grove', 'shared-grove-executor'):
-            self.assertEqual(config['agent'][agent]['permission'], permission)
-            self.assertEqual(config['agent'][agent]['tools'], tools)
+        self.assertEqual(config['agent']['shared-grove-executor']['permission'], permission)
+        self.assertEqual(config['agent']['shared-grove-executor']['tools'], tools)
+        self.assertEqual(config['agent']['shared-grove']['permission'], session.conversation_permissions())
+        self.assertEqual(config['agent']['shared-grove']['tools'], session.conversation_tools())
+        self.assertEqual(config['agent']['shared-grove']['permission']['grove_world_*'], 'deny')
+        self.assertFalse(config['agent']['shared-grove']['tools']['grove_world_*'])
+        self.assertNotIn('grove_world_grove_move', config['agent']['shared-grove']['tools'])
+        self.assertNotIn('grove_world_execution_checkpoint', config['agent']['shared-grove']['tools'])
         for agent in ('shared-grove-blueprint', 'compaction'):
             self.assertEqual(config['agent'][agent]['permission'], {'*': 'deny'})
             self.assertEqual(config['agent'][agent]['tools'], {'*': False})
@@ -574,17 +581,25 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.inference_count, 1)
 
     async def test_completed_ordinary_questions_allow_next_request_without_goal_charge(self):
+        controller = self.session.execution_controller
+        original = {key: controller.value(key) for key in ("task_id", "goal", "status", "request_status",
+            "requests_used", "max_requests", "max_actions", "actions_count", "resume_allowed")}
         self.session.current_turn_facts = AsyncMock(return_value={'player': {'id': 'test-user'}, 'entities': []})
         self.session.host = AsyncMock(return_value={'info': {'role': 'assistant', 'finish': 'stop',
             'time': {'completed': 1}}, 'parts': [{'type': 'text', 'text': 'Look at the actual objects.'}]})
         await self.session.turn('What is here?')
-        self.assertEqual(self.session.execution['request_status'], 'idle')
+        self.assertEqual(self.session.execution['host_request']['status'], 'idle')
+        self.assertEqual({key: controller.value(key) for key in original}, original)
         await self.session.turn('What changed?')
+        self.assertEqual({key: controller.value(key) for key in original}, original)
         self.assertEqual(self.session.inference_count, 2)
         self.assertEqual(self.session.execution['requests_used'], 0)
         self.assertEqual(self.session.host.await_count, 2)
 
     async def test_timed_out_ordinary_question_keeps_original_native_gate_closed(self):
+        controller = self.session.execution_controller
+        original = {key: controller.value(key) for key in ("task_id", "goal", "status", "request_status",
+            "requests_used", "max_requests", "max_actions", "actions_count", "resume_allowed")}
         self.session.current_turn_facts = AsyncMock(return_value={'player': {'id': 'test-user'}, 'entities': []})
         async def native(method, path, body=None, **kwargs):
             if path.endswith('/message'):
@@ -600,11 +615,218 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectorError) as failure:
             await self.session.turn('What is here?')
         self.assertEqual(failure.exception.code, 'HostUnavailable')
-        self.assertEqual(self.session.execution['request_status'], 'unsettled')
+        self.assertEqual(self.session.execution['host_request']['status'], 'unsettled')
+        self.assertEqual({key: controller.value(key) for key in original}, original)
         with self.assertRaises(ConnectorError) as blocked:
             await self.session.turn('A different question')
         self.assertEqual(blocked.exception.code, 'OriginalRequestUnsettled')
+        self.assertEqual({key: controller.value(key) for key in original}, original)
         self.assertEqual(self.session.inference_count, 1)
+
+    async def test_question_preserves_paused_task_and_does_not_reissue_saved_goals(self):
+        controller = self.session.execution_controller
+        controller.state.update(task_id="old-task", goal="制作计数牌", status="paused",
+            request_status="idle_confirmed", requests_used=1, max_requests=4,
+            max_actions=8, actions_count=2, resume_allowed=True)
+        self.session.remember_user_request("制作计数牌", purpose="execution", task_id="old-task")
+        self.session.remember_user_request("让它自己运行", creation=True)
+        original = {key: controller.value(key) for key in ("task_id", "goal", "status", "request_status",
+            "requests_used", "max_requests", "max_actions", "actions_count", "resume_allowed")}
+        self.session.current_turn_facts = AsyncMock(return_value={"player": {"id": "test-user"}, "entities": []})
+        seen = []
+        async def native(_method, _path, body=None, **_kwargs):
+            seen.append(deepcopy(body))
+            self.assertEqual(self.session.active_native_request["purpose"], "explain")
+            self.assertFalse(self.session.active_native_request["world_write_authorized"])
+            self.assertNotIn("task_id", self.session.active_native_request)
+            return {"info": {"role": "assistant", "finish": "stop", "time": {"completed": 1}},
+                "parts": [{"type": "text", "text": "现在暂停了。"}]}
+        self.session.host = native
+        await self.session.turn("现在暂停了吗？")
+        self.assertEqual({key: controller.value(key) for key in original}, original)
+        self.assertTrue(controller.can_resume())
+        self.assertIsNone(self.session.active_native_request)
+        self.assertNotIn("制作计数牌", json.dumps(seen[0], ensure_ascii=False))
+        self.assertNotIn("让它自己运行", json.dumps(seen[0], ensure_ascii=False))
+        self.assertIn("制作计数牌", json.dumps(self.session.private_context, ensure_ascii=False))
+        async def settled(_method, path, body=None, **_kwargs):
+            if path == "/session/test-session":
+                return {"id": "test-session"}
+            if path == "/session/status":
+                return {}
+            self.fail(path)
+        self.session.host = settled
+        self.assertTrue(await self.session.settle_execution_request(native_owner={"purpose": "explain"}))
+        self.assertEqual({key: controller.value(key) for key in original}, original)
+        self.assertTrue(controller.can_resume())
+        self.assertEqual(controller.value("host_request")["status"], "idle_confirmed")
+
+    async def test_completed_question_failed_settlement_preserves_paused_task(self):
+        controller = self.session.execution_controller
+        controller.state.update(task_id="old-task", goal="制作计数牌", status="paused",
+            request_status="idle_confirmed", requests_used=1, max_requests=4,
+            max_actions=8, actions_count=2, resume_allowed=True)
+        original = {key: controller.value(key) for key in ("task_id", "goal", "status", "request_status",
+            "requests_used", "max_requests", "max_actions", "actions_count", "resume_allowed")}
+        self.session.current_turn_facts = AsyncMock(return_value={"player": {"id": "test-user"}, "entities": []})
+        self.session.host = AsyncMock(return_value={"info": {"role": "assistant", "finish": "stop", "time": {"completed": 1}},
+            "parts": [{"type": "text", "text": "现在暂停了。"}]})
+        await self.session.turn("现在暂停了吗？")
+        self.assertEqual(controller.value("host_request")["status"], "idle")
+        async def still_running(_method, path, body=None, **_kwargs):
+            if path == "/session/test-session":
+                return {"id": "test-session"}
+            if path == "/session/status":
+                return {"test-session": {"type": "busy"}}
+            self.fail(path)
+        self.session.host = still_running
+        self.assertFalse(await self.session.settle_execution_request(native_owner={"purpose": "explain"}))
+        self.assertEqual({key: controller.value(key) for key in original}, original)
+        self.assertEqual(controller.value("host_request")["status"], "unsettled")
+        self.assertFalse(controller.native_ready())
+
+    async def test_memory_save_failure_blocks_next_native_request_after_tool_error(self):
+        controller = self.session.execution_controller
+        controller.active = True
+        controller.state.update(task_id="original-task", segment_id="original-segment", status="running",
+            request_status="idle_confirmed", resume_allowed=True)
+        self.session.status = "thinking"
+        self.session.active_native_request = {"purpose": "execution", "world_write_authorized": True,
+            "session_id": self.session.session_id, "task_id": "original-task", "segment_id": "original-segment"}
+        self.session.catalog = {"grove.rule_catalog": {"access": "read", "input_schema": {}}}
+        self.session.invoke = AsyncMock(return_value={"result": {"definitions": []}})
+        with patch("agent_world.grove_connector.save_json", side_effect=OSError("private storage details")):
+            with self.assertRaises(ConnectorError) as failed:
+                await self.session.tool_call("grove_rule_catalog", {})
+        self.assertEqual(failed.exception.code, "ExecutionPersistenceFailed")
+        self.assertNotIn("private storage details", failed.exception.message)
+        self.assertFalse(controller.active)
+        self.assertFalse(controller.value("resume_allowed"))
+        self.session.host = AsyncMock()
+        self.session.current_turn_facts = AsyncMock()
+        with self.assertRaises(ConnectorError) as blocked:
+            await self.session.turn("继续解释")
+        self.assertEqual(blocked.exception.code, "ExecutionPersistenceFailed")
+        self.session.host.assert_not_awaited()
+
+    async def test_question_cannot_use_writes_or_checkpoint_even_with_stale_active_controller(self):
+        self.session.status = "thinking"
+        self.session.execution_controller.active = True
+        self.session.execution_controller.state.update(task_id="old-task", segment_id="old-segment", status="running")
+        self.session.active_native_request = {"purpose": "explain", "world_write_authorized": False,
+            "session_id": self.session.session_id}
+        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        self.session.invoke = AsyncMock()
+        self.session.execution_checkpoint = AsyncMock()
+        before = self.session.execution
+        for name in ("grove_interact", "execution_checkpoint"):
+            with self.assertRaises(ConnectorError) as denied:
+                await self.session.tool_call(name, {"execution_segment_id": "old-segment"})
+            self.assertEqual(denied.exception.code, "ConversationReadOnly")
+        self.assertEqual(self.session.execution, before)
+        self.session.invoke.assert_not_awaited()
+        self.session.execution_checkpoint.assert_not_awaited()
+
+    def test_explicit_goal_request_keeps_its_real_purpose_and_task_reference(self):
+        self.session.remember_user_request("制作计数牌", purpose="execution", task_id="current-task")
+        request = self.session.private_context["recent_user_requests"][-1]
+        self.assertEqual((request["purpose"], request["task_id"]), ("execution", "current-task"))
+        restored = GroveSession(self.manager, {"role_id": "test-user", "access_mode": "control"},
+            "test-private-bearer", "Test", "provider/model")
+        self.assertEqual(restored.private_context["recent_user_requests"][-1], request)
+
+    async def test_question_control_read_does_not_adopt_world_control_into_original_task(self):
+        self.session.status = "thinking"
+        self.session.active_native_request = {"purpose": "explain", "world_write_authorized": False,
+            "session_id": self.session.session_id}
+        self.session.catalog = {"grove.control_status": {"access": "read", "input_schema": {}}}
+        self.session.execution_controller.state.update(task_id="original-task", goal="继续观察",
+            status="paused", grant_id="known-grant", grant_operation_id="known-operation", actions_count=2)
+        self.session.invoke = AsyncMock(return_value={"result": {"goal": "继续观察", "status": "active",
+            "grant_id": "different-grant", "actions_count": 5, "version": 40}})
+        before = self.session.execution
+        delivered = await self.session.tool_call("grove_control_status", {})
+        self.assertEqual(delivered["result"]["grant_id"], "different-grant")
+        self.assertEqual(self.session.execution, before)
+
+    def test_ui_receives_client_inspection_references_without_changing_agent_readback(self):
+        inspection = {"entity": {"id": "counter", "name": "计数牌", "state": {"program": {"fields": {"count": 7}}}}}
+        readback = {"observed_at": 100, "selected_inspection": inspection,
+            "action_targets": [{"entity_id": "counter", "inspection": inspection, "observed_at": 99},
+                {"entity_id": "gone", "unavailable": {"code": "ResourceNotFound"}, "observed_at": 101}]}
+        self.session.execution_controller.state["readback"] = deepcopy(readback)
+        projected = self.session.state()["execution"]["readback"]
+        self.assertNotIn("program", json.dumps(projected))
+        self.assertEqual(projected["action_targets"][0]["client_read_request"], {
+            "function_id": "grove.client_inspect", "arguments": {"entity_id": "counter"}})
+        self.assertEqual(projected["action_targets"][0]["observed_at"], 99)
+        self.assertEqual(projected["action_targets"][1]["unavailable"], {"code": "ResourceNotFound"})
+        self.assertFalse(projected["selected_inspection"]["projection"]["current_detail_delivered"])
+        self.assertEqual(self.session.execution["readback"], readback)
+
+    async def test_http_state_keeps_original_display_facts_without_exporting_storage_mirrors(self):
+        entity = {"id": "counter", "name": "计数牌", "version": 7, "x": 3, "y": 2,
+            "owner": None, "container": None, "authored_description": "共同留下的说明",
+            "state": {"water": None, "program": {"fields": {"count": 7}, "mechanical": {"energy": 4},
+                "definition_ref": "raw-definition"}}, "simulation": {"raw": "raw-simulation"}}
+        action = {"action": "fuel", "stored_energy_after": 4, "target_name": "动力源",
+            "transfer": {"source_name": "水袋", "target_name": "水槽", "material": "water", "transferred": 2},
+            "costs": [{"entity_id": "fuel", "entity_name": "木料", "material": "wood", "quantity_u": 4}],
+            "related_entities": [entity], "recording": {"state": {"program": {"private": "raw-recording"}}}}
+        outcome = {"kind": "server_receipt", "changes": ["计数变成七"], "entity": entity,
+            "player": {"id": "test-user", "x": 3, "y": 2}, "action_result": action,
+            "same_position_public_objects": [{"id": "counter", "name": "计数牌"}]}
+        receipt = {"function": "grove.interact", "operation_id": "original-op", "status": "confirmed",
+            "commit_seq": 42, "task_id": "original-task", "segment_id": "original-segment",
+            "action": "fuel", "action_entity_ids": ["counter"], "confirmed_outcome": outcome}
+        readback = {"observed_at": 100, "player": {"id": "test-user", "x": 3, "y": 2},
+            "clock": {"sequence": 43}, "entities": [entity], "inventory": [entity],
+            "viewport": {"entities": [entity]}, "public_content": {"anchors": [entity]},
+            "selected_inspection": {"entity": entity},
+            "action_targets": [{"entity_id": "counter", "inspection": {"entity": entity}, "observed_at": 99}]}
+        self.session.generation = {"status": "published", "published": True, "attempts": 1,
+            "entities": [entity | {"id": "published-" + str(index)} for index in range(12)],
+            "process": {"id": "rain", "label": "共同降雨", "status": "running", "state": {"program": "raw-process"}},
+            "readback": {"receipt_confirmed": True, "viewport_read": True, "observed_at": 100,
+                "visible_entity_ids": ["counter"], "viewport": {"entities": [entity]}},
+            "public_content": {"anchors": [entity]}, "contribution": {"entity": entity}}
+        self.session.execution_controller.state.update(task_id="original-task", readback=readback,
+            readback_actual=True, receipts=[receipt], progress={"summary": "已添燃料", "next_intent": "读回现场", "evidence": [receipt]})
+        self.session.execution_controller.archive.append(deepcopy(self.session.execution))
+        before = deepcopy((self.session.generation, self.session.execution_controller.state, self.session.execution_archive))
+        app = create_connector_app(storage=self.manager.storage, wrapper=None)
+        app.state.connector.authorized = Mock(return_value=self.session)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8891") as client:
+            response = await client.get("/connector/state", headers={"Authorization": "Bearer test-bearer"})
+        self.assertEqual(response.status_code, 200)
+        page = response.json()
+        exported = {key: page[key] for key in ("generation", "execution", "execution_archive")}
+        self.assertNotIn('"state":', json.dumps(exported))
+        self.assertNotIn('"program":', json.dumps(exported))
+        self.assertNotIn("raw-", json.dumps(exported))
+        self.assertEqual(len(page["generation"]["entities"]), 12)
+        self.assertEqual(page["generation"]["entities"][0]["authored_description"], "共同留下的说明")
+        self.assertEqual(page["generation"]["process"], {"id": "rain", "label": "共同降雨", "status": "running"})
+        self.assertTrue(page["generation"]["readback"]["receipt_confirmed"])
+        for execution in (page["execution"], page["execution_archive"][0]):
+            facts = execution["receipts"][0]["confirmed_outcome"]
+            self.assertEqual(facts["changes"], outcome["changes"])
+            self.assertEqual(facts["action_result"]["transfer"], action["transfer"])
+            self.assertEqual(facts["action_result"]["costs"], action["costs"])
+            self.assertEqual(facts["action_result"]["stored_energy_after"], 4)
+            self.assertEqual(facts["action_result"]["related_entities"][0]["name"], "计数牌")
+            rows = facts["entity"]["summary_facts"]
+            declared = next(row for row in rows if row["id"] == "fields")["rows"][0]
+            self.assertEqual((declared["value"], declared["temporal_scope"], declared["source"]),
+                (7, "historical", "original_server_receipt"))
+            water = next(row for row in rows if row["id"] == "water")
+            self.assertEqual((water["value"], water["availability"]), (None, "unknown"))
+            self.assertEqual(execution["progress"]["evidence"][0]["confirmed_outcome"], facts)
+            self.assertEqual(execution["action_summary"]["groups"][0]["last_confirmed_outcome"]["changes"], ["计数变成七"])
+            self.assertEqual(execution["readback"]["clock"], {"sequence": 43})
+            self.assertEqual(execution["readback"]["action_targets"][0]["client_read_request"], {
+                "function_id": "grove.client_inspect", "arguments": {"entity_id": "counter"}})
+        self.assertEqual((self.session.generation, self.session.execution_controller.state, self.session.execution_archive), before)
 
     async def test_failed_current_read_does_not_spend_model_request(self):
         self.session.entered = True
@@ -749,7 +971,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.invoke = AsyncMock()
         with self.assertRaises(ConnectorError) as denied:
             await self.session.tool_call("grove_move", {"dx": 1, "dy": 0})
-        self.assertEqual(denied.exception.code, "DelegationRequired")
+        self.assertEqual(denied.exception.code, "ConversationReadOnly")
         self.session.invoke.assert_not_awaited()
 
     async def test_execution_keeps_catalog_on_demand_and_closes_writes_before_goal_settlement(self):

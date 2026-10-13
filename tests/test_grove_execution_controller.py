@@ -463,7 +463,8 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         record = {"function_id": function, "envelope": {"operation_id": operation}} | owner
         if function == "grove.control_grant":
             self.control = {"goal": arguments["goal"], "status": "active", "actions_count": 0,
-                "delegation": "private-original-grant", "max_actions": arguments["max_actions"], "version": 1}
+                "delegation": "private-original-grant", "grant_id": "grove-grant-" + operation,
+                "max_actions": arguments["max_actions"], "version": 1}
         elif function == "grove.control_revoke":
             self.control.update(status="revoked", delegation="")
         elif function == "grove.move":
@@ -489,13 +490,12 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.replays.append(False)
 
     async def settle(self, *, abort=False):
-        self.controller.active = False
-        self.controller.state["request_status"] = "idle_confirmed"
+        owner = self.controller.settlement_started("session_identity", native_owner=self.controller.state["host_request"])
+        self.controller.native_status_observed("idle", owner=owner)
+        self.controller.settlement_finished(stage="write_drain", elapsed_seconds=0, owner=owner)
         return True
 
     async def native_segment(self, kind, goal, *, context_entity_id=None):
-        if kind == "compact":
-            return
         self.assertEqual(kind, "execute")
         self.controller.request_started("execution")
         if self.native_action is not None:
@@ -594,6 +594,30 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.state["status"], "paused")
         self.assertFalse(restored.active)
         self.assertFalse(restored.can_resume())
+
+    def test_execution_timeout_restores_its_own_scope_after_previous_ordinary_request(self):
+        for purpose in ("execution", "execution_summary"):
+            with self.subTest(purpose=purpose):
+                self.setUp()
+                self.start()
+                self.controller.request_started("entry")
+                self.controller.request_returned("entry")
+                self.controller.state["segment_id"] = "original-segment"
+                owner = self.controller.request_started(purpose)
+                self.controller.native_interrupted(purpose, owner=owner)
+                saved = self.controller.snapshot()
+                restored = ExecutionController("same-role", max_requests=8, max_world_calls=16, max_seconds=150)
+                restored.restore(saved)
+                self.assertEqual(restored.state["host_request"]["purpose"], purpose)
+                self.assertEqual(restored.state["host_request"]["status"], "unsettled")
+                settlement = restored.settlement_started("abort", native_owner=restored.value("host_request"))
+                self.assertEqual(settlement["native_purpose"], "execution")
+                restored.native_status_observed("idle", owner=settlement)
+                restored.settlement_finished(stage="write_drain", elapsed_seconds=0, owner=settlement)
+                self.assertEqual(restored.state["request_status"], "idle_confirmed")
+                self.assertEqual(restored.state["task_id"], saved["task_id"])
+                self.assertEqual(restored.state["requests_used"], 1)
+                self.assertTrue(restored.can_resume())
 
     def test_explicit_resume_keeps_task_action_ledger_and_extends_only_requests(self):
         self.start(max_requests=2)
@@ -709,6 +733,197 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             self.controller.request_started("execution_summary")
 
+    def segment_yield(self, **changes):
+        return ConnectorError("ExecutionSegmentYield", "Original request safely yielded.", 409,
+            execution_outcome={"stage": "native_segment_yield", "task_id": self.controller.state["task_id"],
+                "segment_id": self.controller.state["segment_id"], "safe": True, "reason": "request_headroom",
+                "request_id": "grove-request-" + "a" * 32,
+                "current_terminal_tool_parts": 1, "current_unfinished_tool_parts": 0,
+                "body_bytes": 98304, **changes})
+
+    async def test_safe_yield_preserves_task_goal_grant_and_receipts_after_settlement(self):
+        self.start(max_requests=2)
+        task = self.controller.state
+        identity, goal = task["task_id"], task["goal"]
+        segments = []
+        async def action():
+            segments.append(task["segment_id"])
+            if task["requests_used"] == 1:
+                await self.controller.write("grove.move", {"dx": 1}, segment_id=task["segment_id"])
+                raise self.segment_yield()
+            self.assertEqual(task["request_status"], "running")
+            self.assertTrue(task["readback_actual"])
+            await self.controller.checkpoint({"task_id": identity, "execution_segment_id": task["segment_id"],
+                "status": "completed", "summary": "Actual receipt retained", "next_intent": "",
+                "evidence_operation_ids": [task["receipts"][0]["operation_id"]]}, schema=CHECKPOINT_SCHEMA)
+        self.native_action = action
+        await self.controller.execute_goal(goal)
+        self.assertEqual((task["task_id"], task["goal"], task["requests_used"], task["actions_count"]), (identity, goal, 2, 1))
+        self.assertEqual(task["status"], "completed")
+        self.assertNotEqual(*segments)
+        self.assertEqual(sum(function == "grove.control_grant" for function, _ in self.calls), 1)
+        self.assertEqual(task["segments"][0]["outcome"], "context_yield")
+        self.assertIsNone(task["segments"][0]["error"])
+        self.assertEqual(self.replays, [False, False])
+
+    async def test_yield_never_bypasses_unknown_original_or_exhausted_budget(self):
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                self.setUp()
+                self.start(max_requests=1)
+                async def action():
+                    if unknown:
+                        self.unknown_operations.append({"function_id": "grove.move",
+                            "envelope": {"operation_id": "original-unknown"}})
+                    raise self.segment_yield()
+                self.native_action = action
+                await self.controller.execute_goal(self.controller.state["goal"])
+                self.assertEqual(self.controller.state["requests_used"], 1)
+                self.assertEqual(self.controller.state["max_requests"], 1)
+                self.assertEqual(self.controller.state["status"], "unknown" if unknown else "paused")
+                self.assertFalse(self.controller.state["resume_allowed"])
+
+    async def test_forged_or_unfinished_yield_pauses_without_a_new_request(self):
+        for changes in ({"task_id": "old-task"}, {"safe": False}, {"current_unfinished_tool_parts": 1},
+                        {"current_terminal_tool_parts": 0}, {"body_bytes": 98303}):
+            with self.subTest(changes=changes):
+                self.setUp()
+                self.start()
+                async def action():
+                    raise self.segment_yield(**changes)
+                self.native_action = action
+                await self.controller.execute_goal(self.controller.state["goal"])
+                self.assertEqual(self.controller.state["requests_used"], 1)
+                self.assertEqual(self.controller.state["error"]["code"], "ExecutionSegmentYield")
+
+    async def test_matching_goal_or_legacy_grant_cannot_replace_owned_grant(self):
+        self.start()
+        await self.invoke("grove.control_grant", {"goal": self.controller.state["goal"], "max_actions": 4})
+        owned = deepcopy(self.control)
+        self.controller.update_control({**owned, "grant_id": "another-grant", "actions_count": 3})
+        self.assertFalse(self.controller.state["delegation_active"])
+        self.assertEqual(self.controller.state["actions_count"], 0)
+        self.controller.update_control({key: value for key, value in owned.items() if key != "grant_id"})
+        self.assertFalse(self.controller.state["delegation_active"])
+        self.controller.update_control(owned)
+        self.assertTrue(self.controller.state["delegation_active"])
+        self.assertEqual(self.controller.state["grant_id"], owned["grant_id"])
+
+    def test_explicit_batches_reach_32_without_resetting_spent_request_or_action_budget(self):
+        self.start(max_requests=8)
+        task = self.controller.state
+        identity = task["task_id"]
+        task.update(status="paused", request_status="idle_confirmed", requests_used=8, actions_count=1,
+            grant_operation_id="owned-original", resume_allowed=False)
+        for total in (16, 24, 32):
+            self.controller.resume({"task_id": identity, "additional_requests": 8}, entered=True,
+                native_connected=True, worker_busy=False)
+            self.assertEqual((task["task_id"], task["max_requests"], task["requests_used"], task["actions_count"], task["max_actions"]),
+                (identity, total, 8, 1, 4))
+            task["status"] = "paused"
+        for additional in (1, 9):
+            with self.assertRaises(ConnectorError) as exceeded:
+                self.controller.resume({"task_id": identity, "additional_requests": additional}, entered=True,
+                    native_connected=True, worker_busy=False)
+            self.assertEqual(exceeded.exception.code, "InvalidRequestBudget")
+
+    def test_ordinary_request_preserves_paused_task_after_success_and_interruption(self):
+        for returned in (False, True):
+            with self.subTest(returned=returned):
+                self.setUp()
+                self.start()
+                self.controller.state.update(status="paused", request_status="idle_confirmed", resume_allowed=True)
+                original = {key: deepcopy(value) for key, value in self.controller.state.items() if key != "host_request"}
+                self.controller.request_started("explain")
+                self.assertEqual({key: value for key, value in self.controller.state.items() if key != "host_request"}, original)
+                self.assertFalse(self.controller.can_resume())
+                if returned:
+                    self.controller.request_returned("explain")
+                else:
+                    self.controller.native_interrupted("explain")
+                owner = self.controller.settlement_started("session_identity", native_owner={"purpose": "explain"})
+                self.controller.native_status_observed("idle", owner=owner)
+                self.controller.settlement_finished(stage="write_drain", elapsed_seconds=0, owner=owner)
+                self.assertEqual({key: value for key, value in self.controller.state.items() if key != "host_request"}, original)
+                self.assertTrue(self.controller.can_resume())
+
+    async def test_checkpoint_save_failure_cannot_complete_or_yield_until_original_recovery(self):
+        await self.running()
+        task = self.controller.state
+        action = await self.controller.write("grove.move", {"dx": 1}, segment_id=task["segment_id"])
+        def save():
+            if task.get("checkpoint"):
+                raise OSError("checkpoint save unavailable")
+        self.persist.side_effect = save
+        with self.assertRaises(ConnectorError) as failed:
+            await self.controller.checkpoint({"task_id": task["task_id"], "execution_segment_id": task["segment_id"],
+                "status": "completed", "summary": "Actual action, unpersisted claim", "next_intent": "",
+                "evidence_operation_ids": [action["operation_id"]]}, schema=CHECKPOINT_SCHEMA)
+        self.assertFalse(failed.exception.execution_outcome["checkpoint_recorded"])
+        self.assertIsNone(task["checkpoint"])
+        self.assertIsNone(task["goal_result"])
+        self.assertFalse(self.controller.active)
+        self.assertEqual(task["persistence_failure"]["error_type"], "OSError")
+        self.persist.side_effect = None
+        for call in (self.controller.ensure_persistence_ready,
+                     lambda: self.controller.request_started("execution"),
+                     lambda: self.controller.admit_write(task["segment_id"])):
+            with self.assertRaises(ConnectorError) as blocked:
+                call()
+            self.assertEqual(blocked.exception.code, "ExecutionPersistenceFailed")
+        self.controller.recovery_finished()
+        self.assertIsNotNone(task["persistence_failure"])
+        await self.settle()
+        await self.controller.revoke()
+        await self.controller.readback()
+        self.controller.recovered_world_authority()
+        self.controller.recovery_finished()
+        self.assertIsNone(task["persistence_failure"])
+        self.assertEqual(task["actions_count"], 1)
+        self.assertEqual(len(task["receipts"]), 1)
+        self.assertTrue(self.controller.can_resume())
+
+    async def test_effective_preparation_can_continue_normal_and_safe_yield_segments(self):
+        self.start(max_requests=3)
+        task = self.controller.state
+        async def action():
+            owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": task["segment_id"]}
+            if task["requests_used"] <= 2:
+                topic = "materials" if task["requests_used"] == 1 else "presentation"
+                self.assertTrue(self.controller.preparation_read_delivered("grove.rule_catalog", {"topic": topic},
+                    owner=owner, delivered={"result": {"topic": topic}}))
+                if task["requests_used"] == 2:
+                    raise self.segment_yield()
+                return
+            await self.controller.write("grove.move", {"dx": 1}, segment_id=task["segment_id"])
+            await self.controller.checkpoint({"task_id": task["task_id"], "execution_segment_id": task["segment_id"],
+                "status": "completed", "summary": "Actual consequence", "next_intent": "",
+                "evidence_operation_ids": [task["receipts"][0]["operation_id"]]}, schema=CHECKPOINT_SCHEMA)
+        self.native_action = action
+        await self.controller.execute_goal(task["goal"])
+        self.assertEqual((task["requests_used"], task["preparation_count"], task["actions_count"], task["status"]), (3, 2, 1, "completed"))
+        self.assertEqual(task["segments"][1]["outcome"], "context_yield")
+
+    async def test_preparation_does_not_retry_ordinary_failure_or_count_repeated_empty_pages(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                self.setUp()
+                self.start()
+                task = self.controller.state
+                async def action():
+                    owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": task["segment_id"]}
+                    self.controller.preparation_read_delivered("grove.public_works", {"author": "person", "after": str(task["requests_used"])},
+                        owner=owner, delivered={"result": {"works": [], "has_more": True}})
+                    if failure:
+                        raise ConnectorError("IncompleteResponse", "Real model HTTP 400", 502)
+                self.native_action = action
+                await self.controller.execute_goal(task["goal"])
+                self.assertEqual(task["preparation_count"], 1)
+                self.assertEqual(task["actions_count"], 0)
+                self.assertEqual(task["requests_used"], 1 if failure else 3)
+                self.assertEqual(task["status"], "paused")
+                self.assertIsNone(task["goal_result"])
+
     async def test_main_entry_and_explanation_require_confirmed_idle_without_spending_goal_budget(self):
         self.start(max_requests=1)
         task = self.controller.state
@@ -718,7 +933,8 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         for purpose in ("entry", "explain"):
             fields = self.controller.request_started(purpose)
             self.assertEqual(fields, {})
-            self.assertEqual(task["request_status"], "running")
+            self.assertEqual(task["request_status"], "idle_confirmed")
+            self.assertEqual(task["host_request"]["status"], "running")
             self.assertEqual({key: self.controller.value(key) for key in original}, original)
             with self.assertRaises(ConnectorError) as unsettled:
                 self.controller.ensure_native_ready()

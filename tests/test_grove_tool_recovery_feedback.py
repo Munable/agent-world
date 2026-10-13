@@ -25,10 +25,17 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.session.catalog = {spec.name: {"access": spec.access, "input_schema": spec.input_schema,
             "description": spec.description} for spec in make_world().functions}
         self.session.status = "thinking"
+        self.session.session_id = "fixture-native-session"
         self.session.execution_controller.active = True
         self.session.execution_controller.delegation = "fixture-delegation"
         self.session.execution_controller.state.update(task_id="task", segment_id="segment", status="running",
-            max_actions=8, delegation_active=True)
+            request_status="running", requests_used=1, max_actions=8, delegation_active=True,
+            host_request={"purpose": "execution", "status": "running", "generation": 1})
+        # Input-repair feedback is exercised inside an already authorized
+        # current Native request; an active old controller alone grants nothing.
+        self.session.active_native_request = {"purpose": "execution", "world_write_authorized": True,
+            "session_id": self.session.session_id, "request_id": "grove-request-" + "a" * 32,
+            "task_id": "task", "segment_id": "segment"}
         self.session.invoke = AsyncMock()
         self.session.execution_controller.write = AsyncMock()
         self.observation = self.session.present_agent_result("map.viewport", {

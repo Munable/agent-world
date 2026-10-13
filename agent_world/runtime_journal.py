@@ -12,6 +12,19 @@ MAX_COMMIT_HISTORY_BYTES = 2 * 1024 * 1024
 MAX_HISTORY_PAGE_BYTES = 1024 * 1024
 
 
+def checkpoint_history_floor_tx(c, universe):
+    row = c.execute("SELECT floor FROM checkpoint_history_floors WHERE universe=?", (universe,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def state_revision_tx(c, universe):
+    """Current revision survives journal retention, within the caller's snapshot."""
+    row = c.execute("SELECT floor FROM state_history_floors WHERE universe=?", (universe,)).fetchone()
+    floor = int(row[0]) if row else 0
+    latest = c.execute("SELECT COALESCE(MAX(seq),0) FROM state_changes WHERE universe=?", (universe,)).fetchone()[0]
+    return max(floor, checkpoint_history_floor_tx(c, universe), int(latest)), floor
+
+
 class RuntimeJournal:
     """Private durable state history. Never a public subscription or an authorization bypass."""
 
@@ -112,15 +125,11 @@ class RuntimeJournal:
         return int(seq)
 
     def _state_revision_tx(self, c, universe):
-        row = c.execute("SELECT floor FROM state_history_floors WHERE universe=?", (universe,)).fetchone()
-        floor = int(row[0]) if row else 0
-        latest = c.execute("SELECT COALESCE(MAX(seq),0) FROM state_changes WHERE universe=?", (universe,)).fetchone()[0]
-        return max(floor, self._checkpoint_history_floor_tx(c, universe), int(latest)), floor
+        return state_revision_tx(c, universe)
 
     @staticmethod
     def _checkpoint_history_floor_tx(c, universe):
-        row = c.execute("SELECT floor FROM checkpoint_history_floors WHERE universe=?", (universe,)).fetchone()
-        return int(row[0]) if row else 0
+        return checkpoint_history_floor_tx(c, universe)
 
     def read_state_history(self, universe, *, after=0, limit=50, retained_only=False):
         """Trusted history, distinguishing completeness from still-retained old rows.

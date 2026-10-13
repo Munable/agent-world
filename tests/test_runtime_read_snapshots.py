@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 import threading
+import multiprocessing
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,27 @@ from agent_world import WorldRuntime, WorldDefinition, FunctionSpec, FunctionOut
 from agent_world.errors import FunctionVersionMismatch, PermissionDenied, WorldVersionMismatch
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+def cross_process_writer(db_path, role, pipe):
+    """A distinct process has its own writer gate and callback registry."""
+    runtime = WorldRuntime(db_path)
+    try:
+        def read(ctx, args):
+            return FunctionOutcome(ctx.get_state("shared", "number"))
+        def write(ctx, args):
+            ctx.set_state("shared", "number", {"value": 2})
+            return FunctionOutcome({"written": True})
+        runtime.install_world("u", RuntimeReadSnapshotContracts.fixture(None, read, write=write))
+        pipe.send("ready")
+        if pipe.poll(8) and pipe.recv() == "write":
+            result = runtime.call_function("u", "write", role, {}, operation_id="new-fact")
+            pipe.send({"ok": result["ok"]})
+    except BaseException as exc:
+        pipe.send({"error": repr(exc)})
+    finally:
+        runtime.close()
+        pipe.close()
 
 
 class RuntimeReadSnapshotContracts(unittest.TestCase):
@@ -53,6 +75,7 @@ class RuntimeReadSnapshotContracts(unittest.TestCase):
 
         self.runtime.install_world("u", self.fixture(read, write=write))
         prior = self.runtime.view_snapshot("u", self.role, "stable")
+        prior_sequence = self.runtime.query_function("u", "number", self.role, {})["snapshot_seq"]
         with ThreadPoolExecutor(max_workers=10) as pool:
             writer = pool.submit(self.runtime.call_function, "u", "write", self.role, {}, operation_id="writer")
             try:
@@ -69,12 +92,15 @@ class RuntimeReadSnapshotContracts(unittest.TestCase):
                 ]
                 results = [future.result(timeout=1) for future in readers]
                 self.assertEqual(results[0]["result"], {"value": 1})
+                self.assertEqual(results[0]["snapshot_seq"], prior_sequence)
                 self.assertEqual(results[6]["cursor"], prior["cursor"])
                 self.assertFalse(writer.done())
             finally:
                 release.set()
             writer.result(timeout=2)
-        self.assertEqual(self.runtime.query_function("u", "number", self.role, {})["result"], {"value": 2})
+        current = self.runtime.query_function("u", "number", self.role, {})
+        self.assertEqual(current["result"], {"value": 2})
+        self.assertGreater(current["snapshot_seq"], prior_sequence)
 
     def test_install_during_read_keeps_old_state_and_old_authorizer_together(self):
         entered, release = threading.Event(), threading.Event()
@@ -111,6 +137,42 @@ class RuntimeReadSnapshotContracts(unittest.TestCase):
         with self.assertRaises(PermissionDenied):
             self.runtime.query_function("u", "number", self.role, {}, expected_version=2)
 
+    def test_query_watermark_stays_with_facts_when_a_write_commits_during_read(self):
+        entered, release = threading.Event(), threading.Event()
+        pause = {"enabled": False}
+
+        def read(ctx, args):
+            value = ctx.get_state("shared", "number")
+            if pause["enabled"]:
+                entered.set()
+                if not release.wait(3):
+                    raise RuntimeError("test reader was not released")
+            return FunctionOutcome({"value": value, "watermark": ctx.read_snapshot_seq})
+
+        def write(ctx, args):
+            ctx.set_state("shared", "number", {"value": 2})
+            return FunctionOutcome({"written": True})
+
+        self.runtime.install_world("u", self.fixture(read, write=write))
+        before = self.runtime.query_function("u", "number", self.role, {})
+        pause["enabled"] = True
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reader = pool.submit(self.runtime.query_function, "u", "number", self.role, {})
+            try:
+                self.assertTrue(entered.wait(1))
+                pool.submit(self.runtime.call_function, "u", "write", self.role, {},
+                            operation_id="concurrent").result(timeout=1)
+            finally:
+                release.set()
+            saved = reader.result(timeout=2)
+        self.assertEqual(saved["result"]["value"], {"value": 1})
+        self.assertEqual(saved["snapshot_seq"], before["snapshot_seq"])
+        self.assertEqual(saved["result"]["watermark"], saved["snapshot_seq"])
+        pause["enabled"] = False
+        current = self.runtime.query_function("u", "number", self.role, {})
+        self.assertEqual(current["result"]["value"], {"value": 2})
+        self.assertGreater(current["snapshot_seq"], saved["snapshot_seq"])
+
     def test_old_code_bundle_cannot_read_a_newer_persisted_contract(self):
         def read(ctx, args):
             return FunctionOutcome({"read": True})
@@ -122,6 +184,17 @@ class RuntimeReadSnapshotContracts(unittest.TestCase):
         with patch.object(self.runtime, "_capture_registry", return_value=old):
             with self.assertRaises(WorldVersionMismatch):
                 self.runtime.query_function("u", "number", self.role, {})
+
+    def test_read_watermark_survives_complete_history_retention(self):
+        def read(ctx, args):
+            return FunctionOutcome({"value": ctx.get_state("shared", "number"), "watermark": ctx.read_snapshot_seq})
+        self.runtime.install_world("u", self.fixture(read))
+        before = self.runtime.query_function("u", "number", self.role, {})
+        self.assertGreater(before["snapshot_seq"], 0)
+        self.assertGreater(self.runtime.prune_state_history("u", before["snapshot_seq"]), 0)
+        current = self.runtime.query_function("u", "number", self.role, {})
+        self.assertEqual(current["result"], before["result"])
+        self.assertEqual(current["snapshot_seq"], before["snapshot_seq"])
 
     def test_unmanaged_bundle_cannot_bypass_newly_installed_world_authorization(self):
         def read(ctx, args):
@@ -232,12 +305,18 @@ class RuntimeReadSnapshotContracts(unittest.TestCase):
 
         initial = self.fixture(read, write=write)
         self.runtime.install_world("u", initial)
-        # Another legitimate Runtime models a separate process. Its writes
+        # A real separate process has an independent writer gate. Its writes
         # can commit after the install SQL transaction but before this host's
         # callback publication; process-local writer locks cannot fence them.
-        writer_runtime = WorldRuntime(self.runtime.db_path)
-        self.addCleanup(lambda: getattr(writer_runtime, "close", lambda: None)())
-        writer_runtime.install_world("u", initial)
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe()
+        writer = context.Process(target=cross_process_writer, args=(self.runtime.db_path, self.role, child))
+        writer.start()
+        child.close()
+        self.addCleanup(parent.close)
+        self.addCleanup(lambda: writer.join(timeout=10))
+        self.assertTrue(parent.poll(5))
+        self.assertEqual(parent.recv(), "ready")
         updated = replace(initial, functions=tuple(
             replace(spec, authorize=lambda ctx, args: False) if spec.name == "number" else spec
             for spec in initial.functions))
@@ -272,8 +351,9 @@ class RuntimeReadSnapshotContracts(unittest.TestCase):
                 self.assertTrue(captured.wait(1))
                 installer = pool.submit(self.runtime.install_world, "u", updated)
                 self.assertTrue(committed.wait(1))
-                pool.submit(writer_runtime.call_function, "u", "write", self.role, {},
-                            operation_id="new-fact").result(timeout=1)
+                parent.send("write")
+                self.assertTrue(parent.poll(1), "cross-process write waited for callback publication")
+                self.assertEqual(parent.recv(), {"ok": True})
                 release_capture.set()
                 self.assertTrue(beginning.wait(1))
                 with self.assertRaises(TimeoutError):

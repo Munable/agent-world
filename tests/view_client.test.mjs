@@ -46,6 +46,18 @@ const denied = new WorldClient("http://localhost:9876", () => "TEST_ONLY", async
 denied.view = base;
 await assert.rejects(() => denied.request("/v1/views"));
 assert.equal(denied.view, null);
+const temporaryRefusal = {error: 'DomainBusy', message: '正在结算', retryable: true,
+  recovery: 'retry_same_operation', retry_after_seconds: 0.2, details: {domain: 'work-a'}};
+const busy = new WorldClient('http://localhost:9876', () => 'TEST_ONLY', async () => ({
+  ok: false, status: 409, json: async () => temporaryRefusal}));
+await assert.rejects(() => busy.act('grove.interact', {}, 'original-intent'), error => {
+  assert.equal(error.retryable, true);
+  assert.equal(error.retry_after_seconds, 0.2);
+  assert.equal(error.recovery, 'retry_same_operation');
+  assert.deepEqual(error.details, temporaryRefusal.details);
+  assert.notEqual(error.details, temporaryRefusal.details);
+  return true;
+});
 let pendingReply;
 const revokedRace = new WorldClient("http://localhost:9876", () => "TEST_ONLY", (url) => {
   if (url.endsWith("/denied")) return Promise.resolve({ok: false, status: 401, json: async () => ({error: "InvalidIdentityToken"})});

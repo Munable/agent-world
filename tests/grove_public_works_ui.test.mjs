@@ -11,14 +11,14 @@ const source=readFileSync(new URL('../agent_world/grove_web/grove.js',import.met
 {
   const work={entity_id:'creation',nearby:true,location:{x:90,y:90}};
   const bounds={min_x:-8,max_x:8,min_y:-8,max_y:8};
-  const world={bounds,entities:[],inventory:[{id:'creation',owner:'self'}]};
+  const world={bounds,entities:[],inventory:[{id:'creation',custody:{scope:'private',holder_id:'self',container_id:null}}]};
   assert.equal(ui.publicWorkLocalTarget(work,world,true),null);
-  world.entities=[{id:'creation',x:90,y:90}];
+  world.entities=[{id:'creation',x:90,y:90,custody:{scope:'public',holder_id:null,container_id:null}}];
   assert.equal(ui.publicWorkLocalTarget(work,world,true),null);
-  world.entities=[{id:'creation',x:2,y:3}];
+  world.entities=[{id:'creation',x:2,y:3,custody:{scope:'public',holder_id:null,container_id:null}}];
   assert.equal(ui.publicWorkLocalTarget(work,world,false),null);
   assert.equal(ui.publicWorkLocalTarget(work,world,true),world.entities[0]);
-  world.entities[0].container='closed-container';
+  world.entities[0].custody.container_id='closed-container';
   assert.equal(ui.publicWorkLocalTarget(work,world,true),null);
 }
 
@@ -86,7 +86,7 @@ const source=readFileSync(new URL('../agent_world/grove_web/grove.js',import.met
   const work={entity_id:'public',nearby:true,location:{x:100,y:100}};
   await context.selectPublicWork(work);
   assert(!calls.some(([kind])=>kind==='select'||kind==='stop'));
-  world.entities=[{id:'public',x:1,y:2}];await context.selectPublicWork(work);
+  world.entities=[{id:'public',x:1,y:2,custody:{scope:'public',holder_id:null,container_id:null}}];await context.selectPublicWork(work);
   assert.equal(calls.filter(([kind])=>kind==='select').length,1);
   assert.deepEqual(calls.at(-1),['select','public']);
 }

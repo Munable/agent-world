@@ -17,6 +17,13 @@ from .world_checkpoints import (
 from .world_timers import RetryTimer
 
 
+# These bound storage work rather than alter the world's logical domain budget.
+CHECKPOINT_BATCH_ITEMS = 8
+CHECKPOINT_BATCH_CHANGES = 2048
+CHECKPOINT_BATCH_HISTORY_BYTES = 4 * 1024 * 1024
+CHECKPOINT_BATCH_SECONDS = 0.025
+
+
 class RuntimeCheckpoints:
     def _init_checkpoints_tx(self, c):
         c.execute("""CREATE TABLE IF NOT EXISTS world_checkpoints(
@@ -149,93 +156,154 @@ class RuntimeCheckpoints:
             return [candidate for candidate in candidates if candidate not in seen][:limit]
 
     def _run_one_checkpoint(self, universe, checkpoint_key, generation):
-        with self._conn(serialized=True, purpose="checkpoint") as c:
+        result = self._run_checkpoint_batch(universe, [(checkpoint_key, generation)])
+        return result["processed"][0] if result["processed"] else None
+
+    def _run_checkpoint_batch(self, universe, candidates, *, deadline=None):
+        """Stage a fixed ready page; publish nothing before its FULL commit.
+
+        An item owns a logical journal/receipt and handler savepoint. A second
+        savepoint can defer a legal item that would exceed the batch's aggregate
+        storage bound. Deferred work keeps its original generation and attempt.
+        A first legal item that exceeds only the physical group policy commits
+        alone, preserving the existing logical item budget and forward progress.
+        New successors never join this physical transaction.
+        """
+        candidates = tuple(candidates)[:CHECKPOINT_BATCH_ITEMS]
+        processed = []
+        consumed = changes = history_bytes = 0
+        stop_reason = "candidate-page"
+        with self._conn(serialized=True, purpose="checkpoint-batch") as c:
+            self._work_timings.annotate(handler="checkpoint-batch", batch_status="staging",
+                batch_candidates=0, logical_results=0, batch_changes=0, batch_history_bytes=0)
             with self._work_timings.phase("begin"):
                 c.execute("BEGIN IMMEDIATE")
-            self._check_world_tx(c, universe)
-            now = time.time()
-            row = c.execute("""SELECT * FROM world_checkpoints
-                WHERE universe=? AND checkpoint_key=? AND generation=? AND status='pending'
-                AND available_at<=? AND due_at<=?""", (universe, checkpoint_key, generation, now, now)).fetchone()
-            if row is None:
-                return None
-            self._work_timings.annotate(handler=row["handler"], generation=generation)
-            definition = self._worlds[universe]
-            spec = next((spec for spec in definition.checkpoints if spec.name == row["handler"]), None)
-            operation_id = "checkpoint:" + self._sha256({"universe": universe, "key": checkpoint_key,
-                                                       "generation": generation})
-            marker = self._journal_marker_tx(c)
-            attempt = row["attempts"] + 1
-            if (spec is None or row["world_id"] != definition.world_id or row["world_version"] != definition.version
-                    or row["handler_version"] != spec.version):
-                return self._checkpoint_failure_tx(c, row, marker, "blocked", "CheckpointVersionMismatch",
-                                                   operation_id, attempt=row["attempts"], started_at=now)
-            ctx = self._context_tx(c, universe, CHECKPOINT_ACTOR, "checkpoint:" + spec.name, spec.version,
-                                   access="write", operation_id=operation_id, now=now)
-            ctx.checkpoint = CheckpointInvocation(checkpoint_key, generation, row["due_at"], row["created_by"],
-                row["created_operation_id"], row["created_at"], attempt)
-            arguments = json.loads(row["arguments_json"])
-            phase = arguments.get("phase") if isinstance(arguments, dict) else None
-            self._work_timings.annotate(task_phase=phase if phase in ("prepare", "advance") else None)
-            c.execute("SAVEPOINT checkpoint_effects")
-            try:
-                validate(spec.input_schema, arguments)
-                if spec.authorize is not None:
-                    ctx.access = "read"
-                    try:
-                        allowed = self._run_user_code(c, spec.authorize, ctx, json.loads(row["arguments_json"]), read_only=True)
-                    finally:
-                        ctx.access = "write"
-                    if allowed is not True:
-                        raise PermissionDenied("checkpoint precondition is no longer authorized")
-                with self._work_timings.phase("handler", cpu=True):
-                    outcome = self._run_user_code(c, spec.handler, ctx, arguments)
-                self._validate_outcome(outcome, {"output_schema": spec.output_schema})
-                receipt = self._commit_outcome_tx(c, ctx, outcome, json.loads(row["arguments_json"]),
-                    journal_marker=marker, source="checkpoint", record_operation=False,
-                    extra_receipt={"checkpoint_key": checkpoint_key, "generation": generation,
-                                   "due_at": row["due_at"], "attempt": attempt, "scheduled_by": row["created_by"]})
-                # The handler may have atomically scheduled this key's successor.
-                # Completing generation N must never erase pending generation N+1.
-                c.execute("""UPDATE world_checkpoints SET completed_through=MAX(completed_through,?),
-                    latest_completed_generation=?,latest_receipt_json=?,latest_commit_seq=?,
-                    status=CASE WHEN generation=? THEN 'completed' ELSE status END,
-                    attempts=CASE WHEN generation=? THEN ? ELSE attempts END,
-                    completed_at=CASE WHEN generation=? THEN ? ELSE completed_at END,
-                    last_error_code=CASE WHEN generation=? THEN NULL ELSE last_error_code END
-                    WHERE universe=? AND checkpoint_key=?""",
-                    (generation, generation, json_text(receipt), receipt["commit_seq"], generation,
-                     generation, attempt, generation, time.time(), generation, universe, checkpoint_key))
-                c.execute("RELEASE checkpoint_effects")
-                self._work_timings.annotate(status="completed", commit_seq=receipt["commit_seq"],
-                    ready_lag_seconds=max(0, now-row["available_at"]))
-                return {"checkpoint_key": checkpoint_key, "generation": generation,
-                        "status": "completed", "attempt": attempt,
-                        "ready_lag_seconds": max(0, now - row["available_at"]),
-                        **self._checkpoint_work_tx(c, receipt["commit_seq"],
-                                                  len(receipt.get("stream_event_ids", ())))}
-            except (KeyboardInterrupt, SystemExit):
+            compute_deadline = time.monotonic() + CHECKPOINT_BATCH_SECONDS
+            for checkpoint_key, generation in candidates:
+                if consumed:
+                    if self._lock.snapshot()["foreground_waiting"]:
+                        stop_reason = "foreground"
+                        break
+                    if time.monotonic() >= compute_deadline or (deadline is not None
+                            and time.monotonic() >= deadline):
+                        stop_reason = "time"
+                        break
+                c.execute("SAVEPOINT checkpoint_batch_item")
+                item = self._run_one_checkpoint_tx(c, universe, checkpoint_key, generation)
+                oversized = item is not None and (changes + item["change_count"] > CHECKPOINT_BATCH_CHANGES
+                    or history_bytes + item["history_bytes"] > CHECKPOINT_BATCH_HISTORY_BYTES)
+                if oversized and processed:
+                    c.execute("ROLLBACK TO checkpoint_batch_item")
+                    c.execute("RELEASE checkpoint_batch_item")
+                    stop_reason = ("changes" if changes + item["change_count"] > CHECKPOINT_BATCH_CHANGES
+                                   else "bytes")
+                    break
+                c.execute("RELEASE checkpoint_batch_item")
+                consumed += 1
+                if item is not None:
+                    processed.append(item)
+                    changes += item["change_count"]
+                    history_bytes += item["history_bytes"]
+                self._work_timings.annotate(batch_candidates=consumed, logical_results=len(processed),
+                    batch_changes=changes, batch_history_bytes=history_bytes)
+                if oversized:
+                    stop_reason = "oversized-singleton"
+                    break
+            self._work_timings.annotate(handler="checkpoint-batch", batch_status="staged",
+                batch_candidates=consumed, logical_results=len(processed), batch_changes=changes,
+                batch_history_bytes=history_bytes, batch_stop_reason=stop_reason)
+        # The connection context commits before this return. On any storage,
+        # BaseException or COMMIT fault no staged result escapes this method.
+        return {"processed": processed, "consumed": consumed}
+
+    def _run_one_checkpoint_tx(self, c, universe, checkpoint_key, generation):
+        self._check_world_tx(c, universe)
+        now = time.time()
+        row = c.execute("""SELECT * FROM world_checkpoints
+            WHERE universe=? AND checkpoint_key=? AND generation=? AND status='pending'
+            AND available_at<=? AND due_at<=?""", (universe, checkpoint_key, generation, now, now)).fetchone()
+        if row is None:
+            return None
+        self._work_timings.annotate(handler=row["handler"], generation=generation)
+        definition = self._worlds[universe]
+        spec = next((spec for spec in definition.checkpoints if spec.name == row["handler"]), None)
+        operation_id = "checkpoint:" + self._sha256({"universe": universe, "key": checkpoint_key,
+                                                   "generation": generation})
+        marker = self._journal_marker_tx(c)
+        attempt = row["attempts"] + 1
+        if (spec is None or row["world_id"] != definition.world_id or row["world_version"] != definition.version
+                or row["handler_version"] != spec.version):
+            return self._checkpoint_failure_tx(c, row, marker, "blocked", "CheckpointVersionMismatch",
+                                               operation_id, attempt=row["attempts"], started_at=now)
+        ctx = self._context_tx(c, universe, CHECKPOINT_ACTOR, "checkpoint:" + spec.name, spec.version,
+                               access="write", operation_id=operation_id, now=now)
+        ctx.checkpoint = CheckpointInvocation(checkpoint_key, generation, row["due_at"], row["created_by"],
+            row["created_operation_id"], row["created_at"], attempt)
+        arguments = json.loads(row["arguments_json"])
+        phase = arguments.get("phase") if isinstance(arguments, dict) else None
+        self._work_timings.annotate(task_phase=phase if phase in ("prepare", "advance") else None)
+        c.execute("SAVEPOINT checkpoint_effects")
+        try:
+            validate(spec.input_schema, arguments)
+            if spec.authorize is not None:
+                ctx.access = "read"
+                try:
+                    allowed = self._run_user_code(c, spec.authorize, ctx, json.loads(row["arguments_json"]), read_only=True)
+                finally:
+                    ctx.access = "write"
+                if allowed is not True:
+                    raise PermissionDenied("checkpoint precondition is no longer authorized")
+            with self._work_timings.phase("handler", cpu=True):
+                outcome = self._run_user_code(c, spec.handler, ctx, arguments)
+            self._validate_outcome(outcome, {"output_schema": spec.output_schema})
+            # Measure this item's actual before/value bytes before a metadata
+            # history rule strips its journal payload during managed commit.
+            history_bytes = c.execute("""SELECT COALESCE(SUM(
+                length(CAST(COALESCE(before_json,'') AS BLOB))+length(CAST(value_json AS BLOB))),0)
+                FROM state_changes WHERE seq>?""", (marker,)).fetchone()[0]
+            receipt = self._commit_outcome_tx(c, ctx, outcome, json.loads(row["arguments_json"]),
+                journal_marker=marker, source="checkpoint", record_operation=False,
+                extra_receipt={"checkpoint_key": checkpoint_key, "generation": generation,
+                               "due_at": row["due_at"], "attempt": attempt, "scheduled_by": row["created_by"]})
+            # The handler may have atomically scheduled this key's successor.
+            # Completing generation N must never erase pending generation N+1.
+            c.execute("""UPDATE world_checkpoints SET completed_through=MAX(completed_through,?),
+                latest_completed_generation=?,latest_receipt_json=?,latest_commit_seq=?,
+                status=CASE WHEN generation=? THEN 'completed' ELSE status END,
+                attempts=CASE WHEN generation=? THEN ? ELSE attempts END,
+                completed_at=CASE WHEN generation=? THEN ? ELSE completed_at END,
+                last_error_code=CASE WHEN generation=? THEN NULL ELSE last_error_code END
+                WHERE universe=? AND checkpoint_key=?""",
+                (generation, generation, json_text(receipt), receipt["commit_seq"], generation,
+                 generation, attempt, generation, time.time(), generation, universe, checkpoint_key))
+            c.execute("RELEASE checkpoint_effects")
+            self._work_timings.annotate(status="completed", commit_seq=receipt["commit_seq"],
+                ready_lag_seconds=max(0, now-row["available_at"]))
+            return {"checkpoint_key": checkpoint_key, "generation": generation,
+                    "status": "completed", "attempt": attempt,
+                    "ready_lag_seconds": max(0, now - row["available_at"]),
+                    **self._checkpoint_work_tx(c, receipt["commit_seq"],
+                                              len(receipt.get("stream_event_ids", ())), history_bytes=history_bytes)}
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            # Engine failures are not a domain rejection. SQLite can abort
+            # the whole transaction; the enclosing batch must decide rollback.
+            if not c.in_transaction or isinstance(exc, sqlite3.DatabaseError):
                 raise
-            except Exception as exc:
-                storage_codes = {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_FULL,
-                    sqlite3.SQLITE_IOERR, sqlite3.SQLITE_NOMEM, sqlite3.SQLITE_INTERRUPT,
-                    sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB, sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_READONLY}
-                code = getattr(exc, "sqlite_errorcode", 0) & 255
-                if not c.in_transaction or (isinstance(exc, sqlite3.DatabaseError) and code in storage_codes):
-                    raise
-                c.execute("ROLLBACK TO checkpoint_effects")
-                c.execute("RELEASE checkpoint_effects")
-                if isinstance(exc, RetryTimer):
-                    status = "pending" if attempt < row["max_attempts"] else "failed"
-                    code = "RetryTimer" if status == "pending" else "CheckpointAttemptsExhausted"
-                elif isinstance(exc, (PermissionDenied, RuleViolation)):
-                    status, code = "rejected", type(exc).__name__
-                elif isinstance(exc, (SchemaRejected, InvalidArguments, CheckpointConflict, WorldDefinitionError)):
-                    status, code = "failed", type(exc).__name__
-                else:
-                    status, code = "failed", "CheckpointHandlerError"
-                return self._checkpoint_failure_tx(c, row, marker, status, code, operation_id,
-                                                   attempt=attempt, started_at=now)
+            c.execute("ROLLBACK TO checkpoint_effects")
+            c.execute("RELEASE checkpoint_effects")
+            if isinstance(exc, RetryTimer):
+                status = "pending" if attempt < row["max_attempts"] else "failed"
+                code = "RetryTimer" if status == "pending" else "CheckpointAttemptsExhausted"
+            elif isinstance(exc, (PermissionDenied, RuleViolation)):
+                status, code = "rejected", type(exc).__name__
+            elif isinstance(exc, (SchemaRejected, InvalidArguments, CheckpointConflict, WorldDefinitionError)):
+                status, code = "failed", type(exc).__name__
+            else:
+                status, code = "failed", "CheckpointHandlerError"
+            return self._checkpoint_failure_tx(c, row, marker, status, code, operation_id,
+                                               attempt=attempt, started_at=now)
 
     def _checkpoint_failure_tx(self, c, row, marker, status, code, operation_id, *, attempt, started_at):
         self._work_timings.annotate(status=status, failure_code=code,
@@ -266,6 +334,7 @@ class RuntimeCheckpoints:
                 **self._checkpoint_work_tx(c, commit_seq, 0)}
 
     @staticmethod
-    def _checkpoint_work_tx(c, commit_seq, stream_events):
+    def _checkpoint_work_tx(c, commit_seq, stream_events, *, history_bytes=0):
         changes = c.execute("SELECT change_count FROM world_commits WHERE seq=?", (commit_seq,)).fetchone()[0]
-        return {"commit_seq": commit_seq, "change_count": changes, "stream_event_count": stream_events}
+        return {"commit_seq": commit_seq, "change_count": changes, "stream_event_count": stream_events,
+                "history_bytes": history_bytes}

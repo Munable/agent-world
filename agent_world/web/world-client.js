@@ -5,6 +5,9 @@ export class WorldRequestError extends Error {
     this.status = status;
     this.code = body.error;
     this.recovery = body.recovery;
+    this.retryable = body.retryable;
+    this.retry_after_seconds = body.retry_after_seconds;
+    this.details = body.details === undefined ? undefined : structuredClone(body.details);
   }
 }
 

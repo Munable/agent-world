@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 from copy import deepcopy
 from dataclasses import dataclass
+import hashlib
 import json
 import secrets
 import time
@@ -26,6 +27,49 @@ from .grove_connector_errors import ConnectorError
 MAX_ACTION_TARGETS = 4
 MAX_ACTION_SUMMARY_BYTES = 8 * 1024
 RECEIPT_HISTORY_SCOPE = "formal_agent_writes"
+MAX_TASK_REQUESTS = 32
+_PAGED_PREPARATION_READS = {
+    "grove.definition_list": {"definitions": "definition_ref"},
+    "grove.public_works": {"works": "entity_id", "author_matches": "author"},
+    "grove.content_history": {"contributions": "id", "outcome_refs": "id"},
+}
+
+
+def _preparation_read_signature(function: str, arguments: dict, *, action_epoch: int = 0):
+    """Identify a semantic query after actual actions, independent of read handles."""
+    if function not in {"map.viewport", "grove.inspect", "grove.rule_catalog",
+            "grove.definition_read", "grove.definition_list", "grove.definition_validate",
+            "grove.fabrication_options", "grove.public_works", "grove.content_history"} or not isinstance(arguments, dict):
+        return None
+    semantic = {key: value for key, value in arguments.items()
+                if key not in {"base_observation_id", "limit", "cursor", "after", "offset"}}
+    try:
+        encoded = json.dumps([function, semantic, action_epoch], ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _preparation_page_keys(function: str, query_key: str, delivered: dict):
+    """Only delivered stable records make another page useful; cursors never do."""
+    if not isinstance(delivered, dict) or delivered.get("ok") is False:
+        return None
+    value = delivered.get("result", delivered)
+    if not isinstance(value, dict):
+        return None
+    rows = [(name, value[name], identity) for name, identity in _PAGED_PREPARATION_READS[function].items()
+            if isinstance(value.get(name), list)]
+    if not rows:
+        return None
+    keys = []
+    for name, page, identity in rows:
+        for row in page:
+            if not isinstance(row, dict) or not isinstance(row.get(identity), str) or not row[identity]:
+                return None
+            encoded = json.dumps([query_key, name, row[identity]], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            keys.append(hashlib.sha256(encoded).hexdigest())
+    return list(dict.fromkeys(keys))
 
 
 def _summary_outcome(outcome):
@@ -130,7 +174,7 @@ class ExecutionPorts:
 
     read accepts kind="receipt"/"facts" and operation_id/context_entity_id,
     plus bounded action_entity_ids for independent exact current target reads.
-    native_segment accepts kind="execute"/"compact"/"history", a goal and an
+    native_segment accepts kind="execute"/"history", a goal and an
     optional context_entity_id. recover settles original operations without
     replay; unknown_operations exposes the transport's original journal.
     settle confirms the saved native request and admitted-write drain.
@@ -149,17 +193,21 @@ class ExecutionController:
     def __init__(self, role_id: str, *, max_requests: int, max_world_calls: int,
                  max_seconds: int, ports: ExecutionPorts | None = None):
         self.role_id = role_id
-        self.request_limit, self.world_call_limit = max_requests, max_world_calls
+        self.request_batch_limit, self.request_limit = max_requests, MAX_TASK_REQUESTS
+        self.world_call_limit = max_world_calls
         self.ports = ports
         self.state = {"status": "idle", "goal": "", "max_actions": 0, "actions_count": 0,
             "control_status": "idle", "delegation_active": False,
-            "grant_version": None, "receipts": [], "receipt_history_complete": True,
+            "grant_version": None, "grant_id": None, "receipts": [], "receipt_history_complete": True,
             "receipt_history_scope": RECEIPT_HISTORY_SCOPE, "readback": None,
             "readback_actual": False, "error": None,
             "task_id": "", "context_entity_id": None, "requests_used": 0, "max_requests": 4,
             "request_status": "idle", "stop_reason": "", "resume_allowed": False,
             "grant_action_offset": 0, "pending_grant_action_offset": None, "grant_operation_id": None,
             "readback_actions_count": None, "no_progress_segments": 0,
+            "preparation_count": 0, "preparation_keys": [],
+            "host_request": {"status": "idle", "purpose": None, "generation": 0},
+            "persistence_failure": None,
             "segment_id": "", "checkpoint": None, "goal_result": None, "segments": [], "phase_timings": [],
             "context_result_reference": None, "context_reference_attempted": True, "world_results": [],
             "settlement": None, "action_entity_ids": [],
@@ -187,7 +235,22 @@ class ExecutionController:
 
     def _persist(self):
         if self.ports is not None:
-            self.ports.persist()
+            try:
+                self.ports.persist()
+            except Exception as exc:
+                self.persistence_failed(exc)
+                raise ConnectorError("ExecutionPersistenceFailed", "本机执行记录未能保存；原行动保留，恢复原会话与回执后才能接续。", 503) from exc
+
+    def persistence_failed(self, error: BaseException):
+        """A failed audit save closes local admission independently of model text."""
+        self.active = False
+        self.state["resume_allowed"] = False
+        if not self.state.get("persistence_failure"):
+            self.state["persistence_failure"] = {"code": "ExecutionPersistenceFailed", "error_type": type(error).__name__}
+
+    def ensure_persistence_ready(self):
+        if self.state.get("persistence_failure"):
+            raise ConnectorError("ExecutionPersistenceFailed", "本机执行记录未能保存；原行动保留，恢复原会话与回执后才能接续。", 503)
 
     def snapshot(self) -> dict:
         """Adapters observe owned task state; nested records are never write ports."""
@@ -305,6 +368,11 @@ class ExecutionController:
                 stop_reason="连接器已重启；先恢复原回执和现场，再明确接续。")
         if (self.state.get("history_recovery") or {}).get("status") == "running":
             self.state["history_recovery"]["status"] = "uncertain"
+        host = self.state.get("host_request")
+        if not isinstance(host, dict):
+            self.state["host_request"] = {"status": "unsettled", "purpose": None, "generation": 0}
+        elif host.get("status") not in {"idle", "idle_confirmed"}:
+            host["status"] = "unsettled"
         return self.normalize_progress()
 
     def ensure_admission(self, *, disconnecting=False):
@@ -315,12 +383,14 @@ class ExecutionController:
 
     def ensure_native_ready(self):
         self.ensure_admission()
+        self.ensure_persistence_ready()
         if not self.native_ready():
             raise ConnectorError("OriginalRequestUnsettled", "原请求尚未确认停止；先恢复原会话和回执，再启动伙伴请求。", 409)
 
     def native_ready(self) -> bool:
         never_started = self.state.get("request_status") == "not_started" and not self.state.get("requests_used")
-        return bool(never_started or self.state.get("request_status") in {"idle", "idle_confirmed"})
+        host_ready = self.state.get("host_request", {}).get("status") in {"idle", "idle_confirmed"}
+        return bool(host_ready and (never_started or self.state.get("request_status") in {"idle", "idle_confirmed"}))
 
     def admission(self, *, entered: bool, native_connected: bool,
                   worker_busy: bool, catalog: dict, publication_pending=False,
@@ -336,6 +406,8 @@ class ExecutionController:
 
         if disconnecting or self.reclaiming:
             common = decision("ReclaimBusy", "原请求正在收尾；先等原收尾完成再启动伙伴任务。")
+        elif self.state.get("persistence_failure"):
+            common = decision("ExecutionPersistenceFailed", "本机执行记录未能保存；先恢复原会话与回执。")
         elif self.unresolved:
             common = decision("UnknownWrite", "先核对原操作结果，再启动伙伴请求。")
         elif not entered or not native_connected:
@@ -376,11 +448,14 @@ class ExecutionController:
     def confirm_no_native_request(self):
         """Adapter confirmed there is no saved native session after worker drain."""
         self.state["request_status"] = "idle"
+        self.state["host_request"] = {"status": "idle", "purpose": None,
+            "generation": self.state.get("host_request", {}).get("generation", 0)}
         self._persist()
 
     def start(self, body: dict, *, entered: bool, native_connected: bool,
               worker_busy: bool, catalog: dict) -> dict:
         self.ensure_admission()
+        self.ensure_persistence_ready()
         if not isinstance(body, dict) or set(body) - {"goal", "max_actions", "max_requests", "context_entity_id", "compact_history"}:
             raise ConnectorError("InvalidArguments", "Expected an explicit goal and bounded action grant.")
         goal, maximum = body.get("goal"), body.get("max_actions", 32)
@@ -389,7 +464,7 @@ class ExecutionController:
         if type(maximum) is not int or not 1 <= maximum <= 64:
             raise ConnectorError("InvalidActionBudget", "每次目标最多授权 1–64 个世界动作。")
         request_budget = body.get("max_requests", 4)
-        if type(request_budget) is not int or not 1 <= request_budget <= self.request_limit:
+        if type(request_budget) is not int or not 1 <= request_budget <= self.request_batch_limit:
             raise ConnectorError("InvalidRequestBudget", "每个目标最多授权 1–8 次模型请求。")
         compact = body.get("compact_history", False)
         if type(compact) is not bool:
@@ -408,13 +483,13 @@ class ExecutionController:
             self.archive = (self.archive + [self.snapshot()])[-8:]
         # Preserve the public state shape and the fixed per-request budget.
         self.state.update(status="starting", goal=goal.strip(), max_actions=maximum, actions_count=0,
-            delegation_active=False, grant_version=None, control_status=None,
+            delegation_active=False, grant_version=None, grant_id=None, control_status=None,
             receipts=[], receipt_history_complete=True, receipt_history_scope=RECEIPT_HISTORY_SCOPE,
             readback=None, readback_actual=False, error=None, action_entity_ids=[],
             task_id="grove-task-" + secrets.token_hex(16), context_entity_id=selected,
             requests_used=0, max_requests=request_budget, request_status="idle", stop_reason="", resume_allowed=False,
             grant_action_offset=0, pending_grant_action_offset=None, grant_operation_id=None,
-            readback_actions_count=None, no_progress_segments=0,
+            readback_actions_count=None, no_progress_segments=0, preparation_count=0, preparation_keys=[],
             segment_id="", checkpoint=None, goal_result=None, segments=[], phase_timings=[], settlement=None,
             context_result_reference=None, context_reference_attempted=False, world_results=[],
             history_recovery={"requested": compact, "status": "not_started", "attempts": 0},
@@ -426,14 +501,16 @@ class ExecutionController:
     def resume(self, body: dict, *, entered: bool, native_connected: bool,
                worker_busy: bool) -> dict:
         self.ensure_admission()
+        self.ensure_persistence_ready()
         if (not isinstance(body, dict) or "task_id" not in body or set(body) - {"task_id", "compact_history", "additional_requests"} or
                 not isinstance(body["task_id"], str) or body["task_id"] != self.state.get("task_id")):
             raise ConnectorError("InvalidTask", "接续需要当前原任务标识；可明确追加模型请求，不接受替换目标或动作额度。")
         compact, additional = body.get("compact_history", False), body.get("additional_requests", 0)
         if type(compact) is not bool:
             raise ConnectorError("InvalidArguments", "compact_history 需要布尔值。")
-        if type(additional) is not int or additional < 0 or self.state.get("max_requests", 0) + additional > self.request_limit:
-            raise ConnectorError("InvalidRequestBudget", "追加后的原目标模型请求总额度不能超过 8 次。")
+        if (type(additional) is not int or not 0 <= additional <= self.request_batch_limit or
+                self.state.get("max_requests", 0) + additional > self.request_limit):
+            raise ConnectorError("InvalidRequestBudget", "每次明确接续最多追加 8 次请求；原目标累计总额度不能超过 32 次。")
         self.require_admission("conversation", entered=entered, native_connected=native_connected,
             worker_busy=worker_busy, catalog={})
         if (self.state.get("status") == "completed" or
@@ -463,19 +540,21 @@ class ExecutionController:
         if not self.state.get("task_id") or self.state.get("grant_operation_id") or self.state.get("receipts") or self.unresolved:
             return False
         changed = self.state.get("actions_count", 0) != 0 or self.state.get("grant_action_offset", 0) != 0
-        self.state.update(actions_count=0, grant_action_offset=0, grant_version=None, delegation_active=False)
+        self.state.update(actions_count=0, grant_action_offset=0, grant_version=None, grant_id=None,
+            delegation_active=False)
         if self.state.get("readback_actions_count") is not None:
             self.state["readback_actions_count"] = 0
         return changed
 
     def can_resume(self, *, additional_requests=0):
-        return bool(not self.reclaiming and self.state.get("task_id") and self.state.get("status") in {"paused", "error"} and
+        return bool(not self.reclaiming and not self.state.get("persistence_failure") and
+            self.state.get("task_id") and self.state.get("status") in {"paused", "error"} and
             (self.state.get("history_recovery") or {}).get("status") not in {"running", "uncertain", "failed"} and
             not self.unresolved and not self.state.get("delegation_active") and not self.delegation and
             self.state.get("actions_count", 0) < self.state.get("max_actions", 0) and
             self.state.get("max_requests", 0) + additional_requests <= self.request_limit and
             self.state.get("requests_used", 0) < self.state.get("max_requests", 0) + additional_requests and
-            self.state.get("request_status") == "idle_confirmed")
+            self.state.get("request_status") == "idle_confirmed" and self.native_ready())
 
     def operation_owner(self, function: str, arguments: dict, *, model_write=False) -> dict:
         if model_write:
@@ -538,6 +617,52 @@ class ExecutionController:
         owner["action_entity_ids"] = list(dict.fromkeys(
             [*targets, *owner.get("action_entity_ids", [])]))[:MAX_ACTION_TARGETS]
 
+    def preparation_read_delivered(self, function: str, arguments: dict, *, owner: dict, delivered: dict) -> bool:
+        """Record a new delivered preparation query; never an action or receipt.
+
+        The adapter has already checked successful projection and encoding.
+        Ownership is captured before its read awaits; reads
+        completing after a segment closes do not extend execution progress.
+        """
+        self.ensure_persistence_ready()
+        if (not isinstance(owner, dict) or owner.get("purpose") != "execution" or
+                not self.state.get("task_id") or not self.state.get("segment_id") or
+                owner.get("task_id") != self.state["task_id"] or
+                owner.get("segment_id") != self.state["segment_id"] or
+                not self.active or self.state.get("status") != "running" or
+                self.stopped or self.reclaiming or self.state.get("checkpoint") or self.unresolved):
+            return False
+        key = _preparation_read_signature(function, arguments,
+                                          action_epoch=self.state.get("actions_count", 0))
+        if key is None:
+            return False
+        keys = self.state.setdefault("preparation_keys", [])
+        previous_keys, previous_count = list(keys), self.state.get("preparation_count", 0)
+        if function in _PAGED_PREPARATION_READS:
+            page_keys = _preparation_page_keys(function, key, delivered)
+            if page_keys is None:
+                return False
+            first_page = key not in keys
+            new_keys = [page_key for page_key in page_keys if page_key not in keys]
+            if not new_keys and not (first_page and not page_keys):
+                return False
+            if first_page:
+                keys.append(key)
+            keys.extend(new_keys)
+        else:
+            if key in keys or not isinstance(delivered, dict) or delivered.get("ok") is False:
+                return False
+            keys.append(key)
+        # Retain every task key across segment/resume boundaries. Evicting an
+        # old key would let the same read repeatedly manufacture progress.
+        self.state["preparation_count"] = self.state.get("preparation_count", 0) + 1
+        try:
+            self._persist()
+        except Exception:
+            self.state.update(preparation_keys=previous_keys, preparation_count=previous_count)
+            raise
+        return True
+
     def phase(self, phase: str, started: float, *, status="confirmed", error=None):
         value = {"phase": phase, "request": self.state.get("requests_used", 0),
             "elapsed_seconds": round(time.monotonic() - started, 3), "status": status}
@@ -545,10 +670,17 @@ class ExecutionController:
             value["error_type"] = type(error).__name__
             if isinstance(error, ConnectorError):
                 value["error_code"] = error.code
-        self.state["phase_timings"] = (self.state.get("phase_timings", []) + [value])[-32:]
+        host = self.state["host_request"]
+        ordinary = phase.startswith("settle_") and host.get("settlement_scope") in {"entry", "explain"}
+        target = host if ordinary else self.state
+        if ordinary:
+            value.pop("request")
+            value["generation"] = host.get("generation", 0)
+        target["phase_timings"] = (target.get("phase_timings", []) + [value])[-32:]
         self._persist()
 
     def request_started(self, purpose: str) -> dict:
+        self.ensure_persistence_ready()
         if purpose in {"entry", "explain"}:
             self.ensure_native_ready()
             if self.stopped:
@@ -556,7 +688,8 @@ class ExecutionController:
             # These use the same saved main native session, but do not spend
             # an explicit goal's grant or manufacture task/segment ownership.
             # The adapter persists this status with the native inference entry.
-            self.state["request_status"] = "running"
+            host = self.state["host_request"]
+            self.state["host_request"] = {"purpose": purpose, "status": "running", "generation": host.get("generation", 0) + 1}
             return {}
         if purpose not in {"execution", "execution_summary"}:
             return {}
@@ -564,12 +697,17 @@ class ExecutionController:
             raise asyncio.CancelledError()
         if self.state["requests_used"] >= self.state["max_requests"]:
             raise ConnectorError("ExecutionRequestBudget", "原目标的模型请求额度已用完。", 409)
+        if self.state["host_request"].get("status") not in {"idle", "idle_confirmed"}:
+            raise ConnectorError("OriginalRequestUnsettled", "原请求尚未确认停止；先结算原会话，再开始执行段。", 409)
         self.state["requests_used"] += 1
         self.state["request_status"] = "summarizing" if purpose == "execution_summary" else "running"
+        host = self.state["host_request"]
+        self.state["host_request"] = {"purpose": purpose, "status": self.state["request_status"],
+            "generation": host.get("generation", 0) + 1}
         # The adapter persists this charge with its matching native inference
         # entry. A separate write here would split that original audit record.
         return {"task_id": self.state.get("task_id"), "segment_id": self.state.get("segment_id"),
-            "request_number": self.state["requests_used"]}
+            "request_number": self.state["requests_used"], "host_generation": self.state["host_request"]["generation"]}
 
     def request_returned(self, purpose: str) -> bool:
         """Adapter verified a complete terminal response from the main session.
@@ -579,7 +717,10 @@ class ExecutionController:
         """
         if purpose not in {"entry", "explain"} or self.stopped or self.reclaiming:
             return False
-        self.state["request_status"] = "idle"
+        host = self.state["host_request"]
+        if host.get("purpose") != purpose or host.get("status") != "running":
+            return False
+        host["status"] = "idle"
         self._persist()
         return True
 
@@ -588,10 +729,19 @@ class ExecutionController:
         if record.get("execution_write") and self.owns_operation(record):
             self.state.update(status="unknown", resume_allowed=False)
 
-    def settlement_started(self, stage: str) -> dict:
+    def settlement_started(self, stage: str, *, native_owner: dict | None = None) -> dict:
+        host = self.state["host_request"]
+        purpose = (native_owner or {}).get("purpose")
+        ordinary = purpose in {"entry", "explain"} and not host.get("task_cleanup_pending")
         owner = {"task_id": self.state.get("task_id"), "segment_id": self.state.get("segment_id"),
+            "native_purpose": purpose if ordinary else "execution", "host_generation": host.get("generation", 0),
             "reclaimed_request": self.state.get("request_status") == "unsettled" and
                 self.state.get("control_status") == "revoked"}
+        host["settlement_scope"] = owner["native_purpose"]
+        if ordinary:
+            host.update(status="settling", settlement={"stage": stage, "status": "checking", "elapsed_seconds": 0})
+            self._persist()
+            return owner
         self.active = False
         self.state.update(request_status="settling", resume_allowed=False,
             settlement={"stage": stage, "status": "checking", "elapsed_seconds": 0})
@@ -600,17 +750,32 @@ class ExecutionController:
 
     def _current_event(self, owner: dict | None) -> bool:
         return owner is None or (owner.get("task_id") == self.state.get("task_id") and
-            owner.get("segment_id") == self.state.get("segment_id"))
+            owner.get("segment_id") == self.state.get("segment_id") and
+            ("host_generation" not in owner or owner["host_generation"] == self.state["host_request"].get("generation", 0)))
 
     def native_status_observed(self, native_status: str, *, owner: dict):
         if self._current_event(owner):
-            self.state["settlement"]["native_status"] = native_status
+            target = self.state["host_request"] if owner.get("native_purpose") in {"entry", "explain"} else self.state
+            target["settlement"]["native_status"] = native_status
 
     def settlement_finished(self, *, stage: str, elapsed_seconds: float, owner: dict) -> dict | None:
         """Adapter verified original session identity, native idle and write drain."""
         if not self._current_event(owner):
             return None
+        if owner.get("native_purpose") in {"entry", "explain"}:
+            host = self.state["host_request"]
+            host["status"] = "idle_confirmed"
+            host["settlement"].update(stage=stage, status="idle_confirmed", elapsed_seconds=elapsed_seconds)
+            host.pop("error", None)
+            if self.reclaiming:
+                # An explicit reclaim closes the delegated task too. Ordinary
+                # conversation cleanup alone never changes task settlement.
+                self.state["request_status"] = "idle_confirmed"
+            self._persist()
+            return {"reclaimed": False}
         self.state["request_status"] = "idle_confirmed"
+        self.state["host_request"]["status"] = "idle_confirmed"
+        self.state["host_request"].pop("task_cleanup_pending", None)
         self.state["settlement"].update(stage=stage, status="idle_confirmed", elapsed_seconds=elapsed_seconds)
         reclaimed = bool(owner.get("reclaimed_request") and not self.unresolved and
             not self.delegation and not self.state.get("delegation_active"))
@@ -623,7 +788,9 @@ class ExecutionController:
                           owner: dict) -> dict | None:
         if not self._current_event(owner):
             return None
-        native_status = (self.state.get("settlement") or {}).get("native_status")
+        ordinary = owner.get("native_purpose") in {"entry", "explain"}
+        target = self.state["host_request"] if ordinary else self.state
+        native_status = (target.get("settlement") or {}).get("native_status")
         diagnostic = {"stage": stage, "status": "unconfirmed", "elapsed_seconds": elapsed_seconds,
             "error_type": type(error).__name__}
         if isinstance(error, ConnectorError):
@@ -634,23 +801,33 @@ class ExecutionController:
             "session_status": "读取执行状态", "write_drain": "核对已接纳行动"}
         message = ("原会话仍在运行；没有打开后续动作。" if native_status in {"busy", "retry"} else
             labels[stage] + "时状态未确认（" + type(error).__name__ + "）；没有打开后续动作。")
-        self.active = False
-        self.state.update(settlement=diagnostic, request_status="unsettled", resume_allowed=False,
-            error={"code": error.code if isinstance(error, ConnectorError) else "UnsettledHost", "message": message})
+        failure = {"code": error.code if isinstance(error, ConnectorError) else "UnsettledHost", "message": message}
+        if ordinary:
+            target.update(settlement=diagnostic, status="unsettled", error=failure)
+        else:
+            self.active = False
+            self.state["host_request"]["status"] = "unsettled"
+            self.state.update(settlement=diagnostic, request_status="unsettled", resume_allowed=False, error=failure)
         self._persist()
-        return deepcopy(self.state["error"])
+        return deepcopy(failure)
 
     def native_response_observed(self, purpose: str, *, owner: dict | None = None):
         if purpose == "execution" and self._current_event(owner) and not self.stopped and not self.reclaiming:
             self.state["request_status"] = "returned"
+            self.state["host_request"]["status"] = "returned"
             self._persist()
 
     def native_interrupted(self, purpose: str, *, owner: dict | None = None):
         if not self._current_event(owner):
             return
+        if purpose in {"entry", "explain"}:
+            self.state["host_request"]["status"] = "unsettled"
+            self._persist()
+            return
         self.active = False
         self.state.update(request_status="timed_out" if purpose == "execution" else "unsettled",
             resume_allowed=False)
+        self.state["host_request"]["status"] = "unsettled"
         self._persist()
 
     def recovered_world_authority(self) -> bool:
@@ -661,6 +838,13 @@ class ExecutionController:
         return bool(self.state.get("goal") and not terminal and not self.unresolved)
 
     def recovery_finished(self):
+        if self.state.get("persistence_failure"):
+            safe = (self.native_ready() and not self.unresolved and not self.delegation and
+                not self.state.get("delegation_active") and not self.active and
+                (not self.state.get("task_id") or self.state.get("readback_actual")))
+            if safe:
+                self.state["persistence_failure"] = None
+                self._persist()
         self.state["resume_allowed"] = self.can_resume()
         self._persist()
 
@@ -717,18 +901,6 @@ class ExecutionController:
         self.state.update(readback=deepcopy(facts), readback_actual=True)
         self._persist()
 
-    def ensure_context_pruning(self):
-        if self.unresolved or self.state.get("request_status") != "idle_confirmed":
-            raise ConnectorError("ExecutionContextBusy", "先核对原请求与回执，才能整理旧现场上下文。", 409)
-
-    def context_pruned(self, *, parts: int, snapshot_characters: int, tool_characters: int, native_backfill=None):
-        self.state["context_pruning"] = {"parts": parts, "superseded_snapshot_chars": snapshot_characters,
-            "superseded_tool_output_chars": tool_characters,
-            "scope": "Native original text/output retained; user goals, definitions, writes and receipts unchanged."}
-        if native_backfill is not None:
-            self.state["context_pruning"]["native_backfill"] = deepcopy(native_backfill)
-        self._persist()
-
     def reclaim_interrupted(self, error: dict, *, persistence_failed=False):
         self.active = False
         if self.state.get("goal") or persistence_failed:
@@ -739,9 +911,12 @@ class ExecutionController:
 
     def update_control(self, value: dict):
         self.normalize_progress()
-        task_control = value.get("goal") == self.state["goal"] and bool(self.state.get("grant_operation_id") or self.state.get("receipts"))
+        grant_id = self.state.get("grant_id")
+        task_control = (isinstance(grant_id, str) and bool(grant_id) and
+            value.get("grant_id") == grant_id and value.get("goal") == self.state["goal"] and
+            bool(self.state.get("grant_operation_id")))
         if self.state.get("task_id"):
-            if task_control and "actions_count" in value:
+            if task_control and type(value.get("actions_count")) is int and value["actions_count"] >= 0:
                 self.state["actions_count"] = max(self.state["actions_count"],
                     self.state.get("grant_action_offset", 0) + value["actions_count"])
         else:
@@ -760,6 +935,10 @@ class ExecutionController:
             owned = operation_record is not None and self.owns_operation(operation_record)
             if owned:
                 self.state["grant_operation_id"] = operation_record["envelope"]["operation_id"]
+                # Bind authority from this task's original grant receipt. An
+                # old receipt without a stable grant identity stays unknown.
+                identity = value.get("grant_id")
+                self.state["grant_id"] = identity if isinstance(identity, str) and identity else None
                 if self.state.get("pending_grant_action_offset") is not None:
                     self.state["grant_action_offset"] = self.state.pop("pending_grant_action_offset")
                 self.update_control(value)
@@ -781,6 +960,7 @@ class ExecutionController:
 
     def begin_reclaim(self):
         self.reclaiming, self.stopped, self.active = True, True, False
+        self.state["host_request"]["task_cleanup_pending"] = True
         self.state.update(request_status="settling", resume_allowed=False)
         self._persist()
 
@@ -806,6 +986,7 @@ class ExecutionController:
         self._persist()
 
     def admit_write(self, segment_id: str | None):
+        self.ensure_persistence_ready()
         if self.stopped or self.reclaiming:
             raise ConnectorError("DelegationRequired", "The person reclaimed control; stop writing.", 403)
         if self.state.get("status") == "idle" and not self.state.get("task_id"):
@@ -909,6 +1090,7 @@ class ExecutionController:
     async def execute_goal(self, goal: str, *, context_entity_id=None, resume=False):
         self.active = False
         try:
+            self.ensure_persistence_ready()
             if not self.state.get("task_id") or goal != self.state.get("goal"):
                 raise ConnectorError("InvalidTask", "执行只能使用本人明确授权的当前原目标。", 409)
             if self.stopped or self.reclaiming:
@@ -944,6 +1126,7 @@ class ExecutionController:
             self.state.update(status="running", stop_reason="", error=None, resume_allowed=False)
             self._persist()
             while not self.stopped and not self.reclaiming:
+                self.ensure_persistence_ready()
                 if self.state["requests_used"] >= self.state["max_requests"]:
                     self.pause("模型请求额度已用完；目标未宣称完成。")
                     break
@@ -951,7 +1134,7 @@ class ExecutionController:
                     self.pause("行动权已收回或原动作额度已用完。")
                     break
                 before = self.state["actions_count"]
-                await self.ports.native_segment("compact", goal, context_entity_id=context_entity_id)
+                preparation_before = self.state.get("preparation_count", 0)
                 self.state.update(checkpoint=None, request_status="preparing", resume_allowed=False,
                     segment_id="grove-segment-" + secrets.token_hex(16))
                 self.active = True
@@ -970,15 +1153,31 @@ class ExecutionController:
                 if self.unresolved:
                     self.pause("原行动结果待核对；没有发起新操作。")
                     break
+                self.ensure_persistence_ready()
                 if (self.state.get("checkpoint") or {}).get("status") != "completed":
                     await self.readback(context_entity_id=context_entity_id)
-                progress = self.state["actions_count"] > before
+                action_progress = self.state["actions_count"] > before
+                preparation_progress = self.state.get("preparation_count", 0) > preparation_before
+                progress = action_progress or preparation_progress
+                outcome = getattr(failure, "execution_outcome", None)
+                yielded = (failure is not None and failure.code == "ExecutionSegmentYield" and
+                    isinstance(outcome, dict) and outcome.get("stage") == "native_segment_yield" and
+                    outcome.get("task_id") == self.state["task_id"] and
+                    outcome.get("segment_id") == self.state["segment_id"] and outcome.get("safe") is True and
+                    outcome.get("reason") in {"request_headroom", "request_over_budget"} and
+                    type(outcome.get("current_terminal_tool_parts")) is int and outcome["current_terminal_tool_parts"] >= 1 and
+                    type(outcome.get("current_unfinished_tool_parts")) is int and outcome["current_unfinished_tool_parts"] == 0 and
+                    type(outcome.get("body_bytes")) is int and outcome["body_bytes"] >= 96 * 1024)
                 checkpoint = self.state.get("checkpoint") or {}
                 self.state["no_progress_segments"] = 0 if progress else self.state["no_progress_segments"] + 1
                 self.state["segments"] = (self.state.get("segments", []) + [{
                     "request": self.state["requests_used"], "actions_before": before,
                     "actions_after": self.state["actions_count"], "progress": progress,
-                    "checkpoint": checkpoint.get("status"), "error": failure.code if failure else None}])[-self.request_limit:]
+                    "preparation_before": preparation_before, "preparation_after": self.state.get("preparation_count", 0),
+                    "task_id": self.state["task_id"], "segment_id": self.state["segment_id"],
+                    "outcome": "context_yield" if yielded else "request_failure" if failure else "returned",
+                    "yield": deepcopy(outcome) if yielded else None,
+                    "checkpoint": checkpoint.get("status"), "error": failure.code if failure and not yielded else None}])[-self.request_limit:]
                 self._persist()
                 if self.stopped or self.reclaiming:
                     raise asyncio.CancelledError()
@@ -991,17 +1190,18 @@ class ExecutionController:
                 if not self.state["delegation_active"]:
                     self.pause("行动权已收回或原动作额度已用完。")
                     break
-                if failure is not None and (not progress or failure.code == "InternalContextResponse"):
+                if failure is not None and not yielded and (not action_progress or
+                        failure.code in {"InternalContextResponse", "ExecutionSegmentYield"}):
                     self.pause(failure.message, error={"code": failure.code, "message": failure.message})
                     break
                 if failure is not None and failure.code in {"ModelUnavailable", "HostAuthenticationFailed", "SavedSessionMissing"}:
                     self.pause("模型或原会话不可用；保留已确认进展，先解决连接阻塞。", error={"code": failure.code, "message": failure.message})
                     break
                 if self.state["no_progress_segments"] >= 2:
-                    self.pause("连续两段没有已确认的新行动；停止重复推理。")
+                    self.pause("连续两段没有已确认的新行动或有效准备读取；停止重复推理。")
                     break
                 self.state["status"] = "running"
-                if progress and not checkpoint:
+                if action_progress and not checkpoint:
                     self.state["progress"] = {"summary": "这一段的实际行动已通过原回执与现场核对。", "next_intent": "依据最新现场继续原目标。",
                         "evidence": [deepcopy(item) for item in self.state["receipts"] if item.get("status") == "confirmed"][-8:]}
         except asyncio.CancelledError:
@@ -1066,6 +1266,7 @@ class ExecutionController:
         return [result]
 
     async def checkpoint(self, arguments: dict, *, schema: dict, write_busy=False):
+        self.ensure_persistence_ready()
         if not Draft202012Validator(schema).is_valid(arguments):
             raise ConnectorError("InvalidCheckpoint", "执行检查点需要本任务标识、状态、真实发现及原回执引用。")
         # Diagnose the actual stop boundary before mismatched report IDs. An
@@ -1110,6 +1311,7 @@ class ExecutionController:
             if not self.state.get("readback_actual") or self.state.get("readback_actions_count") != self.state["actions_count"] or self.state.get("control_status") not in {"active", "exhausted"}:
                 raise ConnectorError("ReadbackRequired", "最新行动结果尚未核对，不能提交完成声明。", 409)
         world_results = self.world_results(self.state.get("readback"))
+        previous_report = {key: deepcopy(self.state.get(key)) for key in ("checkpoint", "progress", "goal_result", "status", "world_results")}
         self.state["world_results"] = world_results
         self.state["checkpoint"] = deepcopy(arguments)
         self.state["progress"] = {"summary": arguments["summary"], "next_intent": arguments["next_intent"],
@@ -1125,10 +1327,11 @@ class ExecutionController:
         try:
             self._persist()
         except Exception as exc:
+            self.state.update(previous_report)
             raise ConnectorError("CheckpointFeedbackUnavailable", "本机已经封闭这一段写入；检查点保存失败。恢复后核对原记录，可以读取现场，不能重做行动。", 409,
                 execution_outcome={"stage": "checkpoint_persistence_failed", "task_id": self.state["task_id"],
                     "segment_id": arguments["execution_segment_id"], "checkpoint_status": arguments["status"],
-                    "checkpoint_recorded": True, "checkpoint_persisted": False,
+                    "checkpoint_recorded": False, "checkpoint_persisted": False,
                     "segment_finished": True, "current_facts_available": False,
                     "world_action_committed": False, "readback_error": type(exc).__name__}) from exc
         result = {"task_id": self.state["task_id"], "status": arguments["status"], "segment_finished": True,

@@ -9,6 +9,7 @@ import time
 from contextlib import asynccontextmanager, closing
 
 from .runtime_contracts import duration, integer
+from .runtime_checkpoints import CHECKPOINT_BATCH_ITEMS
 
 logger = logging.getLogger(__name__)
 
@@ -52,19 +53,28 @@ class TimerWorker:
     def _run_ready_slice(self):
         # Drain immediately ready work without another full polling interval.
         # Both count and elapsed-time bounds prevent an endless catch-up loop;
-        # each Runtime task still commits independently and releases its lock.
+        # each checkpoint batch releases its writer after a bounded opportunity.
         deadline = time.monotonic() + 0.1
         remaining = 100
         due_at = None
         for batch in range(5):
             if self._stop.is_set():
                 break
-            # One atomic opportunity is guaranteed even if selecting ready
-            # work waits for a busy writer. Later batches retain the original
-            # absolute deadline, so contention never creates a catch-up loop.
-            limit = 1 if batch == 0 else min(self.batch_size, remaining)
-            result = (self.runtime.run_due_timers(self.universe, limit=limit) if batch == 0 else
-                      self.runtime.run_due_timers(self.universe, limit=limit, deadline=deadline))
+            # Guarantee the first admission even after a slow selection. Its
+            # fixed checkpoint page shares one FULL commit; the same deadline
+            # still stops later items/batches rather than resetting on waits.
+            definition = self.runtime._worlds.get(self.universe)
+            checkpoint_world = definition is not None and bool(definition.checkpoints)
+            if batch == 0:
+                limit = min(CHECKPOINT_BATCH_ITEMS, self.batch_size) if checkpoint_world else 1
+            else:
+                limit = min(self.batch_size, remaining)
+            if batch == 0 and checkpoint_world:
+                result = self.runtime.run_due_timers(self.universe, limit=limit, deadline=deadline,
+                                                    ensure_initial_work=True)
+            else:
+                result = (self.runtime.run_due_timers(self.universe, limit=limit) if batch == 0 else
+                          self.runtime.run_due_timers(self.universe, limit=limit, deadline=deadline))
             remaining -= limit
             self._credit_checkpoint_work(result.get("checkpoint_work", {}))
             due_at = self.runtime.next_due_work(self.universe)
@@ -73,7 +83,7 @@ class TimerWorker:
                 break
         # Maintenance has its own short budget. It must not be postponed
         # forever by a continuously ready work queue, nor run between every
-        # domain checkpoint. No task transaction is combined with another.
+        # checkpoint batch. Maintenance never joins a world-effect batch.
         self._maintain_checkpoint_history({})
         return due_at
 

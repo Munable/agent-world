@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 
 def public_world_error_details(value):
@@ -81,6 +82,20 @@ class ConnectorError(Exception):
             if (type(execution_outcome.get("wait_seconds")) in (int, float)
                     and math.isfinite(execution_outcome["wait_seconds"]) and execution_outcome["wait_seconds"] >= 0):
                 safe["wait_seconds"] = execution_outcome["wait_seconds"]
+            # Preserve the verified native yield across this public projection.
+            # This only carries evidence; the native proof verifier and executor
+            # still require its exact request owner, terminal tools and budget.
+            if code == "ExecutionSegmentYield" and execution_outcome.get("stage") == "native_segment_yield":
+                if type(execution_outcome.get("safe")) is bool:
+                    safe["safe"] = execution_outcome["safe"]
+                if execution_outcome.get("reason") in ("request_headroom", "request_over_budget"):
+                    safe["reason"] = execution_outcome["reason"]
+                request_id = execution_outcome.get("request_id")
+                if isinstance(request_id, str) and re.fullmatch(r"grove-request-[a-f0-9]{32}", request_id):
+                    safe["request_id"] = request_id
+                for key in ("body_bytes", "current_terminal_tool_parts", "current_unfinished_tool_parts"):
+                    if type(execution_outcome.get(key)) is int and 0 <= execution_outcome[key] <= 2**63 - 1:
+                        safe[key] = execution_outcome[key]
             self.execution_outcome = safe or None
         super().__init__(message)
 

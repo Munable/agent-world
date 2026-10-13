@@ -16,7 +16,7 @@ from agent_world.grove_execution import ExecutionController, ExecutionPorts
 class CheckpointFeedbackContracts(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.invoke = AsyncMock(return_value={"result": {"goal": "Observe a public change", "status": "active",
-            "actions_count": 1, "max_actions": 8, "version": 7}})
+            "grant_id": "grove-grant-" + "a" * 32, "actions_count": 1, "max_actions": 8, "version": 7}})
         self.read = AsyncMock(return_value={"player": {"id": "person", "x": 1, "y": 0}, "entities": []})
         self.persist = Mock()
         self.controller = ExecutionController("person", max_requests=4, max_world_calls=16, max_seconds=150,
@@ -25,7 +25,7 @@ class CheckpointFeedbackContracts(unittest.IsolatedAsyncioTestCase):
                 settle=AsyncMock(return_value=True), persist=self.persist))
         self.controller.state.update(status="running", goal="Observe a public change", task_id="private-current-task",
             segment_id="private-current-segment", actions_count=1, max_actions=8, delegation_active=True,
-            grant_operation_id="original-grant", control_status="active", receipts=[{
+            grant_id="grove-grant-" + "a" * 32, grant_operation_id="original-grant", control_status="active", receipts=[{
                 "function": "grove.move", "operation_id": "original-action", "status": "confirmed",
                 "task_id": "private-current-task", "segment_id": "private-current-segment", "commit_seq": 3}])
         self.controller.active = True

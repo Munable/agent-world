@@ -42,7 +42,15 @@ export class CommonsClient {
     const response = await this.fetcher(path,{method:method || (body ? 'POST':'GET'),cache:'no-store',headers:{'Content-Type':'application/json',...(sentToken ? {Authorization:'Bearer '+sentToken}:{})},...(body ? {body:JSON.stringify(body)}:{}),...(signal ? {signal}:{})});
     let data;
     try {data=await response.json();} catch(cause) {if(signal?.aborted)throw cause;const error=new Error('The world response was interrupted. Your submission can be checked with its original operation.');error.status=response.status;error.client=this;error.staleAuth=response.status===401 && this.token!==sentToken;if(response.status===401 && !error.staleAuth)this.token=null;throw error;}
-    if (!response.ok) { const error = new Error(data.message || data.detail || 'The world could not be reached. Try again.');error.client=this;error.staleAuth=response.status===401 && this.token!==sentToken;if(response.status===401 && !error.staleAuth)this.token=null;error.status=response.status;error.code=data.error;error.recovery=data.recovery;throw error; }
+    if (!response.ok) {
+      const error = new Error(data.message || data.detail || 'The world could not be reached. Try again.');
+      error.client=this;error.staleAuth=response.status===401 && this.token!==sentToken;
+      if(response.status===401 && !error.staleAuth)this.token=null;
+      error.status=response.status;error.code=data.error;error.recovery=data.recovery;
+      error.retryable=data.retryable;error.retry_after_seconds=data.retry_after_seconds;
+      error.details=data.details === undefined ? undefined : structuredClone(data.details);
+      throw error;
+    }
     return data;
   }
   async authenticate(key,{accessMode='control',isCurrent=()=>true,signal}={}) {

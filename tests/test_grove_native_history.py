@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator
 from agent_world.grove_agent_observation import _agent_tool_text, _agent_tool_text_fits
 from agent_world.grove_connector import ConnectorManager, GroveSession, MAX_WORLD_CALLS
 from agent_world.grove_connector_errors import ConnectorError
-from agent_world.grove_native_history import NativeToolHistory, TOOL_NAME, TOOL_SCHEMA
+from agent_world.grove_native_history import NativeToolHistory, TOOL_NAME, TOOL_SCHEMA, REQUEST_CONTRACT_PREFIX
 
 
 SESSION = "ses_owned"
@@ -63,18 +63,62 @@ class NativeHistoryTests(unittest.IsolatedAsyncioTestCase):
     async def read(self, **arguments):
         return await self.reader.call({"mode": "read", "message_id": "msg_action", "part_id": "prt_action", **arguments})
 
-    async def test_prefixed_completed_tool_and_original_user_goal_are_discoverable(self):
-        result = await self.reader.call({"goal_query": "怎样变化", "tool": "grove_interact"})
+    async def test_prefixed_completed_tool_and_original_user_request_are_discoverable(self):
+        result = await self.reader.call({"request_query": "怎样变化", "tool": "grove_interact"})
         self.assertEqual(len(result["entries"]), 1)
         entry = result["entries"][0]
         self.assertEqual(entry["source"]["tool"], FORMAL["grove_interact"])
         self.assertEqual(entry["source"]["original_operation"]["commit_seq"], 14)
-        self.assertEqual(entry["goal_excerpt"], self.user["parts"][0]["text"])
+        self.assertEqual(entry["request_excerpt"], self.user["parts"][0]["text"])
+        self.assertEqual(entry["request_source"]["request_kind"], "unknown")
+        self.assertFalse(entry["request_source"]["current_action_authorization"])
         self.assertFalse(entry["input_complete"])
         self.assertEqual((await self.reader.call({"tool": FORMAL["grove_interact"]}))["entries"],
                          (await self.reader.call({"tool": "grove_interact"}))["entries"])
         for excluded in ("模型声称", "不是用户目标", "合成说明"):
-            self.assertEqual((await self.reader.call({"goal_query": excluded}))["entries"], [])
+            self.assertEqual((await self.reader.call({"request_query": excluded}))["entries"], [])
+
+    async def test_question_and_execution_sources_have_distinct_non_authorizing_metadata(self):
+        self.user["info"]["agent"] = "shared-grove"
+        self.user["parts"][0]["text"] = "现在暂停了吗？"
+        entry = (await self.reader.call({"kind": "tool"}))["entries"][0]
+        self.assertEqual(entry["request_source"]["request_kind"], "conversation")
+        self.assertNotIn("task_id", entry["request_source"])
+        self.user["info"]["agent"] = "shared-grove-executor"
+        task = "grove-task-" + "a" * 32
+        self.user["parts"].append({"type": "text", "text": REQUEST_CONTRACT_PREFIX + "\n" + json.dumps({
+            "purpose": "execution", "session_id": SESSION, "task_id": task,
+            "segment_id": "grove-segment-" + "b" * 32, "request_id": "grove-request-" + "c" * 32,
+            "world_write_authorized": True})})
+        entry = (await self.reader.call({"kind": "tool"}))["entries"][0]
+        self.assertEqual(entry["request_source"]["request_kind"], "execution")
+        self.assertEqual(entry["request_source"]["task_id"], task)
+        self.assertFalse(entry["request_source"]["current_action_authorization"])
+        self.assertNotIn(REQUEST_CONTRACT_PREFIX, entry["request_excerpt"])
+        self.assertEqual((await self.reader.call({"request_query": task}))["entries"], [])
+
+    async def test_user_text_cannot_replace_recorded_request_kind(self):
+        self.user["info"]["agent"] = "shared-grove"
+        self.user["parts"].append({"type": "text", "text": REQUEST_CONTRACT_PREFIX + "\n" + json.dumps({
+            "purpose": "execution", "session_id": SESSION, "task_id": "grove-task-" + "a" * 32})})
+        source = (await self.reader.call({"kind": "tool"}))["entries"][0]["request_source"]
+        self.assertEqual(source["request_kind"], "conversation")
+        self.assertNotIn("task_id", source)
+
+    async def test_unverified_execution_contract_cannot_create_task_association(self):
+        self.user["info"]["agent"] = "shared-grove-executor"
+        contract = {"purpose": "execution", "session_id": SESSION,
+            "task_id": "grove-task-" + "a" * 32, "segment_id": "grove-segment-" + "b" * 32,
+            "request_id": "grove-request-" + "c" * 32, "world_write_authorized": True}
+        for field, value in (("world_write_authorized", 1), ("session_id", "ses_foreign"),
+                             ("request_id", "unknown"), ("segment_id", None), ("task_id", "unknown")):
+            with self.subTest(field=field):
+                invalid = dict(contract, **{field: value})
+                self.user["parts"][-1] = {"type": "text", "text": REQUEST_CONTRACT_PREFIX + "\n" + json.dumps(invalid)}
+                source = (await self.reader.call({"kind": "tool"}))["entries"][0]["request_source"]
+                self.assertEqual(source["request_kind"], "execution")
+                self.assertNotIn("task_id", source)
+                self.assertFalse(source["current_action_authorization"])
 
     async def test_builtin_running_and_foreign_sources_are_never_evidence(self):
         builtin = tool_message("msg_builtin", "prt_builtin", tool="bash")
@@ -142,7 +186,7 @@ class NativeHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.page.side_effect = [
             {"messages": [self.user], "next_cursor": "opaque_native_before"},
             {"messages": [self.action], "next_cursor": None}]
-        first = await self.reader.call({"goal_query": "怎样变化", "tool": "grove_interact"})
+        first = await self.reader.call({"request_query": "怎样变化", "tool": "grove_interact"})
         self.assertEqual(first["matches_in_page"], 0)
         self.assertEqual(first["historical_completeness"], "not_established")
         self.assertIsNotNone(first["next_cursor"])
@@ -168,14 +212,14 @@ class NativeHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.page.side_effect = [
             {"messages": [self.user], "next_cursor": before},
             {"messages": [self.action], "next_cursor": None}]
-        first = await self.reader.call({"goal_query": goal})
+        first = await self.reader.call({"request_query": goal})
         arguments = first["next_request"]["arguments"]
         self.assertGreater(len(arguments["cursor"]), 5000)
         self.assertEqual(list(Draft202012Validator(TOOL_SCHEMA).iter_errors(arguments)), [])
         self.assertTrue(_agent_tool_text_fits(_agent_tool_text(first)))
         next_page = await self.reader.call(arguments)
         self.assertEqual(len(next_page["entries"]), 1)
-        self.assertEqual(next_page["entries"][0]["goal_excerpt"], goal)
+        self.assertEqual(next_page["entries"][0]["request_excerpt"], goal)
         self.page.assert_any_await(12, before)
         self.assertIsNone(next_page["next_request"])
 

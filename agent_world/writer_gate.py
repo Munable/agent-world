@@ -5,6 +5,7 @@ from collections import deque
 import math
 import threading
 import time
+import weakref
 
 
 class WriterGate:
@@ -13,7 +14,7 @@ class WriterGate:
     Reentry belongs to the current transaction and does not queue behind
     itself. The gate never interrupts a handler, commit or rollback.
     """
-    _BACKGROUND = frozenset({"checkpoint", "timer", "maintenance"})
+    _BACKGROUND = frozenset({"checkpoint", "checkpoint-batch", "timer", "maintenance"})
 
     def __init__(self):
         self._condition = threading.Condition(threading.Lock())
@@ -88,3 +89,22 @@ class WriterGate:
 
     def __exit__(self, *exc):
         self.release()
+
+
+_GATES_LOCK = threading.Lock()
+_GATES = weakref.WeakValueDictionary()
+
+
+def writer_gate_for(db_path):
+    """Share admission for Runtime instances using one resolved database path.
+
+    A Runtime and any active waiter hold strong references. Closing one
+    Runtime cannot discard another's gate; unused paths disappear naturally.
+    SQLite remains the fencing boundary between separate processes.
+    """
+    with _GATES_LOCK:
+        gate = _GATES.get(db_path)
+        if gate is None:
+            gate = WriterGate()
+            _GATES[db_path] = gate
+        return gate

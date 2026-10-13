@@ -308,7 +308,8 @@ def _member(ctx, args=None):
 
 def _control_public(value, version):
     return {**{k: deepcopy(v) for k, v in value.items() if k != "delegation"},
-            "version": version, "delegation_active": value.get("status") == "active"}
+            "version": version, "grant_id": value.get("grant_id"),
+            "delegation_active": value.get("status") == "active"}
 
 
 def control_status(ctx, args):
@@ -318,7 +319,8 @@ def control_status(ctx, args):
 
 def control_grant(ctx, args):
     value = {"status": "active", "goal": args["goal"], "max_actions": args["max_actions"],
-             "actions_count": 0, "delegation": secrets.token_urlsafe(32), "started_tick": step(ctx)}
+             "actions_count": 0, "delegation": secrets.token_urlsafe(32), "started_tick": step(ctx),
+             "grant_id": "grove-grant-" + secrets.token_hex(16)}
     version = _save(ctx, CONTROL, ctx.actor_role_id, value)
     return FunctionOutcome({**_control_public(value, version), "delegation": value["delegation"]})
 
@@ -1847,9 +1849,9 @@ def specs():
         FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=5, access="read", description="Read one immutable definition and its author/hash, canonical material bindings and derived bounded risk diagnostics; existing instances pin the unchanged reference."),
         FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=8, authorize=_member, description="Compile and publish immutable definitions; returns advisory bounded diagnostics without changing the canonical definition or publication permission. Read definition_validate first when creating. Publication creates no matter, permission or consent. Discover precise syntax with rule_catalog topics."),
         FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=10, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Declared buttons and fuel/start/stop keep the chosen parameters and presented interaction guard: autonomous fields and mechanical outputs need not be chased each second; current real conditions are rechecked on submission. Other participants' edits, material/ownership/structure changes invalidate that guard. Fuel sources, bindings and contracts retain exact observed versions. Bindings do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
-        FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; max_actions counts committed writes."),
-        FunctionSpec("grove.control_revoke", control_revoke, EMPTY, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results and receipts remain."),
-        FunctionSpec("grove.control_status", control_status, EMPTY, authorize=_member, access="read", description="Read own current goal and committed action count, without exposing grant token."),
+        FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, version=2, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; stable grant_id identifies this authorization, max_actions counts committed writes."),
+        FunctionSpec("grove.control_revoke", control_revoke, EMPTY, version=2, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results, receipts and original grant_id remain."),
+        FunctionSpec("grove.control_status", control_status, EMPTY, version=2, authorize=_member, access="read", description="Read own grant_id, current goal and committed action count, without exposing grant token. Missing historical grant_id is unknown; matching goal text is not authorization identity."),
     )
 
 

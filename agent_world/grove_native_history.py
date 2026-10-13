@@ -20,6 +20,7 @@ from .grove_connector_errors import ConnectorError
 
 
 TOOL_NAME = "native_tool_history"
+REQUEST_CONTRACT_PREFIX = "[Grove current request contract]"
 _PAGE_SIZE = 12
 _ID = re.compile(r"(?:msg|prt)_[A-Za-z0-9]{1,100}\Z")
 _MEANING = (
@@ -40,7 +41,7 @@ _LIST_MEANING = (
 TOOL_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {
     "mode": {"type": "string", "enum": ["list", "read"], "default": "list"},
     "kind": {"type": "string", "enum": ["all", "tool", "user", "summary"], "default": "all"},
-    "goal_query": {"type": "string", "minLength": 1, "maxLength": 500,
+    "request_query": {"type": "string", "minLength": 1, "maxLength": 500,
                    "description": "Literal substring of the original user request; not an Agent summary."},
     "tool": {"type": "string", "minLength": 1, "maxLength": 120,
              "description": "An actual formal tool name, for example grove_interact."},
@@ -60,7 +61,7 @@ TOOL_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {
 }}
 TOOL_DESCRIPTION = (
     "Recover historical sources from your own same dedicated native session. kind selects tool, user, summary or all. "
-    "Start with mode=list; optionally match the original user goal text, a tool, or an operation, "
+    "Start with mode=list; optionally match original user request text, a tool, or an operation, "
     "and copy the complete next_request unchanged even when this page has no matches. "
     "A list page is only a location index, not the original result body; next_request means "
     "the listing has not ended. Entries identify original message_id/part_id and submission/readback "
@@ -137,7 +138,7 @@ class NativeToolHistory:
         self.read_page, self.read_message = read_page, read_message
         self.tool_names = dict(formal_tools)
         self.formal_tools = set(self.tool_names.values())
-        self.prompt_prefixes = tuple(prefix + "\n" for prefix in prompt_prefixes)
+        self.prompt_prefixes = tuple(prefix + "\n" for prefix in (*prompt_prefixes, REQUEST_CONTRACT_PREFIX))
         self.scope = hashlib.sha256((role_id + "\0" + session_id).encode()).hexdigest()[:24]
 
     def _message(self, record, expected_id=None):
@@ -167,12 +168,37 @@ class NativeToolHistory:
             result.append(part)
         return result
 
-    def _goal(self, record):
+    def _request_text(self, record):
         if record["info"].get("role") != "user":
             return ""
         return "\n".join(part["text"] for part in record["parts"] if isinstance(part, dict) and
             part.get("type") == "text" and isinstance(part.get("text"), str) and
             not part.get("synthetic") and not part["text"].startswith(self.prompt_prefixes))
+
+    def _request_source(self, record):
+        info = record["info"]
+        kind = {"shared-grove": "conversation", "shared-grove-executor": "execution"}.get(info.get("agent"), "unknown")
+        source = {"message_id": info["id"], "kind": "original_user_request", "request_kind": kind,
+            "historical_only": True, "current_action_authorization": False}
+        # Only the final host-owned metadata part can associate this original
+        # request. Its contents are history, never live execution authority.
+        parts = record["parts"]
+        last = parts[-1] if parts else {}
+        text = last.get("text") if isinstance(last, dict) else None
+        if isinstance(text, str) and text.startswith(REQUEST_CONTRACT_PREFIX + "\n"):
+            try:
+                contract = json.loads(text.split("\n", 1)[1])
+            except (ValueError, TypeError):
+                contract = None
+            if (isinstance(contract, dict) and contract.get("session_id") == self.session_id and
+                    contract.get("purpose") == "execution" and kind == "execution" and
+                    contract.get("world_write_authorized") is True and
+                    all(isinstance(contract.get(key), str) and re.fullmatch(pattern, contract[key])
+                        for key, pattern in (("task_id", r"grove-task-[a-f0-9]{32}"),
+                            ("segment_id", r"grove-segment-[a-f0-9]{32}"),
+                            ("request_id", r"grove-request-[a-f0-9]{32}")))):
+                source["task_id"] = contract["task_id"]
+        return source
 
     @staticmethod
     def _output(part):
@@ -231,11 +257,14 @@ class NativeToolHistory:
         return result
 
     def _text_source(self, record, part, kind):
-        return {"kind": "original_user_text" if kind == "user" else "native_assistant_summary",
+        source = {"kind": "original_user_text" if kind == "user" else "native_assistant_summary",
             "role_id": self.role_id, "session_id": self.session_id,
             "message_id": record["info"]["id"], "part_id": part["id"],
             "native_role": record["info"]["role"], "historical_only": True,
             "world_evidence": False, "private_session_source": True}
+        if kind == "user":
+            source["request_source"] = self._request_source(record)
+        return source
 
     def _cursor(self, value):
         if value is None:
@@ -247,10 +276,10 @@ class NativeToolHistory:
                     decoded["scope"] != self.scope or type(decoded["offset"]) is not int or
                     not 0 <= decoded["offset"] <= 10000 or not isinstance(decoded["filters"], dict) or
                     type(decoded["cutoff_ms"]) is not int or decoded["cutoff_ms"] <= 0 or
-                    set(decoded["filters"]) - {"goal_query", "tool", "operation_id", "kind"} or
+                    set(decoded["filters"]) - {"request_query", "tool", "operation_id", "kind"} or
                     decoded["filters"].get("kind", "all") not in {"all", "tool", "user", "summary"} or
                     any(not isinstance(item, str) or not 1 <= len(item) <=
-                        {"goal_query": 500, "tool": 120, "operation_id": 180, "kind": 7}[key]
+                        {"request_query": 500, "tool": 120, "operation_id": 180, "kind": 7}[key]
                         for key, item in decoded["filters"].items()) or
                     decoded["before"] is not None and (not isinstance(decoded["before"], str) or
                         not 1 <= len(decoded["before"]) <= 2000 or any(char.isspace() for char in decoded["before"])) or
@@ -268,7 +297,7 @@ class NativeToolHistory:
 
     async def list(self, arguments):
         cursor = self._cursor(arguments.get("cursor"))
-        filters = {key: arguments[key] for key in ("goal_query", "tool", "operation_id", "kind") if key in arguments}
+        filters = {key: arguments[key] for key in ("request_query", "tool", "operation_id", "kind") if key in arguments}
         if arguments.get("cursor") and filters and filters != cursor["filters"]:
             raise ConnectorError("InvalidNativeHistoryCursor", "接续历史分页时请保留原过滤条件。", 422)
         filters = filters or cursor["filters"]
@@ -292,7 +321,7 @@ class NativeToolHistory:
         for record in records:
             if filters.get("kind", "all") != "tool" and not tool and not filters.get("operation_id"):
                 for kind, part in self._text_parts(record):
-                    if filters.get("kind", "all") not in {"all", kind} or filters.get("goal_query") and filters["goal_query"] not in part["text"]:
+                    if filters.get("kind", "all") not in {"all", kind} or filters.get("request_query") and filters["request_query"] not in part["text"]:
                         continue
                     created = record["info"].get("time", {}).get("created")
                     if type(created) in {int, float} and created > cursor["cutoff_ms"]:
@@ -308,8 +337,8 @@ class NativeToolHistory:
             if isinstance(parent_id, str) and parent_id.startswith("msg_") and _ID.fullmatch(parent_id) and parent_id not in parents:
                 parents[parent_id] = self._message(await self.read_message(parent_id), parent_id)
             parent = parents.get(parent_id)
-            goal = self._goal(parent) if parent else ""
-            if filters.get("goal_query") and filters["goal_query"] not in goal:
+            request_text = self._request_text(parent) if parent else ""
+            if filters.get("request_query") and filters["request_query"] not in request_text:
                 continue
             for part in parts:
                 native_time = part["state"].get("time")
@@ -329,8 +358,8 @@ class NativeToolHistory:
                     ("action", "entity_id", "target_id", "item_id", "other_id", "amount") if isinstance(inputs, dict) and key in inputs},
                     "input_complete": False, "input_available": input_available,
                     "input_read": {"tool": TOOL_NAME, "arguments": {"mode": "read", "message_id": source["message_id"], "part_id": source["part_id"], "section": "input"}} if input_available else None,
-                    "goal_excerpt": goal[:600], "goal_excerpt_complete": len(goal) <= 600,
-                    "goal_source": {"message_id": parent_id, "kind": "original_user_request"}
+                    "request_excerpt": request_text[:600], "request_excerpt_complete": len(request_text) <= 600,
+                    "request_source": self._request_source(parent)
                         if parent and parent["info"].get("role") == "user" else None,
                     "output_available": output is not None, "output_format_supported": output is not None,
                     "output_unavailable_reason": (None if output is not None else
@@ -388,7 +417,7 @@ class NativeToolHistory:
         if not isinstance(arguments, dict) or any(Draft202012Validator(TOOL_SCHEMA).iter_errors(arguments)):
             raise ConnectorError("InvalidArguments", "历史读取参数不符合正式工具声明。", 422)
         mode = arguments.get("mode", "list")
-        allowed = ({"mode", "kind", "goal_query", "tool", "operation_id", "cursor", "limit"} if mode == "list" else
+        allowed = ({"mode", "kind", "request_query", "tool", "operation_id", "cursor", "limit"} if mode == "list" else
                    {"mode", "message_id", "part_id", "section", "pointer", "offset", "expected_source_sha256", "expected_filtered_sha256"})
         if set(arguments) - allowed:
             raise ConnectorError("InvalidArguments", "请分别使用历史列表参数或原片段读取参数。", 422)

@@ -39,6 +39,9 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         grant = self.runtime.call_function("w", "grove.control_grant", self.role,
             {"goal": "Explore", "max_actions": 8}, operation_id="grant")["result"]
         self.session.execution_controller.delegation = grant["delegation"]
+        self.session.execution_controller.state["grant_id"] = grant["grant_id"]
+        self.session.active_native_request = {"purpose": "execution", "world_write_authorized": True,
+            "session_id": self.session.session_id, "task_id": "task", "segment_id": "segment"}
         self.calls = []
         self.read_seen = asyncio.Event()
         self.lose_before_commit = self.lose_after_commit = False

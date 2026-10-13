@@ -15,6 +15,7 @@ from .world_timers import (
     TimerConflict, TimerNotFound, RetryTimer, TimerInvocation, public_timer,
     MAX_PENDING_TIMERS, MAX_TIMER_COMMANDS, TIMER_ACTOR,
 )
+from .runtime_checkpoints import CHECKPOINT_BATCH_ITEMS
 
 
 class RuntimeTimers:
@@ -127,10 +128,12 @@ class RuntimeTimers:
                 raise TimerNotFound("timer not found in this universe")
             return json.loads(row[0]) if row[0] is not None else None
 
-    def run_due_timers(self, universe, *, limit=50, deadline=None):
+    def run_due_timers(self, universe, *, limit=50, deadline=None, ensure_initial_work=False):
         """Fixed one-shot candidates and a bounded, fair current-task pipeline."""
         identifier(universe, "universe")
         integer(limit, "limit", 1, 100)
+        if not isinstance(ensure_initial_work, bool):
+            raise InvalidArguments("ensure_initial_work must be boolean")
         if deadline is not None:
             duration(deadline, "worker monotonic deadline", 253402300799, zero=True)
         registry = self._capture_registry(universe)
@@ -152,22 +155,37 @@ class RuntimeTimers:
         checkpoint_candidates = deque()
         checkpoint_work = {"commits": 0, "changes": 0, "stream_events": 0}
         timer_index = work = 0
-        while work < limit and (deadline is None or time.monotonic() < deadline):
+        while work < limit and (deadline is None or time.monotonic() < deadline
+                                or (ensure_initial_work and work == 0)):
             if has_checkpoints and not checkpoint_candidates:
                 checkpoint_candidates.extend(self._due_checkpoint_candidates(universe, seen, limit=limit-work))
             checkpoint = checkpoint_candidates[0] if checkpoint_candidates else None
             if checkpoint is not None and (prefer_checkpoint or timer_index >= len(candidates)):
-                checkpoint_candidates.popleft()
-                seen.add(checkpoint)
-                item = self._run_one_checkpoint(universe, *checkpoint)
+                # Preserve one-shot/category fairness. Otherwise amortize a
+                # fixed ready page, never following successors in its writer.
+                batch_limit = min(CHECKPOINT_BATCH_ITEMS, limit-work,
+                                  1 if timer_index < len(candidates) else len(checkpoint_candidates))
+                if batch_limit == 1:
+                    checkpoint_candidates.popleft()
+                    seen.add(checkpoint)
+                    item = self._run_one_checkpoint(universe, *checkpoint)
+                    items, consumed = ([item] if item is not None else []), 1
+                else:
+                    page = list(checkpoint_candidates)[:batch_limit]
+                    batch = self._run_checkpoint_batch(universe, page, deadline=deadline)
+                    consumed = batch["consumed"]
+                    for _ in range(consumed):
+                        seen.add(checkpoint_candidates.popleft())
+                    items = batch["processed"]
             elif timer_index < len(candidates):
                 item = self._run_one_timer(universe, cutoff, candidates[timer_index][0])
                 timer_index += 1
+                items, consumed = ([item] if item is not None else []), 1
             else:
                 break
-            work += 1
+            work += consumed
             prefer_checkpoint = not prefer_checkpoint
-            if item is not None:
+            for item in items:
                 processed.append(item)
                 if "checkpoint_key" in item:
                     checkpoint_work["commits"] += 1

@@ -316,7 +316,7 @@ class CheckpointTests(unittest.TestCase):
         self.runtime.run_due_timers("u", limit=2)
         self.assertEqual(self.value("a"), 3)
 
-    def test_ready_page_uses_one_reader_for_eight_independent_writers(self):
+    def test_ready_page_uses_one_reader_for_eight_independent_logical_results(self):
         keys = ["work-" + str(index) for index in range(8)]
         for key in keys:
             self.arm(key)
@@ -349,7 +349,10 @@ class CheckpointTests(unittest.TestCase):
                 mutation()
             return item
 
-        with patch.object(self.runtime, "_run_one_checkpoint", side_effect=interleaved):
+        # Force a physical boundary where this concurrency regression inserts
+        # the client mutation. Batching itself is covered by batch regressions.
+        with patch("agent_world.runtime_timers.CHECKPOINT_BATCH_ITEMS", 1), \
+                patch.object(self.runtime, "_run_one_checkpoint", side_effect=interleaved):
             return self.runtime.run_due_timers("u", limit=8)
 
     def test_cancelled_cached_generation_never_runs_or_claims_completion(self):
@@ -420,13 +423,13 @@ class CheckpointTests(unittest.TestCase):
         self.arm("a")
         self.arm("b")
         clock = [100.0]
-        original = self.runtime._run_one_checkpoint
-        def advance_after_commit(*args, **kwargs):
+        original = self.runtime._run_one_checkpoint_tx
+        def advance_after_item(*args, **kwargs):
             result = original(*args, **kwargs)
             clock[0] = 100.2
             return result
         with patch("time.monotonic", side_effect=lambda: clock[0]), \
-                patch.object(self.runtime, "_run_one_checkpoint", side_effect=advance_after_commit):
+                patch.object(self.runtime, "_run_one_checkpoint_tx", side_effect=advance_after_item):
             result = self.runtime.run_due_timers("u", limit=25, deadline=100.1)
         self.assertEqual(result["count"], 1)
         self.assertEqual(self.runtime.get_checkpoint("u", "b")["status"], "pending")

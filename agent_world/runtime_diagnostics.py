@@ -39,17 +39,22 @@ class WorkDiagnostics:
                 self._count += 1
                 self._recent.append(sample)
                 kind_total = self._kinds.setdefault(kind, {"count": 0, "seconds": 0.0, "max_seconds": 0.0,
-                                                         "phases": {}})
+                    "phases": {}, "physical_commit_attempts": 0, "physical_commits": 0,
+                    "logical_results_committed": 0})
                 kind_total["count"] += 1
                 kind_total["seconds"] += sample["seconds"]
                 kind_total["max_seconds"] = max(kind_total["max_seconds"], sample["seconds"])
+                kind_total["physical_commit_attempts"] += int(sample.get("physical_commit_attempted", False))
+                kind_total["physical_commits"] += int(sample.get("physical_commit_completed", False))
+                if sample.get("physical_commit_completed"):
+                    kind_total["logical_results_committed"] += sample.get("logical_results", 0)
                 for name, elapsed in sample["phases"].items():
                     for totals in (self._phases, kind_total["phases"]):
                         total = totals.setdefault(name, {"count": 0, "seconds": 0.0, "max_seconds": 0.0})
                         total["count"] += 1
                         total["seconds"] += elapsed
                         total["max_seconds"] = max(total["max_seconds"], elapsed)
-            if sample["seconds"] >= 1 and kind in {"action", "checkpoint", "timer", "maintenance", "wal-checkpoint", "wal-status", "identity"}:
+            if sample["seconds"] >= 1 and kind in {"action", "checkpoint", "checkpoint-batch", "timer", "maintenance", "wal-checkpoint", "wal-status", "identity"}:
                 phases = sample["phases"]
                 logger.warning("world work slow started_at=%.6f started_utc=%s kind=%s function=%s "
                     "seconds=%.3f writer_wait=%.3f begin=%.3f handler=%.3f handler_cpu=%.3f "

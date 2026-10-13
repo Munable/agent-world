@@ -10,6 +10,7 @@ from typing import Any
 
 from .runtime_contracts import identifier, integer, json_text, MAX_STATE_BYTES
 from .runtime_errors import InvalidArguments, PermissionDenied, RoleNotFound, StateConflict, WorldRuntimeError
+from .runtime_journal import state_revision_tx
 
 
 class FunctionContext:
@@ -63,6 +64,13 @@ class FunctionContext:
         # Mutations performed through the scoped API are recorded so commit-time
         # validation can distinguish them from unexpected direct internal writes.
         self._approved_state_changes: list[tuple[str, str, int, int, str]] = []
+
+    @property
+    def read_snapshot_seq(self):
+        """Universe journal watermark in this read transaction, not an action grant."""
+        if self.access != "read":
+            raise PermissionDenied("read_snapshot_seq is only available to read handlers")
+        return state_revision_tx(self._conn, self.universe)[0]
 
     def schedule_timer(self, timer_id, handler, arguments, *, due_at):
         from .world_timers import MAX_TIMER_COMMANDS, MAX_TIMER_ARGUMENT_BYTES

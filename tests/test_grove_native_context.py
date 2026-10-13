@@ -149,6 +149,8 @@ class GroveNativeContextTests(unittest.IsolatedAsyncioTestCase):
             current_tool_input_bytes=80000, protected_message_bytes=80500,
             managed_message_bytes_after=98500, historical_message_budget_bytes=65536,
             historical_message_allowance_bytes=17804, fixed_request_reserve_bytes=32768, byte_unit="utf8",
+            request_projection_target_bytes=131072, sdk_fixed_request_bytes=30000, sdk_message_expansion_bytes=100,
+            sdk_envelope_source="previous_matching_sdk_body",
             budget_scope="historical_native_inference_projection")
         self.loaded(self.proof(projection=projection))
         await self.session.verify_native_context(request_message_id="this-request", request_started_at_ms=200)
@@ -159,11 +161,19 @@ class GroveNativeContextTests(unittest.IsolatedAsyncioTestCase):
                     "managed_message_bytes_after", "historical_message_budget_bytes", "historical_message_allowance_bytes",
                     "fixed_request_reserve_bytes", "byte_unit", "budget_scope"):
             self.assertEqual(actual[key], projection[key])
+        for key in ("request_projection_target_bytes", "sdk_fixed_request_bytes", "sdk_message_expansion_bytes",
+                    "sdk_envelope_source"):
+            self.assertEqual(actual[key], projection[key])
         self.assertGreater(actual["current_tool_input_bytes"], actual["historical_tool_history_budget_bytes"])
         for invalid in (-1, True, "120000"):
             self.loaded(self.proof(projection={**projection, "omitted_historical_tool_input_bytes": invalid}))
             with self.assertRaises(ConnectorError):
                 await self.session.verify_native_context()
+        for key in ("request_projection_target_bytes", "sdk_fixed_request_bytes", "sdk_message_expansion_bytes"):
+            for invalid in (-1, True, "30000"):
+                self.loaded(self.proof(projection={**projection, key: invalid}))
+                with self.assertRaises(ConnectorError):
+                    await self.session.verify_native_context()
 
     def test_owned_source_is_exact_bundled_code_and_existing_memory_is_unchanged(self):
         self.session.remember()
@@ -175,6 +185,118 @@ class GroveNativeContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.memory_file.read_bytes(), original_memory)
         self.assertEqual(another[1]["session_id"], "same-session")
         self.assertTrue(another[0].startswith("file://"))
+
+    def yielded_proof(self):
+        owner = {"purpose": "execution", "request_id": "grove-request-" + "a" * 32,
+            "task_id": "grove-task-" + "b" * 32, "segment_id": "grove-segment-" + "c" * 32}
+        projection = self.projection(agent="shared-grove-executor", request_purpose="execution",
+            world_write_authorized=True, request_id=owner["request_id"], execution_task_id=owner["task_id"],
+            execution_segment_id=owner["segment_id"], current_terminal_tool_parts=1, current_unfinished_tool_parts=0)
+        proof = self.proof(projection=projection)
+        body = json.dumps({"messages": [{"role": "user", "content": "x" * 100000}]})
+        proof["sdk_guard"].update(status="yielded", agent="shared-grove-executor", body_bytes=len(body.encode()),
+            body_sha256=hashlib.sha256(body.encode()).hexdigest(), rejection="execution_segment_budget", sent_count=0,
+            segment_yield={"safe": True, "reason": "request_headroom", "request_id": owner["request_id"],
+                "task_id": owner["task_id"], "segment_id": owner["segment_id"], "body_bytes": len(body.encode()),
+                "current_terminal_tool_parts": 1, "current_unfinished_tool_parts": 0})
+        return proof, owner
+
+    async def test_verified_owned_yield_is_typed_and_never_a_model_completion(self):
+        proof, owner = self.yielded_proof()
+        self.loaded(proof)
+        with self.assertRaises(ConnectorError) as yielded:
+            await self.session.verify_native_context(request_message_id="this-request", request_started_at_ms=200,
+                inference_owner=owner)
+        self.assertEqual(yielded.exception.code, "ExecutionSegmentYield")
+        self.assertEqual(yielded.exception.execution_outcome,
+            {"stage": "native_segment_yield", **proof["sdk_guard"]["segment_yield"]})
+        self.assertEqual((self.session.inference_count, self.session.completion_count, self.session.text), (0, 0, ""))
+        self.assertEqual(self.session.session_id, "same-session")
+
+    async def test_verified_yield_allows_loading_checks_but_cannot_authorize_the_next_request(self):
+        proof, owner = self.yielded_proof()
+        self.loaded(proof)
+        self.session.execution_controller.state.update(task_id=owner["task_id"], segment_id=owner["segment_id"],
+            goal="Continue the original goal", status="paused", requests_used=3, max_requests=4,
+            actions_count=1, max_actions=4)
+        original_execution = deepcopy(self.session.execution)
+        diagnostic = Path(self.plugin[1]["diagnostic_path"])
+        original_diagnostic = diagnostic.read_bytes()
+        with self.assertRaises(ConnectorError) as yielded:
+            await self.session.verify_native_context(request_message_id="this-request", request_started_at_ms=200,
+                inference_owner=owner)
+        self.assertEqual(yielded.exception.code, "ExecutionSegmentYield")
+        for initialize in (False, True):
+            await self.session.verify_native_context(initialize=initialize)
+            self.assertEqual(self.session.native_context["status"], "loaded")
+            self.assertEqual(self.session.native_context["sdk_guard"]["status"], "yielded")
+            self.assertNotIn("segment_yield", self.session.native_context["sdk_guard"])
+        self.assertEqual(diagnostic.read_bytes(), original_diagnostic)
+        next_owner = {**owner, "request_id": "grove-request-" + "d" * 32,
+            "segment_id": "grove-segment-" + "e" * 32}
+        for request_id, started_at, request_owner in (
+                ("next-request", 400, next_owner), ("this-request", 301, owner),
+                ("this-request", 200, next_owner)):
+            with self.subTest(request_id=request_id, started_at=started_at, request_owner=request_owner):
+                with self.assertRaises(ConnectorError) as stale:
+                    await self.session.verify_native_context(request_message_id=request_id,
+                        request_started_at_ms=started_at, inference_owner=request_owner)
+                self.assertEqual(stale.exception.code, "NativeContextUnavailable")
+        next_projection = self.projection(current_request_message_id="next-request", observed_at_ms=450,
+            agent="shared-grove-executor", request_purpose="execution", world_write_authorized=True,
+            request_id=next_owner["request_id"], execution_task_id=next_owner["task_id"],
+            execution_segment_id=next_owner["segment_id"])
+        next_proof = self.proof(projection=next_projection)
+        next_proof["sdk_guard"].update(observed_at_ms=450, request_sequence=2)
+        self.loaded(next_proof)
+        await self.session.verify_native_context(request_message_id="next-request", request_started_at_ms=400,
+            inference_owner=next_owner)
+        self.assertEqual(self.session.native_context["sdk_guard"]["status"], "sent")
+        self.assertEqual(self.session.native_context["projection"]["current_request_message_id"], "next-request")
+        self.assertEqual(self.session.execution, original_execution)
+        self.assertEqual((self.session.session_id, self.session.inference_count, self.session.completion_count,
+            self.session.text), ("same-session", 0, 0, ""))
+
+    def test_yield_error_projection_keeps_only_typed_bounded_evidence(self):
+        proof, _ = self.yielded_proof()
+        outcome = {"stage": "native_segment_yield", **proof["sdk_guard"]["segment_yield"],
+            "upstream_body": "private-provider-content", "provider_credential": "private-token"}
+        error = ConnectorError("ExecutionSegmentYield", "Safe native boundary.", 409, execution_outcome=outcome)
+        self.assertEqual(error.public_payload()["execution_outcome"],
+            {"stage": "native_segment_yield", **proof["sdk_guard"]["segment_yield"]})
+        self.assertNotIn("private-provider-content", json.dumps(error.public_payload()))
+        ordinary = ConnectorError("ModelRequestFailed", "Provider failure.", 502, execution_outcome=outcome)
+        for key in ("safe", "reason", "request_id", "body_bytes", "current_terminal_tool_parts",
+                    "current_unfinished_tool_parts"):
+            self.assertNotIn(key, ordinary.execution_outcome)
+        invalid = ConnectorError("ExecutionSegmentYield", "Invalid evidence.", 409,
+            execution_outcome={**outcome, "safe": "true", "reason": "arbitrary-upstream-text",
+                "request_id": "another-request", "body_bytes": True,
+                "current_terminal_tool_parts": -1, "current_unfinished_tool_parts": False})
+        for key in ("safe", "reason", "request_id", "body_bytes", "current_terminal_tool_parts",
+                    "current_unfinished_tool_parts"):
+            self.assertNotIn(key, invalid.execution_outcome)
+
+    async def test_yield_requires_exact_current_owner_and_terminal_tool_proof(self):
+        mutations = [lambda proof, owner: owner.update(purpose="explain"),
+            lambda proof, owner: owner.update(task_id="another-task"),
+            lambda proof, owner: owner.update(request_id="another-request"),
+            lambda proof, owner: proof["projection"].update(request_purpose="explain"),
+            lambda proof, owner: proof["projection"].update(world_write_authorized=False),
+            lambda proof, owner: proof["sdk_guard"]["segment_yield"].update(current_terminal_tool_parts=0),
+            lambda proof, owner: proof["sdk_guard"]["segment_yield"].update(current_unfinished_tool_parts=1),
+            lambda proof, owner: proof["sdk_guard"]["segment_yield"].update(current_unfinished_tool_parts=False),
+            lambda proof, owner: proof["sdk_guard"]["segment_yield"].update(safe=False),
+            lambda proof, owner: proof["sdk_guard"].update(agent="shared-grove")]
+        for mutation in mutations:
+            proof, owner = self.yielded_proof()
+            mutation(proof, owner)
+            self.loaded(proof)
+            with self.assertRaises(ConnectorError) as rejected:
+                await self.session.verify_native_context(request_message_id="this-request", request_started_at_ms=200,
+                    inference_owner=owner)
+            self.assertEqual(rejected.exception.code, "NativeContextUnavailable")
+            self.assertEqual(self.session.completion_count, 0)
 
 
 if __name__ == "__main__":

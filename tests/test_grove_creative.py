@@ -681,16 +681,30 @@ class CreativeWorldTests(unittest.TestCase):
 
     def test_delegation_revoke_and_exact_retry(self):
         grant = self.call("A", "grove.control_grant", {"goal": "走到附近看一眼", "max_actions": 2})
+        self.assertRegex(grant["grant_id"], r"^grove-grant-[a-f0-9]{32}$")
         player = self.view()["player"]
         args = {"dx": 1, "dy": 0, "expected_player_version": player["version"], "delegation": grant["delegation"]}
         first = self.call("A", "grove.move", args, operation="single-step")
         repeated = self.call("A", "grove.move", args, operation="single-step")
         self.assertEqual(first, repeated)
         self.assertEqual(self.read("A", "grove.control_status")["actions_count"], 1)
+        self.assertEqual(self.read("A", "grove.control_status")["grant_id"], grant["grant_id"])
         self.call("A", "grove.control_revoke", {})
+        revoked = self.read("A", "grove.control_status")
+        self.assertEqual(revoked["grant_id"], grant["grant_id"])
+        self.assertNotIn("delegation", revoked)
         with self.assertRaises(PermissionDenied):
             self.call("A", "grove.move", {**args, "expected_player_version": self.view()["player"]["version"]})
         self.assertEqual(self.view()["player"], first["player"])
+
+    def test_repeated_goal_text_creates_distinct_control_grants(self):
+        first = self.call("A", "grove.control_grant", {"goal": "继续观察", "max_actions": 2})
+        second = self.call("A", "grove.control_grant", {"goal": "继续观察", "max_actions": 2})
+        self.assertNotEqual(first["grant_id"], second["grant_id"])
+        self.assertNotEqual(first["delegation"], second["delegation"])
+        status = self.read("A", "grove.control_status")
+        self.assertEqual(status["grant_id"], second["grant_id"])
+        self.assertEqual(status["actions_count"], 0)
 
     def test_real_breakage_preserves_surviving_contract_escrow(self):
         definition = {"key": "fragile_pact", "name": "可损坏契约", "version": 1, "types": {"pact": {

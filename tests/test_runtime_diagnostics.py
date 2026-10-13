@@ -102,6 +102,19 @@ class WorkDiagnosticsTests(unittest.TestCase):
             self.assertIn("begin", data["phases"])
             self.assertIn("sqlite_commit", data["phases"])
 
+    def test_read_transaction_commit_is_not_counted_as_a_durable_write_commit(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        runtime = WorldRuntime(Path(directory.name)/"world.sqlite3")
+        self.addCleanup(runtime.close)
+        with runtime._conn(readonly=True, purpose="read-probe") as c:
+            c.execute("BEGIN")
+            c.execute("SELECT 1").fetchone()
+        totals = runtime.work_diagnostics()["kinds"]["read-probe"]
+        self.assertEqual(totals["physical_commit_attempts"], 0)
+        self.assertEqual(totals["physical_commits"], 0)
+        self.assertIn("sqlite_commit", totals["phases"])
+
 
 if __name__ == "__main__":
     unittest.main()

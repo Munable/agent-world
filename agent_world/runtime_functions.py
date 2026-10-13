@@ -285,7 +285,10 @@ class RuntimeFunctions:
         return ctx
 
     def _run_user_code(self, c, callback, *args, read_only=False):
+        denied_access = False
+
         def guard(action, arg1, arg2, database, trigger):
+            nonlocal denied_access
             if action in {
                 sqlite3.SQLITE_TRANSACTION,
                 sqlite3.SQLITE_SAVEPOINT,
@@ -293,15 +296,18 @@ class RuntimeFunctions:
                 sqlite3.SQLITE_DETACH,
                 sqlite3.SQLITE_PRAGMA,
             }:
+                denied_access = True
                 return sqlite3.SQLITE_DENY
             if action in {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}:
                 if (not read_only and action == sqlite3.SQLITE_INSERT
                         and arg1 == "state_changes" and trigger in JOURNAL_TRIGGERS):
                     return sqlite3.SQLITE_OK
                 if read_only or arg1 != "world_state":
+                    denied_access = True
                     return sqlite3.SQLITE_DENY
                 if action == sqlite3.SQLITE_DELETE and not any(
                         getattr(arg, "_forgetting_state", False) for arg in args if isinstance(arg, FunctionContext)):
+                    denied_access = True
                     return sqlite3.SQLITE_DENY
             if action not in {
                 sqlite3.SQLITE_SELECT,
@@ -312,6 +318,7 @@ class RuntimeFunctions:
                 sqlite3.SQLITE_UPDATE,
                 sqlite3.SQLITE_DELETE,
             }:
+                denied_access = True
                 return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
 
@@ -323,7 +330,9 @@ class RuntimeFunctions:
         try:
             return callback(*args)
         except sqlite3.DatabaseError as exc:
-            if "not authorized" in str(exc).lower() or "readonly" in str(exc).lower():
+            code = getattr(exc, "sqlite_errorcode", None)
+            primary = code & 255 if isinstance(code, int) else None
+            if primary == sqlite3.SQLITE_AUTH or (denied_access and primary in {None, sqlite3.SQLITE_ERROR}):
                 raise WorldRuntimeError(
                     "world handler attempted a disallowed database write or transaction control"
                 ) from exc
@@ -556,12 +565,16 @@ class RuntimeFunctions:
             outcome = self._run_user_code(c, handler, ctx, arguments, read_only=True)
             self._validate_outcome(outcome, desc, read_only=True)
             result = json.loads(json_text(outcome.result))
+            # This is the journal watermark of the SAME read transaction. A
+            # logical tick cannot order player writes that happen within it.
+            snapshot_seq = ctx.read_snapshot_seq
         return {
             "ok": True,
             "function_id": function_id,
             "function_version": version,
             "result": result,
             "read_only": True,
+            "snapshot_seq": snapshot_seq,
         }
 
     def _replay_tx(self, row, function_id, arguments, activity_claim):

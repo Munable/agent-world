@@ -199,7 +199,9 @@ test("native compaction summaries retain all preferences and references with exp
   assert.ok(text.startsWith("[Grove历史原生摘要："));
   assert.ok(text.includes("task_action_summary"));
   assert.ok(text.endsWith(original[1].parts[0].text));
-  assert.deepEqual(inference.messages[0], original[0]);
+  assert.deepEqual(inference.messages[0].info, original[0].info);
+  assert.ok(inference.messages[0].parts[0].text.startsWith("[Grove historical user request:"));
+  assert.ok(inference.messages[0].parts[0].text.endsWith(original[0].parts[0].text));
   assert.deepEqual(inference.messages.slice(2), original.slice(2));
   assert.deepEqual(inference.messages[1].info, original[1].info);
   assert.equal(JSON.stringify(original), before);
@@ -556,6 +558,174 @@ test("the managed hook refuses a Native LLM runtime that bypasses the SDK guard"
     if (previous === undefined) delete process.env.OPENCODE_EXPERIMENTAL_NATIVE_LLM;
     else process.env.OPENCODE_EXPERIMENTAL_NATIVE_LLM = previous;
   }
+});
+
+test("owned execution yields at exact SDK headroom with complete terminal tools and keeps originals intact", async t => {
+  const { hooks, transform, diagnostic } = await fixture(t);
+  const contract = { purpose: "execution", session_id: "same-session", world_write_authorized: true,
+    request_id: "grove-request-" + "a".repeat(32), task_id: "grove-task-" + "b".repeat(32),
+    segment_id: "grove-segment-" + "c".repeat(32) };
+  const original = [message("current", "user", [{ type: "text", text: "Continue my original goal" },
+    { type: "text", text: "[Grove current request contract]\n" + JSON.stringify(contract) }]),
+    message("current-tools", "assistant", [{ id: "actual-read", type: "tool", callID: "actual-read-call",
+      tool: "grove_world_grove_definition_read", state: { status: "completed", input: { definition_ref: "original-ref" },
+        output: JSON.stringify({ result: { definition_ref: "original-ref", fields: { count: 4 } } }) } }], { parentID: "current" })];
+  const before = JSON.stringify(original), inference = { messages: structuredClone(original) };
+  let dispatched = 0;
+  const config = { model: "provider/model", provider: { provider: { options: {
+    fetch: async () => { dispatched++; return new Response("delegate"); } } } } };
+  await hooks.config(config);
+  for (const length of [100000, 140000]) {
+    await transform({}, inference);
+    await hooks["chat.headers"]({ agent: "shared-grove-executor", sessionID: "same-session",
+      model: { providerID: "provider", id: "model" }, message: { id: messageID("current") } });
+    const body = JSON.stringify({ messages: [{ role: "user", content: "x".repeat(length) }] });
+    const response = await config.provider.provider.options.fetch("https://provider.invalid/messages", { method: "POST", body });
+    assert.equal(response.status, 422);
+    assert.equal((await response.json()).error.type, "grove_execution_segment_yield");
+    const proof = await diagnostic();
+    assert.equal(proof.sdk_guard.status, "yielded");
+    assert.equal(proof.sdk_guard.rejection, "execution_segment_budget");
+    assert.deepEqual(proof.sdk_guard.segment_yield, { safe: true,
+      reason: length > 131072 ? "request_over_budget" : "request_headroom", request_id: contract.request_id,
+      task_id: contract.task_id, segment_id: contract.segment_id, current_terminal_tool_parts: 1,
+      current_unfinished_tool_parts: 0, body_bytes: Buffer.byteLength(body) });
+    assert.equal(proof.sdk_guard.sent_count, 0);
+    assert.equal(proof.sdk_guard.blocked_count, 0);
+    assert.equal(proof.projection.request_purpose, "execution");
+    assert.equal(proof.projection.current_unfinished_tool_parts, 0);
+    assert.deepEqual(inference.messages, original);
+    assert.equal(JSON.stringify(original), before);
+  }
+  assert.equal(dispatched, 0);
+  assert.equal((await diagnostic()).sdk_guard.yielded_count, 2);
+});
+
+test("real SDK schema overhead first reclaims historical pairs so current preparation feedback reaches the model", async t => {
+  for (const embeddedSystem of [false, true]) {
+    const { hooks, transform, diagnostic } = await fixture(t);
+    const contract = { purpose: "execution", session_id: "same-session", world_write_authorized: true,
+      request_id: "grove-request-" + "a".repeat(32), task_id: "grove-task-" + "b".repeat(32),
+      segment_id: "grove-segment-" + "c".repeat(32) };
+    const tool = (id, length) => ({ id, type: "tool", tool: "grove_world_grove_definition_read", callID: `call-${id}`,
+      state: { status: "completed", input: { definition_ref: `ref-${id}` },
+        output: JSON.stringify({ result: { definition_ref: `ref-${id}`, declaration: "x".repeat(length) } }) } });
+    const original = [message("old", "assistant", Array.from({ length: 5 }, (_, i) => tool(`old-${i}`, 12000))),
+      message("current", "user", [{ type: "text", text: "Continue the original goal" },
+        { type: "text", text: "Exact machine facts header\n" + "f".repeat(18000) },
+        { type: "text", text: "[Grove current request contract]\n" + JSON.stringify(contract) }])];
+    const initial = JSON.stringify(original);
+    const bodyFor = messages => {
+      const wire = [];
+      for (const item of messages) {
+        const text = item.parts.filter(part => part.type === "text").map(part => part.text).join("\n");
+        if (text) wire.push({ role: item.info.role, content: text });
+        for (const part of item.parts.filter(part => part.type === "tool")) {
+          wire.push({ role: "assistant", tool_calls: [{ id: part.callID, type: "function",
+            function: { name: part.tool, arguments: JSON.stringify(part.state.input) } }] },
+          { role: "tool", tool_call_id: part.callID, content: part.state.output });
+        }
+      }
+      const instructions = "s".repeat(2100);
+      if (embeddedSystem) wire.unshift({ role: "system", content: instructions });
+      return JSON.stringify({ model: "model", ...(embeddedSystem ? {} : { system: [{ type: "text", text: instructions }] }),
+        messages: wire, tools: [{ name: "formal_tools", description: "t".repeat(28000),
+          input_schema: { type: "object" } }] });
+    };
+    let dispatched = 0;
+    const config = { model: "provider/model", provider: { provider: { options: {
+      fetch: async () => { dispatched++; return new Response("actual SDK delegate"); } } } } };
+    await hooks.config(config);
+    let previousHistory = 65536;
+    for (let completed = 0; completed <= 2; completed++) {
+      if (completed) original.push(message(`current-${completed}`, "assistant",
+        [tool(`preparation-${completed}`, 10000)], { parentID: "current" }));
+      const before = JSON.stringify(original), inference = { messages: structuredClone(original) };
+      await transform({}, inference);
+      const projection = (await diagnostic()).projection;
+      assert.equal(projection.request_projection_target_bytes, 98304);
+      assert.equal(projection.sdk_envelope_source, completed ? "previous_matching_sdk_body" : "initial_fixed_reserve");
+      assert.equal(projection.historical_message_allowance_bytes, Math.min(65536, Math.max(0,
+        98304 - projection.sdk_fixed_request_bytes - projection.sdk_message_expansion_bytes - projection.protected_message_bytes)));
+      assert.ok(projection.historical_tool_history_bytes_after <= projection.historical_message_allowance_bytes);
+      assert.ok(projection.historical_tool_history_bytes_after <= previousHistory);
+      previousHistory = projection.historical_tool_history_bytes_after;
+      assert.deepEqual(inference.messages.slice(1), original.slice(1));
+      assert.equal(JSON.stringify(original), before);
+      await hooks["chat.headers"]({ agent: "shared-grove-executor", sessionID: "same-session",
+        model: { providerID: "provider", id: "model" }, message: { id: messageID("current") } });
+      const body = bodyFor(inference.messages);
+      assert.ok(Buffer.byteLength(body) < 98304);
+      assert.equal((await config.provider.provider.options.fetch("https://provider.invalid/messages", { method: "POST", body })).status, 200);
+      const guard = (await diagnostic()).sdk_guard;
+      assert.equal(guard.status, "sent");
+      assert.equal(guard.current_request_message_id, messageID("current"));
+      assert.ok(guard.tools_bytes > 28000 && guard.tools_bytes < 29000);
+      assert.equal(guard.body_bytes, Buffer.byteLength(body));
+    }
+    assert.equal(dispatched, 3);
+    // The remaining current round itself reaches the boundary. No historical
+    // source can be reclaimed now, so the owned terminal yield is necessary.
+    original.push(message("current-large", "assistant", [tool("large-current-result", 55000)], { parentID: "current" }));
+    const before = JSON.stringify(original), inference = { messages: structuredClone(original) };
+    await transform({}, inference);
+    const projection = (await diagnostic()).projection;
+    assert.equal(projection.historical_message_allowance_bytes, 0);
+    assert.equal(projection.historical_tool_history_bytes_after, 0);
+    assert.deepEqual(inference.messages[0].parts, []);
+    assert.deepEqual(inference.messages.slice(1), original.slice(1));
+    await hooks["chat.headers"]({ agent: "shared-grove-executor", sessionID: "same-session",
+      model: { providerID: "provider", id: "model" }, message: { id: messageID("current") } });
+    const body = bodyFor(inference.messages);
+    assert.ok(Buffer.byteLength(body) >= 98304 && Buffer.byteLength(body) <= 131072);
+    assert.equal((await config.provider.provider.options.fetch("https://provider.invalid/messages", { method: "POST", body })).status, 422);
+    const guard = (await diagnostic()).sdk_guard;
+    assert.equal(guard.status, "yielded");
+    assert.equal(guard.segment_yield.current_terminal_tool_parts, 3);
+    assert.equal(guard.segment_yield.current_unfinished_tool_parts, 0);
+    assert.equal(guard.segment_yield.request_id, contract.request_id);
+    assert.equal(dispatched, 3);
+    assert.equal(JSON.stringify(original), before);
+    assert.equal(JSON.stringify(original.slice(0, 2)), initial);
+  }
+});
+
+test("oversized first inputs, ordinary chat, unknown ownership and unfinished tools never manufacture a yield", async t => {
+  const { hooks, transform, diagnostic } = await fixture(t);
+  let dispatched = 0;
+  const config = { model: "provider/model", provider: { provider: { options: {
+    fetch: async () => { dispatched++; return new Response("delegate"); } } } } };
+  await hooks.config(config);
+  const contract = { purpose: "execution", session_id: "same-session", world_write_authorized: true,
+    request_id: "grove-request-" + "a".repeat(32), task_id: "grove-task-" + "b".repeat(32),
+    segment_id: "grove-segment-" + "c".repeat(32) };
+  const terminal = { type: "tool", tool: "grove_world_grove_definition_read", callID: "read-call",
+    state: { status: "completed", input: {}, output: "original full result" } };
+  for (const scenario of [
+    { parts: [], contract },
+    { parts: [terminal], contract: null },
+    { parts: [terminal, { ...terminal, callID: "pending-call", state: { status: "running", input: {} } }], contract },
+    { parts: [terminal], contract: { ...contract, purpose: "explain", world_write_authorized: false }, agent: "shared-grove" },
+    { parts: [terminal], contract: { ...contract, session_id: "another-session" } },
+    { parts: [terminal], contract, parentID: "older-request" },
+  ]) {
+    const agent = scenario.agent ?? "shared-grove-executor";
+    const original = [message("current", "user", [{ type: "text", text: "Current intent" },
+      ...(scenario.contract ? [{ type: "text", text: "[Grove current request contract]\n" + JSON.stringify(scenario.contract) }] : [])], { agent }),
+      message("current-tools", "assistant", scenario.parts, { agent, parentID: scenario.parentID ?? "current" })];
+    const inference = { messages: structuredClone(original) };
+    await transform({}, inference);
+    await hooks["chat.headers"]({ agent, sessionID: "same-session", model: { providerID: "provider", id: "model" },
+      message: { id: messageID("current") } });
+    const body = JSON.stringify({ messages: [{ role: "user", content: "x".repeat(140000) }] });
+    assert.equal((await config.provider.provider.options.fetch("https://provider.invalid/messages", { method: "POST", body })).status, 422);
+    const proof = await diagnostic();
+    assert.equal(proof.sdk_guard.status, "blocked");
+    assert.equal(proof.sdk_guard.rejection, "provider_json_over_budget");
+    assert.equal(proof.sdk_guard.segment_yield, null);
+    assert.deepEqual(inference.messages, original);
+  }
+  assert.equal(dispatched, 0);
 });
 
 test("complete current catalog and preflight results above 64KiB coexist with a bounded historical suffix and actual SDK overhead", async t => {

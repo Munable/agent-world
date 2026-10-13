@@ -86,7 +86,7 @@ from .runtime_views import RuntimeViews
 from .runtime_timers import RuntimeTimers
 from .runtime_checkpoints import RuntimeCheckpoints
 from .runtime_diagnostics import WorkDiagnostics
-from .writer_gate import WriterGate
+from .writer_gate import writer_gate_for
 from .retention import RuntimeRetention
 from .runtime_streams import RuntimeStreams
 
@@ -99,7 +99,7 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._worlds: dict[str, Any] = {}
         self._function_options: dict[tuple[str, str, int], dict[str, Any]] = {}
-        self._lock = WriterGate()
+        self._lock = writer_gate_for(self.db_path)
         self._registry_lock = threading.RLock()
         self._read_registries = {}
         self._changed = threading.Condition()
@@ -182,12 +182,22 @@ class WorldRuntime(RuntimeFunctions, RuntimeEvents, RuntimeActivities, RuntimeJo
                 yield conn
                 if conn.in_transaction:
                     with self._work_timings.phase("sqlite_commit"):
+                        if not readonly:
+                            self._work_timings.annotate(physical_commit_attempted=True)
                         conn.commit()
+                        if not readonly:
+                            self._work_timings.annotate(physical_commit_completed=True)
+                    if purpose == "checkpoint-batch":
+                        self._work_timings.annotate(batch_status="committed")
             except BaseException:
+                if purpose == "checkpoint-batch":
+                    self._work_timings.annotate(batch_status="unknown")
                 try:
                     if conn.in_transaction:
                         with self._work_timings.phase("rollback"):
                             conn.rollback()
+                        if purpose == "checkpoint-batch":
+                            self._work_timings.annotate(batch_status="rolled_back")
                 finally:
                     # A failed rollback must close the active transaction
                     # while the caller still holds the transaction lock.

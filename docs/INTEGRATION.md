@@ -73,6 +73,7 @@ python -m agent_world --world my_world:WORLD --universe local-world \
 | `ctx.delete_state(scope, key, expected_version=None)` | `expected_version` 是关键字参数；删除推进版本并保留 tombstone。 |
 | `ctx.list_state(scope, prefix="", limit=50, after=None, order="key")` | 除 scope 外均为关键字参数。返回 `{items: [{key, value, version, updated_at}], has_more, next_cursor}`；limit 1..200，order 为 `key` 或 `updated_desc`。下一页将 next_cursor 原样作为 after。 |
 | `ctx.get_role(role_id=None)` | 返回当前世界可访问的档案；省略参数即本次主体。档案不自动跨世界共享。 |
+| `ctx.read_snapshot_seq` | 只读 Query 的当前世界 `state_changes.seq` 最大值（空世界为 0），与该 Query 所有状态读取处于同一数据库快照；写 handler 访问会拒绝。用于标记和排序读取，不能替代对象 CAS、动作资格或 Receipt。 |
 
 `state_authorizer(ctx, scope, key, access) -> bool` 独立检查每次状态读取／写入；access 为 `read` 或 `write`，必须返回 True 才允许。其内部可用 `ctx.authorization_state(scope, key, default=None)` 读取本世界授权依据，不要递归调用普通状态 API。`list_state` 不是自动过滤器：页面含无权读取的项时会拒绝，私有数据应按世界声明安排独立 scope／读取动作。
 
@@ -136,6 +137,8 @@ observe 可以读取该 Principal 获准内容，包括 bootstrap、Query 和 Re
 
 Query：`{"arguments":{...}}`。Command：`{"operation_id":"stable-id","arguments":{...}}`。二者均使用上述 POST invoke 路径，实际 read/write 由动作声明决定。可选顶层 `expected_version` 核对 **函数合同版本**，它不同于领域参数内的状态 CAS 版本。operation_id 1..128 字符，不能嵌进 arguments；同一意图重试保留同一 ID 与完整 envelope。
 
+Query envelope 为 `ok, read_only, function_id, function_version, snapshot_seq, result`。`snapshot_seq` 是本世界同一读取事务的当前修订水位，取保留的 `state_changes.seq` 与历史清理下界的最大值，不是函数版本、逻辑 tick、对象版本、通知序号或 Receipt 的 `commit_seq`；这些序号不能相互比较。一个只读结果不产生新的水位。读取期间的后续提交不拼入旧结果。
+
 当前世界 Command 的新 Receipt 含 `ok`、`commit_seq`、`function_id`、`function_version`、`operation_id`、`actor_role_id`、`credential_id`、`result`、`event_seqs`，按效果可含 `stream_event_ids`；重放返回 `replayed=true`。actor_role_id 是原提交 Principal，credential_id 是原提交 bearer 的非秘密 token_id；可信进程内／timer 提交没有 bearer，credential_id 为 null。同主体换凭据查询或重放保留原来源，不归因给恢复连接。旧 Receipt 缺少这些字段时原样保留，不能推断或补填原来源。世界 scope 仍由 endpoint 绑定，不能假定 Receipt 含 role_id/universe。
 
 Credential 来源不是独立 AgentIdentity，也不证明哪个外部程序实际持有它。共享 bearer 不能区分宿主；事件、公开帖作者和 journal 仍按 Principal 归因，不自动获得事件级宿主标识。同主体多个宿主共享 Operation ID 命名空间，应为独立意图选择不同 ID；同 ID／不同意图明确冲突。Receipt 证明一次提交，不证明更大事项完成。Query 不形成持久 Command Receipt。
@@ -143,6 +146,62 @@ Credential 来源不是独立 AgentIdentity，也不证明哪个外部程序实�
 遇到写请求超时／取消／断连，先把原 envelope 保留为未知结果，再查原 Receipt。ReceiptNotFound 只表示查询当时没有已提交回执，不能证明原请求永不提交；需要重试时使用原 ID／原 envelope，不换 ID。新进程应从持久保存的未知操作、回执和获准世界状态接续，不能只靠上一模型对话记忆。
 
 非 2xx 的 Runtime 错误对象保留 `error`、`message`、`retryable`，可能附 `recovery`、`retry_after_seconds`、`details`。例如 401 需重新鉴权，403 为权限拒绝，404 可为 ResourceNotFound 或 ReceiptNotFound，409 可为状态／操作冲突。按 error/recovery 区分，不仅按状态码判断；retryable 也不授权换 ID 重做未知写入。HTTP Retry-After 与结构化等待提示一致。
+
+## Shared Grove 可替换前端契约 v1
+
+world38 提供三个只读函数，沿用上述 Query 通道与成员授权。它们给地图、物件详情、动作表单和蓝图浏览器提供正式 DTO；服务器输出 schema 随函数目录发现并在返回前校验。`map.viewport / grove.inspect / grove.definition_read / grove.fabrication_options` 继续作为既有 Agent 的事实／创作读表面，网页不从这些原始领域观察解析 `state.program`、组件或能力名。不同 renderer 可以任意选择布局、字体、相机和动画，不必认识规则 AST、存储键或机械／合同机制的名称。
+
+| 函数（version=1） | 输入 | 正式结果 |
+| --- | --- | --- |
+| `grove.client_viewport` | 现有视野参数：可选 `cx, cy, radius, inventory_after, inventory_limit`；以发现的 schema 为准。 | `context, player, chunks, players, entities, inventory, inventory_total, inventory_next, bounds, truncated, clock, changes, opportunities, navigation, coverage, weather, processes, public_content, projection`。|
+| `grove.client_inspect` | `entity_id`；可选 `action, candidate_id` 展开一个实际动作／候选。或互斥的 `tile:{x,y}` 读取当前附近格子。 | 物件：`context, player, entity, contents, explanation, projection`；格子：`context, player, tile, entities, actions`。|
+| `grove.client_definitions` | `mode:"list"`（默认）：`author, key, limit, after, installable_only`；`mode:"detail"`：`definition_ref`；`mode:"fabrication"`：`definition_ref, type_id`。 | 三个互斥、完整声明的 mode schema：分页蓝图目录；固定版本的显示说明／类型选择；实际来源、输入 schema 和成型调用意图。|
+
+每个结果的 `context` 必含 `projection_version:1, world_instance, world_id:"shared-grove", world_version, viewer_role_id, snapshot_seq, observation_clock, watermark_source:"query_envelope.snapshot_seq"`。浏览器核对调用函数及版本、endpoint 世界、当前身份和 envelope／context 相同水位，再接受结果。只在同一世界、同一主体、同一世界代码版本内按 `snapshot_seq` 比较响应；较旧响应不能覆盖新读取。不同选择目标还应有客户端请求代次，避免同水位的旧详情覆盖新的选择。身份改变或撤权后取消旧读取、清掉受保护缓存；未来操作不能沿旧身份发送。未知 DTO 版本或世界版本变化停止新写入，重新发现／连接；原未决 Operation 仍沿原 Receipt 恢复，不能因 UI 升级丢掉。
+
+`snapshot_seq` 来自同一读取事务的当前修订水位，取仍保留的历史与两类历史清理下界的最大值；合法清理历史不会让水位倒退成零。逻辑 tick 不能替代该水位，因为同一 tick 内也可能有多个玩家提交。
+
+`clock` 与 `context.observation_clock` 使用同一个有限时钟投影：必含 `epoch, sequence, last_tick_at`，可含 `completed_sequence, frame_id, frame_status`；不透传保存时钟里的调度器扩展元数据（例如旧世界的 `rules_version`）。世界代码版本由 `context.world_version` 表达，时钟字段不能代替接口版本或读取水位。
+
+`EntityDTO` 是有界的授权结果，不是保存实体的镜像：
+
+| 字段 | 含义与消费约束 |
+| --- | --- |
+| `id, name, version, interaction_revision, x, y, location, custody` | 稳定身份、已读位置及归属；名称不是身份。对象整版本和交互修订保留各自原动作语义，不把当前水位填进这些字段。|
+| `appearance` | 已解析的 `size, shape, color, glyph, pose, container_open, overlays`；可选 `badge, binding_status, motion`。badge 的 `known:false,value:null` 是未知，不是 0／false；burning、water、broken 等是服务器事实，作者显示绑定不能授予物理能力。motion 只复播已保存观察，不能在本地积分出新权威角度。|
+| `summary_facts, fact_sections` | 有标签的树状 `FactDTO`：`id, label, availability, type, temporal_scope, source`，叶子 `value`／可选 `display_value, unit`，组 `rows`。type 为 group／boolean／number／text，时间范围为 current／historical／published。历史保存值、作者声明与当前事实分别显示；无权、隐藏和缺失读为 unknown，不能用旧缓存补值。|
+| `materials, relations` | 已获准的真实材料身份、数量、槽位标签及关系索引。关系索引与可见子物件不授予其完整状态或操作资格，按 `read_request` 分别读取。|
+| `navigation, read_request, definition_request` | 服务器已判断的阻挡与正式后续读取，前端无需根据容器、配方或能力名猜测。蓝图引用固定不可变版本；署名不是产权。|
+| `actions` | 通用 ActionDTO；地图省略详细动作，详情可能返回只读 outline，只有显式展开的描述能构造参数。|
+
+地图 `navigation.cells` 给出 `x,y,passable`，值 null 或缺失均为未知，`planning_only:true` 表明这是路径规划观察。每步 `grove.move` 仍在服务器重验真实格子，路径规划不预留路线。`coverage` 与 `weather` 是已解析的有界现场显示；`processes` 只含允许显示的身份、标签、状态和参与引用。`projection.truncated / omitted_sections`、背包分页和公开锚点省略明确说明读取范围，省略不表示不存在。DTO 超预算先省去重复锚点详情，再缩小地图实体范围并使规划通行未知；单对象的事实仍不能完整呈现时明确拒绝，不伪造完整返回。
+
+`ActionDTO` 的 `function_id`／`action` 是不透明调用键，客户端依据 `label, description, available, reason` 显示选择，不根据键名补规则。展开项含 `fixed_arguments, input_schema, controls, preconditions, confirmation_keys, read_request`。`controls` 是有限控件描述：
+
+| 控件字段 | 规则 |
+| --- | --- |
+| `id, path, label, kind, required, schema, default?` | path 是提交参数中的明确路径；kind 为 choice／multi_choice／integer／number／boolean／string／array。客户端只校验该控件 schema，不能把未识别结构当自由输入。|
+| `choices:[{value,label,arguments_patch,when?,maximum?,preview?}]` | 选中的实际值及其服务器提供的版本／组合指纹补丁；when 的有限依赖按指定控件值筛选，空候选集合仍是空选择器，不能允许猜 ID。preview 为带标签的只读事实，不能证明已经执行。|
+| `maximum_from_control_id?` | 指定另一个选择控件的 `maximum` 绑定本控件上限；未声明时不得根据 `lot_id`／`amount` 名称猜数量关联。|
+| `discovery_request?` | 正式分页目录请求；本页没有候选不证明全目录没有，沿相同过滤条件继续游标。|
+
+展开过的表单保留实际选择、服务器固定参数及选中候选的原版本／指纹／条款。定时刷新不悄悄替换它们。提交前可以重新读取并核对当前资格；`confirmation_keys` 明确哪些参数变化需要重新确认，客户端按这些键核对固定参数与候选补丁，不猜动作名。已有交互修订的固定意图只核对交互修订，自动派生输出的整版本增长不会阻断；明确数量／槽位的倒水由原服务器 handler 重验当前来源和容量，也不因自动版本增长要求换意图。需确认的护栏变化时先显示差异并要求明确重新确认输入，不能把“刷新”解释成用户同意新的来源、目标、数量、槽位或条款。提交保留原护栏，本人提交版本按当前本人读取更新，不悄悄替换候选。`expanded:false` outline 没有参数／候选权威，先执行它的 `read_request`。任何 `available:true` 都只证明本次读取资格，最终 Command 仍重验当前世界。
+
+需要进一步缩小动作观察时，`candidate_requests:[{id,label,read_request}]` 提供实际候选的正式窄读入口，不能据其 ID 构造缺失护栏。展开后的 read_request 保留选定 candidate_id，提交前仍读取相同候选，其他候选和动作继续明确标记未展开。
+
+蓝图目录的每项有 `definition_ref, author, author_name, key, name, version, hash, published_tick, type_ids, read_request`；`author_name` 是当前公共名字，不能替代作者 ID。list 保留 `has_more, next_cursor, filters, order, complete, last_page, scope` 及明确存储统计范围。`installable_only` 仅过滤所选分页，`filter_scope:"selected_page_only"` 时空页仍须继续游标。detail 返回 `definition_ref, name, author, author_name, version, types, installable, fact_sections, projection`；每个类型有 `id,label,can_fabricate,creation_request`，前端直接使用这些服务器选择。声明说明按深度 6／每组 40 项展开，省略明示；它是 published 内容，不能被解释成实例已经运行。
+
+fabrication 返回固定 `definition_ref,type_id`、真实配方 `cost_u,materials`、当前本人 `player`、可用与不可用来源及有界获取来源。`inputs:{path:["sources"],schema,choices:{sources}}` 精确定义可选择的真实 entity／lot，`intent:{function_id,fixed_arguments,input_schema,selection_path,guard_keys}` 定义调用；原 `action` 含可用性、理由及同一选择菜单。按 canonical material_id 合并数量，同一 ID 的别名行不能重复累加；只提交所选真实来源版本、lot_id 和 quantity_u，不自动换料。附近获取来源只表示可发现，须正式 inspect 后采取原动作并重新读成型菜单，不是本人现货或预留量。定义发表、安装资格、成型资格和实例存在分别成立。
+
+一次普通物件选择的调用链为：
+
+```json
+{"arguments":{"entity_id":"the-actual-object"}}
+```
+
+将该 Query 发送给 `grove.client_inspect`，选取其已展开 `entity.actions`，复制 `fixed_arguments`，按 `controls.path` 加入选值及该选值的 `arguments_patch`，再用原动作 `function_id` 和新意图的稳定 `operation_id` 提交 Command。服务器负责授权、参数、当前条件与原子后果。客户端只接受 Receipt 证明提交，并随后读 DTO 显示当前后果；写返回中的旧原始 viewport 不是 v1 DTO。响应未知保留完整原 envelope，查询原 Receipt；403／404／规则冲突只拒绝相应读取或动作，不冒充凭据失效，也不证明原未知操作没发生。错误 helper 保留 canonical `retryable, retry_after_seconds, details`，等待提示不能变成自动换 ID 重做。
+
+Agent 面板的历史执行 readback 保留原证据语义。网页当前行动目标只有身份索引和 `client_read_request`，点击后取得当前 DTO；当前详情不能覆盖或伪装成原行动的历史读回。
 
 ## MCP 客户端
 
