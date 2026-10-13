@@ -17,10 +17,11 @@ from . import commit
 from . import activity
 from . import processes
 from . import building
+from . import action_contracts as ac
 from . import domains, scheduling
 from .definitions import COMBUSTION_CADENCE_TICKS, COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for, material_import
 
-WORLD_VERSION = 39
+WORLD_VERSION = 40
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 ID = {"type": "string", "minLength": 1, "maxLength": 128}
@@ -45,6 +46,10 @@ BUILD_ARGS = {"type": "object", "properties": {
     "expected_player_version": VERSION,
     "material_ids": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True, "items": ID}},
     "required": ["recipe", "x", "y", "expected_player_version"], "additionalProperties": False}
+BUILD_OPTIONS_ARGS = {"type": "object", "properties": {
+    "x": COORD, "y": COORD, "recipe": {"enum": list(building.RECIPES)},
+    "material_ids": deepcopy(BUILD_ARGS["properties"]["material_ids"])},
+    "required": ["x", "y"], "additionalProperties": False}
 INTERACT_ARGS = {"type": "object", "properties": {
     "action": {"enum": ["pickup", "drop", "open", "close", "store", "retrieve", "fill", "pour", "ignite",
                          "harvest", "tend", "fuel", "dismantle", "switch_mode", "attach", "detach", "launch", "transfer",
@@ -441,37 +446,7 @@ def move(ctx,args):
 
 
 def _accessible(ctx, player, entity, *, near=True, subject="target"):
-    if entity["state"].get("retired") or entity.get("lifecycle") == "consumed":
-        raise RuleViolation("物件已耗尽或投入其他用途。")
-    current, seen = entity, set()
-    for _ in range(17):
-        if current["id"] in seen:
-            raise RuleViolation("物理关系不能循环。")
-        seen.add(current["id"])
-        if current["owner"] not in {None, player["id"]}:
-            raise PermissionDenied("别人的背包和物件不能取用。")
-        parent = current.get("physical_parent")
-        if not parent:
-            break
-        current = m.get_entity(ctx, parent["id"])
-        if parent["relation"] == "contained" and not current["state"]["open"]:
-            raise RuleViolation("物件在关闭的容器内，请先打开。")
-    else:
-        raise RuleViolation("物理关系层数超过限制。")
-    x, y = m.entity_location(ctx, entity)
-    if x is None or (near and current["owner"] is None and abs(x-player["x"])+abs(y-player["y"]) > 1):
-        visible = x is not None and max(abs(x-player["x"]), abs(y-player["y"])) <= 8
-        condition = {"subject": subject, "entity_id": entity["id"], "condition": "adjacent",
-                     "known": visible, "satisfied": False, "required_max": 1, "metric": "manhattan"}
-        if visible:
-            condition.update(location={"x": x, "y": y}, player_location={"x": player["x"], "y": player["y"]},
-                             actual_distance=abs(x-player["x"])+abs(y-player["y"]))
-        else:
-            condition["reason"] = "location_not_observable"
-        label = {"target": "目标物件", "item": "来源物件", "other": "另一物件"}.get(subject, "物件")
-        raise RuleViolation("要先走到" + label + "相邻的一格。", details={"action_precondition": condition})
-    if not near and max(abs(x-player["x"]), abs(y-player["y"])) > 8:
-        raise RuleViolation("物件不在附近视野内。")
+    return ac.accessible(ctx, player, entity, near=near, subject=subject)
 
 
 def _access_observation(ctx, player, entity, *, subject="target"):
@@ -479,31 +454,19 @@ def _access_observation(ctx, player, entity, *, subject="target"):
     try:
         _accessible(ctx, player, entity, near=False, subject=subject)
     except (PermissionDenied, RuleViolation):
-        return {"subject": subject, "entity_id": entity["id"], "condition": "accessible",
-                "known": False, "satisfied": False}
+        return ac.condition("accessible", subject=subject, entity_id=entity["id"],
+                            known=False, required=True)
     x, y = m.entity_location(ctx, entity)
     distance = abs(x-player["x"])+abs(y-player["y"])
-    return {"subject": subject, "entity_id": entity["id"], "condition": "adjacent",
+    return {"subject": subject, "entity_id": entity["id"], "subject_ref": {"kind": "entity", "id": entity["id"]},
+            "condition": "adjacent", "actual": distance, "required": {"maximum": 1},
             "known": True, "location": {"x": x, "y": y}, "player_location": {"x": player["x"], "y": player["y"]},
             "actual_distance": distance, "required_max": 1, "metric": "manhattan",
             "satisfied": entity["owner"] == player["id"] or distance <= 1}
 
 
 def _reason(ctx, player, entity, *, burning=False):
-    try:
-        _accessible(ctx, player, entity)
-    except (PermissionDenied, RuleViolation) as exc:
-        return str(exc)
-    if not burning:
-        cursor = entity
-        for _ in range(17):
-            if cursor["state"]["burning"]:
-                return "燃烧中的物件及内容不能搬运或取用。"
-            parent = cursor.get("physical_parent")
-            if not parent:
-                break
-            cursor = m.get_entity(ctx, parent["id"])
-    return None
+    return ac.access_reason(ctx, player, entity, burning=burning)
 
 
 def _candidate(entity, lots=None):
@@ -549,12 +512,14 @@ def _combination_candidate(ctx, player, target, item, action, reason):
     # closed-container projection already permits aggregate load, never child
     # identities or material lots; no preview adds either kind of disclosure.
     physics["affected"] = visible
-    reason = reason or result["constraint_reason"]
+    reason = reason or (_store_reason(ctx, player, item, target) if action == "store" else None) or result["constraint_reason"]
     candidate["preview"] = {"action": action, "target_id": target["id"], "item_id": item["id"],
         "target_version": target["version"], "item_version": item["version"], "player_version": player["version"],
-        "available": reason is None, "reason": reason, "physics": physics,
+        "available": reason is None, "reason": str(reason) if reason else None, "physics": physics,
         "assumption": "relation_change_only", "current_only": True,
         "version_fingerprint": _combination_fingerprint(player, result["version_fingerprint"])}
+    if isinstance(reason, ac.Reason):
+        candidate["preview"].update(failure=deepcopy(reason.failure), read_requests=deepcopy(reason.failure["read_requests"]))
     return candidate
 
 
@@ -659,16 +624,20 @@ def _action_options(ctx, player, entity):
             add("drop", base or ("附着物件须先解除绑定。" if attached else None), "放在脚下公开，任何附近的人均可拿取使用。")
     if "container" in caps and entity.get("lifecycle") == "intact":
         add("close" if state["open"] else "open", base, "开合容器口；关闭后内容不能装卸。")
-        reason = base or ("请先打开容器。" if not state["open"] else None) or ("容器物件格已满。" if len(state["contents"]) >= state["capacity"] else None)
+        reason = ac.container_reason(ctx, player, entity, capacity=True)
         candidates = [_combination_candidate(ctx, player, entity, e, "store", reason)
                       for e in own if e["id"] != entity["id"] and _movable(ctx, player, e)
                       and entity["id"] not in {child["id"] for child in m.descendants(ctx, e)}]
         if candidates and not any(candidate["preview"]["available"] for candidate in candidates):
             reason = reason or candidates[0]["preview"]["reason"]
-        add("store", reason or ("没有可装入的本人物件。" if not candidates else None), "搬入完整子物件，保留其身份与自身材料；本体不会变成目标的contained配料。载荷超限可能导致后续结构失效。", _input(candidates))
+        add("store", reason or (ac.failure("store_no_candidates", "没有可装入的本人物件。", "owned_store_candidates",
+            entity_id=entity["id"], actual=0, required={"minimum": 1}) if not candidates else None),
+            "搬入完整子物件，保留其身份与自身材料；本体不会变成目标的contained配料。载荷超限可能导致后续结构失效。", _input(candidates))
         children = [m.get_entity(ctx, eid) for eid in state["contents"]] if state["open"] else []
         candidates = [_candidate(e) for e in children if _movable(ctx, player, e)]
-        add("retrieve", base or ("请先打开容器。" if not state["open"] else None) or ("没有可取出的物件。" if not candidates else None),
+        add("retrieve", ac.container_reason(ctx, player, entity) or (
+            ac.failure("retrieve_no_candidates", "没有可取出的物件。", "retrievable_contents",
+                entity_id=entity["id"], actual=0, required={"minimum": 1}) if not candidates else None),
             "取出到本人背包，保留物件身份。", _input(candidates))
     sources = "water_source" in components or "water_source" in caps or "container" in components and state["water_capacity"] > 0
     water_items = [e for e in own if "container" in e["capabilities"] and e["state"]["open"] and e["state"]["water_capacity"] > e["state"]["water"]]
@@ -887,21 +856,38 @@ def _own_item(ctx, player, args, capability=None, *, revalidate=False, fixed_int
 
 
 def _container(ctx, player, entity):
-    reason = _reason(ctx, player, entity)
+    reason = ac.container_reason(ctx, player, entity)
     if reason:
-        raise RuleViolation(reason)
-    if "container" not in entity.get("components", {}) or entity.get("lifecycle") != "intact" or not entity["state"]["open"]:
-        raise RuleViolation("目标必须是打开且结构完整的容器。")
+        ac.reject(reason)
+
+
+def _store_reason(ctx, player, item, target):
+    reason = ac.container_reason(ctx, player, target, capacity=True)
+    if reason:
+        return reason
+    reason = ac.access_reason(ctx, player, item, subject="item")
+    if reason:
+        return reason
+    if "transport" not in item["capabilities"]:
+        return ac.failure("item_not_transportable", "所选物件不能搬运。", "transportable",
+            subject="item", entity_id=item["id"], actual=False, required=True)
+    if "personal" in item["capabilities"]:
+        return ac.failure("item_personal_protected", "私有保护物件不能装卸。", "ordinary_movable_item",
+            subject="item", entity_id=item["id"], actual="personal", required="ordinary")
+    if (item.get("physical_parent") or {}).get("relation") == "attached":
+        return ac.failure("item_attached", "附着中的物件须先解除绑定。", "item_detached",
+            subject="item", entity_id=item["id"], actual=False, required=True,
+            instruction="从物件菜单选择detach，成功后重新读取本人物件。")
+    if item["id"] == target["id"] or target["id"] in {e["id"] for e in m.descendants(ctx, item)}:
+        return ac.failure("physical_relation_cycle", "容纳或绑定关系不能循环。", "acyclic_relation",
+            subject="item", entity_id=item["id"], actual=False, required=True)
+    return None
 
 
 def _store(ctx, player, item, target):
-    _container(ctx, player, target)
-    if not _movable(ctx, player, item):
-        raise RuleViolation("燃烧、私有保护或附着中的物件不能装卸。")
-    if item["id"] == target["id"] or target["id"] in {e["id"] for e in m.descendants(ctx, item)}:
-        raise RuleViolation("容纳或绑定关系不能循环。")
-    if len(target["state"]["contents"]) >= target["state"]["capacity"]:
-        raise RuleViolation("容器物件格已满。")
+    reason = _store_reason(ctx, player, item, target)
+    if reason:
+        ac.reject(reason)
     commit.contain(ctx, target, item)
 
 
@@ -935,12 +921,18 @@ def interact(ctx, args):
         if args["expected_combination_fingerprint"] != _combination_fingerprint(player, current["version_fingerprint"]):
             raise StateConflict("组合物件或承载依据已经变化，请刷新预览后再次选择。")
     _accessible(ctx, player, target)
+    if action in {"store", "retrieve"}:
+        _container(ctx, player, target)
+    if action == "store" and args.get("item_id"):
+        reason = _store_reason(ctx, player, m.get_entity(ctx, args["item_id"]), target)
+        if reason:
+            ac.reject(reason)
     option = next((o for o in _action_options(ctx, player, target) if o["action"] == action), None)
     if not option:
         raise RuleViolation(f"目标「{target['name']}」（{target['id']}）没有{action}行动；请读取所要操作物件自身的行动入口。",
             details={"reason": "action_not_offered", "action": action, "target_id": target["id"], "target_name": target["name"]})
     if not option["available"]:
-        raise RuleViolation(option["reason"])
+        ac.reject(ac.option_reason(option))
     action_result = {"action": action}
     affected_ids = {target["id"]}
     if args.get("item_id"):
@@ -1270,13 +1262,25 @@ def _project_entity(ctx, player, entity, *, include_options=True, detailed=False
     return value
 
 
+def build_options_function(ctx, args):
+    player = m.get_player(ctx)
+    return FunctionOutcome(building.build_options(ctx, player, args, BUILD_ARGS))
+
+
 def build_function(ctx,args):
     from .creative import check_delegation
     check_delegation(ctx, args)
     from .generation import record_content_outcome
     player=m.get_player(ctx)
     m.check_player_version(player,args["expected_player_version"])
-    entity,summary=building.build(ctx,player,args)
+    try:
+        entity,summary=building.build(ctx,player,args)
+    except RuleViolation as exc:
+        # Preserve declared metadata; commit-only constraints which do not yet
+        # expose a full numeric preview are explicitly unknown to readers.
+        reason = ac.from_error(exc, subject="tile", tile={"x": args["x"], "y": args["y"]},
+            reads=[{"function_id": "grove.build_options", "arguments": {"x": args["x"], "y": args["y"], "recipe": args["recipe"]}}])
+        ac.reject(reason, exception=type(exc))
     player=m.get_player(ctx)
     m.save_player(ctx,player)
     commit.record_change(ctx,summary,x=entity["x"],y=entity["y"],entity_id=entity["id"],action="build")
@@ -1434,6 +1438,8 @@ def make_world(*, publication_budget=None):
         FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=15,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),
         FunctionSpec("grove.interact",interact,with_delegation(INTERACT_ARGS),version=12,authorize=member,description="按实际能力与归属操作物件。pickup/drop保留原对象与观察到的交互护栏，自动计数和机械派生输出不要求逐秒追版本；提交时仍重验真实归属、位置、可搬运和容器容量条件，其他参与者操作及材料、归属、结构变化使旧护栏失效。install_interaction/uninstall_interaction使用明确definition_ref在实际合法容器安装/卸载局部交互，安装不生产材料、不改全世界规则；读取inspect菜单与固定版本后提交。store搬入完整子物件，不把其本体变成目标配料；transfer按item_id、lot_id、amount与target_slot转移已有材料批次，材料身份不变。本人personal容器可转出自身contained且非燃烧、非绑定的散料，保护本体、衬层、完整子物件及他人内容；personal目的容器不接收散料。读取inspect的当前候选、目标/来源前置条件与版本；距离拒绝明确对应对象。pour提供固定amount与target_slot时重验当前合法性；燃料或湿度改变版本不单独阻塞，去向改变、来源不足、容量不足或权限/距离改变仍原子拒绝，不换量、来源、目标或槽。"),
         FunctionSpec("grove.build",build_function,with_delegation(BUILD_ARGS),authorize=member,description="用本人原材料搭通路、雨棚或烘干炉，原子投入唯一物件。"),
+        FunctionSpec("grove.build_options",build_options_function,BUILD_OPTIONS_ARGS,access="read",authorize=member,
+            description="读取附近位置的共用建设菜单、真实材料成本、输入schema与版本、机器可读失败和恢复读取。预览不物化地块、不投入材料；最终载荷及提交容量标为未知，提交仍原子重验全部条件。"),
         FunctionSpec("grove.handbook",handbook,EMPTY,access="read",description="读取正式世界规则，未入场亦可读取。"),
         FunctionSpec("map.viewport",viewport_function,VIEW_ARGS,version=5,access="read",authorize=member,description="读取附近有限地图、自己的背包、自身材料槽与明确标记的历史过程摘要；详细反应条件从inspect读取。"),
         *generation_specs(), *creative.specs(), *discovery.specs(), *client_projection.specs()),version=WORLD_VERSION,state_version=25,
@@ -1454,5 +1460,7 @@ def make_world(*, publication_budget=None):
         streams=(StreamSpec("grove.changes",public=True,retention_seconds=86400,max_events=4096),),
         entry_instructions="先读grove.handbook与grove.rule_catalog。人可亲自移动操作，或明确目标委托给自己的外部Agent实际读、计划、行动、读回和调整；随时收回。规则发布与实例生成分开，后者消耗真实区域资源。"
             f"每位作者的发表容量为{budget.payload_bytes}字节、{budget.definitions}份定义；原已发表内容保留。")
-    return replace(definition, functions=tuple(replace(spec, handler=bind_budget(spec.handler, budget))
-                                               for spec in definition.functions))
+    from .agent_contract import attach_agent_contract
+    return attach_agent_contract(replace(definition,
+        functions=tuple(replace(spec, handler=bind_budget(spec.handler, budget))
+                        for spec in definition.functions)))

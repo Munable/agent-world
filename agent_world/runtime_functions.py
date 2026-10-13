@@ -51,6 +51,16 @@ class _ReadRegistry:
 
 _EMPTY_READ_REGISTRY = _ReadRegistry(None, MappingProxyType({}), MappingProxyType({}))
 
+# SHA-256 over UTF-8 json_text({function_id, arguments}): sorted object keys,
+# compact separators, literal Unicode and finite JSON values. This is the
+# already persisted operations.args_hash, not a digest reconstructed from the
+# receipt result or the handler's possibly mutated arguments.
+INTENT_FINGERPRINT_ALGORITHM = "sha256-runtime-canonical-json-v1"
+
+
+def _intent_fingerprint(digest):
+    return {"algorithm": INTENT_FINGERPRINT_ALGORITHM, "digest": digest}
+
 
 class RuntimeFunctions:
     def _capture_registry(self, universe):
@@ -587,6 +597,7 @@ class RuntimeFunctions:
         if previous_target != target:
             raise OperationConflict("operation_id was used for a different activity")
         receipt["replayed"] = True
+        receipt["intent_fingerprint"] = _intent_fingerprint(row["args_hash"])
         return receipt
 
     def invoke_function(
@@ -728,13 +739,15 @@ class RuntimeFunctions:
             receipt.update(extra_receipt)
         if ctx.random_draws:
             receipt["random_draws"] = ctx.random_draws
+        intent_hash = self._sha256({"function_id": ctx.function_id, "arguments": arguments})
+        receipt["intent_fingerprint"] = _intent_fingerprint(intent_hash)
         encoded = json_text(receipt)
         if record_operation:
             c.execute(
                 "INSERT INTO operations(universe,actor_role_id,idempotency_key,function_id,function_version,args_hash,receipt_json,created_at,activity_id) "
                 "VALUES(?,?,?,?,?,?,?,?,?)",
                 (ctx.universe, ctx.actor_role_id, ctx.operation_id, ctx.function_id, ctx.function_version,
-                 self._sha256({"function_id": ctx.function_id, "arguments": arguments}), encoded, ctx.now, activity_id),
+                 intent_hash, encoded, ctx.now, activity_id),
             )
         return json.loads(encoded)
 
@@ -744,12 +757,14 @@ class RuntimeFunctions:
             c.execute("BEGIN")
             self._admit_actor_tx(c, universe, role_id, identity_token)
             row = c.execute(
-                "SELECT receipt_json FROM operations WHERE universe=? AND actor_role_id=? AND idempotency_key=?",
+                "SELECT receipt_json,args_hash FROM operations WHERE universe=? AND actor_role_id=? AND idempotency_key=?",
                 (universe, role_id, operation_id),
             ).fetchone()
             if row is None:
                 raise ReceiptNotFound("no committed operation with this ID for this role")
-            return json.loads(row["receipt_json"])
+            receipt = json.loads(row["receipt_json"])
+            receipt["intent_fingerprint"] = _intent_fingerprint(row["args_hash"])
+            return receipt
 
     def call_function(
         self,

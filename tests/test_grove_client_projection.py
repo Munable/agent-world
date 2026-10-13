@@ -6,10 +6,11 @@ from unittest.mock import patch
 
 import test_grove_creative as fixtures
 from test_grove_presentation import definition
-from agent_world.errors import PermissionDenied
+from agent_world.errors import PermissionDenied, RuleViolation
 from agent_world.world_context import FunctionContext
 from agent_world.worlds.shared_grove import model as m
 from agent_world.worlds.shared_grove.definitions import DEFINITIONS
+from test_grove_interactions import installed_definition
 
 
 class GroveClientProjectionTests(unittest.TestCase):
@@ -31,7 +32,7 @@ class GroveClientProjectionTests(unittest.TestCase):
         self.assertEqual(view["context"]["snapshot_seq"], response["snapshot_seq"])
         self.assertEqual(view["context"]["viewer_role_id"], self.h.roles["A"])
         self.assertEqual(view["context"]["world_instance"], "w")
-        self.assertEqual(view["context"]["projection_version"], 1)
+        self.assertEqual(view["context"]["projection_version"], 2)
         for entity in view["entities"] + view["inventory"]:
             self.assert_client_entity(entity)
         blocked = {(row["x"], row["y"]) for row in view["entities"] if row["navigation"]["blocks"]}
@@ -52,7 +53,7 @@ class GroveClientProjectionTests(unittest.TestCase):
             return value
 
         # Existing worlds retain scheduler fields that are absent from a newly
-        # initialized world. The public v1 schema is immutable after discovery.
+        # initialized world. Only finite declared clock fields reach the DTO.
         with patch.object(FunctionContext, "get_state", legacy_clock):
             response = self.query("A", "grove.client_viewport")
             view = response["result"]
@@ -126,6 +127,7 @@ class GroveClientProjectionTests(unittest.TestCase):
         self.assertEqual(menu["inputs"]["choices"], menu["action"]["choices"])
         self.assertNotIn("sources", menu["intent"]["fixed_arguments"])
         self.assertNotIn("definition", menu)
+        self.assertEqual(menu["inputs"]["schema"], menu["intent"]["input_schema"]["properties"]["sources"])
         page = self.query("A", "grove.client_definitions", {"mode": "list", "limit": 1})["result"]
         self.assertTrue({"has_more", "next_cursor", "filters", "filter_scope"} <= set(page))
         self.assertEqual(page["definitions"][0]["read_request"]["arguments"]["definition_ref"], ref)
@@ -187,3 +189,49 @@ class GroveClientProjectionTests(unittest.TestCase):
             self.assertIn("available", action)
             self.assertIn("reason", action)
             self.assertEqual(action["controls"][0]["kind"], "multi_choice")
+            self.assertIn("preview_scope", action)
+            self.assertIn("failure", action)
+
+    def test_generic_control_directory_follows_formal_next_and_exact_validation_requests(self):
+        h = self.h
+        refs = [h.call("A", "grove.definition_publish", {"definition": installed_definition("candidate_"+str(index))})["definition_ref"] for index in range(2)]
+        # A non-installable publication can make a selected page empty; the
+        # formal next request still represents the rest of the actual directory.
+        h.call("A", "grove.definition_publish", {"definition": definition()})
+        target = h.item("A", "水壶")["id"]
+        inspected = self.query("A", "grove.client_inspect", {"entity_id": target, "action": "install_interaction"})["result"]
+        descriptor = next(row for row in inspected["entity"]["actions"] if row["action"] == "install_interaction")
+        control = descriptor["controls"][0]
+        request = control["discovery_request"]
+        self.assertEqual(request["function_id"], "grove.client_choices")
+        request["arguments"]["limit"] = 1
+        choices = []
+        pages = []
+        while request:
+            response = self.query("A", request["function_id"], request["arguments"])
+            page = response["result"]
+            pages.append(page)
+            self.assertEqual(page["context"]["snapshot_seq"], response["snapshot_seq"])
+            self.assertNotIn("definitions", page)
+            self.assertNotIn("next_cursor", page)
+            choices.extend(page["choices"])
+            self.assertEqual(page["complete"], page["next_request"] is None)
+            request = page["next_request"]
+        self.assertTrue(any(not page["choices"] and not page["complete"] for page in pages))
+        self.assertEqual({row["value"] for row in choices}, set(refs))
+        selected = choices[0]
+        self.assertTrue(selected["validation"]["available"])
+        request = selected["read_request"]
+        before = deepcopy(h.entity(target))
+        checked = self.query("A", request["function_id"], request["arguments"])["result"]
+        self.assertEqual(checked["choices"][0]["value"], selected["value"])
+        self.assertEqual(checked["choices"][0]["arguments_patch"], selected["arguments_patch"])
+        self.assertEqual(h.entity(target), before)
+        h.interact("A", target, "close")
+        rejected = self.query("A", request["function_id"], request["arguments"])["result"]["choices"][0]
+        self.assertFalse(rejected["validation"]["available"])
+        self.assertIn("打开", rejected["validation"]["reason"])
+        with self.assertRaises(PermissionDenied):
+            self.query("B", request["function_id"], request["arguments"])
+        with self.assertRaises(RuleViolation):
+            self.query("A", "grove.client_choices", {"entity_id": target, "action": "close", "control_id": "definition_ref"})

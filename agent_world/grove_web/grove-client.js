@@ -1,6 +1,9 @@
 import {CommonsClient} from '/static/commons-client.js';
 import {WorldClient} from '/static/world-client.js';
 
+const projectionVersion=2;
+const projectionFunctions=Object.freeze({'grove.client_viewport':2,'grove.client_inspect':2,'grove.client_definitions':3,'grove.client_choices':1});
+
 // Browser signing, identity storage and pending-operation locking stay in Commons.
 // A lost response is recovered by its Receipt, then by the same operation ID.
 export class GroveClient extends CommonsClient {
@@ -39,6 +42,8 @@ export class GroveClient extends CommonsClient {
   cancel(){for(const controller of this.controllers){this.cancelledControllers.add(controller);controller.abort();}this.world.cancelReads();this.world.view=null;this.inventoryAfter=null;this.inventoryWasReset=false;this.projectionContext=null;this.projectionBlocked=false;}
   async query(name,args={}) {
     if(!name.startsWith('grove.client_'))return super.query(name,args);
+    const functionVersion=projectionFunctions[name];
+    if(!functionVersion){this.projectionBlocked=true;throw new Error('客户端读取合同尚未支持；重新发现接口后再操作。');}
     const identity={token:this.token,tokenId:this.tokenId,roleId:this.roleId,universe:this.universe};
     let envelope;
     try{envelope=await this.world.query(name,args);}
@@ -53,8 +58,7 @@ export class GroveClient extends CommonsClient {
     if(Object.entries(identity).some(([field,expected])=>this[field]!==expected)){
       const error=new Error('读取期间身份已改变；请重新读取。');error.cancelled=true;throw error;
     }
-    if(context?.projection_version!==1){this.projectionBlocked=true;throw new Error('客户端接口版本尚未支持；重新发现接口后再操作。');}
-    const functionVersion=name==='grove.client_definitions'?2:1;
+    if(context?.projection_version!==projectionVersion){this.projectionBlocked=true;throw new Error('客户端接口版本尚未支持；重新发现接口后再操作。');}
     if(envelope.ok!==true||envelope.read_only!==true||envelope.function_id!==name||envelope.function_version!==functionVersion||
        context.world_id!=='shared-grove'||!Number.isInteger(context.world_version)||context.world_version<1||
        context.world_instance!==identity.universe||context.viewer_role_id!==identity.roleId||
@@ -72,7 +76,7 @@ export class GroveClient extends CommonsClient {
     return value;
   }
   async mutate(name,args,context={},isCurrent) {
-    if(name.startsWith('grove.')&&name!=='grove.control_revoke'&&(this.projectionBlocked||this.projectionContext?.projection_version!==1||this.projectionContext.world_instance!==this.universe||this.projectionContext.viewer_role_id!==this.roleId))throw new Error('先取得本世界、本身份的受支持客户端接口，再操作。');
+    if(name.startsWith('grove.')&&name!=='grove.control_revoke'&&(this.projectionBlocked||this.projectionContext?.projection_version!==projectionVersion||this.projectionContext.world_instance!==this.universe||this.projectionContext.viewer_role_id!==this.roleId))throw new Error('先取得本世界、本身份的受支持客户端接口，再操作。');
     return super.mutate(name,args,context,isCurrent);
   }
   async retry() {
@@ -137,7 +141,7 @@ export class GroveClient extends CommonsClient {
     }
   }
   unpackView(view) {
-    return view?.context?.projection_version===1&&view?.player?view:null;
+    return view?.context?.projection_version===projectionVersion&&view?.player?view:null;
   }
   readChanges(cursor) {
     return this.request('/v1/streams/grove.changes/read',{limit:40,...(cursor?{cursor}:{})});

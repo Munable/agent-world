@@ -6,13 +6,15 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
 from agent_world import WorldRuntime
-from agent_world.errors import WorldRuntimeError
+from agent_world.errors import ReceiptNotFound, WorldRuntimeError
 from agent_world.grove_connector import ConnectorError, ConnectorManager, GroveSession, create_connector_app
 from agent_world.grove_agent_observation import _agent_tool_text, _checked_agent_tool_text
+from agent_world.transport_contracts import error_response
 from agent_world.worlds.shared_grove import make_world
 
 
@@ -29,50 +31,70 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
             storage=self.root / "connector", binary=Path("unused-opencode"), wrapper=None)
         self.session = GroveSession(self.manager, {"role_id": self.role, "access_mode": "control"},
             "fixture-bearer", "A", "provider/model")
-        self.session.catalog = {f["function_id"]: f for f in self.runtime.list_functions("w")}
         self.session.world = self.world
         self.session.status = "thinking"
         self.session.entered = self.session.execution_controller.active = True
         self.session.execution_controller.state.update(task_id="task", segment_id="segment", status="running", max_actions=8,
-            delegation_active=True, context_entity_id=None, goal="Explore", grant_operation_id="grant")
+            delegation_active=True, context_entity_id=None, goal="Explore")
         self.session.current_turn_facts = AsyncMock(side_effect=lambda **kw: self.scene()["result"])
-        grant = self.runtime.call_function("w", "grove.control_grant", self.role,
-            {"goal": "Explore", "max_actions": 8}, operation_id="grant")["result"]
-        self.session.execution_controller.delegation = grant["delegation"]
-        self.session.execution_controller.state["grant_id"] = grant["grant_id"]
         self.session.active_native_request = {"purpose": "execution", "world_write_authorized": True,
             "session_id": self.session.session_id, "task_id": "task", "segment_id": "segment"}
         self.calls = []
         self.read_seen = asyncio.Event()
         self.lose_before_commit = self.lose_after_commit = False
 
+    async def asyncSetUp(self):
+        await self.session.agent_client.discover()
+        self.session.catalog = deepcopy(self.session.agent_client.catalog)
+        self.session._agent_contract_discovered = True
+        # The host grant uses the same scoped SDK operation record and actual
+        # Runtime receipt as later recovery, without entering the Agent menu.
+        await self.session.invoke("grove.control_grant", {"goal": "Explore", "max_actions": 8})
+        self.calls.clear()
+        self.read_seen.clear()
+
     def scene(self):
         return self.runtime.query_function("w", "map.viewport", self.role, {})
 
     def preflight(self):
-        return self.session.present_agent_result("map.viewport", self.scene(), preflight=True)["observation_id"]
+        return self.session.present_agent_result("map.viewport", self.scene(),
+            preflight=True, raw_query=True)["observation_id"]
 
     async def world(self, method, path, body=None):
         self.calls.append((method, path, deepcopy(body)))
         try:
             if method == "GET":
-                return self.runtime.get_receipt("w", self.role, path.rsplit("/", 1)[-1])
+                url = urlsplit(path)
+                if url.path == "/v1/bootstrap":
+                    return self.runtime.bootstrap("w", self.role)
+                if url.path == "/v1/discover":
+                    query = parse_qs(url.query)
+                    return self.runtime.discover_functions("w", actor_role_id=self.role,
+                        after=query.get("after", [""])[0], limit=int(query.get("limit", ["50"])[0]),
+                        include_schemas=query.get("include_schemas", ["false"])[0] == "true")
+                if url.path.startswith("/v1/receipts/"):
+                    return self.runtime.get_receipt("w", self.role, url.path.rsplit("/", 1)[-1])
+                self.fail("Unexpected world read: " + path)
             function = path.split("/")[-2]
-            if self.session.catalog[function]["access"] == "read":
-                result = self.runtime.query_function("w", function, self.role, body["arguments"])
+            if self.runtime.get_function("w", function)["access"] == "read":
+                result = self.runtime.query_function("w", function, self.role, body["arguments"],
+                    expected_version=body.get("expected_version"))
                 self.read_seen.set()
                 return result
             if function == "grove.move" and self.lose_before_commit:
                 self.lose_before_commit = False
                 raise ConnectorError("WorldUnavailable", "Response interrupted", 503)
             result = self.runtime.call_function("w", function, self.role, body["arguments"],
-                operation_id=body["operation_id"])
+                operation_id=body["operation_id"], expected_version=body.get("expected_version"))
             if function == "grove.move" and self.lose_after_commit:
                 self.lose_after_commit = False
                 raise ConnectorError("WorldUnavailable", "Response interrupted", 503)
             return result
         except WorldRuntimeError as exc:
-            raise ConnectorError(type(exc).__name__, str(exc), 409 if type(exc).__name__ != "ReceiptNotFound" else 404)
+            status, payload = error_response(exc)
+            raise ConnectorError(payload["error"], payload["message"], status,
+                world_details=payload.get("details"), retryable=payload.get("retryable"),
+                recovery=payload.get("recovery"), retry_after_seconds=payload.get("retry_after_seconds")) from None
 
     async def write(self, observation_id):
         return await self.session.tool_call("grove_move", {"dx": 1, "dy": 0,
@@ -181,12 +203,13 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
 
     def test_restored_short_handle_cannot_reuse_an_old_observation(self):
         # Even a repeated random tail cannot alias the previous process's bundle.
+        previous_sequence = self.session.observations.sequence
         with patch("agent_world.grove_connector.secrets.token_hex", return_value="ab1234ef"):
             old = self.preflight()
             restored = GroveSession(self.manager, self.session.identity, "fixture-bearer", "A", "provider/model")
             fresh = restored.present_agent_result("map.viewport", self.scene())["observation_id"]
-        self.assertEqual(old, "obs1-ab1234ef")
-        self.assertEqual(fresh, "obs2-ab1234ef")
+        self.assertEqual(old, f"obs{previous_sequence + 1}-ab1234ef")
+        self.assertEqual(fresh, f"obs{previous_sequence + 2}-ab1234ef")
         with self.assertRaises(ConnectorError):
             restored.agent_observation(old)
         self.assertEqual(restored.agent_observation(fresh)["versions"]["player"][self.role],
@@ -426,12 +449,15 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bound["expected_opportunity_version"], 2)
         self.assertEqual((bound["continuation"]["expected_content_version"], bound["continuation"]["observed_anchor_version"]), (7,9))
 
-    async def test_unknown_write_replay_keeps_original_bound_arguments_after_restart(self):
+    async def test_human_unknown_write_replay_keeps_original_bound_arguments_after_restart(self):
         old = self.preflight()
+        bound = self.session.bind_agent_versions("grove.move", {"dx": 1, "dy": 0}, old)
         self.lose_before_commit = True
         with self.assertRaises(ConnectorError):
-            await self.write(old)
+            await self.session.invoke("grove.move", bound, model_write=False)
         original = deepcopy(self.session.unknown[0]["envelope"])
+        self.assertEqual(original["arguments"], bound)
+        self.assertNotIn("execution_write", self.session.unknown[0])
         self.parallel_client_move()  # Original request is now stale, even though a newer observation exists.
         self.session.present_agent_result("map.viewport", self.scene(), preflight=True)
         restored = GroveSession(self.manager, self.session.identity, "fixture-bearer", "A", "provider/model")
@@ -440,7 +466,31 @@ class GroveObservationTests(unittest.IsolatedAsyncioTestCase):
         replay = [body for method,path,body in self.calls if method == "POST" and path.endswith("grove.move/invoke")]
         self.assertEqual(replay, [original, original])
         self.assertEqual(self.scene()["result"]["player"]["x"], 1)
-        self.assertEqual(restored.execution["receipts"][-1]["status"], "rejected")
+        self.assertEqual(restored.unknown, [])
+        self.assertEqual(restored.execution["receipts"], [])
+        with self.assertRaises(ReceiptNotFound):
+            self.runtime.get_receipt("w", self.role, original["operation_id"])
+
+    async def test_restarted_sealed_model_task_cannot_replay_its_unknown_write(self):
+        old = self.preflight()
+        self.lose_before_commit = True
+        with self.assertRaises(ConnectorError):
+            await self.write(old)
+        original = deepcopy(self.session.unknown[0])
+        self.assertTrue(original["execution_write"])
+        restored = GroveSession(self.manager, self.session.identity, "fixture-bearer", "A", "provider/model")
+        restored.world = self.world
+        self.assertFalse(restored.execution_controller.active)
+        with self.assertRaises(ConnectorError) as stopped:
+            await restored.recover_receipts()
+        self.assertEqual(stopped.exception.code, "ExecutionSegmentFinished")
+        self.assertEqual(restored.unknown, [original])
+        posts = [body for method,path,body in self.calls if method == "POST" and path.endswith("grove.move/invoke")]
+        self.assertEqual(posts, [original["envelope"]])
+        self.assertEqual(self.scene()["result"]["player"]["x"], 0)
+        self.assertEqual(self.runtime.query_function("w", "grove.control_status", self.role, {})["result"]["status"], "active")
+        self.assertFalse(restored.execution_controller.active)
+        self.assertEqual(restored.execution["receipts"][-1]["status"], "unknown")
 
     async def test_committed_unknown_action_is_read_back_without_duplicate(self):
         old = self.preflight()

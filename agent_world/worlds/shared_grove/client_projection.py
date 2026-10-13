@@ -13,7 +13,7 @@ from agent_world import FunctionOutcome, FunctionSpec
 from agent_world.errors import RuleViolation
 from . import model as m
 
-VERSION = 1
+VERSION = 2
 LABELS = {
     "fields": "声明字段", "mechanical_observation": "机械观察", "automatic_rules": "自动规则条件",
     "reaction_observations": "材料反应条件", "contract": "当前契约", "history": "已记录历史",
@@ -94,6 +94,9 @@ _APPEARANCE = {"type": "object", "properties": {
     "required": ["size", "shape", "color", "glyph", "pose", "container_open", "overlays"], "additionalProperties": False}
 _CHOICE = {"type": "object", "properties": {"value": {"type": ["string", "number", "boolean", "null"]},
     "label": _TEXT, "arguments_patch": _OBJECT, "when": {"type": "object", "additionalProperties": {"type": "array"}},
+    "read_request": _REQUEST, "validation": {"type": "object", "properties": {
+        "available": {"type": "boolean"}, "reason": {"type": ["string", "null"]}},
+        "required": ["available", "reason"], "additionalProperties": False},
     "maximum": {"type": "number"}, "preview": {"type": "object", "properties": {
         "rows": {"type": "array", "items": {"$ref": "#/$defs/fact"}}, "available": {"type": ["boolean", "null"]},
         "reason": {"type": ["string", "null"]}}, "required": ["rows", "available", "reason"], "additionalProperties": False}},
@@ -113,6 +116,8 @@ _ACTION = {"type": "object", "properties": {"id": _TEXT, "action": _TEXT, "funct
     "expanded": {"type": "boolean"}, "fixed_arguments": _OBJECT, "input_schema": _OBJECT,
     "controls": {"type": "array", "items": {"$ref": "#/$defs/control"}}, "confirmation_keys": {"type": "array", "items": _TEXT},
     "preconditions": {"type": "array", "items": {"$ref": "#/$defs/fact"}}, "read_request": _REQUEST,
+    "failure": {"type": ["object", "null"]}, "preview_scope": _OBJECT,
+    "read_requests": {"type": "array", "items": _REQUEST},
     "cost_facts": {"type": "array", "items": {"$ref": "#/$defs/fact"}},
     "candidate_requests": {"type": "array", "items": {"type": "object", "properties": {"id": _TEXT, "label": _TEXT,
         "read_request": _REQUEST}, "required": ["id", "label", "read_request"], "additionalProperties": False}}},
@@ -160,6 +165,14 @@ def output_schema(surface):
         properties.update({"entity": {"$ref": "#/$defs/entity"}, "contents": {"type": "array", "items": {"$ref": "#/$defs/entity"}},
             "explanation": {"type": ["string", "null"]}, "projection": _OBJECT, "tile": _OBJECT,
             "entities": {"type": "array", "items": {"$ref": "#/$defs/entity"}}, "actions": {"type": "array", "items": {"$ref": "#/$defs/action"}}})
+    elif surface == "choices":
+        choice = deepcopy(_CHOICE)
+        choice["required"] += ["read_request", "validation"]
+        return {"type": "object", "properties": {"context": {"$ref": "#/$defs/context"},
+            "choices": {"type": "array", "maxItems": 16, "items": choice},
+            "next_request": {"oneOf": [{"type": "null"}, _REQUEST]}, "complete": {"type": "boolean"}},
+            "required": ["context", "choices", "next_request", "complete"], "additionalProperties": False,
+            "$defs": {"context": _CONTEXT, "fact": _FACT}}
     else:
         return definitions_output_schema()
     required_fields = list(properties) if surface == "viewport" else ["context", "player"]
@@ -326,6 +339,10 @@ def action(ctx, option, player, entity):
         "input_schema": schema, "controls": [], "expanded": True, "confirmation_keys": [],
         "preconditions": fact_tree(option.get("preconditions", []), path="preconditions"),
         "read_request": {"function_id": "grove.client_inspect", "arguments": {"entity_id": entity["id"], "action": option["action"]}}}
+    if "failure" in option:
+        descriptors["failure"] = deepcopy(option["failure"])
+    if "read_requests" in option:
+        descriptors["read_requests"] = deepcopy(option["read_requests"])
     if option.get("condition_observation"):
         descriptors["preconditions"].extend(fact_tree(option["condition_observation"], path="condition"))
     # This is the world's existing write-handler policy, made explicit for the
@@ -368,7 +385,8 @@ def action(ctx, option, player, entity):
             choices = option.get("choices", {}).get("interactions", [])
             control.update(kind="choice", choices=[_candidate(row, name, entity) for row in choices])
             if option.get("discovery"):
-                control["discovery_request"] = {"function_id": "grove.client_definitions", "arguments": {"mode": "list", "installable_only": True, "limit": 8}}
+                control["discovery_request"] = {"function_id": "grove.client_choices", "arguments": {
+                    "entity_id": entity["id"], "action": option["action"], "control_id": control["id"], "limit": 8}}
         elif prop.get("enum"):
             control.update(kind="choice", choices=[{"value": value, "label": VALUES.get(value, str(value)), "arguments_patch": {}} for value in prop["enum"]])
         elif name == "mode" and inputs.get("choices"):
@@ -521,45 +539,25 @@ def client_viewport(ctx, args):
 
 
 def _tile(ctx, args):
-    from . import world, building, domains
+    from . import world, building
     player = m.get_player(ctx)
     x, y = args["tile"]["x"], args["tile"]["y"]
     if max(abs(x - player["x"]), abs(y - player["y"])) > 8:
         raise RuleViolation("只能读取当前附近地图中的位置。")
     rows = m.public_entities_near(ctx, x, y, radius=0, limit=m.MAX_CHUNK_ENTITIES)
-    terrain = m.tile_at(ctx, x, y)
+    plan = building.build_options(ctx, player, {"x": x, "y": y}, world.BUILD_ARGS)
+    terrain = plan["tile"]["terrain"]
     choices = []
-    for recipe in building.recipes():
-        reason = None
-        try:
-            if abs(x - player["x"]) + abs(y - player["y"]) > 1:
-                raise RuleViolation("只能在自己所在或相邻一格建设。")
-            if terrain not in recipe["terrain"]:
-                raise RuleViolation("这一格地形不适合所选配方。")
-            if any(building.is_structure(row) or row["state"].get("kind") == "resource_node" for row in rows):
-                raise RuleViolation("这一格已有建筑或资源节点。")
-            if m.blocking_at(ctx, x, y):
-                raise RuleViolation("请先移开这一格的障碍。")
-            if "heater" in recipe["components"] and m.is_safe(ctx, x, y):
-                raise RuleViolation("出生安全区不能建设火炉。")
-            materials = building._choose_materials(ctx, player, recipe, None)
-            domains.guard_action(ctx, {"material_ids": list({eid for eid, _, _ in materials})}, topology=True)
-            domains.guard_tiles(ctx, [(x, y)])
-        except RuleViolation as exc:
-            reason = str(exc)
-        option = {"id": "grove.build:" + recipe["id"], "action": recipe["id"], "function_id": "grove.build",
-            "label": "搭建 " + recipe["name"], "description": recipe["use"], "available": reason is None, "reason": reason,
-            "fixed_arguments": {"recipe": recipe["id"], "x": x, "y": y, "expected_player_version": player["version"]},
-            "input_schema": deepcopy(world.BUILD_ARGS), "controls": [], "expanded": True, "confirmation_keys": [], "preconditions": [],
+    for item in plan["options"]:
+        option = {key: deepcopy(item[key]) for key in ("id", "action", "function_id", "label", "description", "available", "reason", "failure", "preview_scope", "input_schema")}
+        option.update({"fixed_arguments": deepcopy(item["arguments"]), "controls": [], "expanded": True,
+            "confirmation_keys": [key for key in item["arguments"] if key != "expected_player_version"],
+            "preconditions": fact_tree(item["preconditions"], path="preconditions"),
             "read_request": {"function_id": "grove.client_inspect", "arguments": {"tile": {"x": x, "y": y}}},
-            "cost_facts": [fact(material, count, label=_material_name(rows[0], material) if rows else material, unit="u") for material, count in recipe["material_cost_u"].items()]}
-        candidates = []
-        for eid in player["inventory"]:
-            raw = m.get_entity(ctx, eid)
-            status = building.material_status(ctx, player, raw)
-            if status["eligible"] and status["material"] in recipe["cost"]:
-                candidates.append({"value": eid, "label": raw["name"] + " · " + str(status["quantity_u"]) + "u", "arguments_patch": {}})
-        option["controls"] = [{"id": "material_ids", "path": ["material_ids"], "label": "可选：指定投入的物件", "kind": "multi_choice", "required": False, "schema": deepcopy(world.BUILD_ARGS["properties"]["material_ids"]), "choices": candidates}]
+            "cost_facts": [fact(material, count, label=material, unit=item["cost"]["unit"]) for material, count in item["cost"]["materials"].items()]})
+        candidates = [{"value": row["id"], "label": row["name"] + " · " + str(row["quantity_u"]) + "u", "arguments_patch": {}}
+            for row in item["material_candidates"]]
+        option["controls"] = [{"id": "material_ids", "path": ["material_ids"], "label": "可选：指定投入的物件", "kind": "multi_choice", "required": False, "schema": deepcopy(item["input_schema"]["properties"]["material_ids"]), "choices": candidates}]
         choices.append(option)
     return {"context": context(ctx), "player": world._public_self(player), "tile": {"x": x, "y": y, "terrain": terrain, "name": {"grass": "草地", "dirt": "泥地", "water": "浅溪", "rock": "岩壁"}[terrain], "passable": terrain != "rock" and not m.blocking_at(ctx, x, y)},
             "entities": [entity_projection(ctx, player, world._project_entity(ctx, player, row, include_options=False)) for row in rows], "actions": choices}
@@ -610,6 +608,56 @@ def client_inspect(ctx, args):
         if len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) > 110000:
             raise RuleViolation("所选对象的客户端事实超出一次读取预算；原数据未改变。")
     return FunctionOutcome(result)
+
+
+def client_choices(ctx, args):
+    """Read a declared control's candidates and revalidate exact selections.
+
+    Provider selection belongs to this world projection. A renderer only follows
+    the returned requests; it never knows a publication cursor or definition ID.
+    """
+    from . import world, publication, interactions
+    inspected = world.inspect(ctx, {"entity_id": args["entity_id"], "action": args["action"]}).result
+    option = next((row for row in inspected["action_options"] if row["action"] == args["action"]), None)
+    if not option or args["control_id"] != "definition_ref" or not option.get("discovery"):
+        raise RuleViolation("所选行动没有声明这个候选目录；请使用控件提供的正式读取请求。")
+    # This provider calls the same definition admission check as installation.
+    # It neither parses client input as rules nor confers permission to commit.
+    if option["discovery"].get("required_activation") != "installed":
+        raise RuleViolation("此候选提供者尚无受支持的客户端合同。")
+    base = {key: deepcopy(args[key]) for key in ("entity_id", "action", "control_id")}
+
+    def choice(reference, name):
+        reason = option.get("reason") if option.get("available") is not True else None
+        try:
+            record, _ = interactions._definition(ctx, reference)
+            name = record["definition"].get("name", name)
+        except RuleViolation as exc:
+            reason = reason or str(exc)
+        return {"value": reference, "label": name, "arguments_patch": {},
+            "read_request": {"function_id": "grove.client_choices", "arguments": {**base, "value": reference}},
+            "validation": {"available": reason is None, "reason": reason}}
+
+    if "value" in args:
+        values = [choice(args["value"], "原候选")]
+        next_request = None
+    else:
+        page_args = {key: args[key] for key in ("limit", "after") if key in args}
+        page = publication.definition_list(ctx, page_args).result
+        values = []
+        for row in page["definitions"]:
+            candidate = choice(row["definition_ref"], row.get("name", row["key"]))
+            if candidate["validation"]["available"] or option.get("available") is not True:
+                # A disabled target still exposes its candidate's actual refusal.
+                # Non-installable definitions are filtered by world admission.
+                try:
+                    interactions._definition(ctx, row["definition_ref"])
+                except RuleViolation:
+                    continue
+                values.append(candidate)
+        next_request = {"function_id": "grove.client_choices", "arguments": {
+            **base, "limit": args.get("limit", 8), "after": page["next_cursor"]}} if page["has_more"] else None
+    return FunctionOutcome({"context": context(ctx), "choices": values, "next_request": next_request, "complete": next_request is None})
 
 
 def client_definitions(ctx, args):
@@ -678,6 +726,13 @@ def specs():
         "author": {"type": "string", "minLength": 1, "maxLength": 128}, "key": {"type": "string", "minLength": 1, "maxLength": 80},
         "source_definition_ref": world.ID,
         "limit": {"type": "integer", "minimum": 1, "maximum": 16}, "after": {"type": "string", "minLength": 1, "maxLength": 4096}, "installable_only": {"type": "boolean"}}}
-    return (FunctionSpec("grove.client_viewport", client_viewport, world.VIEW_ARGS, access="read", version=1, output_schema=output_schema("viewport"), authorize=world.member, description="Version1 authorized client map DTO: appearance, typed facts and navigation. No storage entity/program shapes; inspect separately before acting."),
-            FunctionSpec("grove.client_inspect", client_inspect, inspect_schema, access="read", version=1, output_schema=output_schema("inspect"), authorize=world.member, description="Version1 authorized client entity or tile inspection: typed facts and finite controls with fixed intent guards. Submit through existing authoritative actions and original Operation/Receipt."),
-            FunctionSpec("grove.client_definitions", client_definitions, definitions_schema, access="read", version=2, output_schema=output_schema("definitions"), authorize=world.member, description="Paged immutable blueprint choices and direct revisions via source_definition_ref. Details expose finite source metadata and formal source/revisions read requests, separate from rule AST. Server installation eligibility and actual fabrication menus; publication creates no material or operation permission."))
+    choices_schema = {"type": "object", "additionalProperties": False,
+        "required": ["entity_id", "action", "control_id"], "properties": {
+            "entity_id": deepcopy(world.ID), "action": deepcopy(world.ID), "control_id": deepcopy(world.ID),
+            "value": deepcopy(world.ID), "limit": {"type": "integer", "minimum": 1, "maximum": 16},
+            "after": {"type": "string", "minLength": 1, "maxLength": 4096}},
+        "not": {"anyOf": [{"required": ["value", "after"]}, {"required": ["value", "limit"]}]}}
+    return (FunctionSpec("grove.client_viewport", client_viewport, world.VIEW_ARGS, access="read", version=2, output_schema=output_schema("viewport"), authorize=world.member, description="Version2 authorized client map DTO: appearance, typed facts and navigation. No storage entity/program shapes; inspect separately before acting."),
+            FunctionSpec("grove.client_inspect", client_inspect, inspect_schema, access="read", version=2, output_schema=output_schema("inspect"), authorize=world.member, description="Version2 authorized client entity or tile inspection: typed facts and finite controls with generic candidate requests and shared build plans. Submit through existing authoritative actions and original Operation/Receipt."),
+            FunctionSpec("grove.client_definitions", client_definitions, definitions_schema, access="read", version=3, output_schema=output_schema("definitions"), authorize=world.member, description="Paged immutable blueprint choices and direct revisions via source_definition_ref. Details expose finite source metadata and formal source/revisions read requests, separate from rule AST. Server installation eligibility and actual fabrication menus; publication creates no material or operation permission."),
+            FunctionSpec("grove.client_choices", client_choices, choices_schema, access="read", version=1, output_schema=output_schema("choices"), authorize=world.member, description="Read a declared control's generic choices with exact per-candidate validation/read requests and a formal next-page request. Follow requests without interpreting provider IDs; revalidation is an observation, never a commit reservation."))

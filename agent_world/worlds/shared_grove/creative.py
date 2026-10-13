@@ -1575,6 +1575,7 @@ def projection(ctx, entity, *, detailed=False):
 
 def action_options(ctx, player, entity):
     from .world import _reason
+    from . import action_contracts as ac
     pack, spec = _type(ctx, entity)
     if not spec:
         return []
@@ -1630,8 +1631,13 @@ def action_options(ctx, player, entity):
                 if field["type"] == "integer":
                     param_schema["properties"][name].update(minimum=field["min"], maximum=field["max"])
             fields["params"] = param_schema
-        options.append({"action": action, "label": label, "function_id": "grove.rule_action", "available": not (base or reason),
-                        "reason": base or reason, "arguments": args, "input_schema": schema, "params_schema": param_schema, "choices": choices})
+        unavailable = base or reason
+        options.append({"action": action, "label": label, "function_id": "grove.rule_action", "available": not unavailable,
+                        "reason": str(unavailable) if unavailable else None, "arguments": args,
+                        "input_schema": schema, "params_schema": param_schema, "choices": choices})
+        if isinstance(unavailable, ac.Reason):
+            options[-1].update(failure=deepcopy(unavailable.failure),
+                               read_requests=deepcopy(unavailable.failure["read_requests"]))
         if use:
             options[-1]["use"] = use
 

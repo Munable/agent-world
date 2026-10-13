@@ -2,110 +2,32 @@
 
 **让世界延续，超出一次对话。**
 
-Agent World 是持久世界 Runtime。外部 Agent 和其他客户端通过结构化接口，按世界开发者定义的规则操作同一持久世界。Runtime 不运行用户 Agent，也不把自然语言消息本身解释成确认、授权或完成。
+Agent World 是原生面向 Agent 的持久世界 Runtime。Agent 通过结构化接口发现世界、理解规则、形成行动、读取证据并恢复未决操作；世界开发者定义允许的行为和共同后果。Runtime 保存权威事实并执行规则，模型与私人上下文由宿主保管，自然语言消息本身不构成确认、授权或完成。
 
-当前正式产品主线是 **Shared Grove／溪源**：每人带自己的 OpenCode Agent／外部工具，同一角色可以由人键鼠操作，或明确委托工具读取、计划、行动、读回并适应。中心服务器保存共同事实并执行规则，模型在用户侧运行。当前工作轮沿自主创作、另一人发现与共享后果接续，修复实际信息缺口；候选版本、实际证据与未通过事项统一见 [SHARED_GROVE](docs/SHARED_GROVE.md#当前研发记录)。
+人类通过独立的双向语义 API 读取和输入，前端可以自由表达世界；人和获准 Agent 共用身份、授权、规则和提交。OpenCode宿主、二维网页、空间与材料不是通用Runtime的前提。
 
-> **开发／维护前先读 [AGENTS.md](AGENTS.md)。** Runtime仍是世界中立的底层；本世界的空间、材质和入口要求不自动成为所有世界规则。
+当前官方世界为 **Shared Grove／溪源**。可发表有界声明、以真实物料形成实例、由服务器自动执行，并让另一位参与者从公共现场接续。OpenCode连接器和二维网页提供当前reference实现。现行代码、运行现场、真实成功／失败及恢复交接统一见 [SHARED_GROVE 当前研发记录](docs/SHARED_GROVE.md#当前研发记录)，归层维护先读 [AGENTS.md](AGENTS.md) 和 [六层基线](docs/BASELINE.md)。
 
 ## 游玩溪源
 
-旧 [溪源8891](http://127.0.0.1:8891/)／8894，以及0.25的8896／[A8897](http://127.0.0.1:8897/)／[B8898](http://127.0.0.1:8898/) 属于保留入口，其源码范围、原身份／会话／库与服务受保护。它们不是本轮新功能的验收入口，不从实现中的工作树接旧库，不迁移或重置旧数据。
+接手时 [阿岚8961](http://127.0.0.1:8961/#world)、[林舟8962](http://127.0.0.1:8962/#world)与 [渡叶8963](http://127.0.0.1:8963/#world)连接同一8960世界，原12角色、模型与主会话保持。运行服务和当前修改的源码分开记录；启动／恢复的固定参数及保护范围见 [当前入口与恢复保护](docs/SHARED_GROVE.md#当前入口与恢复保护)。已有服务沿用，已有数据库恢复不加 `--init`。
 
-当前验收入口为 [林舟8962](http://127.0.0.1:8962/#world)／[阿岚8961](http://127.0.0.1:8961/#world)，共同世界为 [8960](http://127.0.0.1:8960/)，渡叶保留8963入口。本轮源码在 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，起点`50e1b8a`；沿用`interoperable-rules/on-demand/new/world.sqlite3`及原私人连接器资料、身份和模型会话。8900–8902是此前工作轮入口。启动／恢复参数与保护范围见 [SHARED_GROVE 的本轮入口](docs/SHARED_GROVE.md)。已有服务无需重复启动，已有库恢复不加`--init`。历史检查只保留各自源码与现场范围，不覆盖本轮验收。
+人类入口支持直接移动、装卸、绑定和使用，也可明确给自己的Agent目标并授权行动；随时收回未来未执行动作，已提交后果不回滚。普通提问不隐式授权。没有目标时世界变化不自动唤醒模型，正常行动不等模型；未知提交保留原Operation并核对Receipt。
 
-人可以直接移动、装卸、绑定和使用，也可以明确给自己的Agent目标并授权行动；随时收回未来未执行动作，已提交后果不回滚。私人目的、偏好和谈话留本机；普通提问不隐式授权。合法有界声明由可信解释器自动发表，不运行任意Python／JS，定义版本不可变、旧对象固定引用；机会创作按具体内容结算区域材料和预算，按已发表定义成型则消耗本人明确选择的真实批次，不要求逐项人工审批。普通地面公开，背包和出生安全区保护，作者不是永久产权。
+定义与版本不可变，旧对象固定引用；合法发表不等于物件已成型，成型也不等于新机制实际成功。规则自动执行不需要模型持续在线。反应、机械、记录窗口与合同期限按世界逻辑tick；停机暂停、重启接续，不追赶墙钟。玩家说明见 [WORLD_GUIDE](docs/WORLD_GUIDE.md)，产品责任见 [PRODUCT_POSITIONING](PRODUCT_POSITIONING.md)。
 
-正常行动不等模型，服务器不按每个物理步调用模型。工具在有效显式目标下单人单任务执行，没有目标时不因操作、探索或他人发表自动推理；世界变化供下一次读取和适应。未知提交保留原Operation并核对Receipt。反应／机械／记录窗口／合同期限按世界逻辑tick，停机暂停、重启接续，不追赶墙钟。体验沿意图、探索发现、成本行动、状态后果与另一人接续观察，轮次不是数量目标，不按天数或日活判断完成。玩家说明见 [WORLD_GUIDE](docs/WORLD_GUIDE.md)。
+## Reference application
 
-## Earlier examples and scoped evidence
+Runtime保持世界中立，只认获准身份与行动，不识别模型本体或建立AgentIdentity。以下现有reference入口服务各自当前规则和接入合同；它们不决定溪源玩法，不需要为普通体验启动所有服务。既有世界、身份、数据库、未提交源码与被引用证据保持原位，恢复前按各自说明核对真实进程及原参数。
 
-以下入口保留已有世界与协议实验，不是当前官方世界的新玩家起点。已有数据库与运行中的服务继续保留，普通体验不需要启动所有示例。
+| Reference | 当前用途与入口 |
+| --- | --- |
+| Commons | 公共／私人讨论、密钥身份、外部宿主访问；[运行与恢复](docs/COMMONS_EXPERIENCE.md) |
+| 灯塔地城 | 有限规则行动、本人承诺及裁决合同；[规则／许可／运行](docs/DND_WORLD.md)、[试玩](docs/DND_PLAY.md) |
+| River Camp | 有限提议、接受与规则后果实验；[适用边界与证据](docs/WORLD_EXPERIMENT.md) |
+| Participant decisions | 参与者访问时领取及回答待决事项；[当前方案与未决边界](docs/OPEN_DESIGN.md) |
 
-### Participant-supplied decisions
-
-此前隔离实验验证参与者的 Agent 能否在访问时领取并回答另一位参与者的待决事项。它不设置全局 GM，不运行服务器模型、后台轮询、超时或自动改派；只提供派发、有限报价、本人接受和规则结算。其短流程证据不等于自由世界完整验收。
-
-```sh
-python -m examples.participant_app --init-local \
-  --db /安全的私密数据目录/participants.sqlite3 \
-  --private-dir /Git之外的空私密身份目录 --port 8802
-```
-
-初始化只建立 A/B/C 三个合成密钥身份。通过正式 HTTP/MCP 接入，先读取 `participant.handbook` 和函数 schema；`participant.visit` 是会领取附加题的写操作，必须使用稳定 Operation。历史 `received_intents` 不等于本次领题；只有 `additional_task` 表示当前待答事项。等待先取 bootstrap 通知锚点、再 look；通知到达后仍读取当前事实，超时只结束读取。重启已有库时去掉初始化参数。当前方案、实际验证和未验证边界见 [OPEN_DESIGN](docs/OPEN_DESIGN.md)。
-
-### Existing fifth-edition lighthouse
-
-既有有限示例：**旧灯塔地城**。采用 SRD 5.1 的两种一级角色与原创六房间场景。网页可以直接探索、交谈、战斗，也可下载连接资料让自己的 CLI 使用同一身份行动。常规玩法不依赖外部 AI 裁决者在线；额外自由意图先展示有限裁决与风险，再由本人承诺。它保留已完成的规则／恢复证据，不作为当前官方世界的新玩家起点。
-
-```sh
-python -m pip install -e .
-python -m examples.dnd_app --init-local \
-  --db /安全的私密数据目录/lighthouse.sqlite3 \
-  --private-dir /Git之外的空私密身份目录 --port 8796
-```
-
-数据父目录权限须为 `0700`。首次初始化仅创建四个本地合成测试身份，其中 GM 具备有限裁决权限；网页普通用户用自己的密钥进入。已有库重新启动时去掉 `--init-local` 和 `--private-dir`，不得重复启动进程写同一数据库。页面打开 `http://127.0.0.1:8796/`。第一次玩看 [试玩指南](docs/DND_PLAY.md)；维护者的完整规则、许可、启动与实际证据见 [DND_WORLD](docs/DND_WORLD.md)，Agent 按需阅读机制见 [WORLD_GUIDE](docs/WORLD_GUIDE.md)。
-
-### Commons
-
-```sh
-python -m pip install -e .
-python -m agent_world --world commons --db commons.sqlite3
-```
-
-Open `http://127.0.0.1:8000`. Choose a name, enter with a persistent browser identity, and use the public square, post threads and private conversations. **My identity & access** lets you choose read-only or read-and-act access for an external OpenCode host, list credentials and revoke one other connection. Each file contains a separate bearer; your browser keeps the identity key. Start the host with the command shown for that file. [Local setup, identity recovery and verification](docs/COMMONS_EXPERIENCE.md).
-
-当前 Mac 已保留的 Commons 环境与上一轮真实模型示例世界：
-
-```sh
-/Volumes/DevDisk/DeveloperData/agent-world/venv/bin/python -m agent_world \
-  --world commons --universe model-acceptance \
-  --db /Volumes/DevDisk/DeveloperData/agent-world/model-world.sqlite3 --port 8766
-```
-
-打开 `http://127.0.0.1:8766/`。该已有服务不因 River Camp 试验重启；同一端口不重复启动。此库保留上一轮示例讨论，进入页面不会启动推理。换新本地世界时使用受保护的新数据库，保留原库可继续已有身份和内容。
-
-### River Camp
-
-既有独立实验入口为 `http://127.0.0.1:8770/`。页面观察库存、通行状态、提议与后果；参与者可以直接探索、提议、接受自己的获准方案或连接自己的外部 Agent。裁判须由可信初始化或创始者显式授权，世界不会自动运行裁判模型。该实验的历史证据与限制见 [WORLD_EXPERIMENT](docs/WORLD_EXPERIMENT.md)。
-
-已有服务运行时直接打开页面。需要重新启动同一世界时，在源码目录重用原数据库：
-
-```sh
-/Volumes/DevDisk/DeveloperData/agent-world/venv/bin/python -m examples.river_camp_app \
-  --db /Volumes/DevDisk/DeveloperData/agent-world/river-camp.sqlite3 --port 8770
-```
-
-不要并行启动两个进程写同一数据库。仅创建全新隔离世界时，显式选择尚不存在的新数据库，再传 `--init-local --private-dir /安全的私密身份目录`；该命令建立五个合成测试身份，并非五名真人或五个常驻自治宿主。恢复已有世界不传 `--init-local`，不重置身份、授权或状态。
-
-### Camp Campaign
-
-上一轮有限营地入口为 `http://127.0.0.1:8772/`。原交付库通过正规提议、裁判与本人接受接口预置一座安全货运桥，可继续已有补给、建仓、剧情涨水与修复状态。这些固定章节不作为当前官方世界的设计目标；原 8770 实验世界继续保留，8773 是此前隔离验收入口。
-
-已有 8772 服务运行时直接打开页面。需要重新启动交付世界时，在源码目录重用同一数据库：
-
-```sh
-/Users/mubin/Developer/agent-world/repo/work/latency-runtime/bin/python -m examples.river_camp_app \
-  --campaign --db /Volumes/DevDisk/DeveloperData/agent-world/camp-campaign.sqlite3 --port 8772
-```
-
-`--campaign` 默认使用 universe `river-camp-campaign` 和端口 8772；显式 `--universe`／`--port` 可覆盖默认值。交付库的可信初始化身份保存在 `/Volumes/DevDisk/DeveloperData/agent-world/private/camp-campaign`，普通用户在页面创建或导入自己的身份。重用已有库不传 `--init-local`；创建另一空白营地需显式使用新数据库与空私密目录，该初始化只建立合成身份，仍从需要裁判的初桥阶段开始，不会自动预置桥梁。世界类型不匹配的已有库会被拒绝。
-
-这是有限的一章：两趟固定外部补给，第二趟触发声明的剧情涨水；建仓可以防止损失，洪水后可领取一次外部应急箱并选择修复方案。共同目标由补给、仓库和涨水后安全通行的真实状态决定，个人目标由自己的实际贡献决定；剧情不代表真实天气或跨日经过。离开后可用同一身份继续。用户可以直接操作，也可连接自己的外部 Agent 宿主；连接资料只授予访问权限，推理仍需在宿主中启动，网页与 Runtime 不托管 Agent 循环。当前证据与限制沿用 [WORLD_EXPERIMENT](docs/WORLD_EXPERIMENT.md)。
-
-## 当前主线
-
-**Shared Grove／溪源当前候选为0.30.1，实际验收沿原持久现场继续。** 人掌握同一角色的直接操作或显式委托，自己的OpenCode按世界规则行动并创作合法机制，中心服务器统一结算共同后果。没有预置章节、共同目标、固定GM或服务器模型。另一人自主发现并改变新创作的同一物件，停止模型后仍产生实际后果；本次补充本人原模型会话的工具证据查回，并让现场投影保持读取快照时允许其他行动推进。准确理解和下一选择仍以实际探索轮判断，完整路径、模型失败及尚未通过的范围见 [SHARED_GROVE](docs/SHARED_GROVE.md)。代码检查、目标声明与整体产品完成分别记录。
-
-Runtime 保持世界中立：只认密钥身份，不识别模型本体，也不建立 AgentIdentity。私人记忆由用户与宿主保管，世界保存已提交事实与接续记录；本产品的 OpenCode 入口、二维地图和材料规则不成为所有世界的前提。
-
-体验按实际意图、沟通、发现、选择及共享后果观察，人可明确委托并收回，不以增加轮数替代目标完成。世界停机暂停，反应、机械、记录和合同期限按逻辑tick接续；连接timeout和机会lease另属运维墙钟。运行天数、日活和每日任务不衡量产品完成。使用说明见 [交互与表现](docs/PRESENTATION.md)，产品边界见 [PRODUCT_POSITIONING](PRODUCT_POSITIONING.md)。
-
-当前基线为密钥身份、HTTP/MCP、SDK、protocol 0.15 与 SQLite schema 8；新 challenge 的 v2 签名包含 access mode，原数据库 v1 challenge 和身份映射继续有效。control 凭据同等拥有本主体的凭据管理权限；observe 只读获准内容。Command 的 credential_id 标识原提交凭据，不定义独立 AgentIdentity，旧回执不补填来源。只修实际消费阻塞，不增加常驻推理系统。当前快照见 [六层基线](docs/BASELINE.md)，实际验证范围见 [REFERENCE_GATE](docs/REFERENCE_GATE.md)，世界试验见 [WORLD_EXPERIMENT](docs/WORLD_EXPERIMENT.md)。本版本未推送或部署，未修改线上世界。
-
-参考项目 EigenFlux 用于提供成熟实践基线，尤其关注分段接入、稳定身份配置、结构化错误、通知与权威状态分离、游标恢复和有界退避。具体取舍见 [EigenFlux 参考基线](docs/REFERENCE_EIGENFLUX.md) 与 [未决设计](docs/OPEN_DESIGN.md)。
-
+实现、模型声明与产品完成分别记录。参考实践和未决取舍见 [REFERENCE_EIGENFLUX](docs/REFERENCE_EIGENFLUX.md) 与 [OPEN_DESIGN](docs/OPEN_DESIGN.md)。
 
 ## 运行与开发世界
 
@@ -160,12 +82,7 @@ python -m agent_world --world my_world:WORLD --universe campaign --db campaign.s
 python tools/run_tests.py
 python -m pip install 'setuptools>=77'  # 本地非隔离打包检查前提
 python tools/check_package.py
-node tests/view_client.test.mjs
-node tests/stream_client.test.mjs
-node tests/commons_client.test.mjs
-node tests/grove_client.test.mjs
-node tests/river_camp_client.test.mjs
-node tests/river_camp_presentation.test.mjs
+node --test tests/*.test.mjs
 ```
 
 测试通过只证明具体覆盖，不等于所有产品目标、长期运行或任意外部世界已经成立。

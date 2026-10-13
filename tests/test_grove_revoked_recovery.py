@@ -6,6 +6,7 @@ contracts prove exact recovery and rejection, not autonomous model acceptance.
 from copy import deepcopy
 import unittest
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 from agent_world.errors import ReceiptNotFound, WorldRuntimeError
 from agent_world.grove_connector import ConnectorError, ConnectorManager, GroveSession
@@ -25,11 +26,11 @@ class RevokedExecutionRecoveryTests(unittest.IsolatedAsyncioTestCase):
             binary=self.h.db.parent / "unused", wrapper=None)
         self.session = GroveSession(manager, {"role_id": self.h.roles["A"], "access_mode": "control"},
             "fixture-bearer", "A", "provider/model")
-        self.session.catalog = {item["function_id"]: item for item in self.h.world.list_functions("w")}
         self.session.entered = True
         self.session.host_url, self.session.session_id = "http://127.0.0.1:9000", "original-native"
         self.session.world, self.session.host = self.world, self.host
-        self.session.current_turn_facts = AsyncMock(return_value={"player": {"id": self.session.role_id}, "entities": []})
+        self.session.current_turn_facts = AsyncMock(side_effect=lambda **kw:
+            self.h.world.query_function("w", "map.viewport", self.session.role_id, {})["result"])
         self.session.messages = [{"role": "assistant", "text": "An old model claim", "task_id": "old-task"}]
         self.original_messages = deepcopy(self.session.messages)
         self.calls, self.host_calls = [], []
@@ -37,6 +38,9 @@ class RevokedExecutionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.native_busy, self.recovery_503 = False, False
         self.session.execution_controller.state.update(task_id="original-task", segment_id="original-segment",
             goal="把自己的木柴放在这里", status="starting", max_actions=4, max_requests=2, requests_used=1)
+        await self.session.agent_client.discover()
+        self.session.catalog = deepcopy(self.session.agent_client.catalog)
+        self.session._agent_contract_discovered = True
         await self.session.invoke("grove.control_grant", {"goal": self.session.execution["goal"], "max_actions": 4})
         self.session.execution_controller.state.update(status="running", request_status="returned")
         self.session.execution_controller.active = True
@@ -50,27 +54,38 @@ class RevokedExecutionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.calls.append((method, path, deepcopy(body)))
         try:
             if method == "GET":
-                if path == "/v1/functions":
-                    return {"functions": self.h.world.list_functions("w")}
-                return self.h.world.get_receipt("w", self.session.role_id, path.rsplit("/", 1)[-1])
+                url = urlsplit(path)
+                if url.path == "/v1/bootstrap":
+                    return self.h.world.bootstrap("w", self.session.role_id)
+                if url.path == "/v1/discover":
+                    query = parse_qs(url.query)
+                    return self.h.world.discover_functions("w", actor_role_id=self.session.role_id,
+                        after=query.get("after", [""])[0], limit=int(query.get("limit", ["50"])[0]),
+                        include_schemas=query.get("include_schemas", ["false"])[0] == "true")
+                if url.path.startswith("/v1/receipts/"):
+                    return self.h.world.get_receipt("w", self.session.role_id, url.path.rsplit("/", 1)[-1])
+                self.fail("Unexpected world read: " + path)
             if path == "/v1/streams/grove.changes/read":
                 return self.h.world.read_stream("w", "grove.changes", self.session.role_id,
                     cursor=body.get("cursor"), limit=body.get("limit", 50))
             function = path.split("/")[-2]
-            if self.session.catalog[function]["access"] == "read":
-                return self.h.world.query_function("w", function, self.session.role_id, body["arguments"])
+            if self.h.world.get_function("w", function)["access"] == "read":
+                return self.h.world.query_function("w", function, self.session.role_id, body["arguments"],
+                    expected_version=body.get("expected_version"))
             lost = function == "grove.interact" and self.lose_reply
             self.lose_reply = False if lost else self.lose_reply
             if (lost and not self.commit_before_loss) or (function == "grove.interact" and self.recovery_503):
                 raise ConnectorError("WorldUnavailable", "Original response was lost.", 503)
             result = self.h.world.call_function("w", function, self.session.role_id, body["arguments"],
-                operation_id=body["operation_id"])
+                operation_id=body["operation_id"], expected_version=body.get("expected_version"))
             if lost:
                 raise ConnectorError("WorldUnavailable", "Committed response was lost.", 503)
             return result
         except WorldRuntimeError as exc:
             status, payload = error_response(exc)
-            raise ConnectorError(payload["error"], payload["message"], status) from None
+            raise ConnectorError(payload["error"], payload["message"], status,
+                world_details=payload.get("details"), retryable=payload.get("retryable"),
+                recovery=payload.get("recovery"), retry_after_seconds=payload.get("retry_after_seconds")) from None
 
     async def host(self, method, path, body=None, **kwargs):
         self.host_calls.append((method, path))
@@ -184,7 +199,9 @@ class RevokedExecutionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         changed = deepcopy(original)
         changed["envelope"]["arguments"]["delegation"] = "a-different-token"
         self.session.unknown = [changed]
-        await self.session.recover_revoked_execution_writes()
+        with self.assertRaises(ConnectorError) as invalid:
+            await self.session.recover_revoked_execution_writes()
+        self.assertEqual(invalid.exception.code, "OriginalOperationInvalid")
         self.assertEqual(self.session.unknown, [changed])
         self.assertEqual(len(self.action_posts()), 1)
         self.session.unknown = [deepcopy(original)]
@@ -208,7 +225,7 @@ class RevokedExecutionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.session.world = wrong_actor
         with self.assertRaises(ConnectorError) as rejected:
             await self.session.recover_revoked_execution_writes()
-        self.assertEqual(rejected.exception.code, "OriginalReceiptMismatch")
+        self.assertEqual(rejected.exception.code, "ReceiptMismatch")
         self.assertEqual(self.session.unknown, [original])
         self.assertEqual(len(self.action_posts()), 1)
         ledger = self.session.execution["receipts"][0]

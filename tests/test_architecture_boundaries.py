@@ -42,6 +42,19 @@ def forbidden_imports(source):
 
 
 class ArchitectureBoundaryTests(unittest.TestCase):
+    def test_agent_client_and_observations_do_not_depend_on_host_or_renderer(self):
+        forbidden = {"grove_connector", "grove_execution", "grove_native_history",
+                     "grove_web", "client_projection", "runtime_core"}
+        package = ROOT / "agent_world"
+        paths = [package / "grove_agent_client.py", package / "grove_agent_observation.py"]
+        for path in paths:
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                names = ([item.name for item in node.names] if isinstance(node, ast.Import)
+                         else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+                for name in names:
+                    with self.subTest(module=path.name, dependency=name):
+                        self.assertFalse(set(name.split(".")) & forbidden)
+
     def test_core_sdk_and_public_sdk_do_not_import_adapters_or_consumers(self):
         package = ROOT / "agent_world"
         paths = set(package.glob("runtime_*.py")) | set(package.glob("world_*.py"))

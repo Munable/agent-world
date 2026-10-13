@@ -1,72 +1,14 @@
 # 验证证据横轴
 
-复核：2026-10-04。验证只回答 **某条 L1-L6 声明在什么源码、环境和场景下得到什么证据**。测试不是 L7，也不能因为一个测试消费者需要某功能，就反向创建产品要求。
+复核：2026-10-13。验证只回答 **某条 L1-L6 声明在什么源码、环境和场景下得到什么证据**。测试不是 L7，也不能因为一个测试消费者需要某功能，就反向创建产品要求。
 
 关键主张当前状态见 [TRACEABILITY](TRACEABILITY.md)。服务器验收针对接口可用、身份归因、世界规则、数据隔离、提交与恢复；模型是否遵循用户提示词、完成其目的或给出正确总结，属于用户侧宿主表现，应与服务器结果分别记录，不把它提升为 Runtime 的功能门槛。用户自行迁移本地记忆不构成服务器恢复失败。
 
-## 2026-10-04 多用户、多凭据与独立目的
+## 当前证据入口
 
-本次只修已复现的 L6 消费缺口：正规入口不能签发 observe、普通用户没有凭据列表／单撤销、首次提交没有 Credential 来源。新增 v2 持钥证明绑定权限；scope 内控制凭据管理；新 Receipt 原子保存原 Principal／Credential，旧回执不补造来源。仍没有独立 AgentIdentity、仅人类 owner 管理权或常驻推理循环。所有 control 凭据同权；只给宿主 bearer、不传身份私钥是本实验的配置边界，不是同 UID 的操作系统沙箱。
+0.37.0／world40的Agent优先与双向人类API，最终本地检查为1299项Python、11份Node脚本、实际安装包及HTTP／MCP独立消费者；221115条原操作与玩家、实体、不可变定义的升级核对逐值一致。具体源码范围、原失败、恢复点和清理沿[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)及已有外置 `implementation.json` 的 `agent_first_modularity`。
 
-四个合成密钥身份各有两个独立、仅持 bearer 的 Python 客户端进程；目的分别为发布事实、只读观察、公开质疑、私下询问、保留个人记录、检查越权与引用公共来源。38 个显式帧、四个检查点，实际交错互动 94.8 秒；十个预期 Operation 各提交一次。observe 写入及第三方私聊读写拒绝后，state／Operation／event／commit／stream／timer 数量不变。真实 socket 完整发送后进程退出 75，新进程从原 outbox 查询 Receipt／必要时仅原 envelope 重试；单撤 A1 后 A2 继续，重新发行 A1 仍读回原提交来源；不同意图冲突无新效果。测试服务实际重启后数据保持；WAL 在线备份恢复到另一独立服务，原私聊消息及完整性检查一致。先前审计脚本误用不存在的 timers 表而停止，属于测试工具错误，原失败保留；修正后用新隔离数据库运行，未覆盖失败证据。另有三项实际多进程 HTTP/MCP 回归：同 Principal 跨凭据并发去重／冲突、旧 session 与 pending RPC 撤权拒绝、原钥新进程恢复；pending RPC 没有服务端 admission 同步点，不扩大为已受理后的撤权证明。
-
-两次新的 OpenCode / LongCat 2.5 Preview 宿主使用同 D Principal 的两枚正式 observe／control 凭据，实际 6 次 MCP、6 个完成步骤、1111 输出 token，CLI 记录成本 0；耗时 31.18／43.24 秒，进程已回收。observe 实读公开事实／回复，目录不提供写工具；403 的证据来自前述直接 HTTP 客户端。control 独立发表一条固定引用回复，再查询原 Receipt；另行 HTTP＋SQLite 核对唯一回复、原凭据来源与全库十一项 Operation。**技术流程通过，模型语义理解仍有失败：** observe 把公开对象 ID／state_version 称作回执，control 没有独立核查来源声明的因果事实；不能把成功调用或 ledger success 当成理解全部协议。公开价格预检曾 TLS 超时，发生在宿主／推理之前；一次明确的无推理重试成功，再冻结五分钟价格快照及代码 SHA。独立两宿主额度未重置，无付费回退／隐私设置变更；未核对账户账单或未报告 usage。
-
-最终 0.22.0 Python **428 项／67.108 秒无 skip 通过**；五份 Node 22.23.1 检查通过，含权限选择、篡改模式拒绝、逐枚撤销、失败与 Close／Escape／Leave 晚响应。最终 wheel、独立安装及 checkout 外公开 SDK probe 通过：169121 bytes，SHA `005e97e909cdd2031868bcbb7d351d9f3233c1468dd3457a298c724bed09b493`。schema 8 的回归保留 schema 7 身份、凭据、已使用及未使用的 v1 challenge；不等于生产升级验收。实际浏览器检查入场、两个权限选项签发、重复点击一枚凭据、断网单撤失败后原连接仍在、恢复后撤销、同钥刷新／退出返回、真实 401 后原草稿恢复、前后导航及 390px 无横向溢出。连接文件名带权限及 Credential 后八位以对应列表；IAB 下载事件捕获超时，实际磁盘文件落盘未验证，不能把服务器签发成功当下载成功。会话经过自然午夜，但只是一段短会话，不算离开一天或 24 小时观察。
-
-证据在 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/multi-host-20261003/`，最终机械记录在 `attempt2/campaign.json`／`database-audit.json`，模型记录在 `models/`，浏览器记录与三张截图在根目录。测试客户端／有界运行器在任务 `work/multi-host-20261003/`，正规回归在 `tests/test_multi_host_boundaries.py`／`test_credential_attribution.py` 等现行文件；唯一密钥、恢复数据库及经实际恢复验证的在线备份在 Git 外 private／test-work 对应目录。清理范围和实际占用沿用 `browser-qa.json` 与模型 ledger，不生成额外报表。未推送、部署或触碰生产；真人理解、自然长期离开再回来、跨机器／跨主机网络分区、复杂世界通用性仍未验证。
-
-当前本地体验：`http://127.0.0.1:8795/`，已用最终 0.22.0 源码正常重启并保留原浏览器身份与数据库。旧 8781 预览正常停止，历史数据库与恢复备份保留。两份新模型临时配置目录已回收约 95.3 MB 分配占用；失败工具探针副本、恢复测试副本与被最终日志替代的日志共 38 个文件、761856 bytes 分配占用已精确清理。原失败记录、最终证据、实际世界数据库、身份钥及经恢复验证的唯一在线备份均保留。磁盘可用量观测记在原浏览器／模型记录中，不当作单项 APFS 释放量。
-
-从仓库目录启动同一隔离世界（已有实例运行时无需重复启动）：
-
-```sh
-./work/latency-runtime/bin/python -m agent_world --world commons \
-  --universe multi-host-commons \
-  --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/multi-host-20261003/ui.sqlite3 \
-  --host 127.0.0.1 --port 8795 --no-timers
-```
-
-## 2026-10-03 独立公开接入与边界补证
-
-假设：陌生世界作者能只凭公开 SDK 说明声明自己的规则；另一个客户端能只凭公开说明及 HTTP 元数据进入、行动、拒绝和接续。不得读取实现／测试猜接口，不假定共同目的或固定 Agent 角色。作者和客户端分别由 GPT 6.1 Sol / Ultra 在无实现上下文的子任务中完成；这是隔离本机的 AI 开发者实验，不是真人盲测。原七份公开文档快照来自 `fc375f3`，新增接入说明是失败后的干预，不能称第一次就无阻塞接入。
-
-- 实际发现并修复说明缺口：SDK 声明缺构造参数，身份签名误签 message 的 ASCII 文本导致 401；新增说明最初错误要求 Receipt 含 role_id/universe，又造成恢复失败。最终 [INTEGRATION](INTEGRATION.md) 明示原始字节编码、路径、envelope 与真实 Receipt 字段，保留全部原失败。
-- 独立作者产生记录与配置两个世界，每个四个动作，均只导入公开 SDK。独立 HTTP 客户端验证公私访问、不能选择他人作者／owner、拒绝后状态不变且无回执、原操作在后续更新后仍重放原结果、同 revision 并发恰一次提交、同钥新进程回原档案与跨世界 bearer 双向拒绝。随后保留作者原代码为 `tests/fixtures/independent_author_worlds.py`，SHA `2a85645f21b17d138504ab993545099e8d87ea5fc1e0193df24d5075dc689195`，四项正式 HTTP 回归另包括实际服务器进程重启。作者 Context double 自测不计作 Runtime 验收。最小列表明确只给有界选择，不冒充完整历史。
-- `tests/test_discovery_authorization.py` 在正式身份下验证可见／隐藏与允许／拒绝四组合；HTTP 与 MCP 各用首次 Operation，隐藏且允许仍执行，拒绝整库无副作用。`tests/test_storage_recovery.py` 在真实子进程中暂存普通 Command 的五种效果后、实际 COMMIT 前退出；重启零残留，同 Operation 重试一次，随后重放不改库。它证明进程中断边界，不等于断电。
-- 独立 Commons 客户端真实代理丢弃提交后的响应，退出后新进程凭原 Operation 恢复而不新增写入。真实模型另启动四次 OpenCode 1.18.34 / LongCat 2.5 Preview：A 发一条自身连通性事实；B 仅观察并说明不代表作者完成目的；A 原身份新进程读回；第四先读原 Receipt 再读事实，无重写。共 8 次 MCP 调用、11 个完成步骤、1268 输出 token，CLI 记录成本 0，最长宿主 31.85 秒，全部进程回收。B 被宿主限制为只读，不能把它算作有写权限下的抗诱导证明；第四的原始未知写入由外部确定性客户端发出并保存，不是模型自主发起／持久化。声明免费路径、每宿主 120 秒／5 steps／2048 输出 token、总四宿主、无自动重试／付费回退；未核对账户账单。旧模型额度与失败记录未重置。外置 CLI 首次 15 秒版本探针超时，第二授权探针 3.24 秒成功；启动前源码 SHA 变化被 gate 拒绝，未开始推理，随后核对差异并固定 runner SHA `41302b06fe1a98b94e586bfc5e9351fd643e40d4e5ab46a41deec90ff6f9602e`。
-- 浏览器真实复现从有效帖切到不存在帖子时仍留旧帖／Reply 框；修复在换路由读取时保存草稿并移除旧操作区，失败提供安全返回。同路由刷新失败保留内容，401／晚响应仍遵守接续合同。行为回归在旧代码先失败，再修复通过；最终页面复测含硬刷新草稿、Dialog 取消、双击回复只有一条、前后导航、390px 窄屏及失败页面返回。
-
-最终 Python **408 项／56.223 秒通过，无 skip**；Node 22.23.1 五份客户端／表现检查通过；最终源码与 README 的 wheel／独立安装／checkout 外 package probe 通过（165439 bytes，SHA `c9282dd4e4cd663c1103b09ec31f7feebec20b6bc63ad2de63eb9365e2bc61a9`）。本轮未改 Runtime 核心或身份合同，未推送／部署／触碰生产。仅修改公开说明、当前回归和 Commons 路由呈现。
-
-证据集中在 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/independent-interface-20261003/`；原始作者／客户端／模型运行器小型源文件在任务 `work/independent-interface-20261003/`，私钥与恢复资料在 Git 外同任务 private 目录。完整回归／打包临时目录由工具清理；四个模型宿主目录共 12008 个可重建文件已精确回收，分配占用约 198.6 MiB，可用空间观测增加约 211.3 MiB，不单归因 APFS 净释放。唯一恢复钥、必要证据及一份 integrity/FK 检查通过的本地预览在线备份保留；本轮未声称该备份已恢复。外置 I/O 曾使清理等待，正常结束而未强杀。该阶段曾保留 Commons 8781 预览，已于 2026-10-04 正常停止，当前体验入口见上文；8782／8783 测试服务已正常停止。
-
-如需复现该历史世界，从仓库目录复用现有环境及数据库（当前体验入口为上文 8795）：
-
-```sh
-./work/latency-runtime/bin/python -m agent_world --world commons \
-  --universe independent-clients \
-  --db /Volumes/DevDisk/DeveloperData/agent-world/test-work/independent-interface-20261003/commons.sqlite3 \
-  --host 127.0.0.1 --port 8781 --no-timers
-```
-
-独立规则可用 `--world tests.fixtures.independent_author_worlds:RECORDS_WORLD` 或 `CONFIG_WORLD` 加新的本地测试库运行；它们是回归消费者，不是完整产品示例。仍未验证真人长期使用、自然跨日、跨机器分区或复杂领域通用性。Agent 是可替换执行载体；本地记忆由用户迁移，世界凭据保持原主体归因。独立 Agent 标识与归属体系不作为产品要求或验收缺口；这些历史实验也不证明任意 CLI 的本地记忆格式和连接配置都已兼容。
-
-## 2026-10-02 Commons 0.19 待部署验收记录
-
-以下保留上一轮 Commons 的源码与证据，不表示 0.20 全部代码已通过相同实验。新增世界消费者与最终检查见 [WORLD_EXPERIMENT](WORLD_EXPERIMENT.md)。
-
-代码来源：GitHub `main` 实查仍为 `a7e92db213033cccf41f4759d24419cadf8721d1`；部署源码 v5 ZIP 的 SHA-256 为 `cd1163f3a19b731ebf8c10eb6b2ad045b108c559ad3cfd688ef8e5408b0b06d7`。v5 相对 main 的前端、正式身份接入和 Railway 改动已整合；包内补丁通过反向检查确认已有，未重复应用。独立 missing-post-resource-error.patch 应用一次，再补本轮实际阻塞。版本 0.19.0；protocol 0.15、SQLite schema 7；未推送、未部署或修改线上数据。
-
-最终代码在当前 Mac／Python 3.12.14 下：306 项 Python 回归通过（123.747 秒）；三份 Node 客户端检查通过；0.19.0 wheel、独立安装与 checkout 外 package probe 通过。新增精确回归覆盖缺失帖子的读取／回复列表／回复创建错误，跨世界档案权限，四类历史分页、长文本字节预算和 v2 世界原地升级，同钥多页接续及其他凭据撤销。CI 加入 Commons Node 检查；本轮尚未推送，不能声称远端 CI 已跑最终代码。
-
-- 确定性多用户旅程：4 个正式密钥身份、3 轮有目标的活动策划，形成 107 条公开回复、109 条私聊、222 个 Operation／224 个 state。覆盖并发相同意图、冲突拒绝、提交后丢响应、HTTP↔MCP 重放、离线游标、实际进程退出／重启、同钥撤权重进、WAL 在线备份及新进程恢复，逐项核对作者、正文和回执。其结果是可断言的模拟策划，不是模型思考。
-- 真实模型：3 个身份、4 次全新 OpenCode 进程，使用现有安全注入与 LongCat 2.5 Preview；28 次 MCP 调用，132444 token（含缓存读取），客户端记录成本 0。权威结果为 1 Post、3 Reply、1 Conversation、1 Message、6 个固定 Operation；新进程 A 读回 B/C 结果并形成示例方案，C 读取私聊返回 403。B/C 有 3 次将 operation_id 放错层级的工具错误后修正；这说明模型并非始终按提示一次成功。已补清顶层参数说明，最终 A 阶段无工具错误。固定 4 次／每次 120 秒／12 steps／4096 输出 token，无付费回退，无后台推理。
-- 原生 Chrome：实际检查进入／刷新／Leave／同钥 Return，公开回复与私聊的重复点击（数据库各一条），草稿硬刷新与 Back/Forward，真实 401 后原身份恢复，独立连接文件 HTTP 200 与撤销后 401，Dialog Close/Escape，缺失帖子错误与正常导航，500px 窄屏；四种 Load older 控件均读回较早记录。最终前端重新加载后，点击第 101 项 peer 的公开帖私聊按钮，直接回到原会话（总数仍一条），在该会话再次双击发送也只一条且对方 HTTP 实读。三 Agent 的真实公开讨论在页面读回。截图和有明确覆盖范围的浏览器记录保存在下面目录。
-
-本轮独立测试数据库、日志与截图统一保存在 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/`；有目标旅程记录为 `commons-multiuser-acceptance.json`，真实模型目录为 `real-model-20261002/`。模型世界数据库与唯一恢复钥在外置盘私密保存，用于手动真实后续观察；没有定时任务或常驻 Agent。有界持续运行实际工作 904.49 秒、总计 912.05 秒：8 个身份／4 对客户端、698 轮、2792 条消息、408 次重放、2 次强制进程重启；数据库实际数量一致、integrity_check=ok，源码前后 SHA-256 均为 `dde71c826e24a91d0271054d50ef68d5bd35ada0cced1f6990f5cf6a20cce3a7`。此后同步包版本常量并修前端旧 peer 查找和共享 pending 取消，未改 Python Runtime 行为；这些后续浏览器变化由最终 Node、原生页面及 wheel 检查覆盖，不能归入此前持续测试。macOS 未取得 RSS 样本，不声称内存稳定。收尾已删除四份模型 XDG 缓存、临时连接文件、UI 世界与钥、v5 解压参考副本、重复构建和诊断／基线日志，合计约 241.3 MiB 分配占用；DevDisk 可用空间观测分两阶段记录在 authority-final.json 和 browser-qa.json，不能当作单项 APFS 净释放。保留活动模型世界、三把唯一恢复钥、一份在线完整性检查通过的私密恢复备份、复用的 OpenCode 宿主与 MIT 许可、活动环境及必要证据；当前 editable package metadata 仍被使用，保留原位。原 v5 ZIP 附件保持原位。一次性 UI 服务已正常停止，8766 本地模型世界供体验，无后台推理。
-
-未覆盖：真实跨日接续、跨机器网络分区、实体场地／运输／预约结果、生产升级与生产备份恢复、更多真实普通用户的理解与使用、长期内存归因。会话撤销是恢复路径模拟，不能叫经过一天；本机重启和备份恢复也不能代替生产演练。Commons 仍是世界 Runtime 的第一个消费者。
+本轮覆盖独立协议消费与恢复，未启动真实模型；此前模型创作的成功与功能失败保留原范围。过去Commons阶段的版本、端口、请求数和截图由Git历史及原外置证据承担，不在当前规则页重复维护运行快照。
 
 ## 核心必需验证
 
@@ -150,24 +92,7 @@ EigenFlux 参考机制的当前取舍见 [REFERENCE_EIGENFLUX](REFERENCE_EIGENFL
 - `tests/test_commons_reference.py`、`tests/test_commons_transport.py`：Commons v2 的 Post / Reply / Conversation / Message，覆盖公开读取、私有参与者授权、Operation replay、并发双向消息、重启后的离线通知恢复，以及真实 HTTP/MCP 混合调用。
 - view / stream / timer / world-data / SDK 测试：各自现行能力合同。
 - `tools/check_package.py`：当前 package 构建与 checkout 外 probe。
-- 两份 Node 客户端测试：当前 View / Stream 客户端合同。
-
-v5 随包记录的历史代码树曾执行（本轮不把它当最终代码证据）：`python tools/run_tests.py` 共 **243 个 unittest 全部通过**。密钥身份与 Capability Harness 保持原有覆盖；当前 **6 个 Commons Reference Application 测试**验证 Post / Reply / Conversation / Message、私有参与者授权、通知≠已读／接受、Operation replay、并发消息、Runtime 重启后的离线恢复、event cursor 断线续接、Credential 撤销后同钥重新进入原私聊，以及 HTTP/MCP 混合调用。0.18.0 package check 已在 Commons v2 变更上通过 wheel 构建、独立安装与 checkout 外 package probe；最新接口边界与错误映射修复后，Linux / Python 3.12.14 下重跑全部 243 项、两份 Node 客户端测试及 package check 均通过；第一次 package check 因干净虚拟环境缺少 setuptools 失败，安装声明的构建依赖后通过。这个数字只描述当前树，不作为未来提交的永久成绩单。
-
-## Real Agent Integration 证据
-
-2026-09-30 在本机 loopback Commons v2 实例上完成一次真实模型宿主实验。这里验证的是“外部 Agent 能否理解并正确使用 Runtime”，不是新的功能合同：
-
-- **OpenCode 1.18.33 + OpenCode Go / GLM 5.3 Flash，Agent A**：独立进程自行调用 `world.bootstrap`、`world.describe`，随后创建 Post、打开 Conversation、发送 Message，并主动 `post.list / conversation.list / message.list` 复核。Runtime 权威状态确认三条写入存在，宿主进程 `returncode=0`。
-- **OpenCode，Agent B**：另一个独立宿主进程先读取公开 Post 与自己的私有 Message，再自行创建 Reply、发送私聊回复，并主动读回验证。Runtime 权威状态确认两条写入存在，进程 `returncode=0`。
-- **OpenCode，Agent A 重连**：原宿主退出后启动全新进程，不携带上一进程会话上下文；它重新 bootstrap/describe，并通过 Post/Reply、Conversation/Message 与 `world.get_changes` 恢复出 B 在离线期间的公开和私有回复，没有创建新世界状态。
-- **Pi Coding Agent 0.87.1 + `pi-mcp-extension` 1.5.0 + OpenCode Go / GLM 5.3 Flash，Agent C**：通过项目级 streamable HTTP MCP 配置自行 bootstrap/describe，回复现有 Post、与 A 打开新 Conversation、发送 Message，并重新读取 Reply / Message 验证；Runtime 权威状态确认三条写入存在，进程 `returncode=0`。
-
-这个实验只提供**短时真实宿主证据**，有明确限制：
-
-1. 所有进程运行在同一台机器，通过 loopback MCP 连接，不是跨机器网络或分区实验。
-2. 为了隔离“真实模型会不会正确使用 Runtime”这一问题，MCP 实验入口关闭 bearer 鉴权并预建本地测试 Role；因此它**不**证明 OpenCode/Pi 的身份密钥或 bearer 托管正确。Key Identity、Credential、MCP session 鉴权已有确定性合同测试单独验证。
-3. 这不是 soak；没有证明长时间资源增长、模型漂移、网络抖动或生产平台矩阵。
+- `tests/*.test.mjs`：当前11份客户端脚本，覆盖View、Stream、Commons、Grove、River Camp及表现合同。
 
 ## 新实验最低要求
 
@@ -197,51 +122,16 @@ v5 随包记录的历史代码树曾执行（本轮不把它当最终代码证�
 
 ## 当前仍缺的验证
 
-长期 soak、跨机器／跨主机 Agent、真实网络分区、生产数据库迁移和真实用户使用仍需要独立证据。本机真实多宿主／多进程已经有上述短时证据。
+长期 soak、跨机器／跨主机 Agent、真实网络分区、生产数据库迁移和真实用户使用仍需要独立证据。既有真实宿主短时证据保留原范围，最新状态统一见当前研发记录。
 
 ## 本机故障与储存恢复回归
 
-2026-09-30，新增七项回归（L6／证据横轴），没有修改 Runtime 生产代码或增加原语：
+仍属于当前合同的故障保护纳入标准unittest：
 
-- `tests/test_network_recovery.py`：正式 key identity/bearer 鉴权下，本机 HTTP 代理在上游提交后丢弃响应、阻断回执查询；服务器进程强制退出后同钥回档，通过 MCP 重放同一 Operation。检查一个消息、一份通知、游标续接和私有会话拒绝未授权读取
-- `tests/test_storage_recovery.py`：SQLite online backup 包含 WAL 中已提交状态；新进程恢复身份、精确 Receipt、通知／stream cursor 和一次性 timer 补执行；备份排除完整暂存但未提交的命令效果；迁移进程退出后原子回滚／重试；schema 创建中退出后重新初始化
+- `tests/test_network_recovery.py`：正式身份鉴权、上游提交后丢响应、分区、服务器进程退出、原Operation跨HTTP／MCP恢复；核对唯一消息、通知、游标及私有读取授权。
+- `tests/test_storage_recovery.py`：SQLite在线WAL备份、身份及精确回执恢复、未提交效果排除、迁移失败原子回滚与重试。
+- `tests/test_runtime_intent_receipts.py`：原参数摘要、旧回执补证明而不改原body、同编号不同意图冲突。
+- `tests/test_grove_agent_client.py`及`tests/test_grove_revoked_recovery.py`：原世界归属、原封包、停止／撤控、错误回执、未知结果及精确恢复。
+- `tests/test_soak_tool.py`：有效工作范围与源码摘要；工具通过不能替代长期运行的实际证据。
 
-- `tests/test_soak_tool.py`：持续检查从完成启动后开始计时、至少完成一轮实际工作；源码摘要改变时拒绝形成通过证据。两项测试均先复现旧工具失败，再修复通过
-
-七项均纳入标准 unittest 入口；四项储存回归额外连续执行十轮通过。该证据只覆盖一次性本机数据库、指定故障点与当前 WorldDefinition，不证明物理断电、磁盘损坏、跨机器备份、任意旧schema迁移或生产数据规模。可重现命令与安全恢复步骤见 [OPERATIONS](OPERATIONS.md)。
-
-基线 `a7e92db` 的远端 [GitHub Actions 36735857057](https://github.com/Munable/agent-world/actions/runs/36735857057) 已于 2026-09-30 15:22 UTC 成功完成 Ubuntu/Python 3.11、Ubuntu/Python 3.13 和 Windows/Python 3.13 三矩阵；每个矩阵均包含安装、原 227 项 unittest、两份 Node 测试、wheel 和 package probe。**该成绩不覆盖之后新增的七项本地回归或持续检查脚本**；新增内容当前只取得上述 Linux 本机证据。
-
-## v5 随包保留的历史持续运行证据
-
-下列数值保留为历史记载。旧 `evidence/` 路径在当前工作树和本机项目证据目录均未定位，当前不提供失效链接，也不计入本轮可回读验收。
-
-2026-09-30，在同一冻结 Runtime／检查工具源码（SHA-256 `e7a1c9dcfad086a8cba9be7fcb8f306764c5eebfa4d175401a20184df26ab480`）上完成两组本机真实计时运行：
-
-| 场景 | 工作时长 | 合成身份／并发会话对 | 持久消息 | 重放 | 强制重启 |
-| --- | --- | --- | --- | --- | --- |
-| 周期崩溃恢复（`commons-soak-1800s.json`） | 1800.70 秒 | 8／4 | 7200 | 1052 | 5 |
-| 不重启持续写入（`commons-steady-1800s.json`） | 1800.45 秒 | 4／2 | 3600 | 516 | 0 |
-
-两组均完成 1800 轮；数据库实际消息数量与成功写入完全一致，`integrity_check=ok`，每个接收者的游标之后没有重复通知，源码摘要前后一致。正式身份密钥／bearer 鉴权始终开启，没有调用模型或外部服务。报告中的工作时长从完成初始化后开始计算，含最终完整性检查与清理；循环本身持续至少请求的 1800 秒。
-
-不重启组的进程 RSS 样本从 77432 KiB 到 86448 KiB；最后数据库主文件样本约 5.99 MB。保存历史导致储存增长是此场景的正常结果；单次半小时样本不能证明无限时长内存稳定，也不是生产容量认证。周期重启组不能用来替代不重启资源观察。两组都不覆盖 timer/retention 组合长期运行、物理断电、跨机器网络或真实用户体验。
-
-初始持续检查在工具验收逻辑复核后主动中止，没有计入上面两个完整结果。工具的“零轮工作也可通过”和“源码变化仍可通过”先由两项回归复现，再修复并在全套 234 项测试中通过。现行工具拒绝这两类无效证据。
-
-## 当前四小时不重启证据
-
-同一冻结源码在 **2026-09-30 19:05:18–23:05:21 UTC** 完成一次连续四小时本机运行。工作计时 14401.33 秒（循环至少 14400 秒，余量包括最终检查与清理），4 个合成身份、2 对并发 HTTP 会话、**0 次重启**：
-
-- 14399 轮、28798 条消息、4114 次同 Operation 重放
-- 数据库实际消息数 28798，与确认写入完全一致；`integrity_check=ok`；最终每个接收者的游标之后没有重复通知
-- Runtime／检查工具源码摘要前后一致，仍为上面记录的 `e7a1c9d…ab480`
-- 475 个资源样本：首个 RSS 76252 KiB，最后 110552 KiB，增加 34300 KiB（约 33.5 MiB）；最后主数据库文件样本 46346240 bytes（约 46.35 MB），**不含 WAL/SHM、日志或磁盘其他占用**
-
-结果证明的是该时段和工作负载的数据／回执重放／游标一致性。RSS 仍在增长，不能称为“内存已稳定”或“无泄漏”；需要后续堆分配归因、缓存／分配器与数据量的对照，才能判断原因。没有设定或通过生产内存、延迟、吞吐 SLO。该场景也不覆盖 timer/retention 长期组合、真实模型、跨机器网络或生产数据迁移。
-
-完整结果：四小时报告（`commons-steady-4h.json`）、实际起止与命令（`commons-steady-4h-run.json`）、约每15分钟存活核对（`commons-steady-4h-monitor.jsonl`）。
-
-此前 17:05 UTC 开始的尝试因执行会话消失而未形成最终报告，最后仅记录 5081.73 秒／5082 轮。它被标为**执行基础设施中断，原因未确认**，不能归为 Runtime 缺陷或通过结果，也没有与新运行拼接。保留中断说明（`commons-steady-4h-interrupted.json`）及当时数字日志（`commons-steady-4h-interrupted.log`），完整四小时从新的 19:05 UTC 运行单独计算。
-
-有限只读归因核对：被测发送／重放／事件读取路径中，没有找到按消息数保留全部对象的常驻 Python 容器。`runtime_core.py:96–100` 的字典用于 world／function／handler 注册，`_conn` 在 `finally` 关闭 SQLite 连接且设置 `cached_statements=0`；消息、回执与事件持久化到数据库，提交校验只读取本事务有界的 state changes。因此当前源码检查既没有定位无界消息缓存，也不足以直接用一个长期 SQLite 页缓存解释 RSS 增长。分配器高水位、原生内存和第三方缓存只是待验证候选；需要堆／原生分配归因及停写后的回落对照，没有据此修改生产代码或启动另一轮长跑。
+本轮逐值恢复范围见当前研发记录；这些检查不证明物理断电、磁盘损坏、任意旧schema迁移或生产恢复。可重现操作与安全步骤见[OPERATIONS](OPERATIONS.md)。远端CI没有运行本轮源码；仓库Actions仍关闭，workflow只接受显式手动触发，本轮采用本地验证。

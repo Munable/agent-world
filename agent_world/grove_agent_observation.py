@@ -14,9 +14,9 @@ import secrets
 
 from .grove_connector_errors import ConnectorError
 
-AGENT_WRITE_FUNCTIONS = frozenset({"grove.move", "grove.interact", "grove.build", "grove.generation_context",
+AGENT_WRITE_FUNCTIONS = frozenset({"grove.join", "grove.move", "grove.interact", "grove.build", "grove.generation_context",
     "grove.content_submit", "grove.content_release", "grove.definition_publish", "grove.rule_action", "grove.fabricate"})
-AGENT_ACTION_FUNCTIONS = frozenset({"grove.move", "grove.interact", "grove.build", "grove.rule_action", "grove.fabricate"})
+AGENT_ACTION_FUNCTIONS = frozenset({"grove.join", "grove.move", "grove.interact", "grove.build", "grove.rule_action", "grove.fabricate"})
 
 _NATIVE_TOOL_MAX_BYTES = 50 * 1024
 _NATIVE_TOOL_MAX_LINES = 2000
@@ -1288,6 +1288,11 @@ def _companion_fact_budget(function, payload):
         protected.update(row["entity_id"] for row in readback.get("action_targets", [])
             if isinstance(row, dict) and isinstance(row.get("entity_id"), str))
     scenes = [value] if function == "map.viewport" else []
+    # A public SDK receives the operation-time viewport directly, without a
+    # host's later execution_readback. Apply the same optional discovery budget
+    # to that actual scene before binding any versions from it.
+    if function in AGENT_ACTION_FUNCTIONS and isinstance(value.get("viewport"), dict):
+        scenes.append(value["viewport"])
     if isinstance(readback, dict):
         scenes.append(readback)
     # A later readback wins when a response also carries a commit-time map.
@@ -1604,13 +1609,19 @@ def _bounded_agent_projection(function, payload):
     # A committed write is never converted into a failed/retryable operation.
     # This response omits expanded state explicitly and retains the real receipt.
     result = {key: deepcopy(payload[key]) for key in (
-        "operation_id", "function_id", "ok", "status", "commit_seq", "actor_role_id",
-        "function_version", "replayed", "execution_control", "confirmed_outcome", "busy_recovery") if key in payload}
+        "operation_id", "function_id", "ok", "status", "commit_seq", "actor_role_id", "credential_id",
+        "function_version", "intent_fingerprint", "replayed", "execution_control", "confirmed_outcome", "busy_recovery") if key in payload}
     operation_result = payload.get("result")
     if isinstance(operation_result, dict):
         receipt_fields = {key: deepcopy(operation_result[key]) for key in
-            ("operation_id", "function_id", "ok", "status", "commit_seq", "function_version", "replayed")
+            ("operation_id", "function_id", "ok", "status", "commit_seq", "function_version", "intent_fingerprint", "replayed")
             if key in operation_result}
+        if function == "grove.join":
+            # Entry has a definite world result independent of the expanded
+            # scene. Retain the returned self snapshot and resumed verdict,
+            # rather than reducing a confirmed entry to commit metadata alone.
+            receipt_fields.update({key: deepcopy(operation_result[key]) for key in
+                                   ("player", "resumed") if key in operation_result})
         if receipt_fields:
             result["result"] = receipt_fields
     readback = payload.get("execution_readback", {})
@@ -1653,8 +1664,9 @@ def _bounded_agent_projection(function, payload):
                    "are unexpanded, not absent. Do not repeat the write to obtain its output. Read current state "
                    "through the declared world tools before another consequential action. Receipt ok/commit "
                    "metadata does not verify physical success or the person's natural-language goal."}
-    result["read_requests"] = [{"tool": "map_viewport", "arguments": {}},
-                               {"tool": "grove_control_status", "arguments": {}}]
+    result["read_requests"] = [{"tool": "map_viewport", "arguments": {}}]
+    if "execution_control" in payload:
+        result["read_requests"].append({"tool": "grove_control_status", "arguments": {}})
     for target in compact.get("action_targets", []):
         request = target.get("inspection", {}).get("read_request")
         if request:
@@ -1704,7 +1716,7 @@ def _agent_interaction_revision_field(name):
             "expected_item_interaction_revision": "item"}.get(name)
 
 
-def agent_tool_schema(schema, *, function=None):
+def agent_tool_schema(schema, *, function=None, guard_paths=None):
     """Hide only optimistic snapshot guards from this connector's MCP input."""
     result = deepcopy(schema)
 
@@ -1715,11 +1727,16 @@ def agent_tool_schema(schema, *, function=None):
         source_row = function == "grove.fabricate" and path == ("sources", "[]")
         properties = value.get("properties", {})
         for key in list(properties):
-            if (guarded and (_agent_version_field(key) or _agent_interaction_revision_field(key))) or (source_row and key == "expected_entity_version"):
+            declared_guard = guard_paths is not None and ["*" if item == "[]" else item for item in (*path, key)] in guard_paths
+            inferred_guard = guard_paths is None and ((guarded and (_agent_version_field(key) or _agent_interaction_revision_field(key))) or (source_row and key == "expected_entity_version"))
+            if declared_guard or inferred_guard:
                 properties.pop(key)
             else:
                 visit(properties[key], (*path, key))
-        if guarded and isinstance(value.get("required"), list):
+        if guard_paths is not None and isinstance(value.get("required"), list):
+            value["required"] = [key for key in value["required"]
+                if ["*" if item == "[]" else item for item in (*path, key)] not in guard_paths]
+        elif guarded and isinstance(value.get("required"), list):
             value["required"] = [key for key in value["required"]
                                  if not (_agent_version_field(key) or _agent_interaction_revision_field(key))]
         elif source_row and isinstance(value.get("required"), list):
@@ -1735,20 +1752,17 @@ def agent_tool_schema(schema, *, function=None):
     return result
 
 
-def agent_mcp_schema(schema, *, function):
-    """One input projection for tool inventory and presented action menus."""
-    result = agent_tool_schema(schema, function=function)
+def agent_mcp_schema(schema, *, function, access=None, guard_paths=None):
+    """Public fixed-observation input; host execution control is separate."""
+    result = agent_tool_schema(schema, function=function, guard_paths=guard_paths)
     properties = result.setdefault("properties", {})
-    if function in AGENT_WRITE_FUNCTIONS:
+    if access == "write" or access is None and function in AGENT_WRITE_FUNCTIONS:
         properties.pop("delegation", None)
         result["required"] = [key for key in result.get("required", []) if key != "delegation"]
-        properties["execution_segment_id"] = {
-            "type": "string", "minLength": 1, "maxLength": 100,
-            "description": "Copy the current execution_task.segment_id exactly; stale requests cannot write."}
         properties["observation_id"] = {
             "type": "string", "minLength": 1, "maxLength": 100,
             "description": "Copy the opaque observation_id returned with these exact facts. Do not invent an ID."}
-        for key in ("execution_segment_id", "observation_id"):
+        for key in ("observation_id",):
             if key not in result["required"]:
                 result["required"].append(key)
     else:
@@ -1758,11 +1772,13 @@ def agent_mcp_schema(schema, *, function):
     return result
 
 
-def _project_agent_menus(value):
+def _project_agent_menus(value, schema_projector=None, *, source_function=None):
     """Project only server-generated scene menus before sizing and binding."""
     if not isinstance(value, dict):
         return
     options = value.get("action_options") or []
+    if source_function == "grove.build_options" and isinstance(value.get("options"), list):
+        options = [*options, *value["options"]]
     action = value.get("action")
     if isinstance(action, dict) and action.get("function_id") == "grove.fabricate":
         options = [*options, action]
@@ -1772,7 +1788,8 @@ def _project_agent_menus(value):
         function = option.get("function_id")
         if function in AGENT_WRITE_FUNCTIONS and isinstance(option.get("input_schema"), dict):
             option["mcp_tool"] = function.replace(".", "_")
-            option["input_schema"] = agent_mcp_schema(option["input_schema"], function=function)
+            option["input_schema"] = (schema_projector(function, option["input_schema"]) if schema_projector
+                                      else agent_mcp_schema(option["input_schema"], function=function))
         if isinstance(option.get("arguments"), dict):
             option["arguments"] = {key: item for key, item in option["arguments"].items()
                                    if not (_agent_version_field(key) or _agent_interaction_revision_field(key))}
@@ -1781,10 +1798,10 @@ def _project_agent_menus(value):
                     if isinstance(source, dict):
                         source.pop("expected_entity_version", None)
     for key in ("result", "entity", "viewport", "selected_inspection", "execution_readback"):
-        _project_agent_menus(value.get(key))
+        _project_agent_menus(value.get(key), schema_projector, source_function=source_function)
     for key in ("entities", "inventory", "contents", "nearby_entities", "resource_nodes", "water_sources"):
         for item in value.get(key, []) or []:
-            _project_agent_menus(item)
+            _project_agent_menus(item, schema_projector, source_function=source_function)
 
 
 class AgentObservations:
@@ -1832,7 +1849,7 @@ class AgentObservations:
         """Detach external readers; internal binding only reads the fixed bundle."""
         return deepcopy(self._require(observation_id))
 
-    def present(self, function, payload, *, base_id=None, preflight=False, action_entity_ids=()):
+    def present(self, function, payload, *, base_id=None, preflight=False, action_entity_ids=(), schema_projector=None):
         """Create a new fixed bundle solely from this presented response.
 
         No invoke/UI/recovery path calls this. Another parallel tool's unseen
@@ -1845,11 +1862,19 @@ class AgentObservations:
         if not preflight and function in AGENT_ACTION_FUNCTIONS | {"grove.definition_publish", "execution_checkpoint"}:
             result = _companion_action_projection(result, base_id=base_id, versions=bundle["versions"],
                 entity_ids=action_entity_ids, source=payload)
-        _project_agent_menus(result)
+        _project_agent_menus(result, schema_projector, source_function=function)
         # Tool responses and the turn's fresh preflight share the same budget
         # before binding. Complete selected previews remain mandatory facts.
         result = _companion_fact_budget(function, result)
         result = _bounded_agent_projection(function, result)
+        # Protocol context and formal follow-up reads describe the authorized
+        # source, not hidden world facts or a replacement binding basis.
+        source = payload.get("result", payload)
+        destination = result.get("result", result)
+        if isinstance(source, dict) and isinstance(destination, dict):
+            for field in ("agent_context", "read_requests"):
+                if field in source:
+                    destination[field] = deepcopy(source[field])
 
         def remember(kind, value, id_key="id", version_key="version"):
             if isinstance(value, dict) and isinstance(value.get(id_key), str) and type(value.get(version_key)) is int and value[version_key] > 0:
@@ -1893,6 +1918,11 @@ class AgentObservations:
                             # A source row's id identifies the real entity;
                             # its nested lot ids never become entity snapshots.
                             remember("entity", source)
+                if option.get("function_id") == "grove.build":
+                    for material in rows(option.get("material_candidates")):
+                        # These actual owned rows are part of the delivered
+                        # server menu, rather than recipe schemas or lot IDs.
+                        remember("entity", material)
                 for candidate in candidates:
                     if isinstance(candidate, dict):
                         remember("player" if candidate.get("kind") == "role" else "entity", candidate)
@@ -1971,8 +2001,16 @@ class AgentObservations:
                 if isinstance(target, dict):
                     scene(target.get("inspection"))
 
-        scene(result.get("result", result))
+        presented = result.get("result", result)
+        scene(presented)
         scene(result.get("execution_readback"))
+        if function == "grove.build_options" and isinstance(presented, dict):
+            # This authenticated self read uses a version scalar instead of a
+            # player snapshot. Copy its actual version; do not reuse a base's
+            # old guard or infer one from editable menu arguments or schemas.
+            bundle["versions"]["player"].pop(self.role_id, None)
+            remember("player", {"id": self.role_id, "version": presented.get("player_version")})
+            options(presented.get("options"))
         # Reserve before publication. The random tail keeps a parallel reader's
         # next handle unpredictable; the durable sequence prevents restart reuse.
         self._sequence += 1
@@ -1986,7 +2024,7 @@ class AgentObservations:
             self._preflight_id = observation_id
         return result
 
-    def bind(self, function, arguments, observation_id, schema):
+    def bind(self, function, arguments, observation_id, schema, *, guard_paths=None):
         """Use an explicitly selected immutable observation; never query state."""
         bundle = self._require(observation_id)
         root = deepcopy(arguments)
@@ -2023,6 +2061,12 @@ class AgentObservations:
                 return node
             props = schema.get("properties", {})
             for key, field in props.items():
+                if guard_paths is not None and ["*" if item == "[]" else item for item in (*path, key)] not in guard_paths:
+                    if key in node and isinstance(node[key], dict):
+                        node[key] = bind(field, node[key], (*path, key))
+                    elif function == "grove.fabricate" and not path and key == "sources" and isinstance(node.get(key), list):
+                        node[key] = [bind(field.get("items", {}), source, ("sources", "[]")) for source in node[key]]
+                    continue
                 interaction_subject = _agent_interaction_revision_field(key) if not path else None
                 if interaction_subject:
                     node.pop(key, None)

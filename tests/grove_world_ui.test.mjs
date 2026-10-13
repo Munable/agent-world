@@ -9,6 +9,10 @@ const row=(id,label,value,extra={})=>({id,label,value,type:typeof value==='boole
 const entity=(id,name)=>({id,name,version:3,x:0,y:0,appearance:{shape:'cloth',color:'#112233',glyph:'■',size:1,overlays:{}},materials:[],summary:'服务器摘要',summary_facts:[],fact_sections:[],relations:{parent:null,children:[]},custody:{scope:'public',holder_id:null,container_id:null},actions:[]});
 const action=(extra={})=>({id:'world.opaque:do',action:'opaque-do',function_id:'world.opaque',label:'服务器操作名称',description:'服务器操作说明',available:true,expanded:true,fixed_arguments:{action:'opaque-do',target_id:'target',expected_target_version:3,expected_target_interaction_revision:2,expected_player_version:1},confirmation_keys:['target_id','expected_target_interaction_revision','terms_version','expected_combination_fingerprint','expected_item_version'],controls:[],read_request:{function_id:'grove.client_inspect',arguments:{entity_id:'target',action:'opaque-do'}},preconditions:[],...extra});
 const replyContext={factLines:ui.factLines,entityById:()=>null};
+const sourceSchema=(extra={})=>({type:'array',minItems:1,maxItems:8,items:{type:'object',additionalProperties:false,
+  required:['entity_id','expected_entity_version','lot_id','quantity_u'],properties:{entity_id:{type:'string'},expected_entity_version:{type:'integer',minimum:1},lot_id:{type:'string'},quantity_u:{type:'integer',minimum:1,maximum:200}}},...extra});
+const fabricationMenu=(cost,sources,schema=sourceSchema())=>({cost_u:cost,inputs:{path:['sources'],schema,choices:{sources}},
+  intent:{selection_path:['sources'],fixed_arguments:{},input_schema:{type:'object',properties:{sources:structuredClone(schema)},required:['sources'],additionalProperties:false}}});
 vm.createContext(replyContext);vm.runInContext(extract('function currentAssistantReply(','function button('),replyContext);
 {
   const execution={task_id:'same-task',action_summary:{task_id:'same-task',scope:'current_task_retained_confirmed_actions',confirmed_count:3,
@@ -82,19 +86,37 @@ vm.createContext(replyContext);vm.runInContext(extract('function currentAssistan
 // A creation binds exact source, batch, quantity and the person's observed
 // source version. Reordering candidates cannot substitute or renew a source.
 {
-  const menu={cost_u:{wood:3,cloth:2},action:{choices:{sources:[
+  const menu=fabricationMenu({wood:3,cloth:2},[
     {id:'wood',version:4,lots:[{id:'wood-lot',material:'wood',quantity:8,slot:'body'}]},
-    {id:'cloth',version:5,lots:[{id:'cloth-lot',material:'cloth',quantity:2,slot:'body'}]}]}}};
+    {id:'cloth',version:5,lots:[{id:'cloth-lot',material:'cloth',quantity:2,slot:'body'}]}]);
   const rows=[{entity_id:'wood',expected_entity_version:4,lot_id:'wood-lot',material_id:'wood',quantity_u:'3'},
     {entity_id:'cloth',expected_entity_version:5,lot_id:'cloth-lot',material_id:'cloth',quantity_u:'2'}];
   assert.equal(ui.fabricationPlan(menu,rows).errors.length,0);
-  const changed=structuredClone(menu);changed.action.choices.sources.reverse();
+  const changed=structuredClone(menu);changed.inputs.choices.sources.reverse();
   assert.equal(ui.fabricationPlan(changed,rows).sources[0].expected_entity_version,4);
-  changed.action.choices.sources[1].version=6;
+  changed.inputs.choices.sources[1].version=6;
   assert.ok(ui.fabricationPlan(changed,rows).errors.some(value=>value.includes('观察版本')));
-  changed.action.choices.sources[1].lots=[];assert.ok(ui.fabricationPlan(changed,rows).errors.length>0);
+  changed.inputs.choices.sources[1].lots=[];assert.ok(ui.fabricationPlan(changed,rows).errors.length>0);
   assert.ok(ui.fabricationPlan(menu,[...rows,rows[0]]).errors.some(value=>value.includes('一行')));
   assert.ok(ui.fabricationPlan(menu,[{...rows[0],quantity_u:'2'},rows[1]]).errors.length>0);
+}
+
+// Source counts and quantity bounds come from both matching server contracts.
+// A future larger menu is usable without editing renderer rule numbers.
+{
+  const schema=sourceSchema({minItems:2,maxItems:12});schema.items.properties.quantity_u={type:'integer',minimum:2,maximum:5};
+  const sources=Array.from({length:9},(_,i)=>({id:'s'+i,version:4,lots:[{id:'lot'+i,material:'wood',quantity:9,slot:'body'}]}));
+  const menu=fabricationMenu({wood:18},sources,schema),rows=sources.map((source,i)=>({entity_id:source.id,expected_entity_version:4,lot_id:'lot'+i,material_id:'wood',quantity_u:'2'}));
+  assert.equal(ui.fabricationPlan(menu,rows).errors.length,0);
+  assert.deepEqual(ui.fabricationInputContract(menu).quantitySchema,{type:'integer',minimum:2,maximum:5});
+  assert.ok(ui.fabricationPlan(menu,[{...rows[0],quantity_u:'1'},...rows.slice(1)]).errors.some(message=>message.includes('数值范围')));
+  const narrow=structuredClone(menu);narrow.inputs.schema.maxItems=3;narrow.intent.input_schema.properties.sources.maxItems=3;
+  assert.ok(ui.fabricationPlan(narrow,rows).errors.some(message=>message.includes('行数')));
+  const mismatch=structuredClone(menu);mismatch.intent.input_schema.properties.sources.maxItems=2;
+  assert.ok(ui.fabricationPlan(mismatch,rows).errors.some(message=>message.includes('一致核对')));
+  const unknown=structuredClone(menu);unknown.inputs.schema.items.properties.quantity_u.$ref='#/$defs/unknown';
+  unknown.intent.input_schema.properties.sources.items.properties.quantity_u.$ref='#/$defs/unknown';
+  assert.ok(ui.fabricationPlan(unknown,rows).errors.some(message=>message.includes('尚未支持')));
 }
 
 // Real geometry consumes only appearance. Values and labels belong to the
@@ -160,7 +182,7 @@ function formNode(tag,text,className){
     {id:'params.amount',path:['params','amount'],label:'投入',kind:'integer',required:true,default:2,schema:{minimum:1,maximum:5},maximum_from_control_id:'lot_id'},
     {id:'params.enabled',path:['params','enabled'],label:'真假输入',kind:'boolean',required:true,default:false,schema:{}}]});target.actions=[descriptor];
   const context={inspection:{entity:target,context:{snapshot_seq:1}},actionBusy:false,actionDrafts:new Map(),interactionSelections:new Map(),node:formNode,$:()=>actions,
-    actionKey:value=>value.id,actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,appendFactRows(){},restoreActionDraft(){},run:fn=>fn(),client:{pending:()=>null}};
+    actionKey:value=>value.id,actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,schemaInputErrors:ui.schemaInputErrors,appendFactRows(){},restoreActionDraft(){},run:fn=>fn(),client:{pending:()=>null}};
   vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('const setArgument=','function authorLabel('),context);
   context.submitDescriptor=(...args)=>writes.push(args);context.renderDescriptorEditor(descriptor,target,false);
   const form=actions.children[0],[item,lot]=form.querySelectorAll('select'),[amount]=form.querySelectorAll('input'),submit=form.querySelectorAll('button').find(value=>value.type==='submit');
@@ -176,6 +198,49 @@ function formNode(tag,text,className){
   context.inspection={...context.inspection,reading:true};form.dispatchEvent({type:'refresh-candidate-preview'});assert.equal(amount.value,'2');assert.equal(submit.disabled,true);
 }
 
+// Candidate pages are a generic protocol. An empty page can carry a formal
+// next request, whose opaque arguments must be passed without cursor guesses.
+{
+  const request={function_id:'world.candidates',arguments:{scope:'original-filter'}},next={function_id:'world.more_candidates',arguments:{page_ticket:'server-ticket',filter:{scope:'original-filter'}}};
+  const target=entity('target','候选目标'),actions=formNode('section'),reads=[];
+  const descriptor=action({controls:[{id:'pick',path:['pick'],label:'候选',kind:'choice',required:true,schema:{type:'string'},choices:[],discovery_request:request}]});target.actions=[descriptor];
+  const candidate={value:'opaque-value',label:'服务器候选名',arguments_patch:{expected_item_version:4},read_request:{function_id:'world.choice_check',arguments:{ticket:'opaque-value'}},validation:{available:true,reason:null}};
+  const pages=[{choices:[],next_request:next,complete:false},{choices:[candidate],next_request:null,complete:true}];
+  for(const page of pages)Object.defineProperty(page,'definitions',{get(){throw new Error('Provider shape must not be interpreted');}});
+  let pending;
+  const context={session:1,inspection:{entity:target,context:{snapshot_seq:1}},actionBusy:false,actionDrafts:new Map(),interactionSelections:new Map(),node:formNode,$:()=>actions,
+    actionKey:value=>value.id,actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,schemaInputErrors:ui.schemaInputErrors,appendFactRows(){},restoreActionDraft(){},run:fn=>pending=fn(),
+    client:{pending:()=>null,query:async(name,args)=>{reads.push({function_id:name,arguments:structuredClone(args)});return pages.shift();}}};
+  vm.createContext(context);vm.runInContext(extract('function button(','function announce(')+extract('const setArgument=','function authorLabel('),context);
+  context.renderDescriptorEditor(descriptor,target,false);
+  const form=actions.children[0],discover=form.querySelectorAll('button').find(value=>value.textContent==='读取候选目录');
+  discover.dispatchEvent({type:'click'});await pending;
+  assert.equal(discover.textContent,'读取下一页候选');assert.equal(form.querySelectorAll('select')[0].options.length,1);
+  discover.dispatchEvent({type:'click'});await pending;
+  assert.deepEqual(reads,[request,next]);
+  const selector=form.querySelectorAll('select')[0];selector.value=JSON.stringify('opaque-value');selector.dispatchEvent({type:'change'});
+  assert.equal(form.querySelectorAll('button').find(value=>value.type==='submit').disabled,false);
+}
+
+// A directory choice must be revalidated through its own formal request. A
+// returned different value, refusal or changed intent guard cannot substitute it.
+for(const mode of ['valid','guard_changed','refused','different_value']){
+  const selectedChoice={value:'original-value',label:'原候选',arguments_patch:{expected_item_version:4},read_request:{function_id:'world.check_choice',arguments:{fixed_ticket:'original-value',filter:'same'}},validation:{available:true,reason:null}};
+  const control={id:'pick',path:['pick'],label:'候选',kind:'choice',required:true,schema:{type:'string'},choices:[],discovery_request:{function_id:'world.directory',arguments:{filter:'same'}}};
+  const original=action({controls:[control]}),latest=structuredClone(original),fresh=structuredClone(selectedChoice),writes=[],reads=[];
+  if(mode==='guard_changed')fresh.arguments_patch.expected_item_version=5;
+  if(mode==='refused')fresh.validation={available:false,reason:'服务器已拒绝此候选'};
+  if(mode==='different_value')fresh.value='replacement-value';
+  const context={session:1,selectedId:'target',selectedTile:null,inspection:null,actionDrafts:new Map(),actionBusy:false,lastSelectionSignature:'',
+    stopWalking(){},renderSelection(){},actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,schemaInputErrors:ui.schemaInputErrors,structuredClone,
+    client:{query:async(name,args)=>{reads.push({function_id:name,arguments:structuredClone(args)});return name===original.read_request.function_id?{player:{version:9},entity:{id:'target',actions:[latest]}}:{choices:[fresh],next_request:null,complete:true};}},
+    perform:async(_name,prepare)=>{writes.push(await prepare(()=>true));return false;}};
+  vm.createContext(context);vm.runInContext(extract('function actionReadTarget(','function authorLabel('),context);
+  const chosen=[{control,value:'original-value',choices:[selectedChoice]}];
+  if(mode==='valid'){await context.submitDescriptor(original,{id:'target'},chosen);assert.equal(writes[0].pick,'original-value');assert.equal(writes[0].expected_item_version,4);assert.deepEqual(reads[1],selectedChoice.read_request);}
+  else{await assert.rejects(context.submitDescriptor(original,{id:'target'},chosen));assert.equal(writes.length,0);}
+}
+
 // Prepare the actual operation: refresh may renew the player's observation,
 // while the original target intent and selected source guards remain fixed.
 for(const mode of ['valid','revision','fingerprint','source','access','target_changed']){
@@ -185,7 +250,7 @@ for(const mode of ['valid','revision','fingerprint','source','access','target_ch
   if(mode==='fingerprint')current.controls[0].choices[0].arguments_patch.expected_combination_fingerprint='changed';
   if(mode==='source')current.controls[0].choices=[];
   const selected=[{control:original.controls[0],value:'source',choices:original.controls[0].choices}],context={session:1,selectedId:'target',selectedTile:null,inspection:null,actionDrafts:new Map(),actionBusy:false,lastSelectionSignature:'',
-    stopWalking(){},renderSelection(){},actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,structuredClone,
+    stopWalking(){},renderSelection(){},actionDescriptors:ui.actionDescriptors,descriptorLabel:ui.descriptorLabel,schemaInputErrors:ui.schemaInputErrors,structuredClone,
     client:{query:async()=>{if(mode==='access')throw Object.assign(new Error('Object unavailable'),{status:403});if(mode==='target_changed')context.selectedId='another';return {player:{version:9},entity:{id:'target',actions:[current]}};}},
     perform:async(_name,prepare)=>{writes.push(await prepare(()=>true));return false;}};
   vm.createContext(context);vm.runInContext(extract('function actionReadTarget(','function authorLabel('),context);

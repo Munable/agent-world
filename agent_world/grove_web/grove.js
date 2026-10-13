@@ -1,7 +1,7 @@
 import {createKey,validateKey,savedKey} from '/static/commons-client.js';
 import {EventLedger} from '/static/stream-client.js';
 import {GroveClient} from './grove-client.js';
-import {matterLots,bodyQuantities,materialLabel,slotLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,presentationBadgeText,publicWorkLocalTarget,publicWorkFactLines,publicWorkDirectoryLines,publicWorkMarkerGeometry,actionDescriptors,descriptorLabel,candidateLabel,previewVersionsChanged,ruleSnapshotChanged,factLabel,factValue,factRowText,factLines,summaryFact,fabricationSources,fabricationPlan,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines,executionTaskSummaryLines} from './grove-world-ui.js?v=client-projection-v1';
+import {matterLots,bodyQuantities,materialLabel,slotLabel,entitySummary,simulationStats,entityGlyph as genericGlyph,safePresentation,presentationBadgeText,publicWorkLocalTarget,publicWorkFactLines,publicWorkDirectoryLines,publicWorkMarkerGeometry,actionDescriptors,descriptorLabel,candidateLabel,previewVersionsChanged,ruleSnapshotChanged,factLabel,factValue,factRowText,factLines,summaryFact,fabricationSources,fabricationPlan,fabricationInputContract,schemaInputErrors,createMechanicalMotion,visibleWaterQuantity,receiptOutcomeLines,executionReadbackLines,executionTaskSummaryLines} from './grove-world-ui.js?v=client-projection-v2';
 
 const $=id=>document.getElementById(id);
 const client=new GroveClient();
@@ -668,8 +668,8 @@ function saveFabricationDraft(){
 }
 function loadFabricationDraft(){
   let saved=null;try{saved=JSON.parse(client.draft(fabricationDraftRoute())||'null');}catch{}
-  fabricationRows=Array.isArray(saved)?saved.slice(0,8).filter(row=>row&&typeof row.row_id==='string'&&typeof row.entity_id==='string'&&typeof row.lot_id==='string').map(row=>({...row})):[];
-  if(saved===null)fabricationRows.push({row_id:crypto.randomUUID(),entity_id:'',lot_id:'',material_id:'',quantity_u:'1'});
+  fabricationRows=Array.isArray(saved)?saved.filter(row=>row&&typeof row.row_id==='string'&&typeof row.entity_id==='string'&&typeof row.lot_id==='string').map(row=>({...row})):[];
+  if(saved===null)fabricationRows.push({row_id:crypto.randomUUID(),entity_id:'',lot_id:'',material_id:'',quantity_u:''});
 }
 async function readDefinitionDirectory({after=directoryCursors.at(-1),filters=directoryFilters,reset=false,direction=null}={}){
   if(directoryBusy||fabricationBusy||!playing||!current())return;
@@ -736,12 +736,12 @@ function renderDefinitionDirectory(){
 }
 function renderFabricationEditor(container){
   const menu=fabricationMenu,form=node('form',undefined,'descriptor-action fabrication-editor'),rowsArea=node('div'),summary=node('div',undefined,'interaction-preview'),note=node('p',undefined,'small');
-  const materials=menu.materials||[],choices=fabricationSources(menu),materialName=id=>materialLabel(materials.find(value=>value.material_id===id)||id);
+  const contract=fabricationInputContract(menu),quantitySchema=contract.quantitySchema||{},materials=menu.materials||[],choices=fabricationSources(menu),materialName=id=>materialLabel(materials.find(value=>value.material_id===id)||id);
   form.append(node('p','用原材料成型一件物件','descriptor-label'),node('p','所用身份：'+(menu.player?.name||point()?.name||'当前角色'),'small'),node('p',menu.player?.id||'身份尚未读到','fact-reference'));
   for(const [id,quantity] of Object.entries(menu.cost_u||{}))form.append(node('p','需要 '+quantity+' 单位 '+materialName(id),'small'),node('p',id,'fact-reference'));
   form.append(node('p','这里按材料单位 u 计量，与区域原料份数不同。只取明确选择的批次，成品放入自己的背包；名称相同不会合并材料身份。','small'),rowsArea);
   for(const row of fabricationRows){
-    const section=node('section',undefined,'creative-state'),sourceSelect=node('select'),lotSelect=node('select'),amount=node('input');amount.type='number';amount.step='1';amount.min='1';amount.inputMode='numeric';amount.value=row.quantity_u;sourceSelect.setAttribute('aria-label','成型材料来源');lotSelect.setAttribute('aria-label','成型材料批次');
+    const section=node('section',undefined,'creative-state'),sourceSelect=node('select'),lotSelect=node('select'),amount=node('input');amount.type='number';amount.step=String(quantitySchema.multipleOf??(quantitySchema.type==='integer'?1:'any'));if(Number.isFinite(quantitySchema.minimum))amount.min=String(quantitySchema.minimum);if(Number.isFinite(quantitySchema.maximum))amount.max=String(quantitySchema.maximum);amount.inputMode='numeric';amount.value=row.quantity_u;sourceSelect.setAttribute('aria-label','成型材料来源');lotSelect.setAttribute('aria-label','成型材料批次');
     const sourceEmpty=node('option','请选择真实来源');sourceEmpty.value='';sourceSelect.append(sourceEmpty);
     for(const source of choices){const option=node('option',candidateLabel(source,choices,'单位'));option.value=source.id;sourceSelect.append(option);}
     if(row.entity_id&&!choices.some(source=>source.id===row.entity_id)){const invalid=node('option',(row.source_name||'原来源')+' · 当前不可用，请重选');invalid.value=row.entity_id;invalid.disabled=true;sourceSelect.append(invalid);}sourceSelect.value=row.entity_id;
@@ -757,11 +757,11 @@ function renderFabricationEditor(container){
     if(source&&row.expected_entity_version!==source.version)section.append(button('按本次读取重新确认同一来源',()=>{row.expected_entity_version=source.version;saveFabricationDraft();renderDefinitionDirectory();},{secondary:true}));
     section.append(button('删除这一来源行',()=>{fabricationRows=fabricationRows.filter(value=>value.row_id!==row.row_id);saveFabricationDraft();renderDefinitionDirectory();},{secondary:true}));rowsArea.append(section);
   }
-  const add=button('添加来源行（最多8行）',()=>{fabricationRows.push({row_id:crypto.randomUUID(),entity_id:'',lot_id:'',material_id:'',quantity_u:'1'});saveFabricationDraft();renderDefinitionDirectory();},{secondary:true}),controls=node('div',undefined,'content-pagination'),submit=button('用所选原材料成型',()=>{}, {disabled:true}),cancel=button('取消材料选择',()=>{fabricationRows=[];saveFabricationDraft();renderDefinitionDirectory();},{secondary:true});submit.type='submit';
+  const add=button('添加来源行'+(Number.isFinite(contract.maxItems)?'（最多'+contract.maxItems+'行）':''),()=>{fabricationRows.push({row_id:crypto.randomUUID(),entity_id:'',lot_id:'',material_id:'',quantity_u:String(contract.defaultQuantity??'')});saveFabricationDraft();renderDefinitionDirectory();},{secondary:true}),controls=node('div',undefined,'content-pagination'),submit=button('用所选原材料成型',()=>{}, {disabled:true}),cancel=button('取消材料选择',()=>{fabricationRows=[];saveFabricationDraft();renderDefinitionDirectory();},{secondary:true});submit.type='submit';
   controls.append(submit,cancel);form.append(add,summary,note,controls);
   function update(){
     const plan=fabricationPlan(menu,fabricationRows),busy=actionBusy||executionReclaimBusy||operationRecoveryBusy||fabricationBusy||!!client.pending(),available=menu.action?.available??menu.available;
-    for(const control of rowsArea.querySelectorAll('input,select,button'))control.disabled=busy;add.disabled=busy||fabricationRows.length>=8;cancel.disabled=busy;
+    for(const control of rowsArea.querySelectorAll('input,select,button'))control.disabled=busy;add.disabled=busy||contract.errors.length>0||fabricationRows.length>=contract.maxItems;cancel.disabled=busy;
     submit.disabled=busy||available!==true||!Number.isInteger(menu.player?.version)||plan.errors.length>0;
     summary.replaceChildren(...Object.entries(menu.cost_u||{}).map(([id,quantity])=>node('p',materialName(id)+'：已选 '+(plan.totals[id]||0)+' / '+quantity+' 单位','small')));
     note.textContent=client.pending()?'先核对原操作结果，草稿保留，不发出替代成型。':busy?'当前操作正在保存或恢复；原材料选择保留。':available!==true?menu.action?.reason||menu.reason||'当前没有取得成型资格。':plan.errors[0]||'提交前会再次读取同一规则、类型和原来源；只核对原批次，不自动换料。';
@@ -803,6 +803,14 @@ function renderDescriptorAction(descriptor,entity,disabled){
 const setArgument=(args,path,value)=>{let cursor=args;for(const part of path.slice(0,-1))cursor=cursor[part]??=(Object.create(null));cursor[path.at(-1)]=value;};
 const sameValue=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 function controlChoices(control,values){return (control.choices||[]).filter(choice=>Object.entries(choice.when||{}).every(([id,allowed])=>allowed.some(value=>sameValue(value,values[id]))));}
+const choiceAvailable=choice=>choice?.validation?.available!==false&&choice?.preview?.available!==false;
+function readChoicePage(page){
+  const request=value=>value&&typeof value.function_id==='string'&&value.arguments&&typeof value.arguments==='object'&&!Array.isArray(value.arguments);
+  if(!page||!Array.isArray(page.choices)||typeof page.complete!=='boolean'||!(page.next_request===null||request(page.next_request))||page.complete!==(page.next_request===null)||page.choices.some(choice=>!choice||!Object.hasOwn(choice,'value')||typeof choice.label!=='string'||!choice.arguments_patch||typeof choice.arguments_patch!=='object'||Array.isArray(choice.arguments_patch)||!request(choice.read_request)||typeof choice.validation?.available!=='boolean'||!(choice.validation.reason===null||typeof choice.validation.reason==='string'))){
+    client.projectionBlocked=true;throw new Error('候选读取合同尚未支持；原选择保留，请重新发现接口。');
+  }
+  return page;
+}
 function renderDescriptorEditor(descriptor,entity,disabled){
   const saved=actionDrafts.get(entity.id+':'+descriptor.action)?.descriptor;
   if(saved?.id===descriptor.id&&saved.expanded!==false)descriptor=saved;
@@ -827,12 +835,12 @@ function renderDescriptorEditor(descriptor,entity,disabled){
     const entry={control,input,unsupported:!['choice','multi_choice','boolean','integer','number','string'].includes(control.kind)};entries.push(entry);
     if(entry.unsupported)field.append(node('p','当前客户端尚不支持此输入类型。','action-reason'));
     if(control.discovery_request){
-      const cacheKey=entity.id+':'+descriptor.id+':'+control.id,cache=interactionSelections.get(cacheKey)||{choices:[],after:null};interactionSelections.set(cacheKey,cache);
+      const cacheKey=entity.id+':'+descriptor.id+':'+control.id,cache=interactionSelections.get(cacheKey)||{choices:[],nextRequest:null};interactionSelections.set(cacheKey,cache);
       entry.discovery=cache;
       const discover=button('读取候选目录',()=>run(async()=>{
         if(actionBusy||discoveryBusy||client.pending())return;
         const epoch=session;discoveryBusy=true;update();
-        try{const request=control.discovery_request,page=await client.query(request.function_id,{...request.arguments,...(cache.after?{after:cache.after}:{})});if(epoch!==session||!form.isConnected)return;cache.choices=[...new Map([...cache.choices,...(page.definitions||[]).map(row=>({value:row.definition_ref,label:(row.name||row.key)+' · 版本 '+row.version,arguments_patch:{}}))].map(row=>[row.value,row])).values()].slice(-64);cache.after=page.next_cursor||null;discover.textContent=page.has_more?'读取下一页候选':'重新读取候选';if(!page.has_more)cache.after=null;update();}finally{discoveryBusy=false;if(form.isConnected)update();}
+        try{const request=cache.nextRequest||control.discovery_request,page=await client.query(request.function_id,request.arguments);if(epoch!==session||!form.isConnected)return;readChoicePage(page);cache.choices=[...new Map([...cache.choices,...page.choices].map(row=>[JSON.stringify(row.value),row])).values()];cache.nextRequest=page.next_request;discover.textContent=page.next_request?'读取下一页候选':'重新读取候选';update();}finally{discoveryBusy=false;if(form.isConnected)update();}
       }),{disabled,secondary:true});field.append(discover);
     }
     if(control.default!==null&&control.default!==undefined){if(input.type==='checkbox')input.checked=control.default;else if(input.tagName!=='SELECT')input.value=control.default;}
@@ -848,10 +856,10 @@ function renderDescriptorEditor(descriptor,entity,disabled){
       if(input.tagName==='SELECT'){
         const previous=values[control.id],choices=choicesFor(entry,values);input.replaceChildren();
         if(!input.multiple){const placeholder=node('option',control.required?'请选择':'可选：未指定');placeholder.value='';input.append(placeholder);}
-        for(const choice of choices){const option=node('option',choice.label||'候选');option.value=JSON.stringify(choice.value);option.disabled=choice.preview?.available===false;option.selected=input.multiple?(previous||[]).some(value=>sameValue(value,choice.value)):sameValue(previous,choice.value);input.append(option);}
+        for(const choice of choices){const option=node('option',choice.label||'候选');option.value=JSON.stringify(choice.value);option.disabled=!choiceAvailable(choice);option.selected=input.multiple?(previous||[]).some(value=>sameValue(value,choice.value)):sameValue(previous,choice.value);input.append(option);}
         const selected=input.multiple?previous||[]:previous===undefined?[]:[previous];
         for(const value of selected)if(!choices.some(choice=>sameValue(choice.value,value))){const option=node('option','原选择当前不可用，请重选');option.value=JSON.stringify(value);option.selected=true;option.disabled=true;input.append(option);invalid=true;reasons.push(control.label+'的原候选已不可用。');}
-        for(const value of selected){const choice=choices.find(choice=>sameValue(choice.value,value));if(choice?.preview){appendFactRows(previews,choice.preview.rows,descriptor.id);if(choice.preview.available===false){invalid=true;reasons.push(choice.preview.reason||'所选候选当前不可用');}}}
+        for(const value of selected){const choice=choices.find(choice=>sameValue(choice.value,value));if(choice?.preview)appendFactRows(previews,choice.preview.rows,descriptor.id);if(choice&&!choiceAvailable(choice)){invalid=true;reasons.push(choice.validation?.reason||choice.preview?.reason||'所选候选当前不可用');}}
       }
       const value=values[control.id];
       if(input.type==='number'&&control.maximum_from_control_id){
@@ -860,6 +868,7 @@ function renderDescriptorEditor(descriptor,entity,disabled){
         if(Number.isFinite(maximum))input.max=String(maximum);else input.removeAttribute('max');
       }
       if(entry.unsupported||control.required&&(value===undefined||Array.isArray(value)&&!value.length)||!input.checkValidity())invalid=true;
+      if(value!==undefined&&!(Array.isArray(value)&&!value.length&&!control.required)&&schemaInputErrors(control.schema,value,control.label).length)invalid=true;
     }
     submit.disabled=invalid;note.textContent=reasons[0]||(client.pending()?'先核对原操作；原选择保留。':discoveryBusy?'正在读取候选，原选择保留。':'提交前重新读取同一目标并核对原候选、固定条款与版本；不会自动替换选择。');
   }
@@ -887,6 +896,7 @@ async function submitDescriptor(original,entity,selected){
     for(const entry of selected){
       const control=current.controls?.find(row=>row.id===entry.control.id);if(!control)throw new Error('原输入已不在当前菜单中，请重新选择。');
       if(entry.value===undefined||Array.isArray(entry.value)&&!entry.value.length){if(control.required)throw new Error('请完整填写当前输入。');continue;}
+      const schemaErrors=schemaInputErrors(control.schema,entry.value,control.label);if(schemaErrors.length)throw new Error(schemaErrors[0]);
       if(['number','integer'].includes(control.kind)){
         const source=control.maximum_from_control_id?current.controls.find(row=>row.id===control.maximum_from_control_id):null,choice=source?controlChoices(source,values).find(row=>sameValue(row.value,values[source.id])):null;
         const maximum=Math.min(control.schema?.maximum??Infinity,Number.isFinite(choice?.maximum)?choice.maximum:Infinity);
@@ -896,13 +906,12 @@ async function submitDescriptor(original,entity,selected){
         const valuesChosen=Array.isArray(entry.value)?entry.value:[entry.value];
         for(const value of valuesChosen){
           let candidate=controlChoices(control,values).find(row=>sameValue(row.value,value));
-          if(!candidate&&control.discovery_request){
-            const detail=await client.query('grove.client_definitions',{mode:'detail',definition_ref:value});if(!isCurrent())return null;
-            if(detail.definition_ref!==value||control.discovery_request.arguments.installable_only&&detail.installable!==true)throw new Error('原定义的服务器资格已改变，尚未提交。');
-            candidate=entry.choices.find(row=>sameValue(row.value,value));
-          }
           const before=entry.choices.find(row=>sameValue(row.value,value));
-          if(!candidate||candidate.preview?.available===false||confirmationKeys.some(key=>!sameValue(before?.arguments_patch?.[key],candidate.arguments_patch?.[key])))throw new Error(candidate?.preview?.reason||'原候选需要确认的观察事实或组合条件已改变，请核对后重选。');
+          if(before?.read_request){
+            const request=before.read_request,read=await client.query(request.function_id,request.arguments);if(!isCurrent())return null;
+            const page=readChoicePage(read);candidate=controlChoices({...control,choices:page.choices},values).find(row=>sameValue(row.value,value));
+          }
+          if(!candidate||!choiceAvailable(candidate)||confirmationKeys.some(key=>!sameValue(before?.arguments_patch?.[key],candidate.arguments_patch?.[key])))throw new Error(candidate?.validation?.reason||candidate?.preview?.reason||'原候选需要确认的观察事实或组合条件已改变，请核对后重选。');
           Object.assign(args,before?.arguments_patch||{});
         }
       }

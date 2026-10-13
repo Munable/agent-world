@@ -2,6 +2,7 @@
 from pathlib import Path
 from copy import deepcopy
 import asyncio
+import hashlib
 import json
 import os
 import tempfile
@@ -23,9 +24,13 @@ from agent_world.worlds.shared_grove.world import INTERACT_ARGS
 
 
 class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
+    def test_raw_catalog_without_agent_contract_exposes_no_world_actions(self):
+        self.session.catalog = {"grove.move": {"access": "write", "input_schema": {}}}
+        self.assertNotIn("grove_move", [tool["name"] for tool in self.session.tools()])
+
     async def test_action_targets_are_exact_separate_reads_and_do_not_replace_selected_contract(self):
         self.session.entered = True
-        self.session.catalog = {name: {"access": "read"} for name in ("map.viewport", "grove.inspect")}
+        self.declare_agent_catalog({name: {"access": "read"} for name in ("map.viewport", "grove.inspect")})
         self.session.world = AsyncMock(return_value={"events": []})
         calls = []
         async def invoke(function, arguments):
@@ -136,6 +141,188 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
                 "historical_message_budget_bytes": 65536, "request_budget_bytes": 131072, "native_llm_allowed": False}}))
         return plugin
 
+    def declare_agent_catalog(self, catalog):
+        """Declare the fake world's explicit Agent contract alongside its schemas."""
+        self.session.catalog = catalog
+        functions = [{"function_id": name, **spec} for name, spec in catalog.items()]
+        contract = {"contract_version": 1, "world_id": "shared-grove", "functions": [
+            {"function_id": name, "access": spec["access"]} for name, spec in catalog.items()]}
+        self.session.agent_client.configure_catalog(functions, contract, activate=True)
+
+    @staticmethod
+    def authenticated_bootstrap():
+        return {"protocol_version": "0.15", "role_id": "test-user", "universe": "fixture-universe",
+            "world": {"id": "shared-grove", "version": 3},
+            "world_entry_state": {"view": {"player": None}}}
+
+    @staticmethod
+    def original_receipt(function, envelope, result):
+        canonical = json.dumps({"function_id": function, "arguments": envelope["arguments"]},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return {"ok": True, "operation_id": envelope["operation_id"], "function_id": function,
+            "function_version": 1, "actor_role_id": "test-user", "commit_seq": 1, "result": result,
+            "intent_fingerprint": {"algorithm": "sha256-runtime-canonical-json-v1",
+                "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}}
+
+    def verified_query_catalog(self):
+        context = {"type": "object", "properties": {
+            "world_instance": {"type": "string"}, "world_id": {"const": "shared-grove"},
+            "world_version": {"type": "integer"}, "viewer_role_id": {"type": "string"},
+            "snapshot_seq": {"type": "integer"}},
+            "required": ["world_instance", "world_id", "world_version", "viewer_role_id", "snapshot_seq"],
+            "additionalProperties": False}
+        output = {"type": "object", "properties": {
+            "player": {"type": "object", "properties": {"version": {"type": "integer"}}, "required": ["version"]},
+            "agent_context": context, "read_requests": {"type": "array"}},
+            "required": ["player", "agent_context", "read_requests"]}
+        self.session.agent_client._check_bootstrap_scope({"universe": "fixture-universe", "role_id": "test-user",
+            "world": {"id": "shared-grove", "version": 3}}, rediscover=True)
+        self.declare_agent_catalog({
+            "map.viewport": {"access": "read", "version": 7, "input_schema": {"type": "object"}, "output_schema": output},
+            "grove.inspect": {"access": "read", "version": 7, "input_schema": {"type": "object"}, "output_schema": output}})
+
+    @staticmethod
+    def verified_query(function="grove.inspect", snapshot=11):
+        return {"ok": True, "read_only": True, "function_id": function, "function_version": 7,
+            "snapshot_seq": snapshot, "result": {"player": {"id": "test-user", "version": 4, "x": 0, "y": 0},
+                "entity": {"id": "object", "version": 2}, "entities": [], "inventory": [], "read_requests": [],
+                "agent_context": {"world_instance": "fixture-universe", "world_id": "shared-grove", "world_version": 3,
+                    "viewer_role_id": "test-user", "snapshot_seq": snapshot}}}
+
+    async def test_native_world_read_validates_original_query_before_fixed_observation(self):
+        self.verified_query_catalog()
+        self.session.status = "thinking"
+        self.session.active_native_request = {"purpose": "explain", "world_write_authorized": False,
+                                              "session_id": self.session.session_id}
+        self.session.world = AsyncMock(return_value=self.verified_query())
+        result = await self.session.tool_call("grove_inspect", {"entity_id": "object"})
+        self.assertEqual(result["function_version"], 7)
+        observation = result["observation_id"]
+        original = deepcopy(self.session.agent_observation(observation))
+        self.session.world.assert_awaited_once_with("POST", "/v1/functions/grove.inspect/invoke",
+            {"arguments": {"entity_id": "object"}, "expected_version": 7})
+        self.assertEqual(self.session.world_call_count, 1)
+        self.assertEqual(self.session.execution["actions_count"], 0)
+        self.assertEqual(self.session.observations.sequence, 1)
+        self.assertEqual(original["versions"]["entity"]["object"], 2)
+
+        corruptions = [
+            ("role", lambda row: row["result"]["agent_context"].update(viewer_role_id="other"), "IdentityScopeMismatch"),
+            ("universe", lambda row: row["result"]["agent_context"].update(world_instance="other"), "IdentityScopeMismatch"),
+            ("snapshot", lambda row: row["result"]["agent_context"].update(snapshot_seq=12), "IdentityScopeMismatch"),
+            ("world code", lambda row: row["result"]["agent_context"].update(world_id="other-code"), "WorldVersionMismatch"),
+            ("world version", lambda row: row["result"]["agent_context"].update(world_version=4), "WorldVersionMismatch"),
+            ("function version", lambda row: row.update(function_version=8), "AgentOutputMismatch"),
+            ("typed output", lambda row: row["result"]["player"].update(version="forged"), "AgentOutputMismatch"),
+            ("old watermark", lambda row: (row.update(snapshot_seq=10), row["result"]["agent_context"].update(snapshot_seq=10)),
+                "StaleObservation"),
+        ]
+        for label, mutate, code in corruptions:
+            with self.subTest(label=label):
+                forged = self.verified_query()
+                forged["result"]["entity"]["version"] = 999
+                mutate(forged)
+                self.session.world.return_value = forged
+                with self.assertRaises(ConnectorError) as denied:
+                    await self.session.tool_call("grove_inspect", {"entity_id": "object", "base_observation_id": observation})
+                self.assertEqual(denied.exception.code, code)
+                self.assertEqual(self.session.observations.sequence, 1)
+                self.assertEqual(self.session.agent_observation(observation), original)
+                self.assertEqual(self.session.unknown, [])
+                self.assertEqual(self.session.execution["actions_count"], 0)
+
+    async def test_preflight_queries_use_same_validation_before_composite_facts_or_model(self):
+        self.verified_query_catalog()
+        self.session.entered = True
+        viewport = self.verified_query("map.viewport", snapshot=10)
+        forged_inspection = self.verified_query(snapshot=11)
+        forged_inspection["result"]["agent_context"]["viewer_role_id"] = "other"
+        self.session.world = AsyncMock(side_effect=[{"events": []}, viewport, forged_inspection])
+        with self.assertRaises(ConnectorError) as denied:
+            await self.session.current_turn_facts(context_entity_id="object", preflight=True)
+        self.assertEqual(denied.exception.code, "IdentityScopeMismatch")
+        self.assertEqual(self.session.observations.sequence, 0)
+        self.assertEqual(self.session.inference_count, 0)
+        self.assertEqual(self.session.unknown, [])
+
+    async def test_bootstrap_special_contract_checks_identity_without_a_query_envelope(self):
+        self.verified_query_catalog()
+        self.session.status = "thinking"
+        bootstrap = {"universe": "fixture-universe", "role_id": "other",
+            "world": {"id": "shared-grove", "version": 3}, "world_entry_state": {"view": {"player": None}}}
+        self.session.world = AsyncMock(return_value=bootstrap)
+        with self.assertRaises(ConnectorError) as denied:
+            await self.session.tool_call("world_bootstrap", {})
+        self.assertEqual(denied.exception.code, "IdentityScopeMismatch")
+        self.assertEqual(self.session.observations.sequence, 0)
+        bootstrap["role_id"] = "test-user"
+        result = await self.session.tool_call("world_bootstrap", {})
+        self.assertEqual(result["agent_observation"]["source_kind"], "bootstrap")
+        self.assertEqual(self.session.observations.sequence, 1)
+
+    async def test_host_catalog_sync_cannot_reactivate_invalidated_world_code(self):
+        self.verified_query_catalog()
+        self.session.status = "thinking"
+        changed = self.verified_query()
+        changed["result"]["agent_context"]["world_version"] = 4
+        self.session.world = AsyncMock(return_value=changed)
+        with self.assertRaises(ConnectorError) as rejected:
+            await self.session.tool_call("grove_inspect", {"entity_id": "object"})
+        self.assertEqual(rejected.exception.code, "WorldVersionMismatch")
+        self.assertFalse(self.session.agent_client._catalog_current)
+        self.session.tools()
+        self.session._sync_agent_client_catalog()
+        self.assertFalse(self.session.agent_client._catalog_current)
+        with self.assertRaises(ConnectorError) as closed:
+            self.session.bind_agent_versions("grove.interact", {}, "missing")
+        self.assertEqual(closed.exception.code, "AgentDiscoveryRequired")
+        self.declare_agent_catalog(self.session.catalog)  # Explicit new installation is allowed.
+        self.assertTrue(self.session.agent_client._catalog_current)
+
+    async def test_original_host_operation_cannot_lookup_or_replay_in_another_universe_at_same_url(self):
+        self.verified_query_catalog()
+        record = self.session.agent_client.operation_record("grove.control_revoke",
+            {"operation_id": "original-control", "arguments": {}})
+        self.session.unknown = [deepcopy(record)]
+        self.session.world = AsyncMock(return_value={"role_id": "test-user", "universe": "replacement-universe",
+            "world": {"id": "shared-grove", "version": 3}})
+        with self.assertRaises(ConnectorError) as refused:
+            await self.session.recover_receipts(replay=True)
+        self.assertEqual(refused.exception.code, "IdentityScopeMismatch")
+        self.session.world.assert_awaited_once_with("GET", "/v1/bootstrap")
+        self.assertEqual(self.session.unknown, [record])
+        self.assertEqual(self.session.observations.sequence, 0)
+        self.session.unknown[0].pop("universe")  # Legacy scope must never be guessed.
+        self.session.world.reset_mock()
+        with self.assertRaises(ConnectorError) as legacy:
+            await self.session.recover_receipts(replay=True)
+        self.assertEqual(legacy.exception.code, "OriginalOperationInvalid")
+        self.session.world.assert_not_awaited()
+        self.assertNotIn("universe", self.session.unknown[0])
+
+    async def test_host_wrong_receipt_keeps_unknown_without_observing_or_replaying(self):
+        self.verified_query_catalog()
+        record = self.session.agent_client.operation_record("grove.control_revoke",
+            {"operation_id": "original-control", "arguments": {}})
+        self.session.unknown = [deepcopy(record)]
+        bootstrap = {"role_id": "test-user", "universe": "fixture-universe",
+            "world": {"id": "shared-grove", "version": 3}}
+        receipt = {"ok": True, "operation_id": "another-control", "function_id": "grove.control_revoke",
+            "function_version": 1, "actor_role_id": "test-user", "commit_seq": 8,
+            "result": {"status": "revoked"}, "intent_fingerprint": self.session.agent_client._intent_fingerprint(
+                "grove.control_revoke", {})}
+        self.session.world = AsyncMock(side_effect=[bootstrap, receipt])
+        self.session.observe_outcome = Mock()
+        self.session.execution_controller.stopped = True  # Stop does not block the original GET.
+        with self.assertRaises(ConnectorError) as refused:
+            await self.session.recover_receipts(replay=True)
+        self.assertEqual(refused.exception.code, "ReceiptMismatch")
+        self.assertEqual(self.session.unknown, [record])
+        self.session.observe_outcome.assert_not_called()
+        self.assertEqual([call.args[:2] for call in self.session.world.await_args_list],
+            [("GET", "/v1/bootstrap"), ("GET", "/v1/receipts/original-control")])
+        self.assertEqual(self.session.observations.sequence, 0)
+
     async def test_missing_transfer_inputs_report_parameters_without_trying_a_write(self):
         self.session.status = "thinking"
         self.session.execution_controller.active = True
@@ -143,7 +330,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.execution_controller.state.update(task_id="task", segment_id="segment", status="running", delegation_active=True)
         self.session.active_native_request = {"purpose": "execution", "world_write_authorized": True,
             "session_id": self.session.session_id, "task_id": "task", "segment_id": "segment"}
-        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        self.declare_agent_catalog({"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}})
         self.session.invoke = AsyncMock()
         with self.assertRaises(ConnectorError) as rejected:
             await self.session.tool_call("grove_interact", {"action": "transfer", "execution_segment_id": "segment"})
@@ -165,7 +352,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     def test_action_menu_and_inventory_publish_same_observation_and_segment_contract(self):
         from agent_world.grove_agent_observation import agent_mcp_schema
-        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        self.declare_agent_catalog({"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}})
         inventory = next(row for row in self.session.tools() if row["name"] == "grove_interact")["inputSchema"]
         delivered = self.session.present_agent_result("grove.inspect", {"entity": {"id": "cup", "version": 2,
             "action_options": [{"function_id": "grove.interact", "action": "transfer", "input_schema": INTERACT_ARGS}]},
@@ -191,12 +378,16 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completed_entry_world_timeout_preserves_answer_and_original_receipt(self):
         self.session.world_read = True
-        self.session.catalog = {"grove.join": {"access": "write"}}
+        self.declare_agent_catalog({"grove.join": {"access": "write"}})
         self.session.host = AsyncMock(return_value={
             "info": {"role": "assistant", "finish": "stop", "time": {"completed": 1}},
             "parts": [{"type": "text", "text": "先看看溪边能用的材料。"}]})
-        with patch("agent_world.grove_connector.httpx.AsyncClient.request",
-                   AsyncMock(side_effect=httpx.ReadTimeout("private transport details"))):
+        async def upstream(method, url, **kwargs):
+            if method == "GET" and url.endswith("/v1/bootstrap"):
+                return httpx.Response(200, json=self.authenticated_bootstrap())
+            self.assertEqual((method, url), ("POST", self.manager.world_url + "/v1/functions/grove.join/invoke"))
+            raise httpx.ReadTimeout("private transport details")
+        with patch("agent_world.grove_connector.httpx.AsyncClient.request", AsyncMock(side_effect=upstream)):
             with self.assertRaises(ConnectorError) as rejected:
                 await self.session.turn("进入世界", initial=True)
         self.assertEqual(rejected.exception.code, "WorldUnavailable")
@@ -207,11 +398,13 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.session_id, "test-session")
         self.assertEqual(self.session.host.await_count, 1)
         self.assertEqual(self.session.unknown[0]["function_id"], "grove.join")
-        original = self.session.unknown[0]["envelope"]["operation_id"]
-        self.session.world = AsyncMock(return_value={"ok": True, "operation_id": original,
-                                                   "result": {"joined": True}})
+        envelope = deepcopy(self.session.unknown[0]["envelope"])
+        original = envelope["operation_id"]
+        self.session.world = AsyncMock(side_effect=[self.authenticated_bootstrap(),
+            self.original_receipt("grove.join", envelope, {"joined": True})])
         await self.session.recover_receipts()
-        self.session.world.assert_awaited_once_with("GET", "/v1/receipts/" + original)
+        self.assertEqual([call.args for call in self.session.world.await_args_list],
+            [("GET", "/v1/bootstrap"), ("GET", "/v1/receipts/" + original)])
         self.assertEqual(self.session.unknown, [])
         self.assertEqual(self.session.inference_count, 1)
         self.assertNotIn("private transport details", json.dumps(self.session.state()))
@@ -366,17 +559,21 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(other.private_context["intent"], "")
 
     async def test_lost_write_keeps_original_operation_until_receipt_recovery(self):
-        self.session.catalog = {"grove.content_submit": {"access": "write"}}
-        self.session.world = AsyncMock(side_effect=httpx.ReadError("connection lost"))
+        self.declare_agent_catalog({"grove.content_submit": {"access": "write"}})
+        self.session.world = AsyncMock(side_effect=[self.authenticated_bootstrap(), httpx.ReadError("connection lost")])
         with self.assertRaises(httpx.ReadError):
             await self.session.invoke("grove.content_submit", {"content": {"kind": "layout"}})
         original = self.session.unknown[0]["envelope"]
         self.assertTrue(original["operation_id"])
         self.assertNotIn("test-private-bearer", self.session.memory_file.read_text())
-        self.session.world = AsyncMock(side_effect=[ConnectorError("ReceiptNotFound", "Missing", 404),
-                                                   {"ok": True, "result": {"published": True}}])
+        self.session.world = AsyncMock(side_effect=[self.authenticated_bootstrap(),
+            ConnectorError("ReceiptNotFound", "Missing", 404), self.authenticated_bootstrap(),
+            self.original_receipt("grove.content_submit", original, {"published": True})])
         await self.session.recover_receipts()
-        replay = self.session.world.await_args_list[1]
+        posts = [call for call in self.session.world.await_args_list if call.args[0] == "POST"]
+        self.assertEqual(len(posts), 1)
+        replay = posts[0]
+        self.assertEqual(replay.args[:2], ("POST", "/v1/functions/grove.content_submit/invoke"))
         self.assertEqual(replay.args[2], original)
         self.assertEqual(self.session.unknown, [])
 
@@ -409,6 +606,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.inference_count = 5
         self.session.remember()
         self.session.world = AsyncMock(return_value={'functions': []})
+        # This host-startup fixture provides an explicit empty Agent contract;
+        # public HTTP/MCP discovery is covered by the independent SDK consumer.
+        self.session.agent_client.discover = AsyncMock(return_value={})
         self.session.join = AsyncMock()
         self.session.observe_automatic = AsyncMock()
         self.session.start_automatic_loop = Mock()
@@ -457,6 +657,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_saved_session_errors_do_not_start_a_replacement_or_spend_request(self):
         self.session.process = Mock(returncode=None)
         self.session.world = AsyncMock(return_value={'functions': []})
+        self.session.agent_client.discover = AsyncMock(return_value={})
         self.session.inference_count = 5
         self.session.remember()
         plugin = self.simulated_native_context_loaded()
@@ -558,7 +759,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_return_question_receives_current_stock_and_other_players_facility(self):
         self.session.entered = True
-        self.session.catalog = {'map.viewport': {'access': 'read'}}
+        self.declare_agent_catalog({'map.viewport': {'access': 'read'}})
         self.session.messages.append({'role': 'assistant', 'text': 'There is no bridge and stock is 2.'})
         self.session.world = AsyncMock(return_value={'events': []})
         self.session.invoke = AsyncMock(return_value={
@@ -693,7 +894,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.status = "thinking"
         self.session.active_native_request = {"purpose": "execution", "world_write_authorized": True,
             "session_id": self.session.session_id, "task_id": "original-task", "segment_id": "original-segment"}
-        self.session.catalog = {"grove.rule_catalog": {"access": "read", "input_schema": {}}}
+        self.declare_agent_catalog({"grove.rule_catalog": {"access": "read", "input_schema": {}}})
         self.session.invoke = AsyncMock(return_value={"result": {"definitions": []}})
         with patch("agent_world.grove_connector.save_json", side_effect=OSError("private storage details")):
             with self.assertRaises(ConnectorError) as failed:
@@ -715,7 +916,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.execution_controller.state.update(task_id="old-task", segment_id="old-segment", status="running")
         self.session.active_native_request = {"purpose": "explain", "world_write_authorized": False,
             "session_id": self.session.session_id}
-        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        self.declare_agent_catalog({"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}})
         self.session.invoke = AsyncMock()
         self.session.execution_checkpoint = AsyncMock()
         before = self.session.execution
@@ -746,10 +947,11 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.status = "thinking"
         self.session.active_native_request = {"purpose": "explain", "world_write_authorized": False,
             "session_id": self.session.session_id}
-        self.session.catalog = {"grove.control_status": {"access": "read", "input_schema": {}}}
+        self.declare_agent_catalog({"grove.control_status": {"access": "read", "input_schema": {}}})
         self.session.execution_controller.state.update(task_id="original-task", goal="继续观察",
             status="paused", grant_id="known-grant", grant_operation_id="known-operation", actions_count=2)
-        self.session.invoke = AsyncMock(return_value={"result": {"goal": "继续观察", "status": "active",
+        self.session.invoke = AsyncMock(return_value={"ok": True, "read_only": True, "function_id": "grove.control_status",
+            "function_version": 1, "snapshot_seq": 0, "result": {"goal": "继续观察", "status": "active",
             "grant_id": "different-grant", "actions_count": 5, "version": 40}})
         before = self.session.execution
         delivered = await self.session.tool_call("grove_control_status", {})
@@ -837,7 +1039,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_current_read_does_not_spend_model_request(self):
         self.session.entered = True
-        self.session.catalog = {'map.viewport': {'access': 'read'}}
+        self.declare_agent_catalog({'map.viewport': {'access': 'read'}})
         self.session.world = AsyncMock(side_effect=httpx.ReadError('world unavailable'))
         self.session.host = AsyncMock()
         with self.assertRaises(httpx.ReadError):
@@ -923,7 +1125,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_selected_inspection_is_authorized_before_model_request(self):
         self.session.entered = True
-        self.session.catalog = {"map.viewport": {"access": "read"}, "grove.inspect": {"access": "read"}}
+        self.declare_agent_catalog({"map.viewport": {"access": "read"}, "grove.inspect": {"access": "read"}})
         self.session.world = AsyncMock(return_value={"events": []})
         preview = {"physics": {"known": True, "overloaded": True}, "version_fingerprint": "a"*64}
         selected = {"entity": {"id": "box", "version": 7, "simulation": {"total": 160}},
@@ -956,7 +1158,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unreadable_previous_selection_keeps_current_scene_but_no_stale_verdict(self):
         self.session.entered = True
-        self.session.catalog = {name: {"access": "read"} for name in ("map.viewport", "grove.inspect")}
+        self.declare_agent_catalog({name: {"access": "read"} for name in ("map.viewport", "grove.inspect")})
         self.session.world = AsyncMock(return_value={"events": []})
         scene = {"player": {"id": "test-user", "x": 12, "y": 0, "version": 9}, "entities": [], "inventory": []}
         self.session.invoke = AsyncMock(side_effect=[scene, ConnectorError("RuleViolation", "物件不在附近视野内。", 409)])
@@ -971,8 +1173,8 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unavailable.exception.code, "WorldUnavailable")
 
     async def test_stable_write_catalog_requires_explicit_person_delegation(self):
-        self.session.catalog = {"grove.move": {"access": "write", "input_schema": {}},
-                                "grove.handbook": {"access": "read", "input_schema": {}}}
+        self.declare_agent_catalog({"grove.move": {"access": "write", "input_schema": {}},
+                                "grove.handbook": {"access": "read", "input_schema": {}}})
         self.assertIn("grove_move", [t["name"] for t in self.session.tools()])
         self.session.status = "thinking"
         self.session.invoke = AsyncMock()
@@ -982,7 +1184,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.invoke.assert_not_awaited()
 
     async def test_execution_keeps_catalog_on_demand_and_closes_writes_before_goal_settlement(self):
-        self.session.catalog = {"grove.rule_catalog": {"access": "read"}}
+        self.declare_agent_catalog({"grove.rule_catalog": {"access": "read"}})
         self.session.current_turn_facts = AsyncMock(return_value={"scene": {"player": "actual"}})
         self.session.invoke = AsyncMock(return_value={"result": {"limits": {"bound_object_ids": 8}}})
         self.session.release_opportunity = AsyncMock()
@@ -1010,7 +1212,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_discovery_index_keeps_real_material_and_location_without_copying_details(self):
         self.session.entered = True
-        self.session.catalog = {name: {"access": "read"} for name in ("map.viewport", "grove.inspect")}
+        self.declare_agent_catalog({name: {"access": "read"} for name in ("map.viewport", "grove.inspect")})
         self.session.world = AsyncMock(return_value={"events": []})
         source = {"id": "foreign-source", "version": 6, "x": None, "y": None,
             "location": {"x": 3, "y": 2}, "owner": None, "capabilities": ["container"],
@@ -1053,7 +1255,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preflight_defers_details_without_changing_selected_preview_or_readback(self):
         self.session.entered = True
-        self.session.catalog = {name: {"access": "read"} for name in ("map.viewport", "grove.inspect")}
+        self.declare_agent_catalog({name: {"access": "read"} for name in ("map.viewport", "grove.inspect")})
         self.session.world = AsyncMock(return_value={"events": [], "observed_at": 12})
         objects = [{"id": f"public-{number}", "version": number + 3, "name": f"装置 {number}",
             "created_by": f"author-{number}", "x": number, "y": 0, "owner": None,
@@ -1118,7 +1320,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preflight_binds_only_displayed_discovery_and_explicit_selected_details(self):
         self.session.entered = True
-        self.session.catalog = {"map.viewport": {"access": "read"}}
+        self.declare_agent_catalog({"map.viewport": {"access": "read"}})
         self.session.world = AsyncMock(return_value={"events": []})
         self.session.invoke = AsyncMock(return_value={
             "player": {"id": "test-user", "version": 2, "x": 0, "y": 0},
@@ -1252,7 +1454,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected["read_request"]["arguments"], {"entity_id": "hearth"})
 
     def test_pour_binds_original_presented_slot_without_refreshing_versions(self):
-        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        self.declare_agent_catalog({"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}})
         observed = self.session.present_agent_result("map.viewport", {
             "player": {"id": "test-user", "version": 7}, "entities": [
                 {"id": "target", "version": 22, "pour_target_slot": "contained"},
@@ -1281,7 +1483,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pour_target_slot", tool["inputSchema"]["properties"]["target_slot"]["description"])
 
     def test_pour_requires_presented_slot_and_does_not_derive_it_from_state(self):
-        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}}
+        self.declare_agent_catalog({"grove.interact": {"access": "write", "input_schema": INTERACT_ARGS}})
         observed = self.session.present_agent_result("map.viewport", {
             "player": {"id": "test-user", "version": 7}, "entities": [
                 {"id": "target", "version": 22, "capabilities": ["container"],
@@ -1326,8 +1528,8 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_permission_recovery_requires_actual_registered_read(self):
         original_call = self.session.tool_call
         self.session.tool_call = AsyncMock(side_effect=ConnectorError("PermissionDenied", "Source must be held", 403))
-        self.session.catalog = {"map.viewport": {"access": "read", "input_schema": {
-            "type": "object", "properties": {}, "additionalProperties": False}}}
+        self.declare_agent_catalog({"map.viewport": {"access": "read", "input_schema": {
+            "type": "object", "properties": {}, "additionalProperties": False}}})
         app = create_connector_app(storage=self.manager.storage, wrapper=None)
         app.state.connector.capability_session = Mock(return_value=self.session)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8891") as client:
@@ -1343,7 +1545,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(read["tool"], {tool["name"] for tool in self.session.tools()})
             self.session.tool_call = original_call
             self.session.status = "thinking"
-            self.session.invoke = AsyncMock(return_value={"player": {"id": "test-user", "version": 7}, "entities": []})
+            self.session.invoke = AsyncMock(return_value={"ok": True, "read_only": True, "function_id": "map.viewport",
+                "function_version": 1, "snapshot_seq": 0, "result": {
+                    "player": {"id": "test-user", "version": 7}, "entities": []}})
             body["params"] = {"name": read["tool"], "arguments": read["arguments"]}
             current = (await client.post("/connector/mcp", json=body,
                 headers={"Authorization": "Bearer test-capability"})).json()["result"]

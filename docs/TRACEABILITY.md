@@ -1,14 +1,16 @@
 # 六层关键主张追溯
 
-复核：2026-10-12。这里将关键L1/L2主张追到L3-L6与证据，不新增规格或质量评分。当前源码、整轮验证和历史原生Agent结果分别见[当前研发记录](SHARED_GROVE.md#当前研发记录)，本机合同与恢复结果不替代真人体验、跨机及规模验收。
+复核：2026-10-13。这里将关键L1/L2主张追到L3-L6与证据，不新增规格或质量评分。当前源码、整轮验证和历史原生Agent结果分别见[当前研发记录](SHARED_GROVE.md#当前研发记录)，本机合同与恢复结果不替代真人体验、跨机及规模验收。
 
 | 主张 | 下层落点 | 当前状态 | 核心证据／限制 |
 | --- | --- | --- | --- |
 | G1 世界持续存在 | State Fact、Operation、Commit、Receipt；L4 提交／恢复合同；Runtime journal/state | **已实现核心机制；长期证据有限** | `tests/test_foundation.py`、`tests/test_world_data.py`、`tests/test_world_sdk.py` 覆盖提交、恢复、重启与升级；没有真实长期 soak 证明。 |
 | G2 用户带身份跨世界 | User Identity、Participant Profile、Credential；身份合同 | **已实现最小密钥身份合同，并接成默认组合入口** | `tests/test_key_identity.py` 验证默认 challenge → exchange → bootstrap；Capability Harness 进一步验证同钥多 Credential／双 MCP session、撤销后持钥重进、重启回档、并发首次进入与独立 Runtime 隔离。新公钥就是新身份，档案不跨世界搬运，密钥丢失不提供恢复。 |
-| G3 Agent 在 Runtime 外部 | External Agent / Client、System Actor；L5 外部推理边界 | **架构上成立** | Runtime 没有模型推理器；timer 以系统来源执行。现有测试能证明 timer 不保存用户 token 等局部性质，但不能证明所有未来宿主都正确。 |
-| G4 世界开发者拥有领域规则 | World Definition、Domain Object；L4 声明式行动／状态合同；SDK | **已形成核心机制，并有公开文档独立消费证据** | `tests/test_world_sdk.py` 与 `tests/test_independent_integration.py`；陌生作者／客户端仅凭文档和 HTTP 元数据完成两套独立规则，先暴露接入说明缺口再修复。保留原失败；有限样本不证明任意领域天然适配。 |
-| G5 多类型世界共用 Runtime | 领域中立不变量、SDK／adapter 架构 | **设计与架构成立，通用性不可由有限样本证明** | 仓库内最小示例和打包夹具只验证接口边界；任何临时游戏／社交测试都不能升级为产品证明。 |
+| G3 Agent体验为首要责任 | 能力发现、Agent contract、固定观察、原意图与Receipt；独立客户端 | **当前官方世界已接通并本地验证** | `test_grove_agent_contract.py`、`test_grove_agent_client.py`、`test_grove_independent_consumers.py`覆盖正式发现、护栏、HTTP写／MCP恢复、错意图及停止后只读恢复；不以协议成功证明模型理解。 |
+| G4 外部宿主保留私人运行与控制 | External Agent／Client、执行控制器、私人Journal；L5宿主边界 | **架构和当前宿主边界成立** | Runtime无模型推理器；`test_architecture_boundaries.py`、`test_grove_execution.py`、`test_grove_revoked_recovery.py`覆盖依赖、预算、停止、封段及原操作恢复。未知scope不重放，不证明所有未来宿主正确。 |
+| G5 人类通过双向语义接口参与 | DTO、动作、参数、候选与原子Command；人类API／renderer | **当前官方契约与独立消费通过** | `test_grove_client_projection.py`、Node客户端与`test_grove_independent_consumers.py`覆盖版本／身份／水位、分页、9项来源输入及按正式动作描述提交；未验证所有renderer或新视觉体验。 |
+| G6 世界开发者拥有领域规则 | World Definition、Domain Object、公开作者SDK | **核心机制与独立消费成立** | `test_world_sdk.py`与`test_independent_integration.py`覆盖陌生作者／客户端消费正式接口；有限样本不证明任意领域天然适配。 |
+| G7 真实共同后果推动通用能力 | 官方世界规则、持久事实、共同内容与后续选择 | **保留共享创作正反证据；自然创作正确性仍缺** | 当前真实模型、自动推进及跨作者接续只见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)。本轮验证接口和恢复，没有新的真实模型验收。 |
 | I1 声明机制产生权威事实 | Command、State Fact、Commit；L4 结构／授权／规则链 | **已实现底座** | `tests/test_foundation.py`、`tests/test_managed_state_boundary.py`、transport tests 覆盖 schema、授权、回滚；Runtime 不解释文本语义。 |
 | I2 不伪造他人意愿 | Principal、Credential、Command；世界业务状态机 | **Runtime 提供归因底座，具体确认仍由世界定义** | 调用主体来自鉴权而非业务参数；没有通用 Confirm 类型，因此 Runtime 也不能替所有世界证明业务确认正确。 |
 | I3 用户身份只认密钥，且与领域授权分离 | Identity Key + world-local Credential + command/state authorization | **已实现当前机制** | challenge signature 证明持钥；`identity_keys` 保存公钥到本地 role 映射；Function/state authorization、observe/control 继续独立判断。不同公钥不能合并，世界 bearer 不能跨实例使用。 |
@@ -19,8 +21,8 @@
 | I8 派生观察不创造事实 | View、Stream、Sync Position、Presentation 横轴 | **已实现主要边界** | view/stream/client tests 覆盖缓存、乱序、撤权、retention gap；具体 UI 仍需按世界正确命名业务状态。 |
 | I9 world instance 默认隔离 | World Instance、instance-scoped state/action | **支持接口层已实现；不是敌对代码安全沙箱** | `test_world_instances_are_isolated`、cross-universe write 回归存在。FunctionContext 不再公开数据库连接；但受信任 Python World Package 仍与 Runtime 同进程，因此这不是恶意租户沙箱。 |
 | I10 Runtime 领域中立 | Domain Object 由世界定义；核心不含固定玩法 | **当前代码结构基本符合** | architecture boundary test 防止 core 反向依赖示例／adapter；有限示例只能证明未立即耦合，不能证明未来不会退化。 |
-| 官方世界可组合后果 | 世界自有构造数据、可选模拟层、数量与关系、固定阶段 | **本地检查／局部UI／独立恢复通过，保留原失败** | 最终562项／186.956秒、0 fail／error／skip；前一562项2个runner截止失败、owned child reaped、同断言两项4.014秒通过，断言未改。两Node／9个访问函数回归／语法通过；原独立／549／分页／密度失败保留。实际原布入B袋、private403、移动／drop原ID和数量保持；独立恢复5实体／5Receipts精确一致，wheel安装probe通过。唯一索引为外置 `implementation.json` 的 `composable_candidate`。 |
-| 私人主持承接共同事实 | 本机意图、公共 anchors／contributions／outcomes、当前观察与提交条件 | **发表接续与共享后果成立；可靠指导未完整通过** | A布兜、B两部件及浅溪过载保留原IDs；最终双方content18／2贡献／16后果、A(5,2)／B(5,3)。模型14＝A5＋B9，第13路由ID错误、第14Zen有单次改善，但已读载荷160＞承载48、过载112／不能漂浮，仍反向建议装入。原Go／LongCat／session／计数恢复，两auto false，两页ready零新推理，冷启动及健康后读取失败保留；截图为代理局部覆盖，人类趣味／跨机／规模未验，最佳0.24不变。 |
+| 官方世界可组合后果 | 世界声明、真实物料、数量、关系与持久规则执行 | **本地规则与恢复有回归，真实范围独立** | 本轮1299项实现检查及旧库逐值恢复核对见[当前研发记录](SHARED_GROVE.md#当前研发记录)；合法定义、真实成型、实际功能分别核对，不把检查数量当创作完成。 |
+| 宿主承接共同事实 | 当前观察、原Operation／Receipt、私人目标、有限授权及预算 | **同一世界参与与恢复成立；自然指导仍有缺口** | 最新基线保留真实发表、真实物料、跨作者改作、旧计数器独立推进及新湿润作品失败；本轮不补判自然创作成功。实际状态只在[当前研发记录](SHARED_GROVE.md#当前研发记录)接续。 |
 
 ## Runtime 能力矩阵
 

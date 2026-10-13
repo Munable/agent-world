@@ -15,9 +15,79 @@ INTERACT_SCHEMA = {
         ("expected_player_version", "expected_target_version", "expected_item_version")},
     "required": ["expected_player_version", "expected_target_version", "expected_item_version"],
 }
+BUILD_SCHEMA = {"type": "object", "properties": {
+    "recipe": {"const": "canopy"}, "x": {"type": "integer"}, "y": {"type": "integer"},
+    "expected_player_version": {"type": "integer", "minimum": 1},
+    "material_ids": {"type": "array", "items": {"type": "string"}}},
+    "required": ["recipe", "x", "y", "expected_player_version"], "additionalProperties": False}
 
 
 class AgentObservationsTests(unittest.TestCase):
+    def test_first_join_receipt_projects_dense_actual_scene_without_binding_withheld_rows(self):
+        player = {"id": "person", "name": "Visitor", "version": 1, "x": 0, "y": 3,
+                  "backpack_id": "backpack", "spawn": {"x": 0, "y": 3}}
+        rows = [{"id": f"object-{index}", "version": index + 2, "name": f"Object {index}",
+                 "owner": None, "x": index % 8, "y": index // 8, "state": {"wetness": 17},
+                 "creative": {"definition_ref": "declared", "type_id": "piece", "fields": {"signal": 4},
+                              "automatic_rules": [{"declaration": "x" * 3000}]}}
+                for index in range(160)]
+        source = {"ok": True, "operation_id": "entry", "function_id": "grove.join", "function_version": 1,
+                  "actor_role_id": "person", "credential_id": "original-credential", "commit_seq": 42,
+                  "intent_fingerprint": {"algorithm": "sha256-runtime-canonical-json-v1", "digest": "a" * 64},
+                  "event_seqs": [43], "replayed": False,
+                  "result": {"resumed": False, "player": player, "viewport": {
+                      "player": deepcopy(player), "entities": rows, "inventory": [], "players": [],
+                      "chunks": [{"cx": 0, "cy": 0, "tiles": ["grass"] * 256}],
+                      "clock": {"sequence": 1}, "bounds": {"min_x": -8, "min_y": -5, "max_x": 8, "max_y": 11}}}}
+        original = deepcopy(source)
+        joined = self.observations.present("grove.join", source)
+        self.assertEqual(source, original)
+        self.assertEqual(joined["result"]["player"], player)
+        self.assertFalse(joined["result"]["resumed"])
+        for field in ("operation_id", "function_id", "actor_role_id", "credential_id", "commit_seq", "function_version", "intent_fingerprint"):
+            self.assertEqual(joined[field], source[field])
+        scene = joined["result"]["viewport"]
+        self.assertEqual(scene["projection"]["scope"], "authorized_scene_index")
+        self.assertTrue(scene["truncated"])
+        self.assertEqual(scene["nearby_discovery"][0]["read_request"]["tool"], "grove_inspect")
+        bundle = self.observations.get(joined["observation_id"])
+        shown = {row["id"] for row in scene.get("entities", [])}
+        self.assertEqual(set(bundle["versions"]["entity"]), shown)
+        self.assertNotIn("object-159", bundle["versions"]["entity"])
+        self.assertEqual(bundle["versions"]["player"], {"person": 1})
+        self.assertLess(len(self.observations.serialize(joined).encode()), 48 * 1024)
+
+    def test_join_hard_limit_preserves_self_and_original_receipt(self):
+        player = {"id": "person", "version": 1, "name": "Visitor", "x": 0, "y": 3}
+        source = {"ok": True, "operation_id": "entry", "function_id": "grove.join", "function_version": 1,
+                  "actor_role_id": "person", "credential_id": "original-credential", "commit_seq": 42,
+                  "intent_fingerprint": {"algorithm": "sha256-runtime-canonical-json-v1", "digest": "a" * 64},
+                  "result": {"resumed": True, "player": player, "viewport": {
+                      "player": deepcopy(player), "clock": {"sequence": 1, "large_fact": "x" * 80000},
+                      "entities": [{"id": "withheld", "version": 999}], "inventory": []}}}
+        joined = self.observations.present("grove.join", source)
+        self.assertEqual(joined["result"]["player"], player)
+        self.assertTrue(joined["result"]["resumed"])
+        self.assertEqual(joined["credential_id"], "original-credential")
+        self.assertEqual(joined["commit_seq"], 42)
+        self.assertEqual(joined["intent_fingerprint"], source["intent_fingerprint"])
+        self.assertFalse(joined["projection"]["expanded_state_included"])
+        self.assertEqual(joined["read_requests"], [{"tool": "map_viewport", "arguments": {}}])
+        self.assertEqual(self.observations.get(joined["observation_id"])["versions"], {
+            "player": {"person": 1}, "entity": {}, "opportunity": {}, "content": {}})
+
+    def test_public_observation_schema_has_no_host_segment_and_preserves_author_inputs(self):
+        from agent_world.grove_agent_observation import agent_mcp_schema
+        schema = {"type": "object", "properties": {"expected_player_version": {"type": "integer"},
+            "params": {"type": "object", "properties": {"expected_player_version": {"type": "integer"}},
+                       "required": ["expected_player_version"]}}, "required": ["expected_player_version", "params"]}
+        public = agent_mcp_schema(schema, function="grove.rule_action", access="write",
+                                  guard_paths=[["expected_player_version"]])
+        self.assertNotIn("execution_segment_id", public["properties"])
+        self.assertNotIn("expected_player_version", public["properties"])
+        self.assertIn("expected_player_version", public["properties"]["params"]["properties"])
+        self.assertIn("observation_id", public["required"])
+
     def test_public_directory_never_binds_remote_action_authority(self):
         old = self.observations.present("map.viewport", self.scene(), preflight=True)["observation_id"]
         directory = {"works": [{"entity_id": "remote", "name": "远处作品",
@@ -242,6 +312,76 @@ class AgentObservationsTests(unittest.TestCase):
         return {"player": {"id": "person", "version": 7}, "entities": [
             {"id": "target", "version": 22, "pour_target_slot": "contained"},
             {"id": "source", "version": 8}]}
+
+    def build_menu(self, version=12):
+        return {"tile": {"x": 0, "y": 0, "terrain": "grass"}, "player_version": version,
+            "authority": "shared_grove.build_plan", "options": [{
+                "id": "grove.build:canopy", "action": "canopy", "function_id": "grove.build",
+                "arguments": {"recipe": "canopy", "x": 0, "y": 0, "expected_player_version": version},
+                "input_schema": deepcopy(BUILD_SCHEMA), "available": True, "reason": None, "failure": None,
+                "cost": {"materials": {"wood": 80, "cloth": 24}, "unit": "logical_matter"},
+                "preview_scope": {"complete": False, "unknown": ["final_load", "commit_capacity"]},
+                "preconditions": [{"condition": "adjacent", "known": True, "satisfied": True,
+                                   "actual": 0, "required": {"maximum": 1}}],
+                "material_candidates": [{"id": "raw-wood", "version": 9, "quantity_u": 80,
+                                         "material": "wood", "read_request": {
+                                             "function_id": "grove.inspect", "arguments": {"entity_id": "raw-wood"}}}],
+                "read_requests": [{"function_id": "grove.build_options", "arguments": {"x": 0, "y": 0}}]}]}
+
+    def test_build_menu_alone_projects_actual_schema_and_binds_its_current_self_version(self):
+        source = self.build_menu()
+        original = deepcopy(source)
+        supplied = self.observations.present("grove.build_options", source)
+        option = supplied["options"][0]
+        self.assertEqual(source, original)
+        self.assertEqual(option["mcp_tool"], "grove_build")
+        self.assertIn("observation_id", option["input_schema"]["required"])
+        self.assertNotIn("expected_player_version", option["input_schema"]["properties"])
+        self.assertNotIn("expected_player_version", option["input_schema"]["required"])
+        self.assertNotIn("expected_player_version", option["arguments"])
+        for name in ("cost", "failure", "preconditions", "preview_scope", "read_requests", "material_candidates"):
+            self.assertEqual(option[name], original["options"][0][name])
+        bundle = self.observations.get(supplied["observation_id"])
+        self.assertEqual(bundle["versions"]["player"], {"person": 12})
+        self.assertEqual(bundle["versions"]["entity"], {"raw-wood": 9})
+        bound = self.observations.bind("grove.build", option["arguments"] | {"expected_player_version": 999},
+                                      supplied["observation_id"], BUILD_SCHEMA)
+        self.assertEqual(bound["expected_player_version"], 12)
+        self.assertEqual(bound["recipe"], "canopy")
+
+    def test_build_menu_updates_only_its_new_bundle_and_ignores_old_base_and_copied_numbers(self):
+        old = self.observations.present("map.viewport", self.scene())["observation_id"]
+        source = self.build_menu(12)
+        source["options"][0]["arguments"]["expected_player_version"] = 999
+        menu = self.observations.present("grove.build_options", {"result": source}, base_id=old)
+        current = menu["observation_id"]
+        later = self.observations.present("grove.build_options", self.build_menu(15), base_id=current)
+        arguments = menu["result"]["options"][0]["arguments"]
+        source["player_version"] = 888
+        for observation, expected in ((old, 7), (current, 12), (later["observation_id"], 15)):
+            bound = self.observations.bind("grove.build", arguments, observation, BUILD_SCHEMA)
+            self.assertEqual(bound["expected_player_version"], expected)
+
+    def test_build_menu_with_missing_version_cannot_reuse_an_old_base_guard(self):
+        old = self.observations.present("map.viewport", self.scene())["observation_id"]
+        source = self.build_menu()
+        source.pop("player_version")
+        supplied = self.observations.present("grove.build_options", source, base_id=old)
+        self.assertNotIn("person", self.observations.get(supplied["observation_id"])["versions"]["player"])
+        self.assertEqual(self.observations.get(old)["versions"]["player"]["person"], 7)
+        with self.assertRaises(ConnectorError) as refused:
+            self.observations.bind("grove.build", supplied["options"][0]["arguments"],
+                                   supplied["observation_id"], BUILD_SCHEMA)
+        self.assertEqual(refused.exception.code, "ObservedVersionRequired")
+
+    def test_unrelated_options_and_version_fields_are_not_treated_as_a_build_read(self):
+        old = self.observations.present("map.viewport", self.scene())["observation_id"]
+        supplied = self.observations.present("grove.rule_catalog", self.build_menu(100), base_id=old)
+        self.assertNotIn("mcp_tool", supplied["options"][0])
+        self.assertIn("expected_player_version", supplied["options"][0]["input_schema"]["properties"])
+        bundle = self.observations.get(supplied["observation_id"])
+        self.assertEqual(bundle["versions"]["player"]["person"], 7)
+        self.assertNotIn("raw-wood", bundle["versions"]["entity"])
 
     def test_interaction_guard_comes_from_the_chosen_observation_not_a_later_read_or_model_number(self):
         scene = self.scene()

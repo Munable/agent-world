@@ -2,6 +2,7 @@
 from copy import deepcopy
 from pathlib import Path
 import asyncio
+import hashlib
 import json
 import tempfile
 import time
@@ -30,7 +31,7 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             local_url="http://127.0.0.1:8891", storage=Path(temporary.name), binary=Path("unused"), wrapper=None)
         self.identity = {"role_id": "same-user", "access_mode": "control"}
         self.session = GroveSession(self.manager, self.identity, "fixture-bearer", "Player", "provider/model")
-        self.session.catalog = {"grove.rule_action": {"access": "write"}}
+        self.session.catalog = {"grove.rule_action": {"access": "write", "version": 1}}
         self.session.status = "thinking"
         self.session.execution_controller.state.update(task_id="original-task", segment_id="original-segment",
             status="running", delegation_active=True, max_actions=8, max_requests=2)
@@ -40,27 +41,59 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             "expected_player_version": 3, "expected_target_version": 4, "expected_item_version": 3,
             "terms_version": 0, "action": "fuel", "delegation": "original-grant"}
         self.attempts = []
+        self.bootstrap_checks = []
+        self.receipt_lookups = []
         self.entry = {"timings": {"world_requests": 0, "world_request_seconds": 0.0}}
         self.session.inference_history = [self.entry]
         self.session._active_request_measurement = {"entry": self.entry, "started": time.monotonic()}
 
     def receipt(self, envelope):
-        return {"operation_id": envelope["operation_id"], "function_id": "grove.rule_action", "commit_seq": 23,
+        canonical = json.dumps({"function_id": "grove.rule_action", "arguments": envelope["arguments"]},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return {"ok": True, "operation_id": envelope["operation_id"], "function_id": "grove.rule_action",
+            "function_version": 1, "actor_role_id": self.identity["role_id"], "commit_seq": 23,
+            "intent_fingerprint": {"algorithm": "sha256-runtime-canonical-json-v1",
+                "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest()},
             "result": {"action_result": {"action": "fuel", "stored_energy_after": 10}}}
+
+    def world_fixture(self, post, *, receipt_lookup=None):
+        async def world(method, path, envelope=None):
+            if path == "/v1/bootstrap":
+                self.assertEqual(method, "GET")
+                self.assertIsNone(envelope)
+                self.bootstrap_checks.append(len(self.attempts))
+                return {"universe": "busy-fixture-universe", "role_id": self.identity["role_id"],
+                    "world": {"id": "shared-grove", "version": 1}}
+            if method == "GET" and path.startswith("/v1/receipts/"):
+                self.assertIsNone(envelope)
+                self.assertIsNotNone(receipt_lookup)
+                operation = path.rsplit("/", 1)[-1]
+                self.receipt_lookups.append(operation)
+                return await receipt_lookup(operation)
+            self.assertEqual(method, "POST")
+            self.assertEqual(path, "/v1/functions/grove.rule_action/invoke")
+            self.attempts.append(deepcopy(envelope))
+            return await post(envelope)
+        return AsyncMock(side_effect=world)
+
+    def assert_post_checks(self, count):
+        self.assertEqual(len(self.attempts), count)
+        self.assertEqual(self.bootstrap_checks, list(range(count)))
+        self.assertEqual(self.session.world.await_count, 2 * count)
+        self.assertEqual(self.receipt_lookups, [])
 
     async def invoke(self):
         return await self.session.invoke("grove.rule_action", deepcopy(self.arguments), model_write=True)
 
     async def test_transient_rejection_reuses_exact_original_intent_and_reports_each_rejection(self):
-        async def world(method, path, envelope=None):
-            self.attempts.append(deepcopy(envelope))
+        async def world(envelope):
             if len(self.attempts) < 3:
                 raise busy()
             return self.receipt(envelope)
-        self.session.world = world
+        self.session.world = self.world_fixture(world)
         with patch("agent_world.grove_connector.asyncio.sleep", new=AsyncMock()):
             result = await self.invoke()
-        self.assertEqual(len(self.attempts), 3)
+        self.assert_post_checks(3)
         self.assertTrue(all(attempt == self.attempts[0] for attempt in self.attempts))
         self.assertEqual(self.attempts[0]["arguments"], self.arguments)
         self.assertEqual(self.session.unknown, [])
@@ -78,14 +111,13 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
             for row in self.entry["timings"]["recent_world_busy_rejections"]))
 
     async def test_persistent_busy_exhausts_finite_transport_budget_without_becoming_unknown(self):
-        async def world(method, path, envelope=None):
-            self.attempts.append(deepcopy(envelope))
+        async def world(envelope):
             raise busy()
-        self.session.world = world
+        self.session.world = self.world_fixture(world)
         with patch("agent_world.grove_connector.asyncio.sleep", new=AsyncMock()):
             with self.assertRaises(ConnectorError) as rejected:
                 await self.invoke()
-        self.assertEqual(len(self.attempts), DOMAIN_BUSY_MAX_ATTEMPTS)
+        self.assert_post_checks(DOMAIN_BUSY_MAX_ATTEMPTS)
         self.assertTrue(all(attempt == self.attempts[0] for attempt in self.attempts))
         self.assertEqual(self.session.unknown, [])
         self.assertFalse(rejected.exception.execution_outcome["world_action_committed"])
@@ -98,63 +130,62 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_waiting_preserves_the_admitted_snapshot_if_the_callers_mapping_changes(self):
         intent = deepcopy(self.arguments)
-        async def world(method, path, envelope=None):
-            self.attempts.append(deepcopy(envelope))
+        async def world(envelope):
             if len(self.attempts) == 1:
                 raise busy()
             return self.receipt(envelope)
         async def wait(delay):
             intent.update(amount=999, expected_target_version=99)
-        self.session.world = world
+        self.session.world = self.world_fixture(world)
         with patch("agent_world.grove_connector.asyncio.sleep", new=wait):
             await self.session.invoke("grove.rule_action", intent, model_write=True)
         self.assertEqual(self.attempts, [self.attempts[0], self.attempts[0]])
+        self.assert_post_checks(2)
         self.assertEqual(self.attempts[0]["arguments"], self.arguments)
         self.assertEqual(intent["amount"], 999)
 
     async def test_changed_state_returns_conflict_without_refreshing_guards_or_retrying_it(self):
-        async def world(method, path, envelope=None):
-            self.attempts.append(deepcopy(envelope))
+        async def world(envelope):
             if len(self.attempts) == 1:
                 raise busy()
             raise ConnectorError("StateConflict", "Read and decide from current facts.", 409, retryable=False)
-        self.session.world = world
+        self.session.world = self.world_fixture(world)
         with patch("agent_world.grove_connector.asyncio.sleep", new=AsyncMock()):
             with self.assertRaises(ConnectorError) as rejected:
                 await self.invoke()
         self.assertEqual(rejected.exception.code, "StateConflict")
         self.assertEqual(self.attempts, [self.attempts[0], self.attempts[0]])
+        self.assert_post_checks(2)
         self.assertEqual(self.attempts[0]["arguments"], self.arguments)
         self.assertEqual(self.session.unknown, [])
         self.assertFalse(rejected.exception.execution_outcome["world_action_committed"])
 
     async def test_original_native_deadline_is_not_extended_by_transport_wait(self):
         self.session._active_request_measurement["started"] -= MAX_SECONDS
-        self.session.world = AsyncMock(side_effect=busy())
+        self.session.world = self.world_fixture(AsyncMock(side_effect=busy()))
         with patch("agent_world.grove_connector.asyncio.sleep", new=AsyncMock()) as wait:
             with self.assertRaises(ConnectorError) as rejected:
                 await self.invoke()
-        self.session.world.assert_awaited_once()
+        self.assert_post_checks(1)
         wait.assert_not_awaited()
         self.assertEqual(self.session.unknown, [])
         self.assertFalse(rejected.exception.execution_outcome["world_action_committed"])
         self.assertEqual(rejected.exception.execution_outcome["attempts"], 1)
 
     async def test_lost_retry_reply_remains_unknown_and_recovers_only_original_receipt(self):
-        async def world(method, path, envelope=None):
-            if method == "GET":
-                self.assertEqual(path.rsplit("/", 1)[-1], self.attempts[0]["operation_id"])
-                return self.receipt(self.attempts[0])
-            self.attempts.append(deepcopy(envelope))
+        async def world(envelope):
             if len(self.attempts) == 1:
                 raise busy()
             raise ConnectorError("WorldUnavailable", "The retry reply was lost.", 503)
-        self.session.world = world
+        async def receipt_lookup(operation):
+            self.assertEqual(operation, self.attempts[0]["operation_id"])
+            return self.receipt(self.attempts[0])
+        self.session.world = self.world_fixture(world, receipt_lookup=receipt_lookup)
         with patch("agent_world.grove_connector.asyncio.sleep", new=AsyncMock()):
             with self.assertRaises(ConnectorError) as unknown:
                 await self.invoke()
         self.assertEqual(unknown.exception.code, "WorldUnavailable")
-        self.assertEqual(len(self.attempts), 2)
+        self.assert_post_checks(2)
         self.assertEqual(self.attempts[0], self.attempts[1])
         self.assertEqual(len(self.session.unknown), 1)
         self.assertEqual(self.session.unknown[0]["envelope"], self.attempts[0])
@@ -163,31 +194,34 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("world_action_committed", unknown.exception.execution_outcome)
         await self.session.recover_receipts(replay=False)
         self.assertEqual(len(self.attempts), 2)
+        self.assertEqual(self.bootstrap_checks, [0, 1, 2])
+        self.assertEqual(self.receipt_lookups, [self.attempts[0]["operation_id"]])
+        self.assertEqual(self.session.world.await_count, 6)
         self.assertEqual(self.session.unknown, [])
         self.assertEqual(self.session.execution["receipts"][0]["status"], "confirmed")
 
     async def test_cancel_during_known_rejection_wait_leaves_no_unknown_operation(self):
-        self.session.world = AsyncMock(side_effect=busy())
+        self.session.world = self.world_fixture(AsyncMock(side_effect=busy()))
         with patch("agent_world.grove_connector.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
             with self.assertRaises(asyncio.CancelledError):
                 await self.invoke()
-        self.assertEqual(self.session.world.await_count, 1)
+        self.assert_post_checks(1)
         self.assertEqual(self.session.unknown, [])
         self.assertEqual(self.session.execution["receipts"][0]["status"], "rejected")
 
     async def test_retry_timeout_does_not_misreport_a_known_rejection(self):
-        async def world(method, path, envelope=None):
-            self.attempts.append(deepcopy(envelope))
+        async def world(envelope):
             if len(self.attempts) == 1:
                 raise busy()
             raise asyncio.TimeoutError()
-        self.session.world = world
+        self.session.world = self.world_fixture(world)
         with patch("agent_world.grove_connector.asyncio.sleep", new=AsyncMock()):
             with self.assertRaises(ConnectorError) as unknown:
                 await self.invoke()
         self.assertEqual(unknown.exception.code, "WorldUnavailable")
         self.assertEqual(unknown.exception.recovery, "query_receipt_before_retry")
         self.assertEqual(self.attempts, [self.attempts[0], self.attempts[0]])
+        self.assert_post_checks(2)
         self.assertEqual(self.session.unknown[0]["envelope"], self.attempts[0])
         self.assertEqual(self.session.execution["receipts"][0]["status"], "unknown")
         self.assertEqual(unknown.exception.execution_outcome["stage"], "unknown_result")
@@ -196,17 +230,17 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retry_window_does_not_cancel_an_already_sent_original_post(self):
         real_sleep = asyncio.sleep
-        async def world(method, path, envelope=None):
-            self.attempts.append(deepcopy(envelope))
+        async def world(envelope):
             if len(self.attempts) == 1:
                 raise busy()
             await real_sleep(0.2)  # Still inside the world's own transport limit.
             return self.receipt(envelope)
-        self.session.world = world
+        self.session.world = self.world_fixture(world)
         with patch("agent_world.grove_connector.DOMAIN_BUSY_RETRY_SECONDS", 0.1), \
                 patch("agent_world.grove_connector.asyncio.sleep", new=AsyncMock()):
             result = await self.invoke()
         self.assertEqual(self.attempts, [self.attempts[0], self.attempts[0]])
+        self.assert_post_checks(2)
         self.assertEqual(self.session.unknown, [])
         self.assertEqual(result["busy_recovery"]["attempts"], 2)
         self.assertEqual(self.session.execution["receipts"][0]["status"], "committed")
@@ -228,13 +262,14 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 controller.active, controller.stopped, controller.reclaiming = True, False, False
                 controller.delegation = "original-grant"
                 self.session.unknown = []
-                self.session.world = AsyncMock(side_effect=busy())
+                self.attempts, self.bootstrap_checks, self.receipt_lookups = [], [], []
+                self.session.world = self.world_fixture(AsyncMock(side_effect=busy()))
                 async def wait(delay):
                     change()
                 with patch("agent_world.grove_connector.asyncio.sleep", new=wait):
                     with self.assertRaises(ConnectorError) as stopped:
                         await self.invoke()
-                self.assertEqual(self.session.world.await_count, 1)
+                self.assert_post_checks(1)
                 self.assertEqual(self.session.unknown, [])
                 self.assertFalse(stopped.exception.execution_outcome["world_action_committed"])
 
@@ -248,11 +283,14 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 recovery="retry_same_operation"),
         ):
             with self.subTest(error=error.code):
-                self.session.unknown = []
-                self.session.world = AsyncMock(side_effect=error)
-                with self.assertRaises(ConnectorError):
+                # An uncertain response closes that original controller and
+                # journal. Each transport case needs its own admitted session.
+                self.setUp()
+                self.session.world = self.world_fixture(AsyncMock(side_effect=error))
+                with self.assertRaises(ConnectorError) as rejected:
                     await self.invoke()
-                self.assertEqual(self.session.world.await_count, 1)
+                self.assertEqual(rejected.exception.code, error.code)
+                self.assert_post_checks(1)
 
     async def test_world_http_preserves_safe_recovery_metadata_without_private_details(self):
         payload = busy().public_payload()

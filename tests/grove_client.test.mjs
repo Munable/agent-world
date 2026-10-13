@@ -8,9 +8,9 @@ const source=readFileSync(new URL('../agent_world/grove_web/grove-client.js',imp
 const {GroveClient}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const values=new Map(),storage={getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
 const reply=(value,status=200)=>({ok:status<400,status,json:async()=>value});
-const projection=(seq=1,extra={})=>({projection_version:1,world_instance:'shared-grove',world_id:'shared-grove',world_version:38,viewer_role_id:'self',snapshot_seq:seq,observation_clock:{epoch:'one',sequence:seq},...extra});
+const projection=(seq=1,extra={})=>({projection_version:2,world_instance:'shared-grove',world_id:'shared-grove',world_version:38,viewer_role_id:'self',snapshot_seq:seq,observation_clock:{epoch:'one',sequence:seq},...extra});
 const authorize=client=>{client.roleId='self';client.tokenId='token-id';client.token='existing-token';client.projectionContext=projection();};
-const envelope=(name,result,seq=result.context.snapshot_seq)=>({ok:true,read_only:true,function_id:name,function_version:name==='grove.client_definitions'?2:1,snapshot_seq:seq,result});
+const envelope=(name,result,seq=result.context.snapshot_seq)=>({ok:true,read_only:true,function_id:name,function_version:{'grove.client_viewport':2,'grove.client_inspect':2,'grove.client_definitions':3,'grove.client_choices':1}[name],snapshot_seq:seq,result});
 
 
 // Losing the body and leaving must not fabricate a second action.
@@ -107,7 +107,7 @@ assert.ok(refusal.pending());
   let next=envelope('grove.client_inspect',{context:projection(5),entity:{id:'selected'},player:{version:1}});
   guarded.world.fetcher=async()=>reply(next);
   assert.equal((await guarded.query('grove.client_inspect',{entity_id:'selected'})).entity.id,'selected');
-  for(const context of [projection(6,{projection_version:2}),projection(6,{viewer_role_id:'another'}),projection(6,{world_instance:'another'}),projection(6,{snapshot_seq:7})]){
+  for(const context of [projection(6,{projection_version:1}),projection(6,{projection_version:99}),projection(6,{viewer_role_id:'another'}),projection(6,{world_instance:'another'}),projection(6,{snapshot_seq:7})]){
     next=envelope('grove.client_inspect',{context,entity:{id:'wrong'}},6);
     await assert.rejects(guarded.query('grove.client_inspect',{entity_id:'selected'}));
     await assert.rejects(guarded.mutate('grove.move',{dx:1,dy:0}),/客户端接口/);
@@ -149,11 +149,37 @@ assert.ok(refusal.pending());
   assert.equal(guarded.token,'new-token');
 }
 
-// Definition revision DTO v2 remains on projection v1; old envelopes fail closed.
+// All current projection surfaces declare their function versions explicitly.
 {
   const definitionClient=new GroveClient(async()=>reply(envelope('grove.client_definitions',{context:projection(1),mode:'list',definitions:[]})),storage,null);
   definitionClient.universe='shared-grove';definitionClient.publicKey='revision-dto';authorize(definitionClient);
   assert.equal((await definitionClient.query('grove.client_definitions',{mode:'list'})).mode,'list');
   definitionClient.world.fetcher=async()=>reply({...envelope('grove.client_definitions',{context:projection(2),mode:'list',definitions:[]}),function_version:1});
   await assert.rejects(definitionClient.query('grove.client_definitions',{mode:'list'}));
+}
+
+// An unsupported DTO cannot create a new intent, but exact old recovery remains
+// available even when ReceiptNotFound requires replay of the original envelope.
+{
+  const guarded=new GroveClient(async()=>{throw new Error('lost original response');},storage,null);
+  guarded.universe='shared-grove';guarded.publicKey='unknown-dto-recovery';authorize(guarded);
+  await assert.rejects(guarded.mutate('grove.interact',{action:'opaque',target_id:'original',expected_player_version:1}));
+  const original=guarded.pending();
+  guarded.world.fetcher=async()=>reply(envelope('grove.client_choices',{context:projection(2,{projection_version:99}),choices:[],next_request:null,complete:true}));
+  await assert.rejects(guarded.query('grove.client_choices',{entity_id:'original',action:'opaque',control_id:'choice'}));
+  await assert.rejects(guarded.mutate('grove.move',{dx:1,dy:0}),/客户端接口/);
+  guarded.fetcher=async(path,options)=>{
+    if(path.startsWith('/v1/receipts/'))return reply({error:'ReceiptNotFound',message:'Not committed yet'},404);
+    assert.deepEqual(JSON.parse(options.body),original.body);
+    return reply({ok:true,operation_id:original.body.operation_id,function_id:original.name,result:{saved:true}});
+  };
+  assert.equal((await guarded.recover()).saved,true);assert.equal(guarded.pending(),null);
+  await assert.rejects(guarded.query('grove.client_unknown',{}),/读取合同/);
+}
+{
+  const choicesClient=new GroveClient(async()=>reply(envelope('grove.client_choices',{context:projection(),choices:[],next_request:null,complete:true})),storage,null);
+  choicesClient.universe='shared-grove';authorize(choicesClient);
+  assert.equal((await choicesClient.query('grove.client_choices',{entity_id:'target',action:'opaque',control_id:'choice'})).complete,true);
+  choicesClient.world.fetcher=async()=>reply({...envelope('grove.client_choices',{context:projection(2),choices:[],next_request:null,complete:true}),function_version:2});
+  await assert.rejects(choicesClient.query('grove.client_choices',{entity_id:'target',action:'opaque',control_id:'choice'}));
 }

@@ -1,6 +1,7 @@
 """Repair feedback names the real input contract without acting for the model."""
 from copy import deepcopy
 from pathlib import Path
+import hashlib
 import json
 import tempfile
 import unittest
@@ -22,8 +23,7 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
             storage=Path(temporary.name), binary=Path("unused-opencode"), wrapper=None)
         self.session = GroveSession(self.manager, {"role_id": "person", "access_mode": "control"},
             "fixture-bearer", "User", "provider/model")
-        self.session.catalog = {spec.name: {"access": spec.access, "input_schema": spec.input_schema,
-            "description": spec.description} for spec in make_world().functions}
+        self.definition = make_world()
         self.session.status = "thinking"
         self.session.session_id = "fixture-native-session"
         self.session.execution_controller.active = True
@@ -38,6 +38,33 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
             "task_id": "task", "segment_id": "segment"}
         self.session.invoke = AsyncMock()
         self.session.execution_controller.write = AsyncMock()
+
+    async def asyncSetUp(self):
+        descriptors = [{"function_id": spec.name, "access": spec.access, "version": spec.version,
+            "input_schema": deepcopy(spec.input_schema), "output_schema": deepcopy(spec.output_schema),
+            "description": spec.description} for spec in self.definition.functions]
+        contract_spec = next(spec for spec in self.definition.functions if spec.name == "grove.agent_contract")
+        bootstrap = {"universe": "fixture-feedback-world", "role_id": self.session.role_id,
+            "world": {"id": self.definition.world_id, "version": self.definition.version},
+            "world_entry_state": {"view": {"player": None,
+                "agent_contract_request": {"function_id": contract_spec.name, "arguments": {}}}}}
+
+        async def world_response(method, path, body=None):
+            if method == "GET" and path == "/v1/bootstrap":
+                return deepcopy(bootstrap)
+            if method == "GET" and path.startswith("/v1/discover?"):
+                return {"functions": deepcopy(descriptors), "has_more": False, "next_cursor": None}
+            if method == "POST" and path == "/v1/functions/grove.agent_contract/invoke":
+                self.assertEqual(body, {"arguments": {}})
+                return {"ok": True, "read_only": True, "function_id": contract_spec.name,
+                    "function_version": contract_spec.version, "snapshot_seq": 0,
+                    "result": contract_spec.handler(None, {}).result}
+            raise AssertionError(f"Unexpected fixture world request: {method} {path}")
+
+        self.session.world = AsyncMock(side_effect=world_response)
+        await self.session.agent_client.discover()
+        self.session.catalog = deepcopy(self.session.agent_client.catalog)
+        self.session._agent_contract_discovered = True
         self.observation = self.session.present_agent_result("map.viewport", {
             "player": {"id": "person", "version": 7, "x": 0, "y": 0}, "entities": []},
             preflight=True)["observation_id"]
@@ -104,8 +131,16 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_valid_write_uses_its_selected_observation_even_after_another_read(self):
         original = self.session.agent_observation(self.observation)
         self.session.present_agent_result("map.viewport", {"player": {"id": "person", "version": 9}, "entities": []})
+        committed_arguments = {"dx": 1, "dy": 0, "expected_player_version": 7,
+                               "delegation": self.session.delegation}
+        canonical = json.dumps({"function_id": "grove.move", "arguments": committed_arguments},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         self.session.execution_controller.write.return_value = {"ok": True, "operation_id": "original-operation",
-            "commit_seq": 5, "result": {"player": {"id": "person", "version": 8}}}
+            "function_id": "grove.move", "function_version": self.session.catalog["grove.move"]["version"],
+            "actor_role_id": self.session.role_id, "credential_id": "fixture-credential", "commit_seq": 5,
+            "intent_fingerprint": {"algorithm": "sha256-runtime-canonical-json-v1",
+                "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest()},
+            "result": {"player": {"id": "person", "version": 8}}}
         result = await self.rpc("grove_move", {"dx": 1, "dy": 0, "execution_segment_id": "segment",
             "observation_id": self.observation, "expected_player_version": 999})
         self.assertFalse(result["isError"])

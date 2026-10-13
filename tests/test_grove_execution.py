@@ -4,6 +4,7 @@ The native model and world HTTP boundary are deterministic doubles. These do
 not claim a real Agent completed the playable-world acceptance scenario.
 """
 import asyncio
+import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -98,15 +99,42 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         session.session_id = "test-session"
         session.host_url = "http://127.0.0.1:9000"
         session.catalog = {name: {"access": "read" if name in {"grove.rule_catalog", "grove.control_status"} else "write",
-            "input_schema": {"type": "object"}} for name in
+            "version": 1, "description": name, "input_schema": {"type": "object"}} for name in
             ("grove.control_grant", "grove.control_revoke", "grove.control_status", "grove.rule_catalog", "grove.move")}
+        session.catalog["grove.move"]["input_schema"] = {"type": "object", "properties": {
+            "dx": {"type": "integer"}, "dy": {"type": "integer"}, "expected_player_version": {"type": "integer"}},
+            "required": ["dx", "dy", "expected_player_version"]}
+        for name in ("grove.control_status", "grove.rule_catalog"):
+            session.catalog[name]["output_schema"] = {"type": "object"}
+        session.agent_client.validate_operation_scope(self.bootstrap())
+        session.agent_client.configure_catalog(
+            [{"function_id": name, **spec} for name, spec in session.catalog.items()],
+            {"contract_version": 1, "world_id": "shared-grove", "functions": [
+                {"function_id": "grove.control_status", "access": "read"},
+                {"function_id": "grove.rule_catalog", "access": "read"},
+                {"function_id": "grove.move", "access": "write", "binding_policy": "grove.fixed-observation.v1",
+                 "guard_paths": [["expected_player_version"]]}]}, activate=True)
         session.world = self.world
         session.current_turn_facts = AsyncMock(side_effect=lambda **kwargs:
             {"player": {"id": session.role_id, "x": self.position, "y": 0, "version": self.position + 1}, "entities": []})
         session.host = self.host
 
+    def bootstrap(self):
+        return {"protocol_version": "0.15", "role_id": self.identity["role_id"], "universe": "execution-fixture",
+            "world": {"id": "shared-grove", "version": 1}, "world_entry_state": {"view": {"player": {
+                "id": self.identity["role_id"], "version": self.position + 1}}}}
+
+    @staticmethod
+    def intent_fingerprint(function, arguments):
+        canonical = json.dumps({"function_id": function, "arguments": arguments}, ensure_ascii=False,
+            sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return {"algorithm": "sha256-runtime-canonical-json-v1",
+                "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+
     async def world(self, method, path, body=None):
         if method == "GET":
+            if path == "/v1/bootstrap":
+                return self.bootstrap()
             operation = path.rsplit("/", 1)[-1]
             if operation not in self.receipts:
                 raise ConnectorError("ReceiptNotFound", "Not committed", 404)
@@ -114,12 +142,18 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
         function = path.split("/")[-2]
         args = body["arguments"]
         if function == "grove.control_status":
-            return {"result": deepcopy(self.control)}
+            value = deepcopy(self.control)
         if function == "grove.rule_catalog":
-            return {"result": {"limits": {"bound_object_ids": 8}}}
+            value = {"limits": {"bound_object_ids": 8}}
+        if function in {"grove.control_status", "grove.rule_catalog"}:
+            return {"ok": True, "read_only": True, "function_id": function, "function_version": 1,
+                "snapshot_seq": len(self.receipts), "result": value}
         operation = body["operation_id"]
         if operation in self.receipts:
-            return deepcopy(self.receipts[operation])
+            existing = self.receipts[operation]
+            if existing["intent_fingerprint"] != self.intent_fingerprint(function, args):
+                raise ConnectorError("OperationConflict", "Original ID belongs to another intent", 409)
+            return deepcopy(existing) | {"replayed": True}
         if function == "grove.control_grant":
             self.grants.append(deepcopy(args))
             self.control = {"status": "active", "goal": args["goal"], "max_actions": args["max_actions"],
@@ -139,7 +173,9 @@ class GroveExecutionTests(unittest.IsolatedAsyncioTestCase):
                 self.control["status"] = "exhausted"
         else:
             raise AssertionError(function)
-        result = {"operation_id": operation, "commit_seq": len(self.receipts) + 1,
+        result = {"ok": True, "operation_id": operation, "function_id": function, "function_version": 1,
+                  "actor_role_id": self.identity["role_id"], "commit_seq": len(self.receipts) + 1,
+                  "intent_fingerprint": self.intent_fingerprint(function, args),
                   "result": deepcopy(self.control) if function.startswith("grove.control_") else {"x": self.position}}
         self.receipts[operation] = result
         return deepcopy(result)

@@ -1,18 +1,20 @@
 """Concise model protocol preserves historical markers and formal schema semantics."""
 from copy import deepcopy
 import hashlib
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import AsyncMock
 
 from agent_world.grove_agent_observation import agent_mcp_schema
 from agent_world.grove_connector import (
     BLUEPRINT_INSTRUCTIONS, CURRENT_FACTS_INSTRUCTIONS, EXECUTION_INSTRUCTIONS,
     HISTORY_RECOVERY_INSTRUCTIONS, HOST_INSTRUCTIONS, PRIVATE_CONTEXT_INSTRUCTIONS,
-    GroveSession, _CURRENT_CONTEXT_PREFIXES, _EARLY_CURRENT_FACTS_INSTRUCTIONS,
+    ConnectorManager, GroveSession, _CURRENT_CONTEXT_PREFIXES, _EARLY_CURRENT_FACTS_INSTRUCTIONS,
     _LEGACY_CURRENT_FACTS_INSTRUCTIONS, _LEGACY_PRIVATE_CONTEXT_INSTRUCTIONS,
     _PREVIOUS_CURRENT_FACTS_INSTRUCTIONS,
 )
-from agent_world.worlds.shared_grove.fabrication import ARGS as FABRICATE_ARGS
-from agent_world.worlds.shared_grove.world import INSPECT_ARGS, INTERACT_ARGS
+from agent_world.worlds.shared_grove.world import make_world
 
 
 def validation_semantics(value):
@@ -25,7 +27,7 @@ def validation_semantics(value):
     return value
 
 
-class GroveConnectorProtocolTests(unittest.TestCase):
+class GroveConnectorProtocolTests(unittest.IsolatedAsyncioTestCase):
     def test_active_protocol_has_a_bounded_fixed_cost_per_role(self):
         for prompt, maximum in ((HOST_INSTRUCTIONS, 1024), (EXECUTION_INSTRUCTIONS, 1800),
                 (BLUEPRINT_INSTRUCTIONS, 800), (HISTORY_RECOVERY_INSTRUCTIONS, 512),
@@ -52,25 +54,61 @@ class GroveConnectorProtocolTests(unittest.TestCase):
             self.assertIn(header, _CURRENT_CONTEXT_PREFIXES)
         self.assertEqual(len(set(_CURRENT_CONTEXT_PREFIXES)), len(_CURRENT_CONTEXT_PREFIXES))
 
-    def test_short_mcp_descriptions_do_not_change_schema_or_catalog(self):
-        session = GroveSession.__new__(GroveSession)
-        session.catalog = {
-            "grove.inspect": {"access": "read", "description": "Original world description",
-                "input_schema": deepcopy(INSPECT_ARGS)},
-            "grove.interact": {"description": "Original world description",
-                "input_schema": deepcopy(INTERACT_ARGS)},
-            "grove.fabricate": {"description": "Original world description",
-                "input_schema": deepcopy(FABRICATE_ARGS)},
-        }
+    async def test_short_mcp_descriptions_do_not_change_schema_or_catalog(self):
+        temporary = tempfile.TemporaryDirectory(prefix="grove-connector-protocol-")
+        self.addCleanup(temporary.cleanup)
+        manager = ConnectorManager(world_url="http://127.0.0.1:8890", local_url="http://127.0.0.1:8891",
+            storage=Path(temporary.name), binary=Path("unused-opencode"), wrapper=None)
+        session = GroveSession(manager, {"role_id": "person", "access_mode": "control"},
+            "fixture-bearer", "User", "provider/model")
+        definition = make_world()
+        descriptors = [{"function_id": spec.name, "access": spec.access, "version": spec.version,
+            "input_schema": deepcopy(spec.input_schema), "output_schema": deepcopy(spec.output_schema),
+            "description": spec.description} for spec in definition.functions]
+        contract_spec = next(spec for spec in definition.functions if spec.name == "grove.agent_contract")
+        bootstrap = {"universe": "fixture-connector-protocol-world", "role_id": session.role_id,
+            "world": {"id": definition.world_id, "version": definition.version},
+            "world_entry_state": {"view": {"player": None,
+                "agent_contract_request": {"function_id": contract_spec.name, "arguments": {}}}}}
+
+        async def world_response(method, path, body=None):
+            if method == "GET" and path == "/v1/bootstrap":
+                return deepcopy(bootstrap)
+            if method == "GET" and path.startswith("/v1/discover?"):
+                return {"functions": deepcopy(descriptors), "has_more": False, "next_cursor": None}
+            if method == "POST" and path == "/v1/functions/grove.agent_contract/invoke":
+                self.assertEqual(body, {"arguments": {}})
+                return {"ok": True, "read_only": True, "function_id": contract_spec.name,
+                    "function_version": contract_spec.version, "snapshot_seq": 0,
+                    "result": contract_spec.handler(None, {}).result}
+            raise AssertionError(f"Unexpected fixture world request: {method} {path}")
+
+        session.world = AsyncMock(side_effect=world_response)
+        await session.agent_client.discover()
+        session.catalog = deepcopy(session.agent_client.catalog)
+        session._agent_contract_discovered = True
         original = deepcopy(session.catalog)
         tools = {item["name"]: item for item in session.tools()}
-        for function, spec in original.items():
-            actual = tools[function.replace(".", "_")]["inputSchema"]
-            expected = agent_mcp_schema(spec["input_schema"], function=function)
+        for function in ("grove.inspect", "grove.interact", "grove.fabricate"):
+            spec = original[function]
+            tool = tools[function.replace(".", "_")]
+            actual = deepcopy(tool["inputSchema"])
+            expected = agent_mcp_schema(spec["input_schema"], function=function, access=spec["access"],
+                guard_paths=session.agent_client.function_contract(function).get("guard_paths"))
+            if spec["access"] == "write":
+                self.assertIn("execution_segment_id", actual["required"])
+                self.assertEqual(validation_semantics(actual["properties"].pop("execution_segment_id")),
+                    {"type": "string", "minLength": 1, "maxLength": 100})
+                actual["required"].remove("execution_segment_id")
+                self.assertEqual(tool["description"], spec["description"] +
+                    " Guards bind from observation_id; terms_version remains explicit.")
+            else:
+                self.assertNotIn("execution_segment_id", actual["properties"])
+                self.assertEqual(tool["description"], spec["description"])
             self.assertEqual(validation_semantics(actual), validation_semantics(expected))
         self.assertEqual(session.catalog, original)
         interact = tools["grove_interact"]
-        self.assertIn("matching candidate.preview", interact["description"])
+        self.assertIn("candidate and combination previews", session.agent_client.contract["binding_semantics"]["candidate_previews"])
         self.assertIn("pour_target_slot", interact["inputSchema"]["properties"]["target_slot"]["description"])
         self.assertNotIn("pour_target_slot", interact["description"])
         fabricate = tools["grove_fabricate"]["inputSchema"]["properties"]["sources"]["items"]

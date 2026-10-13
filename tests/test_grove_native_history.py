@@ -14,6 +14,7 @@ from agent_world.grove_agent_observation import _agent_tool_text, _agent_tool_te
 from agent_world.grove_connector import ConnectorManager, GroveSession, MAX_WORLD_CALLS
 from agent_world.grove_connector_errors import ConnectorError
 from agent_world.grove_native_history import NativeToolHistory, TOOL_NAME, TOOL_SCHEMA, REQUEST_CONTRACT_PREFIX
+from agent_world.worlds.shared_grove.world import make_world
 
 
 SESSION = "ses_owned"
@@ -380,7 +381,34 @@ class ConnectorNativeHistoryTests(unittest.IsolatedAsyncioTestCase):
                                     "unused-private-bearer", "测试玩家", "provider/model")
         self.session.session_id, self.session.host_url = SESSION, "http://127.0.0.1:9000"
         self.session.status = "thinking"
-        self.session.catalog = {"grove.interact": {"access": "write", "input_schema": {"type": "object"}}}
+
+    async def asyncSetUp(self):
+        definition = make_world()
+        descriptors = [{"function_id": spec.name, "access": spec.access, "version": spec.version,
+            "input_schema": deepcopy(spec.input_schema), "output_schema": deepcopy(spec.output_schema),
+            "description": spec.description} for spec in definition.functions]
+        contract_spec = next(spec for spec in definition.functions if spec.name == "grove.agent_contract")
+        bootstrap = {"universe": "fixture-native-history-world", "role_id": self.session.role_id,
+            "world": {"id": definition.world_id, "version": definition.version},
+            "world_entry_state": {"view": {"player": None,
+                "agent_contract_request": {"function_id": contract_spec.name, "arguments": {}}}}}
+
+        async def world_response(method, path, body=None):
+            if method == "GET" and path == "/v1/bootstrap":
+                return deepcopy(bootstrap)
+            if method == "GET" and path.startswith("/v1/discover?"):
+                return {"functions": deepcopy(descriptors), "has_more": False, "next_cursor": None}
+            if method == "POST" and path == "/v1/functions/grove.agent_contract/invoke":
+                self.assertEqual(body, {"arguments": {}})
+                return {"ok": True, "read_only": True, "function_id": contract_spec.name,
+                    "function_version": contract_spec.version, "snapshot_seq": 0,
+                    "result": contract_spec.handler(None, {}).result}
+            raise AssertionError(f"Unexpected fixture world request: {method} {path}")
+
+        self.session.world = AsyncMock(side_effect=world_response)
+        await self.session.agent_client.discover()
+        self.session.catalog = deepcopy(self.session.agent_client.catalog)
+        self.session._agent_contract_discovered = True
 
     async def test_registration_owner_scope_and_repeated_read_do_not_create_world_authority(self):
         self.assertIn(TOOL_NAME, [tool["name"] for tool in self.session.tools()])

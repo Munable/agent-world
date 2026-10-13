@@ -83,18 +83,57 @@ export function executionTaskSummaryLines(execution){
 
 export function fabricationSources(menu){
   const cost=menu?.cost_u||{};
-  return ruleChoices(menu?.action,'sources').map(source=>({...source,lots:(Array.isArray(source.lots)?source.lots:[]).filter(lot=>lot&&typeof lot.id==='string'&&Object.hasOwn(cost,lot.material)&&Number.isInteger(lot.quantity)&&lot.quantity>0)})).filter(source=>source.lots.length);
+  return ruleChoices(menu?.inputs,'sources').map(source=>({...source,lots:(Array.isArray(source.lots)?source.lots:[]).filter(lot=>lot&&typeof lot.id==='string'&&Object.hasOwn(cost,lot.material)&&Number.isInteger(lot.quantity)&&lot.quantity>0)})).filter(source=>source.lots.length);
+}
+export function schemaInputErrors(schema,value,path='输入'){
+  if(!schema||typeof schema!=='object'||Array.isArray(schema))return [path+'尚未提供受支持的参数合同。'];
+  const allowed=new Set(['type','properties','required','additionalProperties','items','minItems','maxItems','uniqueItems','minimum','maximum','exclusiveMinimum','exclusiveMaximum','multipleOf','minLength','maxLength','pattern','enum','const','title','description','default','$schema','examples']);
+  if(Object.keys(schema).some(key=>!allowed.has(key)))return [path+'包含尚未支持的参数合同，请重新发现接口。'];
+  const errors=[],types=Array.isArray(schema.type)?schema.type:schema.type?[schema.type]:[];
+  const matches=type=>type==='null'?value===null:type==='integer'?Number.isSafeInteger(value):type==='number'?typeof value==='number'&&Number.isFinite(value):type==='array'?Array.isArray(value):type==='object'?value!==null&&typeof value==='object'&&!Array.isArray(value):typeof value===type;
+  if(types.length&&!types.some(matches))return [path+'不符合服务器声明的类型。'];
+  if(Object.hasOwn(schema,'const')&&JSON.stringify(value)!==JSON.stringify(schema.const)||schema.enum&&!schema.enum.some(choice=>JSON.stringify(choice)===JSON.stringify(value)))errors.push(path+'不在服务器声明的选择范围内。');
+  if(typeof value==='number'){
+    if(Number.isFinite(schema.minimum)&&value<schema.minimum||Number.isFinite(schema.maximum)&&value>schema.maximum||Number.isFinite(schema.exclusiveMinimum)&&value<=schema.exclusiveMinimum||Number.isFinite(schema.exclusiveMaximum)&&value>=schema.exclusiveMaximum||Number.isFinite(schema.multipleOf)&&Math.abs(value/schema.multipleOf-Math.round(value/schema.multipleOf))>Number.EPSILON*8)errors.push(path+'超出服务器声明的数值范围。');
+  }else if(typeof value==='string'){
+    if(Number.isInteger(schema.minLength)&&[...value].length<schema.minLength||Number.isInteger(schema.maxLength)&&[...value].length>schema.maxLength)errors.push(path+'超出服务器声明的文字长度。');
+    if(schema.pattern){try{if(!new RegExp(schema.pattern,'u').test(value))errors.push(path+'不符合服务器声明的文字格式。');}catch{errors.push(path+'的文字格式尚未支持。');}}
+  }else if(Array.isArray(value)){
+    if(Number.isInteger(schema.minItems)&&value.length<schema.minItems||Number.isInteger(schema.maxItems)&&value.length>schema.maxItems)errors.push(path+'行数超出服务器声明的范围。');
+    if(schema.uniqueItems&&new Set(value.map(item=>JSON.stringify(item))).size!==value.length)errors.push(path+'包含服务器合同禁止的重复项。');
+    if(schema.items)value.forEach((item,index)=>errors.push(...schemaInputErrors(schema.items,item,path+'第 '+(index+1)+' 项')));
+  }else if(value&&typeof value==='object'){
+    for(const name of schema.required||[])if(!Object.hasOwn(value,name))errors.push(path+'缺少服务器要求的 '+name+'。');
+    for(const [name,item] of Object.entries(value)){
+      const property=schema.properties?.[name];
+      if(property)errors.push(...schemaInputErrors(property,item,path+' · '+name));
+      else if(schema.additionalProperties===false)errors.push(path+'包含未声明的 '+name+'。');
+      else if(schema.additionalProperties&&typeof schema.additionalProperties==='object')errors.push(...schemaInputErrors(schema.additionalProperties,item,path+' · '+name));
+    }
+  }
+  return errors;
+}
+export function fabricationInputContract(menu){
+  const schema=menu?.inputs?.schema,path=menu?.inputs?.path,intent=menu?.intent;
+  let submitted=intent?.input_schema;
+  for(const name of Array.isArray(path)?path:[])submitted=submitted?.properties?.[name];
+  if(!Array.isArray(path)||JSON.stringify(path)!==JSON.stringify(intent?.selection_path)||path.length!==1||path[0]!=='sources'||schema?.type!=='array'||schema.items?.type!=='object'||schema.items?.properties?.quantity_u?.type!=='integer'||JSON.stringify(schema)!==JSON.stringify(submitted))return {errors:['成型输入与正式调用合同尚未一致核对。']};
+  const quantitySchema=schema.items.properties.quantity_u;
+  return {schema,quantitySchema,minItems:schema.minItems??0,maxItems:schema.maxItems??Infinity,
+    defaultQuantity:quantitySchema.default??quantitySchema.minimum??'',errors:[]};
 }
 export function fabricationPlan(menu,rows){
-  const errors=[],sources=[],totals=Object.create(null),used=new Map(),choices=fabricationSources(menu),cost=menu?.cost_u||{};
-  if(!Array.isArray(rows)||!rows.length||rows.length>8)return {sources,totals,errors:['请选择一至八行真实来源材料。']};
+  const contract=fabricationInputContract(menu),errors=[...contract.errors],sources=[],totals=Object.create(null),used=new Map(),choices=fabricationSources(menu),cost=menu?.cost_u||{};
+  if(errors.length||!Array.isArray(rows))return {sources,totals,errors:errors.length?errors:['请选择服务器提供的真实来源材料。']};
+  if(rows.length<contract.minItems||rows.length>contract.maxItems)errors.push('来源行数须符合服务器范围：'+contract.minItems+' 至 '+(Number.isFinite(contract.maxItems)?contract.maxItems:'不限')+' 行。');
   for(const row of rows){
     const source=choices.find(value=>value.id===row.entity_id),lot=source?.lots.find(value=>value.id===row.lot_id);
     if(!source||!Number.isInteger(source.version)){errors.push('原来源当前不可用，请重新选择；不会自动换料。');continue;}
     if(!Number.isInteger(row.expected_entity_version)||row.expected_entity_version!==source.version){errors.push('原来源的观察版本已改变或尚未确认，请按新事实重新确认同一来源。');continue;}
     if(!lot||row.material_id!==lot.material){errors.push('原材料批次已耗尽、改变或不可用，请重新选择。');continue;}
-    const quantity=Number(row.quantity_u);
-    if(!Number.isInteger(quantity)||quantity<1){errors.push('每行数量须为大于零的整数。');continue;}
+    const quantity=row.quantity_u===''?undefined:Number(row.quantity_u);
+    const quantityErrors=schemaInputErrors(contract.quantitySchema,quantity,'投入数量');
+    if(quantityErrors.length){errors.push(...quantityErrors);continue;}
     const key=JSON.stringify([source.id,lot.id]);
     if(used.has(key)){errors.push('同一实际来源批次只能填写一行，请合并数量。');continue;}
     const quantityUsed=quantity;used.set(key,quantityUsed);
@@ -102,6 +141,8 @@ export function fabricationPlan(menu,rows){
     totals[lot.material]=(totals[lot.material]||0)+quantity;
     sources.push({entity_id:source.id,expected_entity_version:row.expected_entity_version,lot_id:lot.id,quantity_u:quantity});
   }
+  errors.push(...schemaInputErrors(contract.schema,sources,'来源材料'));
+  if(menu.intent?.input_schema)errors.push(...schemaInputErrors(menu.intent.input_schema,{...menu.intent.fixed_arguments,sources},'成型输入'));
   for(const [material,quantity] of Object.entries(cost))if(totals[material]!==quantity)errors.push('材料 '+material+' 须恰好选择 '+quantity+' 单位，当前 '+(totals[material]||0)+' 单位。');
   return {sources,totals,errors};
 }

@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from agent_world.errors import RuleViolation, StateConflict
+from agent_world.errors import PermissionDenied, RuleViolation, StateConflict
 
 from . import model as m
 from . import commit
 from . import activity
+from . import action_contracts as ac
 from .definitions import PIECE_QUANTITIES, REGISTRY
 
 
@@ -50,29 +51,7 @@ def is_structure(entity):
 
 
 def _path_reason(ctx, player, entity):
-    if entity["state"].get("retired") or entity.get("lifecycle") == "consumed":
-        return "物件已耗尽或已投入其他用途。"
-    if entity["owner"] not in {None, player["id"]}:
-        return "不能使用别人的物件。"
-    cursor, seen = entity, set()
-    for _ in range(17):
-        if cursor["id"] in seen:
-            return "物理关系不能循环。"
-        seen.add(cursor["id"])
-        if cursor["state"]["burning"]:
-            return "燃烧中的物件及其内容不能搬运或取用。"
-        parent = cursor.get("physical_parent")
-        if not parent:
-            break
-        cursor = m.get_entity(ctx, parent["id"])
-        if parent["relation"] == "contained" and not cursor["state"]["open"]:
-            return "请先打开盛放物件的容器。"
-    else:
-        return "物理关系层数超过限制。"
-    x, y = m.entity_location(ctx, entity)
-    if x is None or (entity["owner"] is None and abs(x-player["x"])+abs(y-player["y"]) > 1):
-        return "要先走到目标相邻的一格。"
-    return None
+    return ac.access_reason(ctx, player, entity)
 
 
 def _body_lots(entity):
@@ -83,19 +62,28 @@ def material_status(ctx, player, entity):
     caps = set(entity["capabilities"])
     reason = _path_reason(ctx, player, entity)
     if not reason and entity["owner"] != player["id"]:
-        reason = "请先把原材料拿到自己的背包。"
+        reason = ac.failure("material_not_owned", "请先把原材料拿到自己的背包。", "material_owned",
+            subject="material", entity_id=entity["id"], actual=False, required=True,
+            instruction="先通过pickup取得公共原材料，再读取建设菜单。")
     if not reason and ("transport" not in caps or caps & {"container", "ignition", "personal"}
                        or entity["state"]["contents"] or entity["state"]["water"]
                        or entity.get("components", {}).get("attachment") or is_structure(entity)
                        or entity["state"].get("kind") == "resource_node"):
-        reason = "需使用裸材料，容器、组合部件和私人物件不能投料。"
+        reason = ac.failure("material_not_raw", "需使用裸材料，容器、组合部件和私人物件不能投料。", "raw_material",
+            subject="material", entity_id=entity["id"], actual=False, required=True)
     if not reason and entity["material"] != "stone" and entity["state"]["wetness"] >= 35:
-        reason = "木料和布料须先晾干或烘干到湿度35以下。"
+        reason = ac.failure("material_too_wet", "木料和布料须先晾干或烘干到湿度35以下。", "material_dry",
+            subject="material", entity_id=entity["id"], actual=entity["state"]["wetness"], required={"below": 35},
+            instruction="晾干或烘干所选原材料到湿度35以下，再读取建设菜单。")
     quantity = sum(lot["quantity"] for lot in _body_lots(entity) if lot["material"] == entity["material"])
     if not reason and quantity <= 0:
-        reason = "材料的可用部分已经耗尽。"
-    return {"eligible": reason is None, "reason": reason, "material": entity["material"],
-            "quantity_u": quantity, "unit": "logical_matter", "units_per_piece": MATERIAL_UNITS.get(entity["material"])}
+        reason = ac.failure("material_depleted", "材料的可用部分已经耗尽。", "material_quantity",
+            subject="material", entity_id=entity["id"], actual=quantity, required={"minimum": 1})
+    hidden = reason and not reason.failure["precondition"]["known"]
+    return {"eligible": reason is None, "reason": str(reason) if reason else None, "material": None if hidden else entity["material"],
+            "quantity_u": None if hidden else quantity, "unit": "logical_matter",
+            "units_per_piece": None if hidden else MATERIAL_UNITS.get(entity["material"]),
+            "failure": deepcopy(reason.failure) if reason else None}
 
 
 def _backpack_reason(ctx, player, count, *, tree_count=None):
@@ -104,14 +92,22 @@ def _backpack_reason(ctx, player, count, *, tree_count=None):
     if reason:
         return reason
     if not backpack["state"]["open"]:
-        return "请先打开自己的背包。"
+        return ac.failure("container_closed", "请先打开自己的背包。", "container_open",
+            subject="backpack", entity_id=backpack["id"], actual=False, required=True)
     if len(backpack["state"]["contents"])+count > backpack["state"]["capacity"]:
-        return "背包容量不足，请先腾出位置。"
+        return ac.failure("container_full", "背包容量不足，请先腾出位置。", "container_slots",
+            subject="backpack", entity_id=backpack["id"], actual=len(backpack["state"]["contents"])+count,
+            required={"maximum": backpack["state"]["capacity"]},
+            instruction="取出或放下部分背包物件，读取当前背包后重新选择行动。")
     added = count if tree_count is None else tree_count
     if len(m.descendants(ctx, backpack))+added > 16:
-        return "背包的容纳组合最多16个物件，请先取出或放下部分内容。"
+        return ac.failure("physical_descendant_capacity", "背包的容纳组合最多16个物件，请先取出或放下部分内容。",
+            "physical_descendants", subject="backpack", entity_id=backpack["id"],
+            actual=len(m.descendants(ctx, backpack))+added, required={"maximum": 16})
     if len(player["inventory"])+added > m.MAX_INVENTORY:
-        return "背包物件过多。"
+        return ac.failure("inventory_capacity", "背包物件过多。", "inventory_size",
+            subject="backpack", entity_id=backpack["id"], actual=len(player["inventory"])+added,
+            required={"maximum": m.MAX_INVENTORY})
     return None
 
 
@@ -152,15 +148,17 @@ def _set_hearths(ctx, ids):
 def _choose_materials(ctx, player, recipe, selected):
     required = {key: value*MATERIAL_UNITS[key] for key, value in recipe["cost"].items()}
     if selected is not None and len(set(selected)) != len(selected):
-        raise RuleViolation("所选原材料不能重复。")
+        ac.reject(ac.failure("material_selection_duplicate", "所选原材料不能重复。", "unique_material_selection",
+            subject="materials", actual=False, required=True))
     candidates = [m.get_entity(ctx, eid) for eid in (selected if selected is not None else player["inventory"])]
     if selected is not None:
         for entity in candidates:
             status = material_status(ctx, player, entity)
             if not status["eligible"]:
-                raise RuleViolation(status["reason"])
+                ac.reject(ac.option_reason(status))
             if entity["material"] not in required:
-                raise RuleViolation("所选原料包含配方不需要的材质。")
+                ac.reject(ac.failure("material_not_required", "所选原料包含配方不需要的材质。", "required_material_kind",
+                    subject="material", entity_id=entity["id"], actual=entity["material"], required=list(required)))
     result = []
     for material, amount in required.items():
         remaining = amount
@@ -178,31 +176,140 @@ def _choose_materials(ctx, player, recipe, selected):
             if remaining == 0:
                 break
         if remaining:
-            raise RuleViolation(f"缺少{remaining}u可用{material}原材料，配方需要{amount}u。")
+            ac.reject(ac.failure("material_quantity_insufficient", f"缺少{remaining}u可用{material}原材料，配方需要{amount}u。",
+                "material_quantity", subject="materials", actual=amount-remaining, required=amount,
+                material=material, unit="logical_matter",
+                instruction="采集并持有足量干燥裸材料，或换用已有足量材料的配方。"))
     if len(result)>8:
-        raise RuleViolation("所需材料过于分散；同一建筑最多接受8个真实批次。")
+        ac.reject(ac.failure("material_lot_limit", "所需材料过于分散；同一建筑最多接受8个真实批次。", "material_lots",
+            subject="materials", actual=len(result), required={"maximum": 8}))
     return result
+
+
+def build_plan(ctx, player, args):
+    """Read current preconditions; never materialize terrain or transfer matter.
+
+    Final aggregate load and admission require the real transactional closure.
+    Missing chunks also have an unmaterialized resource layout. These are
+    unknown, not satisfied; a preliminary available option is not a commit.
+    """
+    from . import domains
+    recipe = RECIPES[args["recipe"]]
+    x, y = args["x"], args["y"]
+    tile = {"x": x, "y": y}
+    reads = [{"function_id": "grove.build_options", "arguments": tile}]
+    preconditions, materials, reason = [], [], None
+    materialized = bool(m.get_chunk(ctx, *m.chunk_for(x, y))["version"])
+    preview_scope = {"kind": "current_preconditions", "complete": False, "side_effects": False,
+        "checked": [],
+        "unknown": (["generated_resource_layout"] if not materialized else []) + ["final_load", "commit_capacity"],
+        "commit_revalidates": True, "state_materialized": materialized}
+    def check(name, actual, required, satisfied, code, message, *, known=True, **facts):
+        preconditions.append(ac.condition(name, subject="tile", tile=tile, known=known,
+            satisfied=satisfied if known else False, actual=actual, required=required, **facts))
+        if known and not satisfied:
+            ac.reject(ac.failure(code, message, name, subject="tile", tile=tile,
+                actual=actual, required=required, reads=reads, **facts))
+    try:
+        distance = abs(x-player["x"])+abs(y-player["y"])
+        check("adjacent", distance, {"maximum": 1}, distance <= 1, "build_not_adjacent",
+              "只能在自己所在或相邻一格建设。", metric="manhattan")
+        terrain = m.tile_at(ctx, x, y)
+        check("build_terrain", terrain, recipe["terrain"], terrain in recipe["terrain"], "build_terrain_incompatible",
+              "这一格地形不适合所选配方。")
+        ground = m.public_entities_near(ctx, x, y, radius=0, limit=m.MAX_CHUNK_ENTITIES)
+        occupied = any(is_structure(e) or e["state"].get("kind") == "resource_node" for e in ground)
+        check("build_site_unoccupied", occupied, False, not occupied, "build_site_occupied",
+              "这一格已有建筑或资源节点。", known=materialized)
+        blocked = m.blocking_at(ctx, x, y)
+        check("build_site_unblocked", blocked, False, not blocked, "build_site_blocked",
+              "请先移开这一格的障碍。", known=materialized)
+        safe = m.is_safe(ctx, x, y)
+        allowed = "heater" not in recipe["components"] or not safe
+        check("heater_outside_safe_zone", safe, False if "heater" in recipe["components"] else "any", allowed,
+              "build_heater_safe_zone", "出生安全区不能建设火炉。")
+        materials = _choose_materials(ctx, player, recipe, args.get("material_ids"))
+        for material, count in recipe["cost"].items():
+            quantity = count*MATERIAL_UNITS[material]
+            preconditions.append(ac.condition("material_quantity", subject="materials", satisfied=True,
+                actual=quantity, required=quantity, material=material, unit="logical_matter"))
+        try:
+            domains.guard_action(ctx, {"material_ids": list({eid for eid, _, _ in materials})}, topology=True)
+            domains.guard_tiles(ctx, [(x, y)])
+        except domains.DomainBusy as exc:
+            reason = ac.failure("domain_settlement_pending", str(exc), "domain_boundary_settled", subject="tile", tile=tile,
+                actual=False, required=True, reads=reads, recovery=exc.recovery, retryable=True,
+                retry_after_seconds=exc.retry_after_seconds,
+                instruction="等待当前相互作用域结算完成，读取菜单后重试同一未提交行动。")
+            reason.details.update(deepcopy(exc.details or {}))
+            ac.reject(reason, exception=domains.DomainBusy)
+        preconditions.append(ac.condition("domain_boundary_settled", subject="tile", tile=tile,
+            satisfied=True, actual=True, required=True))
+    except (RuleViolation, PermissionDenied) as exc:
+        reason = ac.from_error(exc, tile=tile, reads=reads)
+        failed = reason.failure["precondition"]
+        if not any(row["condition"] == failed["condition"] and row["satisfied"] is False for row in preconditions):
+            preconditions.append(deepcopy(failed))
+    for name in preview_scope["unknown"]:
+        preconditions.append(ac.condition(name, subject="tile", tile=tile, known=False,
+            required="validated_at_commit"))
+    preview_scope["checked"] = list(dict.fromkeys(row["condition"] for row in preconditions if row["known"]))
+    return {"available": reason is None, "reason": reason,
+            "failure": deepcopy(reason.failure) if reason else None, "preconditions": preconditions,
+            "materials": materials, "preview_scope": preview_scope}
+
+
+def build_options(ctx, player, args, input_schema):
+    """One domain action menu consumed by both Agent and human projections."""
+    x, y = args["x"], args["y"]
+    distance = max(abs(x-player["x"]), abs(y-player["y"]))
+    if distance > 8:
+        ac.reject(ac.failure("build_site_not_observable", "只能读取当前附近地图中的位置。", "observable",
+            subject="tile", tile={"x": x, "y": y}, known=False, required={"maximum_radius": 8}))
+    options = []
+    for recipe in recipes():
+        if args.get("recipe") and args["recipe"] != recipe["id"]:
+            continue
+        arguments = {"recipe": recipe["id"], "x": x, "y": y, "expected_player_version": player["version"]}
+        if "material_ids" in args:
+            arguments["material_ids"] = list(args["material_ids"])
+        plan = build_plan(ctx, player, arguments)
+        candidates = []
+        for eid in player["inventory"]:
+            raw = m.get_entity(ctx, eid)
+            status = material_status(ctx, player, raw)
+            if status["eligible"] and status["material"] in recipe["cost"]:
+                candidates.append({"id": eid, "name": raw["name"], "version": raw["version"],
+                    "material": status["material"], "quantity_u": status["quantity_u"],
+                    "read_request": ac.read_entity(eid)})
+        schema = deepcopy(input_schema)
+        schema["properties"]["recipe"] = {"const": recipe["id"]}
+        options.append({"id": "grove.build:"+recipe["id"], "action": recipe["id"], "function_id": "grove.build",
+            "label": "搭建 "+recipe["name"], "description": recipe["use"], "use": recipe["use"],
+            "arguments": arguments, "input_schema": schema,
+            "available": plan["available"], "reason": str(plan["reason"]) if plan["reason"] else None,
+            "failure": plan["failure"], "preconditions": plan["preconditions"], "preview_scope": plan["preview_scope"],
+            "material_candidates": candidates, "cost": {"materials": recipe["material_cost_u"], "unit": "logical_matter"},
+            "read_requests": [{"function_id": "grove.build_options", "arguments": {"x": x, "y": y, "recipe": recipe["id"]}}],
+            "expanded": True})
+    return {"tile": {"x": x, "y": y, "terrain": m.tile_at(ctx, x, y)}, "options": options,
+            "player_version": player["version"], "authority": "shared_grove.build_plan"}
 
 
 def build(ctx, player, args):
     from . import domains
+    plan = build_plan(ctx, player, args)
+    if plan["reason"]:
+        ac.reject(plan["reason"], exception=domains.DomainBusy if plan["reason"].retryable else RuleViolation)
     recipe = RECIPES[args["recipe"]]
     x, y = args["x"], args["y"]
-    if abs(x-player["x"])+abs(y-player["y"]) > 1:
-        raise RuleViolation("只能在自己所在或相邻一格建设。")
     commit.ensure_chunk(ctx, *m.chunk_for(x, y))
-    if m.tile_at(ctx, x, y) not in recipe["terrain"]:
-        raise RuleViolation("这一格地形不适合所选配方。")
-    ground = m.public_entities_near(ctx, x, y, radius=0, limit=m.MAX_CHUNK_ENTITIES)
-    if any(is_structure(e) or e["state"].get("kind") == "resource_node" for e in ground):
-        raise RuleViolation("这一格已有建筑或资源节点。")
-    if m.blocking_at(ctx, x, y):
-        raise RuleViolation("请先移开这一格的障碍。")
-    if "heater" in recipe["components"] and m.is_safe(ctx, x, y):
-        raise RuleViolation("出生安全区不能建设火炉。")
-    materials = _choose_materials(ctx, player, recipe, args.get("material_ids"))
-    domains.guard_action(ctx, {"material_ids": list({eid for eid, _, _ in materials})}, topology=True)
-    domains.guard_tiles(ctx, [(x, y)])
+    # Materialization can introduce the deterministic resource layout. All
+    # observed conditions are checked again against the commit candidate.
+    plan = build_plan(ctx, player, args)
+    if plan["reason"]:
+        ac.reject(plan["reason"], exception=domains.DomainBusy if plan["reason"].retryable else RuleViolation)
+    materials = plan["materials"]
     region = f"{x//m.CHUNK_SIZE}:{y//m.CHUNK_SIZE}"
     content_region = next((m.get_entity(ctx,source_id)["state"].get("generation_region")
                            for source_id,_,_ in materials if m.get_entity(ctx,source_id)["state"].get("generation_region") == region),None)
@@ -233,13 +340,20 @@ def build(ctx, player, args):
         entity["state"]["generation_region"] = content_region
     _bind_absorption(entity)
     commit.save_entity(ctx, entity)
-    if m.load_summary(ctx, entity)["overload"]:
-        raise RuleViolation("所选原材料超过建筑的支撑载荷。")
+    load = m.load_summary(ctx, entity)
+    if load["overload"]:
+        ac.reject(ac.failure("build_load_exceeded", "所选原材料超过建筑的支撑载荷。", "final_load",
+            subject="tile", tile={"x": x, "y": y}, actual=load["supported"], required={"maximum": load["limit"]},
+            reads=[{"function_id": "grove.build_options", "arguments": {"x": x, "y": y}}],
+            instruction="选择不同投入材料或配方；本次原子建设失败，原材料没有投入。"))
     if "heater" in recipe["components"]:
         domains.ensure(ctx, entity_ids=[bid])
         hearths = _live_hearths(ctx)
         if len(hearths) >= MAX_HEARTHS:
-            raise domains.CapacityPressure("同一相互作用域最多保留16座可用烘干炉。")
+            ac.reject(ac.failure("build_hearth_capacity", "同一相互作用域最多保留16座可用烘干炉。", "commit_capacity",
+                subject="tile", tile={"x": x, "y": y}, actual=len(hearths), required={"maximum_before_build": MAX_HEARTHS-1},
+                reads=[{"function_id": "grove.build_options", "arguments": {"x": x, "y": y}}]),
+                exception=domains.CapacityPressure)
         _set_hearths(ctx, [e["id"] for e in hearths]+[bid])
     return entity, f"搭建了{recipe['name']}，投入真实材料；剩余原料保留在背包。"
 
@@ -304,7 +418,9 @@ def _dismantle_reason(ctx, player, target):
 
 
 def _option(action, reason, use, cost=None, **fields):
-    value = {"action": action, "available": reason is None, "reason": reason, "use": use, **fields}
+    value = {"action": action, "available": reason is None, "reason": str(reason) if reason else None, "use": use, **fields}
+    if isinstance(reason, ac.Reason):
+        value.update(failure=deepcopy(reason.failure), read_requests=deepcopy(reason.failure["read_requests"]))
     if cost is not None:
         value["cost"] = cost
     return value
@@ -361,7 +477,8 @@ def _require_own(ctx, player, args):
         raise StateConflict("所选物件已经变化，请刷新后再行动。")
     reason = _path_reason(ctx, player, entity)
     if reason or entity["owner"] != player["id"] or "personal" in entity["capabilities"]:
-        raise RuleViolation(reason or "须使用自己持有的可用物件。")
+        ac.reject(reason or ac.failure("item_not_owned_ordinary", "须使用自己持有的可用物件。", "owned_ordinary_item",
+            subject="item", entity_id=entity["id"], actual=False, required=True))
     return entity
 
 
@@ -369,7 +486,7 @@ def interact_structure(ctx, player, args, target):
     action, state = args["action"], target["state"]
     option = next((o for o in action_options(ctx, player, target) if o["action"] == action), None)
     if not option or not option["available"]:
-        raise RuleViolation(option["reason"] if option else "此目标没有所选行动。")
+        ac.reject(ac.option_reason(option) if option else "此目标没有所选行动。")
     if action == "harvest":
         material = state["resource_kind"]
         names = {"wood": "木料", "cloth": "芦苇布料", "stone": "石料"}

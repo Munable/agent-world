@@ -30,13 +30,16 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .grove_connector_errors import ConnectorError
+from .grove_agent_client import (GroveAgentClient, HttpGroveTransport, MemoryOperationJournal,
+    AgentClientError, observation_output_schema)
 from .grove_native_history import (NativeToolHistory, TOOL_DESCRIPTION as NATIVE_HISTORY_DESCRIPTION,
     TOOL_NAME as NATIVE_HISTORY_TOOL, TOOL_SCHEMA as NATIVE_HISTORY_SCHEMA,
     REQUEST_CONTRACT_PREFIX)
 from .grove_execution import ExecutionController, ExecutionPorts, MAX_ACTION_TARGETS, DEFAULT_TASK_REQUESTS
 from .grove_agent_observation import (AgentObservations, AGENT_WRITE_FUNCTIONS,
-    companion_projection, blueprint_model_input, agent_tool_schema, agent_mcp_schema, _checked_agent_tool_text,
-    _companion_scene_index, _companion_selected_state_summary, execution_private_context, nearby_public_events)
+    companion_projection, blueprint_model_input, agent_mcp_schema, _checked_agent_tool_text,
+    _companion_scene_index, _companion_selected_state_summary, execution_private_context, nearby_public_events,
+    _project_agent_menus)
 from .worlds.shared_grove.client_projection import fact_tree
 
 DEFAULT_BINARY = Path("/Volumes/DevDisk/DeveloperData/agent-world/opencode/bin/opencode")
@@ -47,9 +50,6 @@ AGENT = "shared-grove"
 BLUEPRINT_AGENT = "shared-grove-blueprint"
 EXECUTOR_AGENT = "shared-grove-executor"
 MCP_NAME = "grove_world"
-AGENT_READ_FUNCTIONS = frozenset({"map.viewport", "grove.inspect", "grove.handbook", "grove.content_history",
-    "grove.rule_catalog", "grove.definition_read", "grove.definition_list", "grove.definition_validate",
-    "grove.fabrication_options", "grove.control_status", "grove.public_works"})
 MAX_SECONDS, MAX_WORLD_CALLS = 150, 16
 _TOOL_ARGUMENT_DIAGNOSTIC_MAX_CHARS = 16 * 1024
 MAX_EXECUTION_REQUESTS = 8
@@ -191,55 +191,7 @@ MCP_READ_BASE_DESCRIPTION = (
 MCP_WRITE_OBSERVATION_DESCRIPTION = (
     "Copy the observation_id of the exact presented facts. base_observation_id is for reads only."
 )
-# These are discovery summaries, not a second mechanism manual. Exact arguments
-# remain in inputSchema; current candidates/previews and catalog topics supply semantics.
-MCP_TOOL_DESCRIPTIONS = {
-    "map.viewport": "Read the authorized nearby map and one inventory page. Omitted data remains unknown; "
-        "use supplied detail/page requests. Nearby players are not an online roster.",
-    "grove.inspect": "Read a permitted object's current facts and action index. Expand the relevant "
-        "action/candidate_id via read_request for exact inputs and previews; an index is not permission or safety.",
-    "grove.public_works": "Discover current public top-level creations by exact author_name/author/name "
-        "and returned cursor. Follow has_more; an unfinished index cannot prove absence. Coordinates do not "
-        "authorize remote actions or identify online players.",
-    "grove.handbook": "Read the compact entry overview; precise later mechanisms are available through "
-        "rule_catalog topics and inspected actions.",
-    "grove.content_history": "Read the supplied public content_id's historical contributions/outcomes; "
-        "continue with its returned cursor. History is not current physical state or action authorization.",
-    "grove.rule_catalog": "Read the compact capability overview or a relevant advertised topic for exact "
-        "creation and mechanism semantics. Omitted topics remain supported; declarations are not observed effects.",
-    "grove.definition_read": "Read one immutable definition, actual author, material bindings and bounded "
-        "diagnostics. Instances retain their fixed reference; a name is not identity.",
-    "grove.definition_list": "Read a bounded page of immutable definitions. Follow the supplied pagination "
-        "for discovery; a published definition is not a physical instance.",
-    "grove.definition_validate": "Check a draft with the actual compiler without publishing or consuming "
-        "matter. Read the diagnostics; valid does not guarantee perpetual safety or effects.",
-    "grove.fabrication_options": "Read a cost_u type's eligible real source lots, quantities and reasons. "
-        "Keep each source's actual entity_id/lot_id; names or stock summaries are not sources.",
-    "grove.control_status": "Read your current delegated goal and committed action count, not another "
-        "person's control or private intent.",
-    "grove.move": "Move one allowed cardinal step under the current control; read the actual result.",
-    "grove.interact": "Use the selected object's declared action and inspected inputs. Store/attach needs "
-        "this observation's full matching candidate.preview; eligibility is not safety. Current guards "
-        "and conditions are rechecked.",
-    "grove.build": "Use a declared recipe with eligible owned raw lots; recipe pieces and actual consumed "
-        "material u are distinct. Read real costs and the created object.",
-    "grove.generation_context": "Claim/read a bounded content opportunity with its actual schema, legal "
-        "placements, finite regional stock and current continuation constraints.",
-    "grove.content_submit": "Submit content for the original opportunity and supplied schema, finite "
-        "stock/placements and optional current continuation. Conditions are rechecked; real parts are "
-        "not an attachment or completed effect.",
-    "grove.content_release": "Release the original unused content opportunity; do not replace its ID or "
-        "claim that release published content.",
-    "grove.definition_publish": "Compile/publish an immutable definition. Read actual diagnostics; "
-        "publication creates no matter, instance, consent or observed automatic effect. "
-        "When adapting a public definition, supply its source_definition_ref; publish your own new version, leaving the original intact.",
-    "grove.rule_action": "Use a declared action or locally supported port/fuel/control operation with "
-        "inspected parameters and guards. Exact semantics use the relevant catalog topic; conditions "
-        "and enabled flags are not effects.",
-    "grove.fabricate": "Form a cost_u type from eligible fabrication_options sources, keeping entity_id, "
-        "lot_id and quantity_u from that observation. Consumes real material; never substitute "
-        "regional stock or a same-named lot.",
-}
+
 
 
 def safe_response_diagnostics(response: Any) -> dict:
@@ -480,6 +432,15 @@ class GroveSession:
                         self.private_context["last_creation_request"] = last_creation
             except (ValueError, OSError, TypeError, ConnectorError):
                 raise ConnectorError("CorruptMemory", "Local companion memory could not be read; keep it for recovery.", 500)
+        # Public discovery, schemas and fixed observations share the same
+        # client. Exact execution recovery stays in this adapter's durable
+        # task-owned journal and existing stop/revoke controller.
+        self.agent_client = GroveAgentClient(
+            HttpGroveTransport(manager.world_url, bearer,
+                request=lambda method, path, body=None: self.world(method, path, body)),
+            self.role_id, manager.world_url, journal=MemoryOperationJournal(), observations=self.observations,
+            before_write=lambda record: self.require_execution_request())
+        self._agent_contract_discovered = False
         if self.execution_controller.normalize_progress() or execution_restore_changed:
             self.remember()
 
@@ -802,17 +763,49 @@ class GroveSession:
                     "function_id": record["function_id"], "world_action_committed": False}
                 raise
 
+    async def _check_host_operation_scope(self, records=(), *, recovery=False):
+        # Verify local records before making any receipt lookup. In particular,
+        # an old unscoped journal cannot be assigned today's bootstrap universe.
+        try:
+            if self.manager.world_url != self.agent_client.world_instance:
+                raise AgentClientError("IdentityScopeMismatch", "The configured world endpoint changed; preserve the original journal.", 409)
+            for record in records:
+                self.agent_client.validate_operation_record(record)
+            bootstrap = await self.world("GET", "/v1/bootstrap")
+            if records:
+                for record in records:
+                    self.agent_client.validate_operation_scope(bootstrap, record=record, recovery=recovery)
+            else:
+                self.agent_client.validate_operation_scope(bootstrap, recovery=recovery)
+        except AgentClientError as exc:
+            raise self._connector_client_error(exc) from exc
+
+    def _settle_original_rejection(self, record):
+        if record.get("execution_write"):
+            self.execution_controller.receipt(record["function_id"], record["envelope"]["operation_id"],
+                status="rejected", operation_record=record)
+        if record in self.unknown:
+            self.unknown.remove(record)
+        self.remember()
+
     async def invoke(self, function: str, arguments: dict, *, model_write: bool = False):
         spec = self.catalog.get(function)
         write = spec is None or spec.get("access") != "read"
         envelope = {"arguments": deepcopy(arguments)}
+        if not write and type(spec.get("version")) is int:
+            envelope["expected_version"] = spec["version"]
         record = None
         if write:
             if self.unknown and function != "grove.control_revoke":
                 raise ConnectorError("UnknownWrite", "Recover the previous world receipt before another write.", 409)
             envelope["operation_id"] = "grove-local-" + secrets.token_hex(16)
-            record = {"function_id": function, "envelope": envelope, "created_at": time.time()}
-            record.update(self.execution_controller.operation_owner(function, arguments, model_write=model_write))
+            if type((spec or {}).get("version")) is int:
+                envelope["expected_version"] = spec["version"]
+            owner = self.execution_controller.operation_owner(function, arguments, model_write=model_write)
+            await self._check_host_operation_scope(self.unknown,
+                recovery=function in {"grove.control_grant", "grove.control_revoke"})
+            record = self.agent_client.operation_record(function, envelope)
+            record.update(owner, created_at=time.time())
             if function == "grove.content_submit":
                 self.generation["pending_operation_id"] = envelope["operation_id"]
             self.unknown.append(record)
@@ -834,6 +827,11 @@ class GroveSession:
                     remaining = retry_deadline - time.monotonic()
                     if remaining <= 0:
                         raise last_busy
+                if record is not None:
+                    if recovery["attempts"]:
+                        await self._check_host_operation_scope([record], recovery=True)
+                    if model_write:
+                        self._admit_busy_retry(record, model_write=True)
                 recovery["attempts"] += 1
                 try:
                     try:
@@ -898,7 +896,8 @@ class GroveSession:
                         raise
         except ConnectorError as exc:
             # Definite rejection has no candidate commit; 5xx remains unknown.
-            if record is not None and exc.status < 500:
+            if (record is not None and self.agent_client._definite_rejection(exc)
+                    and exc.code not in {"IdentityScopeMismatch", "OriginalOperationInvalid", "ReceiptMismatch"}):
                 if record in self.unknown:
                     self.unknown.remove(record)
                 if model_write:
@@ -928,6 +927,12 @@ class GroveSession:
             payload["busy_recovery"] = {"source": "connector_retry_log_not_world_receipt",
                 "operation_id": envelope["operation_id"], "same_arguments": True, **recovery}
         if record is not None:
+            try:
+                self._check_original_receipt(payload, record)
+            except ConnectorError as exc:
+                if exc.code == "OperationConflict":
+                    self._settle_original_rejection(record)
+                raise
             # Persist publication/claim authority before clearing its recovery
             # journal. A restart between the HTTP reply and caller cannot lose
             # an actual committed publication and replace it with a new one.
@@ -944,10 +949,17 @@ class GroveSession:
                         "function_id": function, "commit_seq": payload.get("commit_seq"), "world_action_committed": True,
                         "receipt_confirmed": False, "current_facts_available": False,
                         "readback_error": exc.code if isinstance(exc, ConnectorError) else type(exc).__name__}) from exc
+        if not write:
+            self._sync_agent_client_catalog()
+            try:
+                self.agent_client.validate_query(function, payload, accept_watermark=True)
+            except AgentClientError as exc:
+                raise self._connector_client_error(exc) from exc
         return payload
 
     async def recover_receipts(self, *, replay: bool = True):
         for record in list(self.unknown):
+            await self._check_host_operation_scope([record], recovery=True)
             operation = record["envelope"]["operation_id"]
             try:
                 result = await self.world("GET", "/v1/receipts/" + quote(operation, safe=""))
@@ -959,21 +971,29 @@ class GroveSession:
                     self.remember()
                     continue
                 # Exact replay, never a new operation ID after a missing receipt.
+                await self._check_host_operation_scope([record], recovery=True)
+                if record["function_id"] != "grove.control_revoke":
+                    # Withdrawal itself retains the user's stop authority;
+                    # every other replay keeps the original host admission.
+                    self._admit_busy_retry(record, model_write=record.get("execution_write") is True)
                 try:
                     result = await self.world("POST", "/v1/functions/" + quote(record["function_id"], safe=".") + "/invoke",
                                               record["envelope"])
                 except ConnectorError as replay_error:
-                    if replay_error.status >= 500:
+                    if not self.agent_client._definite_rejection(replay_error):
                         raise
                     # The original receipt is absent and its exact operation
                     # was definitively rejected. There is no publication to
                     # replace; never ask a model for a recovery blueprint.
-                    if record in self.unknown:
-                        self.unknown.remove(record)
-                    if record.get("execution_write"):
-                        self.execution_controller.receipt(record["function_id"], operation, status="rejected", operation_record=record)
-                    self.remember()
+                    self._settle_original_rejection(record)
                     continue
+            try:
+                self._check_original_receipt(result, record)
+            except ConnectorError as exc:
+                if exc.code != "OperationConflict":
+                    raise
+                self._settle_original_rejection(record)
+                continue
             self.observe_outcome(record["function_id"], result, operation_record=record)
             if record.get("execution_write"):
                 self.execution_controller.receipt(record["function_id"], operation, result, status="confirmed", operation_record=record)
@@ -987,12 +1007,11 @@ class GroveSession:
                 "message": "已核对原操作并释放机会；没有发表内容，也未调用替代模型。"})
             self.remember()
 
-    def _check_original_receipt(self, payload, operation, function):
-        # A successful HTTP response alone cannot settle a different actor's
-        # operation or a different function under the same local journal key.
-        if (not isinstance(payload, dict) or payload.get("operation_id") != operation or
-                payload.get("function_id") != function or payload.get("actor_role_id") != self.role_id):
-            raise ConnectorError("OriginalReceiptMismatch", "原回执身份或操作不匹配；保留未知记录，不能创建替代动作。", 502)
+    def _check_original_receipt(self, payload, record):
+        try:
+            self.agent_client.validate_receipt(payload, record)
+        except AgentClientError as exc:
+            raise self._connector_client_error(exc) from exc
 
     async def recover_revoked_execution_writes(self):
         """One bounded pass over original writes after revoke and native drain.
@@ -1029,6 +1048,7 @@ class GroveSession:
                 return
             function, envelope = record["function_id"], record["envelope"]
             operation = envelope["operation_id"]
+            await self._check_host_operation_scope([record], recovery=True)
             try:
                 result = await self.world("GET", "/v1/receipts/" + quote(operation, safe=""))
             except ConnectorError as exc:
@@ -1037,8 +1057,13 @@ class GroveSession:
                 if not grant_operation:
                     return  # Old incomplete journals remain unknown, not guessed.
                 if grant is None:
+                    grant_record = controller.value("grant_operation_record")
+                    if (not isinstance(grant_record, dict) or grant_record.get("function_id") != "grove.control_grant"
+                            or grant_record.get("envelope", {}).get("operation_id") != grant_operation):
+                        return  # Keep legacy grants without original evidence closed.
+                    await self._check_host_operation_scope([grant_record], recovery=True)
                     grant = await self.world("GET", "/v1/receipts/" + quote(grant_operation, safe=""))
-                    self._check_original_receipt(grant, grant_operation, "grove.control_grant")
+                    self._check_original_receipt(grant, grant_record)
                 granted = grant.get("result", {})
                 token = envelope["arguments"]["delegation"]
                 if (granted.get("goal") != goal or not isinstance(granted.get("delegation"), str) or
@@ -1051,20 +1076,27 @@ class GroveSession:
                 if (not isinstance(control, dict) or control.get("status") != "revoked" or
                         control.get("delegation_active") is not False or not settled() or record not in self.unknown):
                     return
+                await self._check_host_operation_scope([record, grant_record], recovery=True)
+                if not settled() or record not in self.unknown:
+                    return
                 try:
                     result = await self.world("POST", "/v1/functions/" + quote(function, safe=".") + "/invoke", envelope)
                 except ConnectorError as rejected:
-                    if rejected.status >= 500:
+                    if not self.agent_client._definite_rejection(rejected):
                         raise
                     # Revoke and drain precede the missing-receipt read. No
                     # original action can commit later under this old grant.
                     if not settled() or record not in self.unknown:
                         return
-                    controller.receipt(function, operation, status="rejected", operation_record=record)
-                    self.unknown.remove(record)
-                    self.remember()
+                    self._settle_original_rejection(record)
                     continue
-            self._check_original_receipt(result, operation, function)
+            try:
+                self._check_original_receipt(result, record)
+            except ConnectorError as exc:
+                if exc.code != "OperationConflict":
+                    raise
+                self._settle_original_rejection(record)
+                continue
             if not settled() or record not in self.unknown:
                 return
             self.observe_outcome(function, result, operation_record=record)
@@ -1216,6 +1248,9 @@ class GroveSession:
         value = payload.get("result", payload)
         if function in {"grove.control_grant", "grove.control_revoke"}:
             self.execution_controller.observe_control(function, payload, operation_record=operation_record)
+            if (function == "grove.control_grant" and operation_record is not None
+                    and self.execution_controller.value("grant_operation_id") == operation_record["envelope"]["operation_id"]):
+                self.execution_controller.state["grant_operation_record"] = deepcopy(operation_record)
         elif function == "grove.generation_context":
             opportunity = value.get("opportunity")
             if (isinstance(opportunity, dict) and opportunity.get("status") == "claimed" and
@@ -1282,8 +1317,12 @@ class GroveSession:
     async def prepare(self, requested_host: str = ""):
         self.status, self.error = "connecting", None
         self.note("connecting", "正在连接本机 OpenCode")
-        functions = await self.world("GET", "/v1/functions")
-        self.catalog = {s["function_id"]: s for s in functions.get("functions", [])}
+        try:
+            await self.agent_client.discover()
+        except AgentClientError as exc:
+            raise self._connector_client_error(exc) from exc
+        self.catalog = deepcopy(self.agent_client.catalog)
+        self._agent_contract_discovered = True
         if requested_host and requested_host != self.host_url:
             raise ConnectorError("DedicatedHostRequired", "Leave the host address empty to start this game's restricted OpenCode session.")
         if self.process and self.process.returncode is None:
@@ -1422,8 +1461,10 @@ class GroveSession:
         return {"*": "deny", MCP_NAME + "_*": "allow", "invalid": "allow"}
 
     def conversation_tools(self):
+        self._sync_agent_client_catalog()
         names = {"world_bootstrap", NATIVE_HISTORY_TOOL} | {
-            function.replace(".", "_") for function in AGENT_READ_FUNCTIONS}
+            function.replace(".", "_") for function in self.agent_client.function_ids
+            if self.catalog[function].get("access") == "read"}
         # Override the exact host wildcard too; merged agent settings must not
         # retain the executor's global grove tool permission.
         return {"*": False, MCP_NAME + "_*": False,
@@ -2924,19 +2965,61 @@ class GroveSession:
     def agent_observation(self, observation_id):
         return self.observations.get(observation_id)
 
-    def present_agent_result(self, function, payload, *, base_id=None, preflight=False, action_entity_ids=()):
-        return self.observations.present(function, payload, base_id=base_id,
-            preflight=preflight, action_entity_ids=action_entity_ids)
+    def present_agent_result(self, function, payload, *, base_id=None, preflight=False, action_entity_ids=(), raw_query=False):
+        self._sync_agent_client_catalog()
+        try:
+            presenter = self.agent_client.present_query if raw_query else self.agent_client.present
+            delivered = presenter(function, payload, base_id=base_id,
+                preflight=preflight, action_entity_ids=action_entity_ids)
+        except AgentClientError as exc:
+            raise self._connector_client_error(exc) from exc
+        _project_agent_menus(delivered, self._host_agent_schema)
+        return delivered
 
     def bind_agent_versions(self, function, arguments, observation_id):
-        return self.observations.bind(function, arguments, observation_id, self.catalog[function]["input_schema"])
+        self._sync_agent_client_catalog()
+        try:
+            return self.agent_client.bind(function, arguments, observation_id)
+        except AgentClientError as exc:
+            raise self._connector_client_error(exc) from exc
+
+    @staticmethod
+    def _connector_client_error(exc):
+        return ConnectorError(exc.code, exc.message, exc.status, world_details=exc.world_details,
+            retryable=exc.retryable, recovery=exc.recovery, retry_after_seconds=exc.retry_after_seconds)
+
+    def _sync_agent_client_catalog(self):
+        # A raw directory is insufficient to declare the Agent interface.
+        # Before discovery only bootstrap and adapter-local tools are exposed.
+        contract = self.agent_client.contract or {"contract_version": 1, "functions": []}
+        functions = [{"function_id": function, "access": spec.get("access", "write"), **spec}
+                     for function, spec in self.catalog.items()]
+        # Mirroring the same host directory is not evidence that a detected
+        # world code change has been rediscovered. Only real discovery or an
+        # explicit installation may reopen new write binding.
+        self.agent_client.configure_catalog(functions, contract, activate=False)
+
+    def _host_agent_schema(self, function, schema=None):
+        if function not in self.catalog:
+            return schema
+        spec = self.catalog[function]
+        schema = agent_mcp_schema(schema or spec["input_schema"], function=function, access=spec["access"],
+            guard_paths=self.agent_client.function_contract(function).get("guard_paths"))
+        if spec["access"] == "write":
+            schema["properties"]["execution_segment_id"] = {
+                "type": "string", "minLength": 1, "maxLength": 100,
+                "description": "Copy the current execution_task.segment_id exactly; stale requests cannot write."}
+            if "execution_segment_id" not in schema.setdefault("required", []):
+                schema["required"].append("execution_segment_id")
+        return schema
 
     def tools(self):
+        self._sync_agent_client_catalog()
         result = [{"name": "world_bootstrap", "description": "Read authenticated entry facts of this world.",
                    "inputSchema": {"type": "object", "properties": {"base_observation_id": {
                        "type": "string", "minLength": 1, "maxLength": 100,
                        "description": MCP_READ_BASE_DESCRIPTION}},
-                       "additionalProperties": False}}]
+                       "additionalProperties": False}, "outputSchema": observation_output_schema()}]
         result.append({"name": NATIVE_HISTORY_TOOL, "description": NATIVE_HISTORY_DESCRIPTION,
                        "inputSchema": deepcopy(NATIVE_HISTORY_SCHEMA)})
         result.append({"name": "execution_checkpoint",
@@ -2944,20 +3027,19 @@ class GroveSession:
                 "next_intent and this task's confirmed IDs. Read-only completion may use empty evidence after an actual task read. "
                 "Completed is an unverified goal claim. Returns "
                 "fresh execution_readback/observation_id for your answer; changes no world facts or permission.",
-            "inputSchema": deepcopy(EXECUTION_CHECKPOINT_SCHEMA)})
+            "inputSchema": deepcopy(EXECUTION_CHECKPOINT_SCHEMA), "outputSchema": observation_output_schema()})
         # Inventory must be stable when OpenCode connects the MCP server. Write
         # admission is scoped to an explicit execution, never this static list.
-        for function in sorted((AGENT_READ_FUNCTIONS | AGENT_WRITE_FUNCTIONS) & self.catalog.keys()):
+        for tool in self.agent_client.tools():
+            function = self.agent_client.function_for_tool(tool["name"])
             spec = self.catalog[function]
-            if function in AGENT_READ_FUNCTIONS and spec.get("access") != "read":
-                continue
-            schema = agent_mcp_schema(spec["input_schema"], function=function)
-            if function in AGENT_WRITE_FUNCTIONS:
+            schema = self._host_agent_schema(function, tool["inputSchema"])
+            if spec["access"] == "write":
                 schema["properties"]["observation_id"]["description"] = MCP_WRITE_OBSERVATION_DESCRIPTION
             else:
                 schema["properties"]["base_observation_id"]["description"] = MCP_READ_BASE_DESCRIPTION
-            description = MCP_TOOL_DESCRIPTIONS.get(function, spec.get("description", function))
-            if function in AGENT_WRITE_FUNCTIONS:
+            description = tool["description"]
+            if spec["access"] == "write":
                 description += " Guards bind from observation_id; terms_version remains explicit."
                 if function == "grove.interact":
                     if "target_slot" in schema.get("properties", {}):
@@ -2967,7 +3049,7 @@ class GroveSession:
                             "changing amount/source/target/slot. Do not chase autonomous fuel/wetness "
                             "versions. Other actions use their declared slots.")
             result.append({"name": function.replace(".", "_"), "description": description,
-                           "inputSchema": schema})
+                           "inputSchema": schema, "outputSchema": tool["outputSchema"]})
         return result
 
     def require_execution_request(self):
@@ -3003,23 +3085,26 @@ class GroveSession:
             if clean:
                 raise ConnectorError("InvalidArguments", "world_bootstrap only accepts base_observation_id.")
             result = await self.world("GET", "/v1/bootstrap")
+            try:
+                self.agent_client.validate_bootstrap(result)
+            except AgentClientError as exc:
+                raise self._connector_client_error(exc) from exc
             self.world_read = True
             self.note("world_read", "伙伴已实际读取本人获准的世界事实")
             self.remember()
             return self.present_agent_result("world_bootstrap", result, base_id=base_id)
-        mapping = {function.replace(".", "_"): function for function in
-                   (AGENT_READ_FUNCTIONS | AGENT_WRITE_FUNCTIONS) & self.catalog.keys()}
-        function = mapping.get(name)
+        self._sync_agent_client_catalog()
+        function = self.agent_client.function_for_tool(name)
         if not function:
             raise ConnectorError("ToolDenied", "This tool is outside the companion's world scope.", 403)
         if "delegation" in arguments:
             raise ConnectorError("DelegationDenied", "The model cannot choose an execution grant.", 403)
-        write = function in AGENT_WRITE_FUNCTIONS
+        write = self.catalog[function].get("access") == "write"
         if write:
             self.require_execution_request()
             segment_id = arguments.get("execution_segment_id")
             self.execution_controller.admit_write(segment_id)
-            schema = agent_mcp_schema(self.catalog[function]["input_schema"], function=function)
+            schema = self._host_agent_schema(function)
             # Name missing semantic choices by their real schema paths. Do not
             # echo values or convert a read-base into a write observation.
             missing = []
@@ -3086,7 +3171,7 @@ class GroveSession:
                 owner.get("segment_id") == self.execution_controller.value("segment_id")):
             self.execution_controller.update_control(result.get("result", result))
         self.remember()
-        delivered = self.present_agent_result(function, result, base_id=base_id)
+        delivered = self.present_agent_result(function, result, base_id=base_id, raw_query=True)
         _checked_agent_tool_text(delivered)
         self.execution_controller.preparation_read_delivered(function, clean, owner=owner, delivered=delivered)
         return delivered
