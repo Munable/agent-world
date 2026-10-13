@@ -58,7 +58,7 @@ Shared Grove 的玩家通过二维地图、键盘移动、鼠标选择与行动�
 
 ## Shared Grove 正式前端读边界
 
-world38 的地图、物件详情、动作表单和蓝图浏览器消费 `grove.client_viewport / grove.client_inspect / grove.client_definitions` v1；完整字段、发现 schema 与调用方法见 [INTEGRATION 的前端契约](INTEGRATION.md#shared-grove-可替换前端契约-v1)。服务器把获准事实、解析后的外观、当前动作资格、候选和参数护栏投影成正式 DTO。网页不解析存储 `state.program`、组件或能力名，也不根据规则键名裁决“能不能做”。既有 Agent 读取保留原事实和创作责任，DTO 不替换其世界证据。
+world39 的地图、物件详情和动作表单消费 `grove.client_viewport / grove.client_inspect` v1，蓝图浏览器消费 `grove.client_definitions` v2（投影上下文仍为v1）；完整字段、发现 schema 与调用方法见 [INTEGRATION 的前端契约](INTEGRATION.md#shared-grove-可替换前端契约-v1)。服务器把获准事实、解析后的外观、当前动作资格、候选和参数护栏投影成正式 DTO。网页不解析存储 `state.program`、组件或能力名，也不根据规则键名裁决“能不能做”。既有 Agent 读取保留原事实和创作责任，DTO 不替换其世界证据。
 
 renderer 可以改变地图形状、字体、动画、相机、卡片和输入布局。它读取 FactDTO 的类型、标签、单位、可知性和时间范围，读取 appearance 的形状、颜色、字样与实际 badge，按通用 controls 收集参数，再提交服务器描述的结构化意图。未知字段／版本不能自行补默认规则；available 只是当前读取资格，真正行动仍由原 Command 验证并通过原 Operation／Receipt 恢复。`navigation.cells` 是规划观察，每步移动仍服务器裁决。
 
@@ -101,3 +101,5 @@ Shared Grove DTO 使用与 Query 相同读取快照的 `snapshot_seq` 排序，�
 接入界面／宿主状态应分别表达“已安装／适配存在、身份已建立、权限当前可用、持续运行已授权或不可用”，不能把安装成功显示成 Agent 已在线。错误提示优先呈现安全的下一步动作，例如重新授权、等待后重试、恢复 Receipt 或重置 Snapshot，而不是把所有失败压成一句“请求失败”。
 
 Reference Application 的通知、会话和未决事项要忠实表达服务器事实：等待不等于拒绝，通知读过不等于接受，不保证投递的操作不能显示成对方已读。名称与文案帮助人理解事实，但不能制造认证、关系或完成状态。
+
+公开蓝图详情展示固定来源的有限事实及“读取原作”“查看直接改作”入口，沿服务器给的正式 read_request/revisions_request 读取，不推导整棵版本树。原实例不因出现改作而变形；新版本需要真实成型与世界操作。私人草稿属于用户自己的宿主；浏览器未发出的输入仅为本地表单恢复，不进入世界存储。

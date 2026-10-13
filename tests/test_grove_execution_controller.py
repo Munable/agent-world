@@ -519,6 +519,42 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(blocked.exception.code, "InvalidRequestBudget")
         self.assertEqual(self.controller.state, original)
 
+    def test_one_goal_authorizes_complete_bounded_request_budget_without_extending_old_tasks(self):
+        self.controller.start({"goal": "Make a shared changing object"}, entered=True,
+            native_connected=True, worker_busy=False, catalog=CATALOG)
+        self.assertEqual(self.controller.state["max_requests"], 16)
+        saved = self.controller.snapshot()
+        saved.update(status="paused", request_status="idle_confirmed", max_requests=4, requests_used=2)
+        restored = ExecutionController("same-role", max_requests=8, max_world_calls=16, max_seconds=150)
+        restored.restore(saved)
+        self.assertEqual((restored.state["max_requests"], restored.state["requests_used"]), (4, 2))
+        self.start(max_requests=32)
+        original = deepcopy(self.controller.state)
+        for invalid in (33, 0, True):
+            with self.subTest(invalid=invalid), self.assertRaises(ConnectorError):
+                self.start(max_requests=invalid)
+            self.assertEqual(self.controller.state, original)
+
+    def test_technical_shutdown_preserves_a_paused_reason_and_user_reclaim_is_explicit(self):
+        self.start()
+        task = self.controller.state
+        task.update(status="paused", stop_reason="模型请求额度已用完；物件仍存在。")
+        self.controller.begin_reclaim(reason="连接器正在关闭；恢复后核对原请求。")
+        self.controller.record_reclaimed()
+        self.assertEqual(task["stop_reason"], "模型请求额度已用完；物件仍存在。")
+        self.controller.state["request_status"] = "idle_confirmed"
+        self.controller.finish_reclaim()
+        self.controller.begin_reclaim()
+        self.controller.record_reclaimed()
+        self.assertEqual(task["stop_reason"], "你已收回后续行动；已成立结果保留。")
+
+    def test_technical_shutdown_of_running_goal_uses_technical_reason(self):
+        self.start()
+        self.controller.state.update(status="running", stop_reason="")
+        self.controller.begin_reclaim(reason="连接器正在关闭；恢复后核对原请求。")
+        self.controller.record_reclaimed()
+        self.assertEqual(self.controller.state["stop_reason"], "连接器正在关闭；恢复后核对原请求。")
+
     def test_manual_ready_reclaim_does_not_admit_a_new_partner_goal(self):
         self.start()
         original = deepcopy(self.controller.state)
@@ -903,6 +939,169 @@ class ExecutionOwnershipTests(unittest.IsolatedAsyncioTestCase):
         await self.controller.execute_goal(task["goal"])
         self.assertEqual((task["requests_used"], task["preparation_count"], task["actions_count"], task["status"]), (3, 2, 1, "completed"))
         self.assertEqual(task["segments"][1]["outcome"], "context_yield")
+
+    async def test_same_object_changed_by_world_or_other_player_is_real_preparation(self):
+        self.start(max_requests=12)
+        task = self.controller.state
+        async def observe_then_complete():
+            owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": task["segment_id"]}
+            current = {"result": {"entity": {"id": "shared-sign", "version": task["requests_used"],
+                "owner": None, "creative": {"fields": {"count": task["requests_used"]}}}}}
+            self.assertTrue(self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "shared-sign"},
+                owner=owner, delivered=current))
+            if task["requests_used"] < 10:
+                raise self.segment_yield()
+            await self.controller.checkpoint({"task_id": task["task_id"], "execution_segment_id": task["segment_id"],
+                "status": "completed", "summary": "The shared counter continued without my writes", "next_intent": "",
+                "evidence_operation_ids": []}, schema=CHECKPOINT_SCHEMA)
+        self.native_action = observe_then_complete
+        await self.controller.execute_goal(task["goal"])
+        self.assertEqual((task["requests_used"], task["preparation_count"], task["actions_count"], task["status"]),
+            (10, 10, 0, "completed"))
+        self.assertEqual(task["goal_result"]["verification"]["status"], "unverified")
+        self.assertEqual(len(task["preparation_fingerprints"]), 1)
+
+    async def test_clock_handles_and_process_observation_ticks_do_not_manufacture_progress(self):
+        await self.running()
+        task = self.controller.state
+        owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": task["segment_id"]}
+        def observation(tick):
+            return {"observation_id": "opaque-" + str(tick), "snapshot_seq": tick, "result": {
+                "clock": {"sequence": tick}, "observed_at": tick, "entity": {"id": "shared-sign", "version": tick,
+                    "interaction_revision": tick, "creative": {"world_tick": tick, "fields": {"count": 2},
+                        "process": {"observed_tick": tick, "last_tick": tick, "status": "idle"},
+                        "mechanical_observation": {"observed_tick": tick,
+                            "current_inputs": {"energy": 4, "observed_tick": tick},
+                            "saved_outputs": {"values": {"angle": 2}, "observed_tick": tick}}},
+                    "state": {"program": {"event_cursor": tick, "fields": {"count": 2},
+                        "process": {"observed_tick": tick, "last_tick": tick, "status": "idle"}}}}}}
+        self.assertTrue(self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "shared-sign"},
+            owner=owner, delivered=observation(1)))
+        self.assertFalse(self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "shared-sign"},
+            owner=owner, delivered=observation(2)))
+        self.assertEqual(task["preparation_count"], 1)
+
+    async def test_authored_metadata_names_material_and_conditions_remain_real_facts(self):
+        await self.running()
+        task = self.controller.state
+        owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": task["segment_id"]}
+        value = {"entity": {"id": "shared-sign", "state": {"program": {"fields": {
+            "tick": 1, "version": 1, "observed_at": 1, "clock": 1}}},
+            "matter": [{"material": "wood", "quantity_u": 10}], "creative": {"automatic_rules": [
+                {"condition": {"status": "true", "tick": 1}}]}}}
+        def record():
+            return self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "shared-sign"},
+                owner=owner, delivered=deepcopy(value))
+        self.assertTrue(record())
+        for field in ("tick", "version", "observed_at", "clock"):
+            value["entity"]["state"]["program"]["fields"][field] = 2
+            self.assertTrue(record(), field)
+        value["entity"]["matter"][0]["quantity_u"] = 9
+        self.assertTrue(record())
+        value["entity"]["creative"]["automatic_rules"][0]["condition"]["status"] = "false"
+        self.assertTrue(record())
+        self.assertFalse(record())
+
+    async def test_formal_paused_object_clock_changes_stop_after_two_empty_segments(self):
+        self.start(max_requests=8)
+        task = self.controller.state
+        async def read_paused_object():
+            tick = task["requests_used"]
+            owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": task["segment_id"]}
+            self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "paused-counter"}, owner=owner,
+                delivered={"entity": {"id": "paused-counter", "version": tick,
+                    "creative": {"fields": {"count": 30, "paused": True}, "world_tick": tick},
+                    "simulation": {"combustion": {"clock_sequence": tick, "fuel_quantity": 12,
+                        "burning_quantity": 0, "next_consumption_tick": None, "ticks_until_next_consumption": None}},
+                    "presentation": {"badge": {"value": 30, "known": True},
+                        "observation": {"tick": tick, "bindings": [{"field": "count", "value": 30}]}},
+                    "execution_domain": {"state": "settled", "last_applied_tick": tick, "failure": None}}})
+            raise self.segment_yield()
+        self.native_action = read_paused_object
+        await self.controller.execute_goal(task["goal"])
+        self.assertEqual((task["requests_used"], task["preparation_count"], task["no_progress_segments"], task["status"]),
+            (3, 1, 2, "paused"))
+        self.assertIsNone(task["goal_result"])
+        self.assertEqual(task["actions_count"], 0)
+
+    async def test_updated_same_page_record_counts_but_cursor_and_order_do_not(self):
+        await self.running()
+        task = self.controller.state
+        owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": task["segment_id"]}
+        def record(page, cursor):
+            return self.controller.preparation_read_delivered("grove.public_works", {"author_name": "person", "after": cursor},
+                owner=owner, delivered={"result": {"works": page, "next": cursor, "has_more": True}})
+        page = [{"entity_id": "first", "version": 1, "name": "Counter", "x": 1},
+                {"entity_id": "second", "version": 1, "name": "Flag", "x": 2}]
+        self.assertTrue(record(page, "a"))
+        self.assertFalse(record(list(reversed(page)), "b"))
+        page[0].update(version=2, x=3)
+        self.assertTrue(record(page, "c"))
+        self.assertFalse(record(page, "d"))
+        self.assertEqual(task["preparation_count"], 2)
+
+    async def test_local_progress_hashes_are_bounded_without_evicting_old_queries(self):
+        await self.running()
+        task = self.controller.state
+        owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": task["segment_id"]}
+        self.controller.world_call_limit = 1
+        for number in range(40):
+            accepted = self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "object-" + str(number)},
+                owner=owner, delivered={"entity": {"id": "object-" + str(number), "name": "Actual object"}})
+            self.assertEqual(accepted, number < 32)
+        self.assertEqual(len(task["preparation_fingerprints"]), 32)
+        encoded = json.dumps(task["preparation_fingerprints"])
+        self.assertNotIn("Actual object", encoded)
+        self.assertFalse(self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "object-0"},
+            owner=owner, delivered={"entity": {"id": "object-0", "name": "Actual object"}}))
+
+    async def test_read_only_completion_requires_real_task_read_and_fresh_readback(self):
+        await self.running()
+        task = self.controller.state
+        claim = {"task_id": task["task_id"], "execution_segment_id": task["segment_id"],
+                 "status": "completed", "summary": "I observed the counter", "next_intent": "", "evidence_operation_ids": []}
+        for delivered in ({}, {"ok": True}, {"clock": {"sequence": 3}}):
+            owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": task["segment_id"]}
+            self.assertFalse(self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "counter"},
+                owner=owner, delivered=delivered))
+        with self.assertRaises(ConnectorError) as empty:
+            await self.controller.checkpoint(claim, schema=CHECKPOINT_SCHEMA)
+        self.assertEqual(empty.exception.code, "ReadbackRequired")
+        self.assertTrue(self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "counter"},
+            owner=owner, delivered={"entity": {"id": "counter", "creative": {"fields": {"count": 3}}}}))
+        self.controller.ports = replace(self.controller.ports, read=AsyncMock(side_effect=OSError("read unavailable")))
+        with self.assertRaises(ConnectorError) as failed:
+            await self.controller.checkpoint(claim, schema=CHECKPOINT_SCHEMA)
+        self.assertEqual(failed.exception.code, "CheckpointReadbackPending")
+        self.assertIsNone(task["goal_result"])
+        self.assertFalse(task["readback_actual"])
+        self.controller.ports = replace(self.controller.ports, read=self.read)
+        result = await self.controller.checkpoint(claim, schema=CHECKPOINT_SCHEMA)
+        self.assertEqual(result["goal_result"]["actions_count"], 0)
+        self.assertEqual(result["goal_result"]["evidence_operation_ids"], [])
+        self.assertEqual(result["goal_result"]["verification"]["status"], "unverified")
+        self.assertFalse(self.controller.active)
+
+    async def test_read_only_completion_cannot_use_foreign_receipt_or_late_read(self):
+        await self.running()
+        task = self.controller.state
+        owner = {"purpose": "execution", "task_id": task["task_id"], "segment_id": "old-segment"}
+        self.assertFalse(self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "counter"},
+            owner=owner, delivered={"entity": {"id": "counter", "count": 1}}))
+        owner["segment_id"] = task["segment_id"]
+        self.assertTrue(self.controller.preparation_read_delivered("grove.inspect", {"entity_id": "counter"},
+            owner=owner, delivered={"entity": {"id": "counter", "count": 1}}))
+        with self.assertRaises(ConnectorError) as foreign:
+            await self.controller.checkpoint({"task_id": task["task_id"], "execution_segment_id": task["segment_id"],
+                "status": "completed", "summary": "Read complete", "next_intent": "", "evidence_operation_ids": ["another-task"]},
+                schema=CHECKPOINT_SCHEMA)
+        self.assertEqual(foreign.exception.code, "UnconfirmedEvidence")
+        self.controller.begin_reclaim()
+        with self.assertRaises(ConnectorError) as reclaimed:
+            await self.controller.checkpoint({"task_id": task["task_id"], "execution_segment_id": task["segment_id"],
+                "status": "completed", "summary": "Read complete", "next_intent": "", "evidence_operation_ids": []},
+                schema=CHECKPOINT_SCHEMA)
+        self.assertEqual(reclaimed.exception.code, "NoActiveExecution")
 
     async def test_preparation_does_not_retry_ordinary_failure_or_count_repeated_empty_pages(self):
         for failure in (False, True):

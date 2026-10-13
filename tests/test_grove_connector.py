@@ -351,7 +351,6 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.world = AsyncMock()
         self.session.configure_private_context({"intent": "想看看别人留下的器皿能怎么用",
                                                "preferences": ["先解释真实后果", "别替我决定"]})
-        self.session.remember_user_request("这件东西为什么变重了？")
         original = self.session.private_context
         restored = GroveSession(self.manager, {"role_id": "test-user", "access_mode": "control"},
                                 "test-private-bearer", "Test", "provider/model")
@@ -628,8 +627,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         controller.state.update(task_id="old-task", goal="制作计数牌", status="paused",
             request_status="idle_confirmed", requests_used=1, max_requests=4,
             max_actions=8, actions_count=2, resume_allowed=True)
-        self.session.remember_user_request("制作计数牌", purpose="execution", task_id="old-task")
-        self.session.remember_user_request("让它自己运行", creation=True)
+        self.session.private_context.update(recent_user_requests=[{"text": "制作计数牌", "purpose": "execution",
+            "task_id": "old-task", "time": 1}], last_creation_request="让它自己运行")
+        self.session.remember()
         original = {key: controller.value(key) for key in ("task_id", "goal", "status", "request_status",
             "requests_used", "max_requests", "max_actions", "actions_count", "resume_allowed")}
         self.session.current_turn_facts = AsyncMock(return_value={"player": {"id": "test-user"}, "entities": []})
@@ -727,13 +727,20 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.session.invoke.assert_not_awaited()
         self.session.execution_checkpoint.assert_not_awaited()
 
-    def test_explicit_goal_request_keeps_its_real_purpose_and_task_reference(self):
-        self.session.remember_user_request("制作计数牌", purpose="execution", task_id="current-task")
-        request = self.session.private_context["recent_user_requests"][-1]
-        self.assertEqual((request["purpose"], request["task_id"]), ("execution", "current-task"))
+    def test_legacy_requests_preserved_without_replay_or_new_duplicate_memory(self):
+        self.assertEqual(set(self.session.private_context), {"intent", "preferences"})
+        requests = [{"text": "旧目标", "purpose": "execution", "task_id": "old-task", "time": i}
+            for i in range(10)]
+        self.session.private_context.update(recent_user_requests=requests, last_creation_request="旧创作")
+        self.session.remember()
         restored = GroveSession(self.manager, {"role_id": "test-user", "access_mode": "control"},
             "test-private-bearer", "Test", "provider/model")
-        self.assertEqual(restored.private_context["recent_user_requests"][-1], request)
+        self.assertEqual(restored.private_context["recent_user_requests"], requests)
+        self.assertEqual(restored.private_context["last_creation_request"], "旧创作")
+        self.assertEqual(restored.state()["private_context"], {"intent": "", "preferences": []})
+        restored.configure_private_context({"intent": "新偏好"})
+        self.assertEqual(restored.private_context["recent_user_requests"], requests)
+        self.assertEqual(restored.private_context["last_creation_request"], "旧创作")
 
     async def test_question_control_read_does_not_adopt_world_control_into_original_task(self):
         self.session.status = "thinking"
@@ -1153,23 +1160,27 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered["operation_id"], "one-move")
         self.assertEqual(delivered["result"]["changes"], ["走了一格。"])
         self.assertEqual(readback["player"], current["player"])
-        # The small initial map may omit discovery rows. A later action may
-        # supply those genuinely unpresented rows, never repeat known ones.
-        known=self.session.agent_observation(base)["versions"]["entity"]
-        self.assertLessEqual(len(readback["entities"]),8)
-        self.assertTrue(all(row["id"] not in known for row in readback["entities"]))
+        # Automatic feedback does not re-send unrelated discovery. The map
+        # remains the explicit entrance to those current objects.
+        self.assertEqual(readback["entities"], [])
         self.assertEqual(readback["construction"]["material_totals"], {"wood": 12})
-        self.assertEqual(readback["inventory"][0]["matter"][0]["quantity"], 12)
-        self.assertNotIn("action_options", readback["inventory"][0])
+        self.assertEqual(readback["inventory"], [])
+        self.assertEqual(readback["inventory_discovery"][0]["id"], "own-source")
+        self.assertNotIn("version", readback["inventory_discovery"][0])
+        self.assertNotIn("matter", readback["inventory_discovery"][0])
         self.assertEqual(readback["inventory_total"], 7)
-        self.assertEqual(readback["inventory_next"], "own-source")
+        self.assertNotIn("inventory_next", readback)
+        self.assertEqual(readback["inventory_discovery_projection"]["read_request"],
+            {"tool": "map_viewport", "arguments": {}})
         self.assertNotIn("chunks", readback)
         self.assertNotIn("public_content", readback)
         self.assertEqual(delivered["read_requests"], [{"tool": "map_viewport", "arguments": {}}])
         self.assertLess(len(json.dumps(delivered, ensure_ascii=False)), len(json.dumps(expanded, ensure_ascii=False)) // 3)
         versions = self.session.agent_observation(delivered["observation_id"])["versions"]
         self.assertEqual(versions["player"]["test-user"], 2)
-        self.assertEqual(versions["entity"]["own-source"], 5)
+        # This old version came from the explicitly presented base map. The
+        # unexpanded inventory index cannot refresh or manufacture it.
+        self.assertEqual(versions["entity"], self.session.agent_observation(base)["versions"]["entity"])
         self.assertEqual(original, unchanged)
 
     def test_action_receipt_marks_consumed_commit_lots_without_replacing_evidence(self):
@@ -1212,7 +1223,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn({"id": "nearby-19", "version": 2, "discovery_state": {},
             "read_request": {"tool": "grove_inspect", "arguments": {"entity_id": "nearby-19"}}},
             readback["entities"])
-        self.assertEqual(len(readback["entities"]), 9)
+        self.assertEqual(len(readback["entities"]), 1)
         self.assertGreater(readback["projection"]["omitted_changed_or_new_entity_count"], 0)
         self.assertEqual(readback["changes"], scene["changes"])
         versions = self.session.agent_observation(delivered["observation_id"])["versions"]["entity"]
@@ -1349,11 +1360,24 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             "execution_readback": {"selected_inspection": {"entity": visible}}})
         self.assertEqual(supplied["execution_readback"]["selected_inspection"]["entity"]["pour_target_slot"], "surface")
         self.assertEqual(self.session.agent_observation(supplied["observation_id"])["pour_target_slots"], {"selected": "surface"})
+        bound = self.session.observations.bind("grove.interact", {
+            "action": "pour", "target_id": "selected", "amount": 1}, supplied["observation_id"],
+            {"properties": {"expected_target_version": {}}})
+        self.assertEqual((bound["expected_target_version"], bound["target_slot"]), (5, "surface"))
         rows = [{"id": f"visible-{index}", "version": 1, "pour_target_slot": "contained"} for index in range(8)]
         rows.append({"id": "omitted", "version": 7, "pour_target_slot": "surface"})
         delta = self.session.present_agent_result("grove.move", {"result": {}, "execution_readback": {"entities": rows}})
-        self.assertEqual(delta["execution_readback"]["entities"][0]["pour_target_slot"], "contained")
-        self.assertNotIn("omitted", self.session.agent_observation(delta["observation_id"])["pour_target_slots"])
+        self.assertEqual(delta["execution_readback"]["entities"], [])
+        observed = self.session.agent_observation(delta["observation_id"])
+        self.assertEqual(observed["versions"]["entity"], {})
+        self.assertFalse(observed.get("pour_target_slots"))
+        for row in rows:
+            with self.subTest(entity_id=row["id"]):
+                with self.assertRaises(ConnectorError) as denied:
+                    self.session.observations.bind("grove.interact", {
+                        "action": "pour", "target_id": row["id"], "amount": 1}, delta["observation_id"],
+                        {"properties": {"expected_target_version": {}}})
+                self.assertEqual(denied.exception.code, "ObservedActionRequired")
 
     async def test_unknown_publication_stops_new_generation_without_model_call(self):
         self.session.unknown = [{"envelope": {"operation_id": "original-publication"}}]

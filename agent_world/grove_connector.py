@@ -33,7 +33,7 @@ from .grove_connector_errors import ConnectorError
 from .grove_native_history import (NativeToolHistory, TOOL_DESCRIPTION as NATIVE_HISTORY_DESCRIPTION,
     TOOL_NAME as NATIVE_HISTORY_TOOL, TOOL_SCHEMA as NATIVE_HISTORY_SCHEMA,
     REQUEST_CONTRACT_PREFIX)
-from .grove_execution import ExecutionController, ExecutionPorts, MAX_ACTION_TARGETS
+from .grove_execution import ExecutionController, ExecutionPorts, MAX_ACTION_TARGETS, DEFAULT_TASK_REQUESTS
 from .grove_agent_observation import (AgentObservations, AGENT_WRITE_FUNCTIONS,
     companion_projection, blueprint_model_input, agent_tool_schema, agent_mcp_schema, _checked_agent_tool_text,
     _companion_scene_index, _companion_selected_state_summary, execution_private_context, nearby_public_events)
@@ -231,7 +231,8 @@ MCP_TOOL_DESCRIPTIONS = {
     "grove.content_release": "Release the original unused content opportunity; do not replace its ID or "
         "claim that release published content.",
     "grove.definition_publish": "Compile/publish an immutable definition. Read actual diagnostics; "
-        "publication creates no matter, instance, consent or observed automatic effect.",
+        "publication creates no matter, instance, consent or observed automatic effect. "
+        "When adapting a public definition, supply its source_definition_ref; publish your own new version, leaving the original intact.",
     "grove.rule_action": "Use a declared action or locally supported port/fuel/control operation with "
         "inspected parameters and guards. Exact semantics use the relevant catalog topic; conditions "
         "and enabled flags are not effects.",
@@ -377,8 +378,7 @@ class GroveSession:
         self.recent_contributions: list[dict] = []
         self.active_changes: list[dict] = []
         self.active_scene: dict = {}
-        self.private_context = {"intent": "", "preferences": [], "recent_user_requests": [],
-                                "last_creation_request": ""}
+        self.private_context = {"intent": "", "preferences": []}
         self.automatic_started = False
         self.pending: tuple[str, bool, str, str | None, str | None] | None = None
         self.status = "disconnected"
@@ -471,13 +471,13 @@ class GroveSession:
                             ("time" in item and (not isinstance(item["time"], (int, float)) or
                              isinstance(item["time"], bool) or not math.isfinite(item["time"]))) for item in requests)):
                         raise ValueError("invalid private requests")
-                    self.private_context["recent_user_requests"] = [
-                        {key: item[key] for key in ("text", "purpose", "time", "task_id") if key in item}
-                        for item in requests[-8:]]
+                    if "recent_user_requests" in local_context:
+                        self.private_context["recent_user_requests"] = deepcopy(requests)
                     last_creation = local_context.get("last_creation_request", "")
                     if not isinstance(last_creation, str) or len(last_creation) > 4000:
                         raise ValueError("invalid private creation request")
-                    self.private_context["last_creation_request"] = last_creation
+                    if "last_creation_request" in local_context:
+                        self.private_context["last_creation_request"] = last_creation
             except (ValueError, OSError, TypeError, ConnectorError):
                 raise ConnectorError("CorruptMemory", "Local companion memory could not be read; keep it for recovery.", 500)
         if self.execution_controller.normalize_progress() or execution_restore_changed:
@@ -561,19 +561,9 @@ class GroveSession:
         if persist:
             self.remember()
 
-    def remember_user_request(self, text: str, *, creation: bool = False, purpose: str = "conversation", task_id=None):
-        """Retain the user's own words locally; no inferred summary or world write."""
-        if purpose not in {"conversation", "execution", "creation"}:
-            raise ValueError("invalid user request purpose")
-        request = {"text": text[:4000], "purpose": "creation" if creation else purpose, "time": time.time()}
-        if task_id is not None:
-            if request["purpose"] != "execution" or not isinstance(task_id, str) or not 1 <= len(task_id) <= 256:
-                raise ValueError("invalid user request task association")
-            request["task_id"] = task_id
-        self.private_context["recent_user_requests"] = self.private_context["recent_user_requests"][-7:] + [request]
-        if creation:
-            self.private_context["last_creation_request"] = text[:4000]
-        self.remember()
+    def private_preferences(self):
+        """Only explicit user settings; native dialogue stays in the user's host."""
+        return {key: deepcopy(self.private_context[key]) for key in ("intent", "preferences")}
 
     def note(self, kind: str, message: str):
         self.progress.append({"kind": kind, "message": message, "time": time.time()})
@@ -754,8 +744,12 @@ class GroveSession:
                 "extension_allowed": self.execution_controller.can_resume(additional_requests=1)},
             "admission": self.execution_controller.admission(**self.admission_facts()),
             "execution_archive": [self.execution_client_projection(row) for row in self.execution_archive],
-            "private_context": deepcopy(self.private_context),
-            "context": {key: deepcopy(self.private_context[key]) for key in ("intent", "preferences")},
+            "execution_limits": {"default_requests": DEFAULT_TASK_REQUESTS,
+                "max_requests": self.execution_controller.request_limit,
+                "additional_requests": self.execution_controller.request_batch_limit,
+                "max_actions": 64},
+            "private_context": self.private_preferences(),
+            "context": self.private_preferences(),
             "inference_history": self.inference_history[-30:],
             "inference_count_scope": "User-owned main and isolated blueprint session OpenCode HTTP model requests, including failed requests and correction requests; pre-counter main session user requests recovered once from its real message history. Provider-internal retries/steps are not counted here.",
             "usage_scope": "OpenCode-reported completed response counters; interrupted/unreported work may be absent. Cost is not a billing confirmation."}
@@ -1844,17 +1838,12 @@ class GroveSession:
         self.claim_count = self.submit_count = self.world_call_count = 0
         self.text = ""
         self.response_diagnostics = {"completed": False, "validated_final": False}
-        if not initial and not self.active_automatic and not executing:
-            self.remember_user_request(text)
         self.messages.append({"role": "event" if self.active_automatic or executing else "user",
             "text": ("Agent 继续原目标（第 " + str(self.execution_controller.value("requests_used") + 1) + " 段）") if executing else
                     "连接世界伙伴" if initial else display_text or text, "time": time.time()})
         self.note("thinking", "伙伴正在读取世界并回应")
         parts = [{"type": "text", "text": text}]
-        local_context = execution_private_context(self.private_context, self.execution_controller.value("goal")) if executing else {
-            "intent": self.private_context["intent"], "preferences": deepcopy(self.private_context["preferences"]),
-            "projection": {"scope": "conversation_preferences", "current_action_authorization": False,
-                "historical_requests_available": NATIVE_HISTORY_TOOL}}
+        local_context = execution_private_context(self.private_context, self.execution_controller.value("goal")) if executing else self.private_preferences()
         preflight_started = time.monotonic()
         if not initial:
             # Persistent dialogue is memory, not a current observation. This
@@ -2187,6 +2176,8 @@ class GroveSession:
             "模型返回了内部历史索引，没有形成可展示的回答；已确认行动保留，未自动重试。", 502)
 
     def blueprint_input(self, text: str, context: dict, handbook: dict, *, private_context: dict | None = None) -> dict:
+        preferences = self.private_preferences() if private_context is None else {
+            key: deepcopy(private_context.get(key, self.private_context[key])) for key in ("intent", "preferences")}
         compact = companion_projection("grove.generation_context", {"result": context})["result"]
         opportunity = context["opportunity"]
         properties = self.catalog["grove.content_submit"]["input_schema"]["properties"]
@@ -2202,7 +2193,7 @@ class GroveSession:
         facts = context.get("public_facts", {})
         entities = facts.get("nearby_entities", facts.get("entities", []))
         player = context.get("player", {})
-        return {"goal": text, "private_context": deepcopy(self.private_context if private_context is None else private_context),
+        return {"goal": text, "private_context": preferences,
             "private_context_guidance": PRIVATE_CONTEXT_INSTRUCTIONS,
             "kind": opportunity["kind"], "chunk_size": 16,
             "player": {key: player.get(key) for key in ("id", "name", "x", "y")},
@@ -2398,9 +2389,7 @@ class GroveSession:
         self.status, self.error, self.text = "thinking", None, ""
         self.world_call_count = self.claim_count = self.submit_count = 0
         self.response_diagnostics = {"completed": False, "validated_final": False}
-        if not self.active_automatic:
-            self.remember_user_request(text, creation=True)
-        local_context = deepcopy(self.private_context)
+        local_context = self.private_preferences()
         self.generation = {"status": "claiming", "kind": kind, "published": False, "attempts": 0,
                            "entities": [], "process": None, "readback": None, "error": None}
         self.messages.append({"role": "event" if self.active_automatic else "user",
@@ -2791,20 +2780,20 @@ class GroveSession:
     def ensure_not_reclaiming(self):
         self.execution_controller.ensure_admission(disconnecting=self.disconnecting)
 
-    async def cancel(self, *, background: bool = False):
+    async def cancel(self, *, background: bool = False, reason: str | None = None):
         # All callers join the same task. Cancelling an HTTP waiter must not
         # abandon the original receipt journal or reopen task admission.
         if self.reclaim_task and not self.reclaim_task.done():
             task, ready = self.reclaim_task, self.reclaim_ready
         else:
-            self._close_reclaim_admission()
+            self._close_reclaim_admission(reason=reason)
             ready = asyncio.get_running_loop().create_future()
             self.reclaim_ready = ready
             task = self.reclaim_task = asyncio.create_task(self._finish_reclaim(ready, self.worker))
         await asyncio.shield(ready if background else task)
 
-    def _close_reclaim_admission(self):
-        self.execution_controller.begin_reclaim()
+    def _close_reclaim_admission(self, *, reason: str | None = None):
+        self.execution_controller.begin_reclaim(reason=reason)
         # The response stays in its original history/diagnostics, but explicit
         # reclaim withdraws its current-reply qualification across reconnects.
         self.response_diagnostics["current_reply_invalidated"] = True
@@ -2896,7 +2885,7 @@ class GroveSession:
         async with self.disconnect_lock:
             self.disconnecting = True
             try:
-                await self.cancel()
+                await self.cancel(reason="连接关闭，后续行动已暂停；原任务、额度和回执保留。")
                 if self.event_worker:
                     self.event_worker.cancel()
                 await self.stop_host()
@@ -2952,7 +2941,8 @@ class GroveSession:
                        "inputSchema": deepcopy(NATIVE_HISTORY_SCHEMA)})
         result.append({"name": "execution_checkpoint",
             "description": "Close the current segment's writes; reads remain allowed. Record observed progress, "
-                "next_intent and this task's confirmed IDs. Completed is an unverified goal claim. Returns "
+                "next_intent and this task's confirmed IDs. Read-only completion may use empty evidence after an actual task read. "
+                "Completed is an unverified goal claim. Returns "
                 "fresh execution_readback/observation_id for your answer; changes no world facts or permission.",
             "inputSchema": deepcopy(EXECUTION_CHECKPOINT_SCHEMA)})
         # Inventory must be stable when OpenCode connects the MCP server. Write
@@ -3343,8 +3333,6 @@ def create_connector_app(*, world_url="http://127.0.0.1:8890", port=8891,
         session.pending_changes = []
         if session.automatic_worker:
             session.automatic_worker.cancel()
-        session.remember_user_request(command["goal"], purpose="execution",
-            task_id=session.execution_controller.value("task_id"))
         session.messages.append({"role": "user", "text": command["goal"], "time": time.time()})
         session.schedule(command["goal"], mode=command["mode"], context_entity_id=command["context_entity_id"])
         return session.state()

@@ -235,6 +235,12 @@ def record_content_outcomes(ctx, entries):
         raise RuleViolation("one physical step reserves at most164 public outcome records")
     regions, outcomes = {}, []
     for entry in entries:
+        # This repeated display summary is not a permanent motion trace. The
+        # solver state, public events, subscribers and bounded recorders retain
+        # their own facts. Match the summary too: authored actions may use this id.
+        if (entry["action"] == "mechanical" and entry.get("process_id") is None
+                and entry["summary"] == "传动网络按齿数、方向、负载推进。"):
+            continue
         entity = model.get_entity(ctx, entry["entity_id"], required=False)
         if not entity or not entity["state"].get("generation_region"):
             continue

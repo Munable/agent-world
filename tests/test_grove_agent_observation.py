@@ -154,8 +154,44 @@ class AgentObservationsTests(unittest.TestCase):
         self.assertEqual(context["preferences"], original["preferences"])
         self.assertNotIn("last_creation_request", context)
         self.assertNotIn("recent_user_requests", context)
-        self.assertEqual(context["projection"]["omitted_historical_request_count"], 2)
+        self.assertNotIn("omitted_historical_request_count", context["projection"])
         self.assertEqual(stored, original)
+
+    def test_execution_preferences_ignore_unrelated_saved_memory_fields(self):
+        saved = {"intent": "Explore", "preferences": {"answer": "brief"},
+            "old_goal": "Make a machine", "cached_world": {"count": 99},
+            "recent_user_requests": ["private history"]}
+        original = deepcopy(saved)
+        actual = execution_private_context(saved, "Find the public works")
+        self.assertEqual(set(actual), {"intent", "preferences", "current_execution_goal", "projection"})
+        self.assertEqual(actual["intent"], "Explore")
+        actual["preferences"]["answer"] = "changed local copy"
+        self.assertEqual(saved, original)
+
+    def test_default_action_index_shares_only_exact_duplicate_preconditions(self):
+        access = [{"subject": "target", "known": True, "satisfied": False,
+            "actual_distance": 3, "required_max": 2}]
+        other_access = [{"subject": "target", "known": True, "satisfied": True,
+            "actual_distance": 1, "required_max": 2}]
+        source = {"entity": {"id": "target", "version": 77}, "action_options": [
+            {"action": "first", "available": False, "preconditions": deepcopy(access),
+                "condition_observation": {"known": True, "satisfied": True}},
+            {"action": "second", "available": False, "preconditions": deepcopy(access),
+                "condition_observation": {"known": False, "satisfied": None, "reason": "unavailable"}},
+            {"action": "different", "available": True, "preconditions": other_access}]}
+        original = deepcopy(source)
+        actual = companion_projection("grove.inspect", source)
+        self.assertEqual(actual["shared_preconditions"], [access])
+        first, second, different = actual["action_options"]
+        for outline in (first, second):
+            self.assertEqual(outline["preconditions_ref"], "#/shared_preconditions/0")
+            self.assertNotIn("preconditions", outline)
+            self.assertFalse(outline["available"])
+        self.assertEqual(first["condition_observation"], source["action_options"][0]["condition_observation"])
+        self.assertEqual(second["condition_observation"], source["action_options"][1]["condition_observation"])
+        self.assertEqual(different["preconditions"], other_access)
+        self.assertEqual(companion_projection("grove.inspect", actual), actual)
+        self.assertEqual(source, original)
 
     def test_actual_target_state_survives_action_and_checkpoint_projection_and_binds_only_presented_version(self):
         prior = self.observations.present("map.viewport", self.scene(), preflight=True)["observation_id"]

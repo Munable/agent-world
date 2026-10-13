@@ -95,6 +95,24 @@ class PublicAuthorFactsTests(unittest.TestCase):
         filtered = h.read("B", "grove.definition_list", {"author": h.roles["A"]})
         self.assertEqual([row["definition_ref"] for row in filtered["definitions"]], [a_ref])
 
+    def test_revision_source_names_are_current_without_rewriting_publications(self):
+        h = self.h
+        source, _ = self.publish("A")
+        definition = h.read("B", "grove.definition_read", {"definition_ref": source})["definition"]
+        reference = h.call("B", "grove.definition_publish", {
+            "definition": definition, "source_definition_ref": source})["definition_ref"]
+        before = deepcopy(h.world.get_state("w", DEFINITIONS, reference))
+        h.call("A", "grove.public_author_fixture", {"player_id": h.roles["A"], "name": "新名字"})
+        projected = h.read("B", "grove.definition_read", {"definition_ref": reference})["source_definition"]
+        self.assertEqual((projected["author"], projected["author_name"]), (h.roles["A"], "新名字"))
+        self.assertTrue({"author_location", "author_inventory", "author_profile"}.isdisjoint(projected))
+        self.assertEqual(h.world.get_state("w", DEFINITIONS, reference), before)
+        h.call("A", "grove.public_author_fixture", {"player_id": h.roles["A"], "delete": True})
+        projected = h.read("B", "grove.definition_read", {"definition_ref": reference})["source_definition"]
+        self.assertEqual(projected["author"], h.roles["A"])
+        self.assertIsNone(projected["author_name"])
+        self.assertEqual(h.world.get_state("w", DEFINITIONS, reference), before)
+
 
 class PublicAuthorBoundedReadTests(unittest.TestCase):
     def test_name_reads_one_exact_world_player_key_without_role_or_spatial_discovery(self):

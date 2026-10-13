@@ -2,7 +2,8 @@
 from copy import deepcopy
 import unittest
 
-from agent_world.grove_agent_observation import AgentObservations, companion_projection, _companion_inspection_index
+from agent_world.grove_agent_observation import (AgentObservations, companion_projection,
+    _companion_inspection_index, _companion_selected_state_summary)
 from agent_world.grove_connector_errors import ConnectorError
 from agent_world.grove_native_history import TOOL_SCHEMA as HISTORY_SCHEMA
 from jsonschema import Draft202012Validator
@@ -420,12 +421,106 @@ class GroveProjectionBudgetTests(unittest.TestCase):
         current = {"id": "vessel", "version": 5, "matter": [{"material": "wood", "quantity": 7}]}
         scene["inventory"].append(current)
         scene["selected_inspection"] = {"entity": {"id": "other-selection", "version": 1}}
-        delivered = AgentObservations("person").present("grove.interact", {"result": {"entity": {
+        observations = AgentObservations("person")
+        delivered = observations.present("grove.interact", {"result": {"entity": {
             "id": "vessel", "version": 4, "matter": [{"material": "wood", "quantity": 10}]}},
             "execution_readback": scene}, action_entity_ids=["vessel"])
         reference = delivered["result"]["entity"]["snapshot_projection"]["superseded_by_readback"]["entity_ref"]
-        self.assertEqual(reference, "#/execution_readback/inventory/12")
-        self.assertEqual(delivered["execution_readback"]["inventory"][12]["matter"][0]["quantity"], 7)
+        self.assertEqual(reference, "#/execution_readback/inventory/0")
+        actual = delivered
+        for part in reference.removeprefix("#/").split("/"):
+            actual = actual[int(part)] if isinstance(actual, list) else actual[part]
+        self.assertEqual((actual["id"], actual["version"]), ("vessel", 5))
+        self.assertEqual(actual["matter"], current["matter"])
+        self.assertEqual(actual["matter"][0]["quantity"], 7)
+        self.assertEqual(actual["read_request"], {"tool": "grove_inspect", "arguments": {"entity_id": "vessel"}})
+        self.assertEqual(len(delivered["execution_readback"]["inventory"]), 1)
+        self.assertEqual(delivered["result"]["entity"]["version"], 4)
+        self.assertEqual(delivered["result"]["entity"]["matter"][0]["quantity"], 10)
+        self.assertEqual(observations.get(delivered["observation_id"])["versions"]["entity"]["vessel"], 5)
+        self.assertEqual(delivered["execution_readback"]["inventory_discovery_projection"]["returned_page_count"], 13)
+
+    def test_write_and_checkpoint_keep_related_state_without_repeating_inventory(self):
+        current = {"id": "made-object", "version": 6, "name": "Actual public work",
+            "components": {"absorbent": {"capacity": 9}},
+            "matter": [{"id": "actual-lot", "material": "cloth", "quantity": 7, "slot": "body"}],
+            "creative": {"definition_ref": "actual-definition", "type_id": "body",
+                "fields": {"enabled": False, "signal": 3}, "automatic_rules": [
+                    {"rule_id": "constant", "condition": {"expression": False, "known": True, "satisfied": False}},
+                    {"rule_id": "uncertain", "condition": {"expression": {"field": "signal"},
+                        "known": False, "satisfied": None, "facts": [{"available": False}],
+                        "checks": [{"known": False}], "reason": "Unavailable"}}]}}
+        source = self.scene()
+        source["inventory"].append(deepcopy(current))
+        source["action_targets"] = [{"entity_id": current["id"], "observed_at": 15,
+            "inspection": {"entity": deepcopy(current)}}]
+        original = deepcopy(source)
+        for function in ("grove.interact", "execution_checkpoint"):
+            with self.subTest(function=function):
+                observations = AgentObservations("person")
+                delivered = observations.present(function, {"operation_id": "actual-operation", "commit_seq": 4,
+                    "confirmed_outcome": {"action_result": {"costs": [{"material": "cloth", "quantity_u": 2}]}},
+                    "result": {"entity": {"id": current["id"], "version": 5}},
+                    "execution_readback": deepcopy(source)}, action_entity_ids=[current["id"]])
+                facts = delivered["execution_readback"]
+                self.assertEqual(facts["inventory"], [])
+                self.assertNotIn("inventory_next", facts)
+                self.assertEqual(facts["inventory_total"], 15)
+                self.assertLessEqual(len(facts["inventory_discovery"]), 8)
+                target = facts["action_targets"][0]["inspection"]["entity"]
+                self.assertEqual(target["matter"], current["matter"])
+                self.assertEqual(target["components"], current["components"])
+                self.assertEqual(target["creative"]["fields"], current["creative"]["fields"])
+                self.assertEqual(target["creative"]["automatic_rules"], current["creative"]["automatic_rules"])
+                self.assertEqual(delivered["confirmed_outcome"]["action_result"]["costs"][0]["quantity_u"], 2)
+                bundle = observations.get(delivered["observation_id"])
+                self.assertEqual(bundle["versions"]["entity"], {current["id"]: 6})
+                for entry in facts["inventory_discovery"]:
+                    self.assertNotIn("version", entry)
+                    self.assertNotIn("matter", entry)
+                    self.assertNotIn("creative", entry)
+                    self.assertNotIn("state", entry)
+                    self.assertNotIn(entry["id"], bundle["versions"]["entity"])
+                with self.assertRaises(ConnectorError) as rejected:
+                    observations.bind("grove.interact", {"action": "drop", "target_id": "own-0"},
+                        delivered["observation_id"], {"properties": {"expected_target_version": {}}})
+                self.assertEqual(rejected.exception.code, "ObservedVersionRequired")
+        self.assertEqual(source, original)
+
+    def test_later_unavailable_target_does_not_bind_earlier_inventory_version(self):
+        source = self.scene()
+        source["action_targets"] = [{"entity_id": "own-0", "observed_at": 15,
+            "unavailable": {"code": "ResourceNotFound"}}]
+        delivered = AgentObservations("person").present("grove.interact", {"result": {},
+            "execution_readback": source}, action_entity_ids=["own-0"])
+        facts = delivered["execution_readback"]
+        self.assertEqual(facts["inventory"], [])
+        self.assertEqual(facts["action_targets"], source["action_targets"])
+        self.assertNotIn("own-0", {row["id"] for row in facts["inventory_discovery"]})
+
+    def test_unprovided_inventory_is_not_projected_as_an_empty_page(self):
+        delivered = AgentObservations("person").present("execution_checkpoint", {"execution_readback": {
+            "player": {"id": "person", "version": 2}, "clock": {"sequence": 100}}})
+        for field in ("inventory", "inventory_total", "inventory_discovery", "inventory_discovery_projection"):
+            self.assertNotIn(field, delivered["execution_readback"])
+
+    def test_automatic_related_summary_keeps_current_conditions_and_material_gaps(self):
+        inspection = self.literal_conditions()
+        entity = inspection["entity"]
+        entity["components"] = {"absorbent": {"capacity": 4}}
+        entity["matter"] = [{"id": "actual-material", "material": "cloth", "quantity": 7}]
+        entity["creative"]["reaction_inputs"] = {"available_quantities": {"water": 0}, "unit": "logical_matter"}
+        entity["creative"]["reaction_observations"] = [{"rule_id": "reaction",
+            "inputs": [{"symbol": "water", "available": 0, "missing_for_one_extent": 2}],
+            "blockers": ["insufficient_inputs"]}]
+        before = deepcopy(inspection)
+        summary = _companion_selected_state_summary(inspection, compact=True)
+        self.assertEqual(summary["entity"]["components"], entity["components"])
+        self.assertEqual(summary["entity"]["matter"], entity["matter"])
+        for field in ("reaction_inputs", "reaction_observations", "fields"):
+            self.assertEqual(summary["entity"]["creative"][field], entity["creative"][field])
+        self.assert_literal_conditions(summary, inspection)
+        self.assertEqual(inspection, before)
 
     def test_progress_is_historical_operation_index_without_changing_saved_evidence(self):
         evidence = [{"function": "grove.interact", "operation_id": "old-op", "status": "confirmed",

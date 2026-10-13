@@ -406,6 +406,7 @@ def _compile_definition(ctx, raw):
 def definition_validate(ctx, args):
     """Check without publishing, generating, reserving or altering old definitions."""
     try:
+        publication.source_descriptor(ctx, args.get("source_definition_ref"))
         definition = _compile_definition(ctx, args["definition"])
         if sm.encoded_size(definition) > 24576:
             raise ValueError("program: 规则包超过24KiB，请拆成更小的实际能力包。")
@@ -419,6 +420,8 @@ def definition_validate(ctx, args):
 
 def definition_publish(ctx, args):
     check_delegation(ctx, args)
+    source_ref = args.get("source_definition_ref")
+    source = publication.source_descriptor(ctx, source_ref)
     try:
         definition = _compile_definition(ctx, args["definition"])
     except ValueError as exc:
@@ -427,7 +430,10 @@ def definition_publish(ctx, args):
     if len(encoded) > 24576:
         raise RuleViolation("规则包超过24KiB，请拆成更小的实际能力包。")
     digest = hashlib.sha256(encoded).hexdigest()
-    ref = "program_" + hashlib.sha256((ctx.actor_role_id + ":" + digest).encode()).hexdigest()
+    identity = ctx.actor_role_id + ":" + digest
+    if source_ref is not None:
+        identity += ":source:" + source_ref
+    ref = "program_" + hashlib.sha256(identity.encode()).hexdigest()
     semantics = program_material_semantics(definition, ref, materials=REGISTRY.materials)
     version_key = hashlib.sha256((ctx.actor_role_id + ":" + definition["key"] + ":" + str(definition["version"])).encode()).hexdigest()
     previous = ctx.get_state(VERSIONS, version_key)
@@ -435,12 +441,16 @@ def definition_publish(ctx, args):
         if previous["definition_ref"] != ref:
             raise StateConflict("已发布的同作者／名称／版本不能覆盖；请递增version。旧物件仍引用原版本。")
         return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": True,
+                                "source_definition_ref": source_ref, "source_definition": source,
                                 "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition),
                                 "diagnostics": program_diagnostics(definition)})
-    publication.publish(ctx, ref, version_key, {"definition": definition, "author": ctx.actor_role_id, "hash": digest,
-                                               "published_tick": step(ctx), "published_at": ctx.now,
-                                               "execution_semantics": EXECUTION_SEMANTICS})
+    record = {"definition": definition, "author": ctx.actor_role_id, "hash": digest,
+              "published_tick": step(ctx), "published_at": ctx.now, "execution_semantics": EXECUTION_SEMANTICS}
+    if source_ref is not None:
+        record["source_definition_ref"] = source_ref
+    publication.publish(ctx, ref, version_key, record)
     return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": False,
+                            "source_definition_ref": source_ref, "source_definition": source,
                             "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition),
                             "diagnostics": program_diagnostics(definition),
                             "instantiate": "cost_u: grove.fabrication_options then grove.fabricate with actual lot sources; cost: grove.content_submit with existing opportunity and builtin piece costs"})
@@ -452,6 +462,9 @@ def definition_read(ctx, args):
     if not value:
         raise RuleViolation("规则版本不存在；先发布并使用返回的definition_ref。")
     return FunctionOutcome({"definition_ref": args["definition_ref"], **value,
+        "source_definition_ref": value.get("source_definition_ref"),
+        "source_definition": publication.source_descriptor(ctx, value.get("source_definition_ref")),
+        "revisions_request": {"function_id": "grove.definition_list", "arguments": {"source_definition_ref": args["definition_ref"]}},
         "author_name": m.public_player_name(ctx, value.get("author")),
         "author_name_meaning": "Current public name in this world, not the name at publication. Null means no current known name; "
             "names may coincide, so author remains the identity. The author is not necessarily an object's operator or owner.",
@@ -1693,7 +1706,7 @@ def action_options(ctx, player, entity):
 def _catalog_topic(catalog, topic):
     if topic not in CATALOG_TOPICS:
         raise RuleViolation("未知规则目录专题；使用overview或目录返回的topics。")
-    catalog["validation"] = {"function_id": "grove.definition_validate", "input": "{definition:proposed_program}",
+    catalog["validation"] = {"function_id": "grove.definition_validate", "input": "{definition:proposed_program,source_definition_ref?:real_original_ref}",
         "meaning": "Read-only syntax/type validation and bounded local range/zero-divisor advice before publication; "
                    "valid is not a proof of perpetual safety. Publication/reading also returns derived diagnostics."}
     metadata = {"topic": topic, "topics": [{"topic": name,
@@ -1757,7 +1770,9 @@ def rule_catalog(ctx, args):
                               if field != "supports"}}
         for name in PROGRAM_COMPONENTS}
     catalog = {"language_version": 5, "execution_semantics": EXECUTION_SEMANTICS, "presentation": presentation_catalog(), "definition_directory": {"function_id": "grove.definition_list",
-        "read_function_id": "grove.definition_read", "seek_paged": True}, "world_tick": step(ctx),
+        "read_function_id": "grove.definition_read", "seek_paged": True,
+        "revision_filter": "{source_definition_ref:original_published_ref}; direct revisions, all authors, separate from author/key filters",
+        "revision_publication": "definition_publish accepts optional source_definition_ref outside definition; the source must already exist. Publish your own modified complete definition. Source attribution creates no approval, material, instance or migration. Old definitions/instances remain unchanged; preserve existing material identities through material_imports, not copied local declarations."}, "world_tick": step(ctx),
         "builtin_materials": {key: {"name": value.name, "load_per_u": value.load_per_u,
             "combustible": value.combustible, "liquid": value.liquid} for key, value in REGISTRY.materials.items()},
         "phase_policy": declaration_semantics({"types": {}})["phase_policy"],
@@ -1774,7 +1789,7 @@ def rule_catalog(ctx, args):
             "drive": "drive controls only this instance's existing source. A changed request applies from the following logical step; the current mechanical solve uses the step-start control and fuel snapshot. Neither drive nor start writes energy, speed or position. when=false is not an implicit stop request.",
             "readback": "Inspect current automatic conditions, bindings and actual fields/matter/mechanical state. A satisfied snapshot condition is not execution evidence; a saved control request records a past change, not repeated activity. Read actual state after the request's applies_from_step. process.steps counts reaction steps only, not all rule execution or goal progress. Another person may change public inputs; re-read the same instance and continue from its real shared consequences."},
         "limits": {"publication_bytes": 24576, "new_publications_per_author_step": publication.MAX_PUBLISH_PER_STEP,
-                   "publication_storage": "no small lifetime package/byte cap; metered JSON payloads and actual host storage remain separate",
+                   "publication_storage": "Published history is separate from active-rule capacity; the host meters per-author definition count and stored JSON bytes, including revision indexes.",
                    "active_instances": MAX_INSTANCES, "active_scope": "interaction_domain",
                    "stored_instances": "No world-global32 active or lifetime creation cap. Each connected interaction domain and each actual publication keep their finite execution/write budgets",
                    "types_per_package": 8, "materials_per_package": 4, "rules_per_type": 8,
@@ -1844,10 +1859,10 @@ def specs():
     return (
         *publication.specs(),
         *fabrication.specs(),
-        FunctionSpec("grove.rule_catalog", rule_catalog, CATALOG_ARGS, version=7, access="read", description="Read creation syntax and discover capability topics. Default overview is compact; select program/materials/components/mechanical/events/contract/physical/ports/presentation, or explicit all for the complete catalog. Omitted topics remain supported. No full-history index."),
-        FunctionSpec("grove.definition_validate", definition_validate, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}}}, access="read", authorize=_member, description="Validate a proposed definition without publishing or creating matter. Uses the actual compiler and bounded local range/division diagnostics; valid is syntax/type validity, not perpetual safety or execution permission."),
-        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=5, access="read", description="Read one immutable definition and its author/hash, canonical material bindings and derived bounded risk diagnostics; existing instances pin the unchanged reference."),
-        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "delegation": DELEGATION}}, version=8, authorize=_member, description="Compile and publish immutable definitions; returns advisory bounded diagnostics without changing the canonical definition or publication permission. Read definition_validate first when creating. Publication creates no matter, permission or consent. Discover precise syntax with rule_catalog topics."),
+        FunctionSpec("grove.rule_catalog", rule_catalog, CATALOG_ARGS, version=8, access="read", description="Read creation syntax, shared revision publication/discovery and capability topics. Default overview is compact; select program/materials/components/mechanical/events/contract/physical/ports/presentation, or explicit all for the complete catalog. Omitted topics remain supported. No full-history index."),
+        FunctionSpec("grove.definition_validate", definition_validate, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "source_definition_ref": REF}}, version=2, access="read", authorize=_member, description="Validate a proposed definition and optional real source_definition_ref without saving drafts, publishing or creating matter. Uses the actual compiler and bounded local range/division diagnostics; valid is syntax/type validity, not perpetual safety or execution permission."),
+        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=6, access="read", description="Read one immutable definition and its author/hash, optional source definition with formal read request, direct revisions request, canonical material bindings and bounded diagnostics; existing instances pin the unchanged reference."),
+        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "source_definition_ref": REF, "delegation": DELEGATION}}, version=9, authorize=_member, description="Compile and publish your own immutable definition, optionally derived from one real published source_definition_ref supplied outside definition. Source participates in publication identity; existing instances/definitions are never upgraded. No drafts, matter, permission or consent are created. Read definition_validate when helpful and discover precise syntax with rule_catalog topics."),
         FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=10, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Declared buttons and fuel/start/stop keep the chosen parameters and presented interaction guard: autonomous fields and mechanical outputs need not be chased each second; current real conditions are rechecked on submission. Other participants' edits, material/ownership/structure changes invalidate that guard. Fuel sources, bindings and contracts retain exact observed versions. Bindings do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, version=2, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; stable grant_id identifies this authorization, max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, version=2, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results, receipts and original grant_id remain."),

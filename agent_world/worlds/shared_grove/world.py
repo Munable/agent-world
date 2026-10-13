@@ -20,7 +20,7 @@ from . import building
 from . import domains, scheduling
 from .definitions import COMBUSTION_CADENCE_TICKS, COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for, material_import
 
-WORLD_VERSION = 38
+WORLD_VERSION = 39
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 ID = {"type": "string", "minLength": 1, "maxLength": 128}

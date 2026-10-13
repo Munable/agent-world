@@ -54,7 +54,8 @@ export class GroveClient extends CommonsClient {
       const error=new Error('读取期间身份已改变；请重新读取。');error.cancelled=true;throw error;
     }
     if(context?.projection_version!==1){this.projectionBlocked=true;throw new Error('客户端接口版本尚未支持；重新发现接口后再操作。');}
-    if(envelope.ok!==true||envelope.read_only!==true||envelope.function_id!==name||envelope.function_version!==1||
+    const functionVersion=name==='grove.client_definitions'?2:1;
+    if(envelope.ok!==true||envelope.read_only!==true||envelope.function_id!==name||envelope.function_version!==functionVersion||
        context.world_id!=='shared-grove'||!Number.isInteger(context.world_version)||context.world_version<1||
        context.world_instance!==identity.universe||context.viewer_role_id!==identity.roleId||
        !Number.isSafeInteger(envelope.snapshot_seq)||envelope.snapshot_seq<0||context.snapshot_seq!==envelope.snapshot_seq){

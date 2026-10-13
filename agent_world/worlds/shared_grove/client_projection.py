@@ -179,23 +179,29 @@ def definitions_output_schema():
     nullable_text = {"type": ["string", "null"]}
     summary = {"type": "object", "properties": {"definition_ref": _TEXT, "author": _TEXT, "author_name": nullable_text,
         "key": _TEXT, "name": _TEXT, "version": {"type": "integer"}, "hash": _TEXT, "published_tick": {"type": "integer"},
-        "type_ids": {"type": "array", "items": _TEXT}, "read_request": _REQUEST},
-        "required": ["definition_ref", "author", "author_name", "key", "name", "version", "hash", "published_tick", "type_ids", "read_request"], "additionalProperties": False}
+        "type_ids": {"type": "array", "items": _TEXT}, "read_request": _REQUEST,
+        "source_definition_ref": nullable_text},
+        "required": ["definition_ref", "author", "author_name", "key", "name", "version", "hash", "published_tick", "type_ids", "read_request", "source_definition_ref"], "additionalProperties": False}
     storage = {"type": "object", "properties": {"sequence": {"type": "integer"}, "definitions_count": {"type": "integer"}, "payload_bytes": {"type": "integer"}}, "additionalProperties": False}
     author_storage = {"type": ["object", "null"], "properties": {"definitions_count": {"type": "integer"}, "payload_bytes": {"type": "integer"}, "complete": {"type": "boolean"}}, "additionalProperties": False}
     budget = {"type": "object", "properties": {"payload_bytes": {"type": "integer"}, "definitions": {"type": "integer"},
         **{key: _TEXT for key in ("scope", "charge", "excludes", "on_exhaustion")}},
         "required": ["payload_bytes", "definitions", "scope", "charge", "excludes", "on_exhaustion"], "additionalProperties": False}
     list_shape = shape("list", {"definitions": {"type": "array", "maxItems": 16, "items": summary}, "has_more": {"type": "boolean"},
-        "next_cursor": nullable_text, "filters": {"type": "object", "properties": {"author": _TEXT, "key": _TEXT}, "additionalProperties": False},
+        "next_cursor": nullable_text, "filters": {"type": "object", "properties": {"author": _TEXT, "key": _TEXT, "source_definition_ref": _TEXT}, "additionalProperties": False},
         "order": {"const": "publication_sequence_desc"}, "complete": {"type": "boolean"}, "last_page": {"type": "boolean"},
         "scope": {"const": "one_query_page"}, "filter_scope": {"enum": ["selected_page_only", "all_definitions"]},
         "author_name_meaning": _TEXT, "storage": storage, "storage_scope": {"const": "whole_world_publications"},
         "storage_meaning": _TEXT, "author_storage": author_storage, "publication_budget": budget})
     type_choice = {"type": "object", "properties": {"id": _TEXT, "label": _TEXT, "can_fabricate": {"type": "boolean"},
         "creation_request": {"oneOf": [{"type": "null"}, _REQUEST]}}, "required": ["id", "label", "can_fabricate", "creation_request"], "additionalProperties": False}
+    source_definition = {"type": "object", "properties": {"definition_ref": _TEXT, "author": _TEXT,
+        "author_name": nullable_text, "key": _TEXT, "name": _TEXT, "version": {"type": "integer"},
+        "hash": _TEXT, "read_request": _REQUEST},
+        "required": ["definition_ref", "author", "author_name", "key", "name", "version", "hash", "read_request"], "additionalProperties": False}
     detail_shape = shape("detail", {"definition_ref": _TEXT, "name": _TEXT, "author": _TEXT, "author_name": nullable_text,
         "version": {"type": "integer"}, "types": {"type": "array", "items": type_choice}, "installable": {"type": "boolean"},
+        "source_definition": {"oneOf": [{"type": "null"}, source_definition]}, "revisions_request": _REQUEST,
         "fact_sections": {"type": "array", "items": {"$ref": "#/$defs/section"}}, "projection": _OBJECT})
     lot = {"type": "object", "properties": {"id": _TEXT, "material": _TEXT, "quantity": {"type": "integer"}, "slot": _TEXT,
         "material_import": {"type": "object", "properties": {"definition_ref": _TEXT, "symbol": _TEXT}, "required": ["definition_ref", "symbol"], "additionalProperties": False}},
@@ -610,7 +616,7 @@ def client_definitions(ctx, args):
     from . import creative, publication, fabrication
     mode = args.get("mode", "list")
     if mode == "list":
-        value = publication.definition_list(ctx, {key: value for key, value in args.items() if key in {"author", "key", "limit", "after"}}).result
+        value = publication.definition_list(ctx, {key: value for key, value in args.items() if key in {"author", "key", "source_definition_ref", "limit", "after"}}).result
         definitions = []
         for row in value["definitions"]:
             if args.get("installable_only"):
@@ -635,15 +641,28 @@ def client_definitions(ctx, args):
         return FunctionOutcome({**value, "context": context(ctx), "mode": mode})
     value = creative.definition_read(ctx, {"definition_ref": args["definition_ref"]}).result
     pack = value["definition"]
+    source = deepcopy(value["source_definition"])
+    if source:
+        source["read_request"] = {"function_id": "grove.client_definitions", "arguments": {"mode": "detail", "definition_ref": source["definition_ref"]}}
+    sections = [{"id": "definition", "label": "所选不可变版本的声明说明", "rows": fact_tree(pack, path="definition", temporal="published", source="author")},
+                {"id": "diagnostics", "label": "服务器诊断", "rows": fact_tree(value.get("diagnostics", {}))}]
+    if source:
+        sections.insert(0, {"id": "source_definition", "label": "改版承接的原始规则", "rows": [
+            fact("source_definition_ref", source["definition_ref"], label="源规则固定版本", temporal="published", source="publication"),
+            fact("source_author", source["author"], label="源作者身份", temporal="published", source="publication"),
+            fact("source_author_name", source["author_name"], label="源作者当前名字", source="world"),
+            fact("source_name", source["name"], label="源规则名称", temporal="published", source="publication"),
+            fact("source_version", source["version"], label="源规则版本", temporal="published", source="publication")]})
     types = []
     for type_id, spec in pack.get("types", {}).items():
         types.append({"id": type_id, "label": spec.get("name", spec.get("label", type_id)), "can_fabricate": bool(spec.get("cost_u")),
             "creation_request": {"function_id": "grove.client_definitions", "arguments": {"mode": "fabrication", "definition_ref": args["definition_ref"], "type_id": type_id}} if spec.get("cost_u") else None})
     return FunctionOutcome({"context": context(ctx), "mode": "detail", "definition_ref": args["definition_ref"], "name": pack.get("name", "规则做法"),
         "author": value["author"], "author_name": value.get("author_name"), "version": pack["version"], "types": types,
+        "source_definition": source,
+        "revisions_request": {"function_id": "grove.client_definitions", "arguments": {"mode": "list", "source_definition_ref": args["definition_ref"]}},
         "installable": any(rule.get("activation") == "installed" for rule in pack.get("contact_reactions", [])),
-        "fact_sections": [{"id": "definition", "label": "所选不可变版本的声明说明", "rows": fact_tree(pack, path="definition", temporal="published", source="author")},
-                          {"id": "diagnostics", "label": "服务器诊断", "rows": fact_tree(value.get("diagnostics", {}))}],
+        "fact_sections": sections,
         "projection": {"scope": "immutable_definition_display", "fact_max_depth": 6, "fact_max_children": 40,
             "meaning": "Typed published declaration display, not current instance facts or executable client rules; omitted rows are explicit."}})
 
@@ -657,7 +676,8 @@ def specs():
     definitions_schema = {"type": "object", "additionalProperties": False, "properties": {
         "mode": {"enum": ["list", "detail", "fabrication"]}, "definition_ref": world.ID, "type_id": {"type": "string", "minLength": 1, "maxLength": 80},
         "author": {"type": "string", "minLength": 1, "maxLength": 128}, "key": {"type": "string", "minLength": 1, "maxLength": 80},
+        "source_definition_ref": world.ID,
         "limit": {"type": "integer", "minimum": 1, "maximum": 16}, "after": {"type": "string", "minLength": 1, "maxLength": 4096}, "installable_only": {"type": "boolean"}}}
     return (FunctionSpec("grove.client_viewport", client_viewport, world.VIEW_ARGS, access="read", version=1, output_schema=output_schema("viewport"), authorize=world.member, description="Version1 authorized client map DTO: appearance, typed facts and navigation. No storage entity/program shapes; inspect separately before acting."),
             FunctionSpec("grove.client_inspect", client_inspect, inspect_schema, access="read", version=1, output_schema=output_schema("inspect"), authorize=world.member, description="Version1 authorized client entity or tile inspection: typed facts and finite controls with fixed intent guards. Submit through existing authoritative actions and original Operation/Receipt."),
-            FunctionSpec("grove.client_definitions", client_definitions, definitions_schema, access="read", version=1, output_schema=output_schema("definitions"), authorize=world.member, description="Version1 paged immutable blueprint choices, server installation eligibility and actual fabrication source menus. Publication creates no material or operation permission."))
+            FunctionSpec("grove.client_definitions", client_definitions, definitions_schema, access="read", version=2, output_schema=output_schema("definitions"), authorize=world.member, description="Paged immutable blueprint choices and direct revisions via source_definition_ref. Details expose finite source metadata and formal source/revisions read requests, separate from rule AST. Server installation eligibility and actual fabrication menus; publication creates no material or operation permission."))

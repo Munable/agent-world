@@ -28,15 +28,43 @@ MAX_ACTION_TARGETS = 4
 MAX_ACTION_SUMMARY_BYTES = 8 * 1024
 RECEIPT_HISTORY_SCOPE = "formal_agent_writes"
 MAX_TASK_REQUESTS = 32
+DEFAULT_TASK_REQUESTS = 16
 _PAGED_PREPARATION_READS = {
     "grove.definition_list": {"definitions": "definition_ref"},
     "grove.public_works": {"works": "entity_id", "author_matches": "author"},
     "grove.content_history": {"contributions": "id", "outcome_refs": "id"},
 }
+_PREPARATION_METADATA = {
+    "response": {"observation_id", "base_observation_id", "snapshot_seq", "commit_seq", "observed_at",
+                 "ok", "world_id", "function_id", "function_version", "clock", "world_tick", "cursor",
+                 "next_cursor", "next", "after", "offset", "has_more", "execution_control", "execution_task",
+                 "task_action_summary"},
+    "entity": {"version", "interaction_revision", "updated_at"},
+    "creative": {"world_tick"}, "program": {"event_cursor"}, "process": {"last_tick", "observed_tick"},
+    "mechanical_observation": {"observed_tick"}, "mechanical_values": {"observed_tick"},
+    "automatic_field_change": {"tick"},
+    "combustion": {"clock_sequence", "next_consumption_tick", "ticks_until_next_consumption"},
+    "presentation_observation": {"tick"},
+    "execution_domain": {"last_applied_tick", "pending_target_tick"},
+}
+_PREPARATION_CHILDREN = {
+    "response": {"result": "response", "viewport": "response", "selected_inspection": "response",
+        "inspection": "response", "entity": "entity", "player": "entity", "entities": "entity",
+        "players": "entity", "nearby_entities": "entity", "nearby_players": "entity", "inventory": "entity",
+        "contents": "entity", "resource_nodes": "entity", "water_sources": "entity"},
+    "entity": {"creative": "creative", "state": "state", "simulation": "simulation",
+               "presentation": "presentation", "execution_domain": "execution_domain"},
+    "simulation": {"combustion": "combustion"},
+    "presentation": {"observation": "presentation_observation"},
+    "state": {"program": "program"}, "program": {"process": "process"},
+    "creative": {"process": "process", "mechanical_observation": "mechanical_observation",
+                 "automatic_field_change": "automatic_field_change"},
+    "mechanical_observation": {"current_inputs": "mechanical_values", "saved_outputs": "mechanical_values"},
+}
 
 
-def _preparation_read_signature(function: str, arguments: dict, *, action_epoch: int = 0):
-    """Identify a semantic query after actual actions, independent of read handles."""
+def _preparation_read_signature(function: str, arguments: dict):
+    """Identify a semantic query, independent of read handles and cursors."""
     if function not in {"map.viewport", "grove.inspect", "grove.rule_catalog",
             "grove.definition_read", "grove.definition_list", "grove.definition_validate",
             "grove.fabrication_options", "grove.public_works", "grove.content_history"} or not isinstance(arguments, dict):
@@ -44,32 +72,78 @@ def _preparation_read_signature(function: str, arguments: dict, *, action_epoch:
     semantic = {key: value for key, value in arguments.items()
                 if key not in {"base_observation_id", "limit", "cursor", "after", "offset"}}
     try:
-        encoded = json.dumps([function, semantic, action_epoch], ensure_ascii=False, sort_keys=True,
+        encoded = json.dumps([function, semantic], ensure_ascii=False, sort_keys=True,
                              separators=(",", ":"), allow_nan=False).encode("utf-8")
     except (TypeError, ValueError):
         return None
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _preparation_page_keys(function: str, query_key: str, delivered: dict):
-    """Only delivered stable records make another page useful; cursors never do."""
+def _preparation_facts(value, *, kind="response"):
+    """Hash delivered facts, excluding only known envelope/runtime metadata.
+
+    Authored fields, conditions and definitions are opaque here: a user field
+    called ``version`` or ``tick`` is still a fact. These fingerprints never
+    provide write guards or certify a natural-language goal.
+    """
+    if isinstance(value, list):
+        return [_preparation_facts(row, kind=kind) for row in value]
+    if not isinstance(value, dict):
+        return value
+    omitted = _PREPARATION_METADATA.get(kind, ())
+    children = _PREPARATION_CHILDREN.get(kind, {})
+    # The shape, not arbitrary descendant field names, identifies each known
+    # runtime block. Everything else remains opaque and unchanged.
+    result = {}
+    for key, item in value.items():
+        if key in omitted:
+            continue
+        child_kind = children.get(key)
+        if child_kind:
+            result[key] = _preparation_facts(item, kind=child_kind)
+        else:
+            result[key] = item
+    return result
+
+
+def _preparation_digest(value):
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _preparation_fingerprints(function: str, query_key: str, delivered: dict):
+    """Only delivered facts count; a changed row retains its stable identity."""
     if not isinstance(delivered, dict) or delivered.get("ok") is False:
         return None
     value = delivered.get("result", delivered)
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or value.get("ok") is False or not value:
         return None
-    rows = [(name, value[name], identity) for name, identity in _PAGED_PREPARATION_READS[function].items()
-            if isinstance(value.get(name), list)]
-    if not rows:
+    if function not in _PAGED_PREPARATION_READS:
+        facts = _preparation_facts(value)
+        if not facts:
+            return None
+        digest = _preparation_digest(facts)
+        return {query_key: digest} if digest is not None else None
+    pages = [(name, value[name], identity) for name, identity in _PAGED_PREPARATION_READS[function].items()
+             if isinstance(value.get(name), list)]
+    if not pages:
         return None
-    keys = []
-    for name, page, identity in rows:
+    # A successful empty result is useful once, but changing its cursor is not.
+    result = {query_key: "page_read"}
+    for name, page, identity in pages:
         for row in page:
             if not isinstance(row, dict) or not isinstance(row.get(identity), str) or not row[identity]:
                 return None
-            encoded = json.dumps([query_key, name, row[identity]], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            keys.append(hashlib.sha256(encoded).hexdigest())
-    return list(dict.fromkeys(keys))
+            key = _preparation_digest([query_key, name, row[identity]])
+            digest = _preparation_digest(_preparation_facts(row, kind="entity" if name == "works" else "response"))
+            if key is None or digest is None:
+                return None
+            result[key] = digest
+    return result
 
 
 def _summary_outcome(outcome):
@@ -201,11 +275,11 @@ class ExecutionController:
             "grant_version": None, "grant_id": None, "receipts": [], "receipt_history_complete": True,
             "receipt_history_scope": RECEIPT_HISTORY_SCOPE, "readback": None,
             "readback_actual": False, "error": None,
-            "task_id": "", "context_entity_id": None, "requests_used": 0, "max_requests": 4,
+            "task_id": "", "context_entity_id": None, "requests_used": 0, "max_requests": DEFAULT_TASK_REQUESTS,
             "request_status": "idle", "stop_reason": "", "resume_allowed": False,
             "grant_action_offset": 0, "pending_grant_action_offset": None, "grant_operation_id": None,
             "readback_actions_count": None, "no_progress_segments": 0,
-            "preparation_count": 0, "preparation_keys": [],
+            "preparation_count": 0, "preparation_fingerprints": {},
             "host_request": {"status": "idle", "purpose": None, "generation": 0},
             "persistence_failure": None,
             "segment_id": "", "checkpoint": None, "goal_result": None, "segments": [], "phase_timings": [],
@@ -223,6 +297,8 @@ class ExecutionController:
         self.active = False
         self.stopped = False
         self.reclaiming = False
+        self._reclaim_stop_reason = "你已收回后续行动；已成立结果保留。"
+        self._preserve_reclaim_reason = False
 
     @property
     def unresolved(self) -> bool:
@@ -358,6 +434,9 @@ class ExecutionController:
                     self.state["receipt_history_scope"] = "legacy_write_scope_unverified"
             self.state.pop("remaining_actions", None)
             self.state.pop("action_summary", None)
+            # Old query-only hashes cannot describe observed content changes.
+            # Keep consumed progress/budget, not the obsolete local cache.
+            self.state.pop("preparation_keys", None)
         self.archive = deepcopy(archive[-8:]) if isinstance(archive, list) else []
         if not isinstance(delegation, str):
             raise ValueError("invalid execution delegation")
@@ -463,9 +542,9 @@ class ExecutionController:
             raise ConnectorError("InvalidGoal", "执行目标需要 1–4000 字。")
         if type(maximum) is not int or not 1 <= maximum <= 64:
             raise ConnectorError("InvalidActionBudget", "每次目标最多授权 1–64 个世界动作。")
-        request_budget = body.get("max_requests", 4)
-        if type(request_budget) is not int or not 1 <= request_budget <= self.request_batch_limit:
-            raise ConnectorError("InvalidRequestBudget", "每个目标最多授权 1–8 次模型请求。")
+        request_budget = body.get("max_requests", DEFAULT_TASK_REQUESTS)
+        if type(request_budget) is not int or not 1 <= request_budget <= self.request_limit:
+            raise ConnectorError("InvalidRequestBudget", "每个目标最多授权 1–32 次模型请求；在原额度内自动分段。")
         compact = body.get("compact_history", False)
         if type(compact) is not bool:
             raise ConnectorError("InvalidArguments", "compact_history 需要布尔值。")
@@ -489,12 +568,13 @@ class ExecutionController:
             task_id="grove-task-" + secrets.token_hex(16), context_entity_id=selected,
             requests_used=0, max_requests=request_budget, request_status="idle", stop_reason="", resume_allowed=False,
             grant_action_offset=0, pending_grant_action_offset=None, grant_operation_id=None,
-            readback_actions_count=None, no_progress_segments=0, preparation_count=0, preparation_keys=[],
+            readback_actions_count=None, no_progress_segments=0, preparation_count=0, preparation_fingerprints={},
             segment_id="", checkpoint=None, goal_result=None, segments=[], phase_timings=[], settlement=None,
             context_result_reference=None, context_reference_attempted=False, world_results=[],
             history_recovery={"requested": compact, "status": "not_started", "attempts": 0},
             budget_extensions=[], progress={"summary": "", "next_intent": "", "evidence": []})
         self.active, self.stopped = False, False
+        self._preserve_reclaim_reason = False
         self._persist()
         return {"goal": self.state["goal"], "context_entity_id": selected, "mode": "execute"}
 
@@ -532,6 +612,7 @@ class ExecutionController:
                 "max_requests": self.state["max_requests"], "requests_used": self.state["requests_used"],
                 "actions_count": self.state["actions_count"]}])[-self.request_limit:]
         self.active, self.stopped = False, False
+        self._preserve_reclaim_reason = False
         self.state.update(status="starting", error=None, stop_reason="", resume_allowed=False)
         self._persist()
         return {"goal": self.state["goal"], "context_entity_id": self.state.get("context_entity_id"), "mode": "execute-resume"}
@@ -632,34 +713,38 @@ class ExecutionController:
                 not self.active or self.state.get("status") != "running" or
                 self.stopped or self.reclaiming or self.state.get("checkpoint") or self.unresolved):
             return False
-        key = _preparation_read_signature(function, arguments,
-                                          action_epoch=self.state.get("actions_count", 0))
+        key = _preparation_read_signature(function, arguments)
         if key is None:
             return False
-        keys = self.state.setdefault("preparation_keys", [])
-        previous_keys, previous_count = list(keys), self.state.get("preparation_count", 0)
-        if function in _PAGED_PREPARATION_READS:
-            page_keys = _preparation_page_keys(function, key, delivered)
-            if page_keys is None:
-                return False
-            first_page = key not in keys
-            new_keys = [page_key for page_key in page_keys if page_key not in keys]
-            if not new_keys and not (first_page and not page_keys):
-                return False
-            if first_page:
-                keys.append(key)
-            keys.extend(new_keys)
-        else:
-            if key in keys or not isinstance(delivered, dict) or delivered.get("ok") is False:
-                return False
-            keys.append(key)
-        # Retain every task key across segment/resume boundaries. Evicting an
-        # old key would let the same read repeatedly manufacture progress.
+        delivered_facts = _preparation_fingerprints(function, key, delivered)
+        if delivered_facts is None:
+            return False
+        fingerprints = self.state.setdefault("preparation_fingerprints", {})
+        changes = {identity: digest for identity, digest in delivered_facts.items()
+                   if fingerprints.get(identity) != digest}
+        if not changes:
+            return False
+        # Keep bounded local hashes, not snapshots or an Agent memory service.
+        # Never evict an old identity merely to let repeated pages count again.
+        limit = self.request_limit * self.world_call_limit
+        available = max(0, limit - len(fingerprints))
+        accepted = {}
+        for identity, digest in changes.items():
+            if identity in fingerprints:
+                accepted[identity] = digest
+            elif available:
+                accepted[identity] = digest
+                available -= 1
+        if not accepted:
+            return False
+        previous_fingerprints = dict(fingerprints)
+        previous_count = self.state.get("preparation_count", 0)
+        fingerprints.update(accepted)
         self.state["preparation_count"] = self.state.get("preparation_count", 0) + 1
         try:
             self._persist()
         except Exception:
-            self.state.update(preparation_keys=previous_keys, preparation_count=previous_count)
+            self.state.update(preparation_fingerprints=previous_fingerprints, preparation_count=previous_count)
             raise
         return True
 
@@ -958,7 +1043,12 @@ class ExecutionController:
         self.state.update(status="unknown" if self.unresolved else "completed" if completed else "paused",
             stop_reason=reason, error=error, resume_allowed=False)
 
-    def begin_reclaim(self):
+    def begin_reclaim(self, *, reason: str | None = None):
+        # Technical shutdown still revokes authority, but does not rewrite an
+        # already-paused task as a new deliberate user withdrawal.
+        self._reclaim_stop_reason = reason or "你已收回后续行动；已成立结果保留。"
+        self._preserve_reclaim_reason = bool(reason and self.state.get("status") in {"paused", "error"}
+                                            and self.state.get("stop_reason"))
         self.reclaiming, self.stopped, self.active = True, True, False
         self.state["host_request"]["task_cleanup_pending"] = True
         self.state.update(request_status="settling", resume_allowed=False)
@@ -966,8 +1056,9 @@ class ExecutionController:
 
     def record_reclaimed(self, revoke_error=None):
         if self.state.get("goal") and self.state.get("status") != "completed":
-            self.state.update(status="unknown" if self.unresolved or revoke_error else "paused",
-                stop_reason="你已收回后续行动；已成立结果保留。")
+            self.state["status"] = "unknown" if self.unresolved or revoke_error else "paused"
+            if not self._preserve_reclaim_reason:
+                self.state["stop_reason"] = self._reclaim_stop_reason
             if revoke_error:
                 self.state["error"] = {"code": revoke_error.code,
                     "message": "收回或原操作结果尚未确认；后续本机动作已停止，请恢复后核对。"}
@@ -1115,8 +1206,11 @@ class ExecutionController:
             if self.stopped or self.reclaiming:
                 raise asyncio.CancelledError()
             remaining = self.state["max_actions"] - self.state["actions_count"]
-            if remaining <= 0 or self.state["requests_used"] >= self.state["max_requests"]:
-                self.pause("原任务的行动或模型请求额度已用完。")
+            if self.state["requests_used"] >= self.state["max_requests"]:
+                self.pause("原任务的模型请求额度已用完；目标仍可未完成，已成立结果保留。")
+                return
+            if remaining <= 0:
+                self.pause("原任务的世界动作额度已用完；已成立结果保留。")
                 return
             await self.ports.invoke("grove.control_grant", {"goal": goal, "max_actions": remaining})
             if self.stopped or self.reclaiming:
@@ -1130,8 +1224,11 @@ class ExecutionController:
                 if self.state["requests_used"] >= self.state["max_requests"]:
                     self.pause("模型请求额度已用完；目标未宣称完成。")
                     break
-                if not self.state["delegation_active"] or self.remaining_actions <= 0:
-                    self.pause("行动权已收回或原动作额度已用完。")
+                if self.remaining_actions <= 0:
+                    self.pause("原任务的世界动作额度已用完；已成立结果保留。")
+                    break
+                if not self.state["delegation_active"]:
+                    self.pause("世界行动授权已结束；没有继续行动。")
                     break
                 before = self.state["actions_count"]
                 preparation_before = self.state.get("preparation_count", 0)
@@ -1188,7 +1285,8 @@ class ExecutionController:
                     self.pause(checkpoint.get("summary") or "Agent 根据现场报告无法安全推进。")
                     break
                 if not self.state["delegation_active"]:
-                    self.pause("行动权已收回或原动作额度已用完。")
+                    self.pause("原任务的世界动作额度已用完；已成立结果保留。" if self.remaining_actions <= 0
+                               else "世界行动授权已结束；没有继续行动。")
                     break
                 if failure is not None and not yielded and (not action_progress or
                         failure.code in {"InternalContextResponse", "ExecutionSegmentYield"}):
@@ -1206,7 +1304,9 @@ class ExecutionController:
                         "evidence": [deepcopy(item) for item in self.state["receipts"] if item.get("status") == "confirmed"][-8:]}
         except asyncio.CancelledError:
             if self.state["status"] not in {"unknown", "completed"}:
-                self.pause("你已停止或收回后续行动；已成立结果保留。")
+                self.pause(self.state["stop_reason"] if self._preserve_reclaim_reason else
+                           self._reclaim_stop_reason if self.reclaiming else
+                           "本机执行已中止；先核对原请求，已成立结果保留。")
             raise
         except ConnectorError as exc:
             completed = (self.state.get("goal_result") or {}).get("status") == "completed"
@@ -1291,8 +1391,9 @@ class ExecutionController:
         if any(operation not in confirmed for operation in evidence):
             raise ConnectorError("UnconfirmedEvidence", "报告引用必须属于本任务实际已确认的原操作。", 409)
         if arguments["status"] == "completed":
-            if not evidence:
-                raise ConnectorError("ReadbackRequired", "没有本任务已确认的真实行动，不能提交完成声明。", 409)
+            action_evidence = any(confirmed[operation].get("function") in AGENT_WRITE_FUNCTIONS for operation in evidence)
+            if not action_evidence and self.state.get("preparation_count", 0) <= 0:
+                raise ConnectorError("ReadbackRequired", "先实际读取本任务需要的世界事实；没有行动或有效读取，不能仅凭口头提交完成声明。", 409)
         # All terminal reports need the same current facts. The adapter holds
         # the existing write lock while this read and segment closure complete.
         try:
@@ -1321,7 +1422,7 @@ class ExecutionController:
                 "completion_source": "agent_claim", "verification": {"status": "unverified", "scope": "natural_language_goal"},
                 "evidence_operation_ids": evidence, "actions_count": self.state["actions_count"],
                 "readback_actual": True, "world_results": deepcopy(world_results),
-                "source": "Agent completion claim after confirmed operations and world readback; no natural-language adjudication"}
+                "source": "Agent completion claim after confirmed operations or delivered preparation reads and fresh world readback; no natural-language adjudication"}
             self.state["status"] = "completed"
         self.active = False
         try:

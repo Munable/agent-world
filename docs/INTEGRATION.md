@@ -149,13 +149,17 @@ Credential 来源不是独立 AgentIdentity，也不证明哪个外部程序实�
 
 ## Shared Grove 可替换前端契约 v1
 
-world38 提供三个只读函数，沿用上述 Query 通道与成员授权。它们给地图、物件详情、动作表单和蓝图浏览器提供正式 DTO；服务器输出 schema 随函数目录发现并在返回前校验。`map.viewport / grove.inspect / grove.definition_read / grove.fabrication_options` 继续作为既有 Agent 的事实／创作读表面，网页不从这些原始领域观察解析 `state.program`、组件或能力名。不同 renderer 可以任意选择布局、字体、相机和动画，不必认识规则 AST、存储键或机械／合同机制的名称。
+world39 提供三个只读函数，沿用上述 Query 通道与成员授权。它们给地图、物件详情、动作表单和蓝图浏览器提供正式 DTO；服务器输出 schema 随函数目录发现并在返回前校验。`map.viewport / grove.inspect / grove.definition_read / grove.fabrication_options` 继续作为既有 Agent 的事实／创作读表面，网页不从这些原始领域观察解析 `state.program`、组件或能力名。不同 renderer 可以任意选择布局、字体、相机和动画，不必认识规则 AST、存储键或机械／合同机制的名称。
 
-| 函数（version=1） | 输入 | 正式结果 |
+| 函数（viewport/inspect version=1，definitions version=2） | 输入 | 正式结果 |
 | --- | --- | --- |
 | `grove.client_viewport` | 现有视野参数：可选 `cx, cy, radius, inventory_after, inventory_limit`；以发现的 schema 为准。 | `context, player, chunks, players, entities, inventory, inventory_total, inventory_next, bounds, truncated, clock, changes, opportunities, navigation, coverage, weather, processes, public_content, projection`。|
 | `grove.client_inspect` | `entity_id`；可选 `action, candidate_id` 展开一个实际动作／候选。或互斥的 `tile:{x,y}` 读取当前附近格子。 | 物件：`context, player, entity, contents, explanation, projection`；格子：`context, player, tile, entities, actions`。|
-| `grove.client_definitions` | `mode:"list"`（默认）：`author, key, limit, after, installable_only`；`mode:"detail"`：`definition_ref`；`mode:"fabrication"`：`definition_ref, type_id`。 | 三个互斥、完整声明的 mode schema：分页蓝图目录；固定版本的显示说明／类型选择；实际来源、输入 schema 和成型调用意图。|
+| `grove.client_definitions` | `mode:"list"`（默认）：`author, key, limit, after, installable_only`，或独立的 `source_definition_ref` 分页筛选；`mode:"detail"`：`definition_ref`；`mode:"fabrication"`：`definition_ref, type_id`。 | 三个互斥、完整声明的 mode schema：分页蓝图目录；固定版本的显示说明／类型选择；实际来源、输入 schema 和成型调用意图。|
+
+本机连接器 `/connector/state.execution_limits` 提供新目标默认请求、总上限、每批追加上限与动作上限；网页读取这份合同验证输入，不能另设比服务器更低的隐含额度。已保存旧任务保持其原额度，断线不自动续授权。
+
+已发表规则可以用可选 `source_definition_ref` 声明改作的原版本；服务器重验该公开来源，并把来源纳入新定义身份。旧版本和既有实例不改。客户端详情提供 `source_definition`（有限公开元数据及 `read_request`）、`revisions_request`（直接改作分页请求），列表行提供真实来源 ref 或 `null`；前端执行这些正式请求，不解析 AST 或自己推导版本关系。来源不是继承执行许可，不升级实例，也没有私人草稿／人工审批。
 
 每个结果的 `context` 必含 `projection_version:1, world_instance, world_id:"shared-grove", world_version, viewer_role_id, snapshot_seq, observation_clock, watermark_source:"query_envelope.snapshot_seq"`。浏览器核对调用函数及版本、endpoint 世界、当前身份和 envelope／context 相同水位，再接受结果。只在同一世界、同一主体、同一世界代码版本内按 `snapshot_seq` 比较响应；较旧响应不能覆盖新读取。不同选择目标还应有客户端请求代次，避免同水位的旧详情覆盖新的选择。身份改变或撤权后取消旧读取、清掉受保护缓存；未来操作不能沿旧身份发送。未知 DTO 版本或世界版本变化停止新写入，重新发现／连接；原未决 Operation 仍沿原 Receipt 恢复，不能因 UI 升级丢掉。
 

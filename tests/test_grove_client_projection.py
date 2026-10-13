@@ -143,6 +143,34 @@ class GroveClientProjectionTests(unittest.TestCase):
         self.assertTrue(any(row["expanded"] is False for row in narrow["entity"]["actions"]))
         self.assertTrue(all(row["read_request"]["function_id"] == "grove.client_inspect" for row in narrow["entity"]["actions"]))
 
+    def test_revision_source_and_discovery_are_formal_reads_without_program_parsing(self):
+        h = self.h
+        original = h.call("A", "grove.definition_publish", {"definition": definition()})
+        source_ref = original["definition_ref"]
+        revised = deepcopy(original["definition"])
+        revised["name"] = "另一人的显示改版"
+        reference = h.call("B", "grove.definition_publish", {
+            "definition": revised, "source_definition_ref": source_ref})["definition_ref"]
+        detail = self.query("A", "grove.client_definitions", {"mode": "detail", "definition_ref": reference})["result"]
+        source = detail["source_definition"]
+        self.assertEqual((source["definition_ref"], source["author"], source["author_name"]), (source_ref, h.roles["A"], "A"))
+        self.assertNotIn("definition", source)
+        self.assertNotIn("program", source)
+        request = source["read_request"]
+        source_detail = self.query("B", request["function_id"], request["arguments"])["result"]
+        self.assertEqual(source_detail["definition_ref"], source_ref)
+        self.assertIsNone(source_detail["source_definition"])
+        request = source_detail["revisions_request"]
+        page = self.query("A", request["function_id"], request["arguments"])["result"]
+        self.assertEqual(page["filters"], {"source_definition_ref": source_ref})
+        self.assertEqual([row["definition_ref"] for row in page["definitions"]], [reference])
+        self.assertEqual(page["definitions"][0]["source_definition_ref"], source_ref)
+        section = next(row for row in detail["fact_sections"] if row["id"] == "source_definition")
+        original_author = next(row for row in section["rows"] if row["id"] == "source_author")
+        current_name = next(row for row in section["rows"] if row["id"] == "source_author_name")
+        self.assertEqual(original_author["temporal_scope"], "published")
+        self.assertEqual(current_name["temporal_scope"], "current")
+
     def test_foreign_private_entity_is_rejected_by_formal_client_read(self):
         view = self.h.view("B")
         item = view["inventory"][0]

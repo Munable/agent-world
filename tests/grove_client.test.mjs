@@ -10,7 +10,7 @@ const values=new Map(),storage={getItem:k=>values.get(k)??null,setItem:(k,v)=>va
 const reply=(value,status=200)=>({ok:status<400,status,json:async()=>value});
 const projection=(seq=1,extra={})=>({projection_version:1,world_instance:'shared-grove',world_id:'shared-grove',world_version:38,viewer_role_id:'self',snapshot_seq:seq,observation_clock:{epoch:'one',sequence:seq},...extra});
 const authorize=client=>{client.roleId='self';client.tokenId='token-id';client.token='existing-token';client.projectionContext=projection();};
-const envelope=(name,result,seq=result.context.snapshot_seq)=>({ok:true,read_only:true,function_id:name,function_version:1,snapshot_seq:seq,result});
+const envelope=(name,result,seq=result.context.snapshot_seq)=>({ok:true,read_only:true,function_id:name,function_version:name==='grove.client_definitions'?2:1,snapshot_seq:seq,result});
 
 
 // Losing the body and leaving must not fabricate a second action.
@@ -147,4 +147,13 @@ assert.ok(refusal.pending());
   deliver({error:'InvalidIdentityToken',message:'Old identity expired'});
   await assert.rejects(reading,error=>error.cancelled===true&&error.staleAuth===true);
   assert.equal(guarded.token,'new-token');
+}
+
+// Definition revision DTO v2 remains on projection v1; old envelopes fail closed.
+{
+  const definitionClient=new GroveClient(async()=>reply(envelope('grove.client_definitions',{context:projection(1),mode:'list',definitions:[]})),storage,null);
+  definitionClient.universe='shared-grove';definitionClient.publicKey='revision-dto';authorize(definitionClient);
+  assert.equal((await definitionClient.query('grove.client_definitions',{mode:'list'})).mode,'list');
+  definitionClient.world.fetcher=async()=>reply({...envelope('grove.client_definitions',{context:projection(2),mode:'list',definitions:[]}),function_version:1});
+  await assert.rejects(definitionClient.query('grove.client_definitions',{mode:'list'}));
 }

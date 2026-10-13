@@ -8,12 +8,13 @@ from agent_world import FunctionOutcome, FunctionSpec, StateRule
 from agent_world.errors import RuleViolation
 from agent_world.simulation import matter as sm
 from . import model as m
-from .definitions import DEFINITIONS
+from .definitions import DEFINITIONS, read_definition
 
 VERSIONS = "grove.creative.versions"
 DIRECTORY = "grove.creative.directory"
 AUTHORS = "grove.creative.author."
 SERIES = "grove.creative.series."
+DERIVATIVES = "grove.creative.derivatives."
 PUBLISHERS = "grove.creative.publishers"
 AUTHOR_STORAGE = "grove.creative.author_storage"
 LEDGER_KEY = "publication_storage"
@@ -32,7 +33,7 @@ class PublicationBudget:
                 or self.payload_bytes < 0 or self.definitions < 0):
             raise ValueError("publication storage limits must be nonnegative integers")
         return {"payload_bytes": self.payload_bytes, "definitions": self.definitions,
-                "scope": "per_author", "charge": "definition+version_mapping+three_directory_summaries",
+                "scope": "per_author", "charge": "definition+version_mapping+three_directory_summaries+optional_source_index",
                 "excludes": "keys, SQLite pages/indexes, receipts, history, WAL and backups",
                 "on_exhaustion": "reject_new_publication_preserve_existing_definitions"}
 
@@ -58,7 +59,11 @@ def _save(ctx, scope, key, value):
     ctx.set_state(scope, key, value, expected_version=previous["version"])
 
 
-def _scope(author=None, key=None):
+def _scope(author=None, key=None, source_definition_ref=None):
+    if source_definition_ref is not None:
+        if author is not None or key is not None:
+            raise RuleViolation("按源规则查询改版时，不同时筛选作者或系列；每页返回真实改版作者。")
+        return DERIVATIVES + hashlib.sha256(source_definition_ref.encode()).hexdigest()
     if key is not None and author is None:
         raise RuleViolation("查询规则系列需要同时指定作者。")
     if key is not None and (not isinstance(key, str) or not _KEY.fullmatch(key)):
@@ -71,14 +76,32 @@ def _scope(author=None, key=None):
 
 def _summary(reference, record):
     definition = record["definition"]
-    return {"definition_ref": reference, "author": record["author"], "key": definition["key"],
+    result = {"definition_ref": reference, "author": record["author"], "key": definition["key"],
                "name": definition["name"], "version": definition["version"], "hash": record["hash"],
                "published_tick": record["published_tick"], "type_ids": list(definition["types"])}
+    if record.get("source_definition_ref") is not None:
+        result["source_definition_ref"] = record["source_definition_ref"]
+    return result
+
+
+def source_descriptor(ctx, reference):
+    """Read one immutable source, never the source author's private profile."""
+    if reference is None:
+        return None
+    record = read_definition(ctx, reference)
+    if record is None:
+        raise RuleViolation("规则改版的原始来源缺失；不能猜测来源或替换旧引用。")
+    definition = record["definition"]
+    return {"definition_ref": reference, "author": record["author"],
+            "author_name": m.public_player_name(ctx, record["author"]), "key": definition["key"],
+            "name": definition["name"], "version": definition["version"], "hash": record["hash"],
+            "read_request": {"function_id": "grove.definition_read", "arguments": {"definition_ref": reference}}}
 
 
 def _publication_bytes(reference, record):
     return (sm.encoded_size(record) + sm.encoded_size({"definition_ref": reference})
-            + 3 * sm.encoded_size(_summary(reference, record)))
+            + (4 if record.get("source_definition_ref") is not None else 3)
+                * sm.encoded_size(_summary(reference, record)))
 
 
 def _index(ctx, reference, record, sequence):
@@ -86,7 +109,10 @@ def _index(ctx, reference, record, sequence):
     summary = _summary(reference, record)
     key = f"{(1 << 63) - 1 - sequence:019d}:{reference}"
     sizes = 0
-    for scope in (DIRECTORY, _scope(record["author"]), _scope(record["author"], definition["key"])):
+    scopes = [DIRECTORY, _scope(record["author"]), _scope(record["author"], definition["key"])]
+    if record.get("source_definition_ref") is not None:
+        scopes.append(_scope(source_definition_ref=record["source_definition_ref"]))
+    for scope in scopes:
         _save(ctx, scope, key, summary)
         sizes += sm.encoded_size(summary)
     return sizes
@@ -177,18 +203,22 @@ def publish(ctx, reference, version_key, record):
 
 
 def definition_list(ctx, args):
-    scope = _scope(args.get("author"), args.get("key"))
+    source = args.get("source_definition_ref")
+    if source is not None and read_definition(ctx, source) is None:
+        raise RuleViolation("源规则版本不存在；请使用已发表的真实definition_ref。")
+    scope = _scope(args.get("author"), args.get("key"), source)
     page = ctx.list_state(scope, limit=args.get("limit", 8), after=args.get("after"), order="key")
     return FunctionOutcome({"definitions": [{**item["value"],
+            "source_definition_ref": item["value"].get("source_definition_ref"),
             "author_name": m.public_player_name(ctx, item["value"].get("author"))} for item in page["items"]],
         "author_name_meaning": "Current public names in this world, not names at publication. Null means no current known name; "
             "names may coincide, so author remains the identity. Authors are not necessarily objects' operators or owners.",
         "has_more": page["has_more"], "next_cursor": page["next_cursor"],
-        "filters": {key: args[key] for key in ("author", "key") if key in args},
+        "filters": {key: args[key] for key in ("author", "key", "source_definition_ref") if key in args},
         "order": "publication_sequence_desc", "storage": ctx.get_state(m.META, LEDGER_KEY, {}),
         "complete": not page["has_more"], "last_page": not page["has_more"], "scope": "one_query_page",
         "storage_scope": "whole_world_publications",
-        "storage_meaning": "累计定义、版本映射及三类目录摘要的JSON负载字节；不含key、SQLite、回执、journal、WAL或备份，不是总磁盘占用。",
+        "storage_meaning": "累计定义、版本映射及三类目录摘要及可选来源索引的JSON负载字节；不含key、SQLite、回执、journal、WAL或备份，不是总磁盘占用。",
         "author_storage": author_storage(ctx, ctx.actor_role_id) if ctx.actor_role_id else None,
         "publication_budget": budget_contract(ctx)})
 
@@ -198,10 +228,11 @@ def specs():
         {"type": "object", "additionalProperties": False, "properties": {
             "author": {"type": "string", "minLength": 1, "maxLength": 128},
             "key": {"type": "string", "minLength": 1, "maxLength": 80},
+            "source_definition_ref": {"type": "string", "minLength": 1, "maxLength": 128},
             "limit": {"type": "integer", "minimum": 1, "maximum": 16},
             "after": {"type": "string", "minLength": 1, "maxLength": 4096}}}, access="read",
-        description="Page immutable published definitions, optionally by author or author+key; use next_cursor with identical filters. Read selected definition_ref directly with definition_read; no full-history scan."),)
+        version=2, description="Page immutable published definitions by author, author+key, or source_definition_ref for direct revisions. Source filtering is separate from author/series filtering. Use next_cursor with identical filters. Read selected definition_ref directly with definition_read; no full-history scan."),)
 
 
 def state_specs():
-    return tuple(StateRule(scope, "", {}, history="metadata") for scope in (DIRECTORY, AUTHORS, SERIES, PUBLISHERS, AUTHOR_STORAGE))
+    return tuple(StateRule(scope, "", {}, history="metadata") for scope in (DIRECTORY, AUTHORS, SERIES, DERIVATIVES, PUBLISHERS, AUTHOR_STORAGE))

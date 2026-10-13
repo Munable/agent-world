@@ -122,9 +122,15 @@ function agentAdmission(kind){
   if(typeof admission?.allowed!=='boolean')return {allowed:false,reason:'Agent 资格尚未读取；恢复连接后再提问、创作或委托。'};
   return {allowed:admission.allowed,reason:admission.allowed?'':admission.reason||'当前不能开始这项 Agent 请求，请恢复连接后核对状态。'};
 }
+function executionLimits(){
+  const limits=host?.execution_limits;
+  return limits&&['default_requests','max_requests','additional_requests','max_actions'].every(key=>Number.isInteger(limits[key])&&limits[key]>0)?limits:null;
+}
 function continuationAdmission(){
-  const execution=host?.execution||{},additional=Number($('execution-additional-requests').value),limit=Math.max(0,Math.min(8,32-(execution.max_requests||0)));
-  if(!Number.isInteger(additional)||additional<0||additional>limit)return {allowed:false,reason:'每批最多追加 8 步，原目标累计最多 32 步；追加数须为非负整数。'};
+  const execution=host?.execution||{},limits=executionLimits(),additional=Number($('execution-additional-requests').value);
+  if(!limits)return {allowed:false,reason:'执行额度尚未读取；恢复连接后再接续。'};
+  const limit=Math.max(0,Math.min(limits.additional_requests,limits.max_requests-(execution.max_requests||0)));
+  if(!Number.isInteger(additional)||additional<0||additional>limit)return {allowed:false,reason:'每批最多追加 '+limits.additional_requests+' 次请求，总计最多 '+limits.max_requests+' 次；追加数须为非负整数。'};
   return agentAdmission(additional>0?'extend':'resume');
 }
 function applyAdmission(id,admission){
@@ -307,7 +313,8 @@ function renderExecution(){
   const readbacks=[execution.readback?.selected_inspection,...(execution.readback?.action_targets||[])],shownTargets=new Set();
   for(const entry of readbacks){const request=entry?.client_read_request,id=request?.arguments?.entity_id;if(request?.function_id!=='grove.client_inspect'||!id||shownTargets.has(id))continue;shownTargets.add(id);$('execution-actions').append(button('重新读取当前详情 · '+(entry.name||entityById(id)?.name||'原任务对象'),()=>run(()=>select(id,false,true)),{secondary:true}));}
   applyAdmission('execution-start',goalAdmission);
-  const additionalControl=$('execution-additional-requests'),additionalLimit=Math.max(0,Math.min(8,32-(execution.max_requests||0)));
+  const limits=executionLimits(),requestControl=$('execution-max-requests'),additionalControl=$('execution-additional-requests'),additionalLimit=limits?Math.max(0,Math.min(limits.additional_requests,limits.max_requests-(execution.max_requests||0))):0;
+  if(limits){if(!requestControl.dataset.limitsInitialized){requestControl.value=String(limits.default_requests);requestControl.dataset.limitsInitialized='true';}requestControl.max=String(limits.max_requests);$('execution-max-actions').max=String(limits.max_actions);$('execution-budget-help').textContent='单目标最多 '+limits.max_requests+' 次模型请求、'+limits.max_actions+' 次实际动作。接段自动继续，额度耗尽才需要你选择接续。';}
   additionalControl.max=String(additionalLimit);applyAdmission('execution-additional-requests',extendAdmission);
   if(Number(additionalControl.value)>additionalLimit)additionalControl.value=String(additionalLimit);
   $('execution-resume').hidden=(execution.resume_allowed!==true&&execution.extension_allowed!==true)||!execution.task_id||unknown;
@@ -701,6 +708,7 @@ function renderDefinitionDirectory(){
   if(directoryError)area.append(node('p',directoryError,'action-reason'));
   if(directoryBusy)area.append(node('p','正在读取所选目录或规则版本…','small'));
   const definitions=directoryPage?.definitions||[];
+  if(directoryFilters.source_definition_ref)area.append(node('p','正在查看基于所选固定版本的直接改作；原作和旧物件保留。','small'));
   if(directoryPage){area.append(node('p','第 '+directoryCursors.length+' 页 · '+definitions.length+' 份已发表定义'+(directoryPage.has_more?' · 后面还有内容':' · 已到这一查询的末页'),'small'));}
   for(const definition of definitions){
     const section=node('section',undefined,'content-contribution');section.append(node('strong',(definition.name||definition.key)+' · 版本 '+definition.version),node('p','作者：'+authorLabel(definition.author),'small'),node('p',definition.author+' · '+definition.key+' · '+definition.definition_ref,'fact-reference'));
@@ -712,6 +720,9 @@ function renderDefinitionDirectory(){
   if(directoryDefinition){
     const section=node('section',undefined,'creative-state'),definition=directoryDefinition;section.append(node('h4',definition.name||'所选规则'),node('p',directoryDefinitionRef,'fact-reference'));
     const detail=node('details',undefined,'rule-definition');detail.append(node('summary','所选不可变版本的完整说明'));appendFactSections(detail,directoryDefinition.fact_sections,directoryDefinitionRef);section.append(detail);
+    const source=definition.source_definition,sourceRequest=source?.read_request,revisions=definition.revisions_request;
+    if(sourceRequest?.function_id==='grove.client_definitions'&&sourceRequest.arguments?.mode==='detail')section.append(button('读取原作 · '+(source.name||source.key)+' · '+(source.author_name||'创作者'),()=>run(()=>readPublishedDefinition(sourceRequest.arguments.definition_ref)),{disabled:directoryBusy||fabricationBusy||actionBusy,secondary:true}));
+    if(revisions?.function_id==='grove.client_definitions'&&revisions.arguments?.mode==='list')section.append(button('查看基于此版本的改作',()=>run(()=>readDefinitionDirectory({filters:{source_definition_ref:revisions.arguments.source_definition_ref},reset:true})),{disabled:directoryBusy||fabricationBusy||actionBusy,secondary:true}));
     const types=definition.types||[],choices=node('select');choices.setAttribute('aria-label','按真实批次成型的类型');const empty=node('option','请选择按真实材料成型的类型');empty.value='';choices.append(empty);
     for(const kind of types.filter(row=>row.can_fabricate===true&&row.creation_request)){const option=node('option',kind.label);option.value=kind.id;choices.append(option);}choices.value=directoryType||'';choices.disabled=directoryBusy||fabricationBusy||actionBusy;
     const field=node('label','成型类型');field.append(choices);section.append(field);choices.addEventListener('change',()=>{if(choices.value)run(()=>readFabricationMenu(choices.value));else{saveFabricationDraft();directoryType=null;fabricationMenu=null;fabricationRows=[];fabricationError=null;renderDefinitionDirectory();}});
@@ -1185,8 +1196,9 @@ $('execution-form').addEventListener('submit',event=>{event.preventDefault();run
   const goal=$('execution-goal').value.trim(),maxActions=Number($('execution-max-actions').value),maxRequests=Number($('execution-max-requests').value);
   if(!goal)return;
   if(goal.length>2000)throw new Error('委托目标最多 2000 字。');
-  if(!Number.isInteger(maxActions)||maxActions<1||maxActions>64)throw new Error('目标动作上限须为 1 至 64 的整数。');
-  if(!Number.isInteger(maxRequests)||maxRequests<1||maxRequests>8)throw new Error('目标模型请求上限须为 1 至 8 的整数。');
+  const limits=executionLimits();if(!limits)throw new Error('执行额度尚未读取，请恢复连接。');
+  if(!Number.isInteger(maxActions)||maxActions<1||maxActions>limits.max_actions)throw new Error('动作上限须为 1 至 '+limits.max_actions+' 的整数。');
+  if(!Number.isInteger(maxRequests)||maxRequests<1||maxRequests>limits.max_requests)throw new Error('模型请求上限须为 1 至 '+limits.max_requests+' 的整数。');
   stopWalking();const entity=selectedEntity();
   if(await hostCommand('execute',{goal,max_actions:maxActions,max_requests:maxRequests,compact_history:$('execution-compact-history').checked,...(entity?{context_entity_id:entity.id}:{})})){goalDirty=false;$('execution-compact-history').checked=false;client.saveDraft('grove-goal',goal);announce('目标已交给你的 Agent。它可在总额度内接续执行，你可以随时收回后续行动权。');}
 });});

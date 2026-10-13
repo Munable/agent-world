@@ -27,15 +27,11 @@ _AGENT_FACT_TARGET_BYTES = 8 * 1024
 
 def execution_private_context(context: dict, goal: str) -> dict:
     """Keep preferences, without reissuing retired creation requests as intent."""
-    result = deepcopy(context)
-    historical = {key: result.pop(key) for key in ("last_creation_request", "recent_user_requests") if key in result}
+    result = {key: deepcopy(context[key]) for key in ("intent", "preferences") if key in context}
     result["current_execution_goal"] = goal
     result["projection"] = {"scope": "current_execution_preferences",
-        "omitted_historical_request_count": len(historical.get("recent_user_requests", [])),
-        "historical_creation_request_omitted": "last_creation_request" in historical,
-        "meaning": "The original private requests and dialogue remain stored in this same session. "
-                   "They are historical background, not renewed goals. Only the current granted goal "
-                   "is active; retained preferences are not world facts or action authorization."}
+        "meaning": "Only this granted goal is active. Private intent/preferences are not world facts "
+                   "or renewed authorization; private memory remains the user's Agent's responsibility."}
     return result
 
 
@@ -529,7 +525,7 @@ def _companion_selected_state_summary(inspection, *, compact=False):
     # A new object must not inherit inspection-local references to omitted actions.
     state = {key: deepcopy(entity[key]) for key in (
         "id", "version", "interaction_revision", "name", "x", "y", "location", "owner", "physical_parent",
-        "material", "materials", "matter", "matter_unit", "material_quantity", "simulation",
+        "material", "materials", "matter", "matter_unit", "material_quantity", "simulation", "components",
         "state", "mechanical", "creative", "presentation", "capabilities", "container", "lifecycle",
         "barrier_active", "contents_visibility", "content_summary", "relations", "created_by", "created_by_name", "source",
         "pour_target_slot", "execution_domain", "fabrication_materials", "material_eligibility",
@@ -542,6 +538,15 @@ def _companion_selected_state_summary(inspection, *, compact=False):
             state["creative"] = _companion_creative_summary(creative)
             if "contract" in creative:
                 state["creative"]["contract"] = deepcopy(creative["contract"])
+            # Current yes/no/unknown conditions and material gaps explain the
+            # actual result. Only the immutable expression can be deferred.
+            for field in ("automatic_rules", "automatic_rules_truncated", "automatic_rules_meaning",
+                          "automatic_rules_expression_projection",
+                          "reaction_inputs", "reaction_observations", "reaction_observations_truncated",
+                          "port_sources"):
+                if field in creative:
+                    state["creative"][field] = deepcopy(creative[field])
+            _companion_condition_expressions(state["creative"])
         program = state.get("state", {}).get("program")
         if isinstance(program, dict):
             state["state"]["program"] = {key: deepcopy(program[key]) for key in
@@ -979,8 +984,35 @@ def companion_projection(function: str, payload: dict) -> dict:
     return result
 
 
-def _companion_action_projection(result, *, base_id=None, versions=None, entity_ids=(), source=None,
-                                 discovery_limit=8):
+def _companion_inventory_discovery(scene, rows, *, excluded=(), limit=8):
+    """A returned-page index without action versions, transferable lots or state."""
+    excluded = set(excluded)
+    visible = [row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
+               and row["id"] not in excluded]
+    entries = []
+    for row in visible[:limit]:
+        entry = {key: deepcopy(row[key]) for key in ("id", "name", "material", "capabilities",
+            "created_by", "created_by_name", "source", "container", "physical_parent") if key in row}
+        state = row.get("discovery_state")
+        kind = row.get("entity_kind", state.get("kind") if isinstance(state, dict) else None)
+        if isinstance(kind, str):
+            entry["entity_kind"] = kind
+        entry["read_request"] = {"tool": "grove_inspect", "arguments": {"entity_id": row["id"]}}
+        entries.append(entry)
+    scene["inventory_discovery"] = entries
+    scene["inventory_discovery_projection"] = {
+        "scope": "returned_inventory_page_index", "returned_page_count": len(rows),
+        "retained_count": len(entries), "omitted_index_count": max(0, len(visible) - len(entries)),
+        "separately_observed_count": sum(isinstance(row, dict) and row.get("id") in excluded for row in rows),
+        "complete_inventory": False,
+        "read_request": {"tool": "map_viewport", "arguments": {}},
+        "meaning": "Discovery from the authorized returned inventory page, not a complete inventory "
+                   "or action basis. Versions, lots, quantities and state are unexpanded. Current related "
+                   "objects are read separately; omitted objects are not absent. Read the map's first "
+                   "inventory page, then follow that response's inventory_next; this index has no paging cursor."}
+
+
+def _companion_action_projection(result, *, base_id=None, versions=None, entity_ids=(), source=None):
     """Reduce this call's owned projection; only retained rows reach binding."""
     readback = result.get("execution_readback")
     if not isinstance(readback, dict):
@@ -1000,20 +1032,38 @@ def _companion_action_projection(result, *, base_id=None, versions=None, entity_
         relevant.add(selected["entity"].get("id"))
 
     compact = {key: readback[key] for key in (
-        "player", "clock", "bounds", "inventory", "inventory_total", "inventory_next", "truncated",
+        "player", "clock", "bounds", "inventory_total", "truncated",
         "observed_at", "selected_inspection", "selected_inspection_unavailable", "world_results",
         "action_targets", "action_targets_meaning", "task_action_summary", "public_events") if key in readback}
     construction = readback.get("construction")
     if isinstance(construction, dict):
         compact["construction"] = {key: construction[key] for key in ("material_totals", "unit")
                                    if key in construction}
+    # Later selected/target inspections own those objects' current readback.
+    # An earlier map's inventory or scene must not duplicate or override them,
+    # including a later explicit unavailable result.
+    separately_observed = {target["entity_id"] for target in compact.get("action_targets", [])
+        if isinstance(target, dict) and isinstance(target.get("entity_id"), str)}
+    selected = compact.get("selected_inspection")
+    for selected in (selected.get("entity") if isinstance(selected, dict) else None,
+                     compact.get("selected_inspection_unavailable")):
+        if isinstance(selected, dict):
+            identity = selected.get("id", selected.get("entity_id"))
+            if isinstance(identity, str):
+                separately_observed.add(identity)
+    inventory = readback.get("inventory")
+    if isinstance(inventory, list):
+        compact["inventory"] = [row for row in inventory if isinstance(row, dict)
+            and row.get("id") in relevant and row.get("id") not in separately_observed]
+        _companion_inventory_discovery(compact, inventory,
+            excluded=separately_observed | {row["id"] for row in compact["inventory"]})
     rows = readback.get("entities", [])
     rows = rows if isinstance(rows, list) else []
     changed = [row for row in rows if isinstance(row, dict) and
                (row.get("id") not in known or known[row["id"]] != row.get("version"))]
     discovery = [row for row in changed if row.get("id") not in relevant]
-    retained = [row for row in rows if isinstance(row, dict) and row.get("id") in relevant]
-    retained += discovery[:discovery_limit]
+    retained = [row for row in rows if isinstance(row, dict) and row.get("id") in relevant
+                and row.get("id") not in separately_observed]
     compact["entities"] = retained
     for field in ("players", "nearby_players"):
         if isinstance(readback.get(field), list):
@@ -1030,18 +1080,15 @@ def _companion_action_projection(result, *, base_id=None, versions=None, entity_
         "base_observation_id": base_id, "complete_scene": False,
         "scene_entity_count": len(rows), "changed_or_new_entity_count": len(changed),
         "retained_entity_count": len(retained),
-        "omitted_changed_or_new_entity_count": max(0, len(discovery) - discovery_limit),
+        "omitted_changed_or_new_entity_count": len(discovery),
         "omitted_recent_change_count": max(0, len(changes) - 6),
-        "discovery_limit": discovery_limit,
-        "omitted_sections": ["chunk terrain", "unchanged and excess nearby discovery rows",
+        "omitted_sections": ["chunk terrain", "unrelated scene and inventory state",
                              "other players", "public content/history", "construction recipes"],
-        "meaning": "Current actor, actual returned inventory page/material totals, selected state and "
-                   "bounded changed/new authorized entity summaries relative to the referenced observation. "
-                   "This is not a complete scene or action preview. Omission proves neither absence nor "
-                   "unchanged state; retained summaries are not transferable lot choices. Recent changes "
-                   "are nearby history, not attribution of this operation. Use map_viewport for discovery "
-                   "and grove_inspect for exact current action inputs/previews; chain base_observation_id "
-                   "to this response when extending it."}
+        "meaning": "Current actor/material totals and related objects; later selected/target inspections "
+                   "supersede their earlier map rows. Inventory discovery is unexpanded. This is not a "
+                   "complete scene or action preview; omission means neither absence nor unchanged state. "
+                   "Recent changes are nearby history, not this operation's attribution. Use map_viewport "
+                   "for discovery and grove_inspect for exact inputs; chain base_observation_id to this response."}
     result["execution_readback"] = compact
 
     viewport = value.get("viewport")
@@ -1260,7 +1307,8 @@ def _companion_fact_budget(function, payload):
                     and len(_agent_tool_text(selected).encode()) > _AGENT_FACT_TARGET_BYTES):
                 scene["selected_inspection"] = _companion_inspection_index(
                     selected, preserve_facts=True, compact_expressions=True) or selected
-        if scene is discovery_scene and too_large():
+        if (scene is discovery_scene and too_large() and
+                (scene.get("projection") or {}).get("mode") != "action_readback_delta"):
             # The soft target must not turn a populated nearby world into an
             # empty one merely because exact selected facts need more room.
             _companion_nearby_read_entries(scene)
@@ -1316,6 +1364,29 @@ def _companion_fact_budget(function, payload):
     return payload
 
 
+def _companion_condition_expressions(creative):
+    """Keep current condition evidence; defer duplicated immutable expressions."""
+    if (not isinstance(creative, dict) or not isinstance(creative.get("definition_ref"), str)
+            or not isinstance(creative.get("type_id"), str) or not isinstance(creative.get("automatic_rules"), list)):
+        return
+    omitted = False
+    for rule in creative["automatic_rules"]:
+        conditions = [rule.get("condition"), *[item.get("observation")
+                      for item in rule.get("drive_inputs", [])]]
+        for condition in conditions:
+            if (isinstance(condition, dict) and "expression" in condition and
+                    not isinstance(condition["expression"], bool)):
+                condition.pop("expression")
+                omitted = True
+    if omitted:
+        creative["automatic_rules_expression_projection"] = {
+            "scope": "current_conditions_without_duplicate_expressions",
+            "read_request": {"tool": "grove_definition_read", "arguments": {
+                "definition_ref": creative["definition_ref"]}},
+            "type_id": creative["type_id"],
+            "meaning": "Current verdicts, facts, checks and boolean literals remain; read omitted expressions from the pinned definition."}
+
+
 def _companion_inspection_index(payload, *, preserve_facts=False, compact_expressions=False):
     """Index action choices without presenting or binding expanded previews.
 
@@ -1353,34 +1424,15 @@ def _companion_inspection_index(payload, *, preserve_facts=False, compact_expres
                     program.pop(field)
                     if f"state.program.{field} (same values in entity.creative.{field})" not in duplicate_state:
                         duplicate_state.append(f"state.program.{field} (same values in entity.creative.{field})")
-    if ((not preserve_facts or compact_expressions) and isinstance(creative, dict) and
-            isinstance(creative.get("definition_ref"), str) and isinstance(creative.get("type_id"), str) and
-            isinstance(creative.get("automatic_rules"), list)):
-        # The pinned definition is independently readable. Keep every current
-        # fact/comparison. A boolean literal also distinguishes an unconditional
-        # rule from a condition that only happens to be satisfied at this read.
-        omitted = False
-        for rule in creative["automatic_rules"]:
-            conditions = [rule.get("condition"), *[item.get("observation")
-                          for item in rule.get("drive_inputs", [])]]
-            for condition in conditions:
-                if (isinstance(condition, dict) and "expression" in condition and
-                        not isinstance(condition["expression"], bool)):
-                    condition.pop("expression")
-                    omitted = True
-        if omitted:
-            creative["automatic_rules_expression_projection"] = {
-                "scope": "current_conditions_without_duplicate_expressions",
-                "read_request": {"tool": "grove_definition_read", "arguments": {
-                    "definition_ref": creative["definition_ref"]}},
-                "type_id": creative["type_id"],
-                "meaning": "Current verdicts, facts, checks and boolean literals remain; read omitted expressions from the pinned definition."}
+    if not preserve_facts or compact_expressions:
+        _companion_condition_expressions(creative)
     outlines = []
     for option in options:
         if not isinstance(option, dict) or not isinstance(option.get("action"), str):
             continue
         outline = {key: deepcopy(option[key]) for key in
-            ("action", "label", "function_id", "available", "reason", "use", "preconditions", "condition_observation")
+            ("action", "label", "function_id", "available", "reason", "use", "preconditions",
+             "preconditions_ref", "condition_observation")
             if key in option}
         request = {"tool": "grove_inspect", "arguments": {"entity_id": entity["id"], "action": option["action"]}}
         outline["read_request"] = request
@@ -1424,17 +1476,42 @@ def _companion_inspection_index(payload, *, preserve_facts=False, compact_expres
         elif isinstance(option.get("sources_index"), list):
             outline["sources_index"] = deepcopy(option["sources_index"])
         outlines.append(outline)
+    # Shared access observations are identical facts, not separate verdicts for
+    # each button. Preserve action-specific conditions verbatim beside them.
+    shared = deepcopy(value.get("shared_preconditions", []))
+    shared = shared if isinstance(shared, list) else []
+    counts = {}
+    for outline in outlines:
+        if isinstance(outline.get("preconditions"), list) and outline["preconditions"]:
+            key = json.dumps(outline["preconditions"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            counts[key] = counts.get(key, 0) + 1
+    references = {}
+    for outline in outlines:
+        conditions = outline.get("preconditions")
+        if not isinstance(conditions, list) or not conditions:
+            continue
+        key = json.dumps(conditions, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if counts[key] < 2:
+            continue
+        if key not in references:
+            references[key] = len(shared)
+            shared.append(conditions)
+        outline.pop("preconditions")
+        outline["preconditions_ref"] = "#/shared_preconditions/" + str(references[key])
     index = deepcopy(value) if preserve_facts else {"player": deepcopy(value.get("player"))}
     index.update({"entity": state,
         "action_options": outlines,
         "available_actions": deepcopy(value.get("available_actions", entity.get("available_actions", []))),
         "action_options_projection": {"scope": "authorized_action_index", "expanded_actions": [],
             "requested_projection": deepcopy(projection),
-            "meaning": "Index only; inputs and previews are unprovided/unbound. Use read_request."},
+            "meaning": "Index only; inputs and previews are unprovided/unbound. preconditions_ref "
+                       "resolves within this inspection result. Use read_request for a complete action."},
         "projection": {"scope": "object_state_and_action_index", "complete_inspection": False,
             "complete_object_state": preserve_facts,
             "omitted_sections": ["expanded action inputs and previews", *duplicate_state] + ([] if preserve_facts else
                 ["child snapshots", "public content history"])}})
+    if shared:
+        index["shared_preconditions"] = shared
     if "explanation" in value:
         index["explanation"] = deepcopy(value["explanation"])
     if "result" not in payload:
@@ -1767,8 +1844,7 @@ class AgentObservations:
                    "continuation_bases": {}, "pour_target_slots": {}})
         if not preflight and function in AGENT_ACTION_FUNCTIONS | {"grove.definition_publish", "execution_checkpoint"}:
             result = _companion_action_projection(result, base_id=base_id, versions=bundle["versions"],
-                entity_ids=action_entity_ids, source=payload,
-                discovery_limit=8 if function in AGENT_ACTION_FUNCTIONS else 0)
+                entity_ids=action_entity_ids, source=payload)
         _project_agent_menus(result)
         # Tool responses and the turn's fresh preflight share the same budget
         # before binding. Complete selected previews remain mandatory facts.
