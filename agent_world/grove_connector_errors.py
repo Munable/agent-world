@@ -282,6 +282,31 @@ def _include_bounded(result, key, value):
         result[key] = value
 
 
+def _checkpoint_schema_errors(value):
+    fields = {"task_id", "execution_segment_id", "status", "summary", "next_intent",
+              "evidence_operation_ids", "evidence_observation_ids"}
+    constraints = {"type", "enum", "required", "minLength", "maxLength", "minItems",
+                   "maxItems", "uniqueItems", "additionalProperties"}
+    if not isinstance(value, list) or not 1 <= len(value) <= 4:
+        return None
+    result = []
+    for row in value:
+        if not isinstance(row, dict) or row.get("constraint") not in constraints:
+            return None
+        path, limit = row.get("path"), _fact(row.get("limit"))
+        if (not isinstance(path, list) or len(path) > 2 or limit is _MISSING or
+                any(not (isinstance(part, str) and part in fields or type(part) is int and 0 <= part < 8) for part in path)):
+            return None
+        safe = {"path": list(path), "constraint": row["constraint"], "limit": limit}
+        if "allowed_fields" in row:
+            allowed = row["allowed_fields"]
+            if not isinstance(allowed, list) or any(not isinstance(key, str) or key not in fields for key in allowed):
+                return None
+            safe["allowed_fields"] = list(allowed)
+        result.append(safe)
+    return result
+
+
 def public_world_error_details(value):
     """Keep formal public failures and diagnostics, never arbitrary upstream data."""
     if not isinstance(value, dict):
@@ -319,6 +344,7 @@ def public_world_error_details(value):
     _include_bounded(result, "diagnostics", _compiler_diagnostics(value.get("diagnostics")))
     _include_bounded(result, "effect_evidence_diagnostic", _effect_evidence_diagnostic(value.get("effect_evidence_diagnostic")))
     _include_bounded(result, "fact_catalog", _effect_fact_catalog(value.get("fact_catalog")))
+    _include_bounded(result, "schema_errors", _checkpoint_schema_errors(value.get("schema_errors")))
     return result or None
 
 

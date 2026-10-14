@@ -16,8 +16,13 @@ async function fixture(t, overrides = {}) {
     source_sha256: createHash("sha256").update(await readFile(SOURCE)).digest("hex"),
     diagnostic_path: join(directory, "native-context.json"),
     machine_context_prefixes: ["Exact machine facts header", "Exact private context header"],
-    formal_tools: ["grove_world_grove_definition_publish", "grove_world_grove_definition_read", "grove_world_grove_interact", "grove_world_native_tool_history"],
+    formal_tools: ["grove_world_grove_definition_publish", "grove_world_grove_definition_read", "grove_world_grove_interact", "grove_world_native_tool_history",
+      "grove_world_play_look", "grove_world_play_act", "grove_world_execution_checkpoint", "grove_world_grove_effect_evidence"],
+    play_tool_names: ["grove_world_play_look", "grove_world_play_act", "grove_world_execution_checkpoint", "grove_world_grove_effect_evidence", "grove_world_native_tool_history"],
     ...overrides };
+  if (overrides.formal_tools && !Object.hasOwn(overrides, "play_tool_names")) {
+    options.play_tool_names = options.play_tool_names.filter(name => options.formal_tools.includes(name));
+  }
   const hooks = await GroveNativeContext({}, options);
   return { options, hooks, transform: hooks[HOOK], diagnostic: () => readFile(options.diagnostic_path, "utf8").then(JSON.parse) };
 }
@@ -601,6 +606,70 @@ test("owned execution yields at exact SDK headroom with complete terminal tools 
   assert.equal((await diagnostic()).sdk_guard.yielded_count, 2);
 });
 
+test("play executor keeps exact request ownership and cannot yield under a full-mode contract", async t => {
+  const { hooks, transform, diagnostic } = await fixture(t);
+  const agent = "shared-grove-play-executor";
+  const contract = { purpose: "execution", interaction_mode: "play", session_id: "same-session", world_write_authorized: true,
+    request_id: "grove-request-" + "a".repeat(32), task_id: "grove-task-" + "b".repeat(32),
+    segment_id: "grove-segment-" + "c".repeat(32) };
+  let dispatched = 0;
+  const config = { model: "provider/model", provider: { provider: { options: {
+    fetch: async () => { dispatched++; return new Response("delegate"); } } } } };
+  await hooks.config(config);
+  for (const mode of ["play", "full"]) {
+    const original = [message("current", "user", [{ type: "text", text: "Use one actual public work" },
+      { type: "text", text: "[Grove current request contract]\n" + JSON.stringify({ ...contract, interaction_mode: mode }) }], { agent }),
+      message("current-tools", "assistant", [{ type: "tool", tool: "grove_world_play_look", callID: "actual-look",
+        state: { status: "completed", input: {}, output: JSON.stringify({ result: { player: { id: "same-player" } } }) } }],
+        { agent, parentID: "current" })];
+    const inference = { messages: structuredClone(original) };
+    await transform({}, inference);
+    await hooks["chat.headers"]({ agent, sessionID: "same-session", model: { providerID: "provider", id: "model" },
+      message: { id: messageID("current") } });
+    const body = JSON.stringify({ messages: [{ role: "user", content: "x".repeat(140000) }], tools: [
+      { type: "function", function: { name: "grove_world_play_look", parameters: { type: "object" } } }] });
+    const response = await config.provider.provider.options.fetch("https://provider.invalid/messages", { method: "POST", body });
+    assert.equal(response.status, 422);
+    const proof = await diagnostic();
+    assert.equal(proof.sdk_guard.status, mode === "play" ? "yielded" : "blocked");
+    assert.deepEqual(inference.messages, original);
+  }
+  assert.equal(dispatched, 0);
+});
+
+test("owned play wire sends only complete declared schemas and refuses an excluded forced tool", async t => {
+  const { hooks, transform, diagnostic } = await fixture(t);
+  const agent = "shared-grove-play-executor";
+  const contract = { purpose: "execution", interaction_mode: "play", session_id: "same-session", world_write_authorized: true,
+    request_id: "grove-request-" + "a".repeat(32), task_id: "grove-task-" + "b".repeat(32), segment_id: "grove-segment-" + "c".repeat(32) };
+  const original = [message("current", "user", [{ type: "text", text: "[Grove current request contract]\n" + JSON.stringify(contract) }], { agent })];
+  const inference = { messages: structuredClone(original) };
+  const sent = [];
+  const config = { model: "provider/model", provider: { provider: { options: {
+    fetch: async (_url, init) => { sent.push(JSON.parse(init.body)); return new Response("delegate"); } } } } };
+  await hooks.config(config);
+  await transform({}, inference);
+  await hooks["chat.headers"]({ agent, sessionID: "same-session", model: { providerID: "provider", id: "model" },
+    message: { id: messageID("current") } });
+  const keep = { type: "function", function: { name: "grove_world_play_look", description: "Complete actual schema",
+    parameters: { type: "object", properties: { entity_id: { type: "string", minLength: 1 } }, additionalProperties: false } } };
+  const exclude = { type: "function", function: { name: "grove_world_grove_definition_publish", parameters: { type: "object" } } };
+  const body = { model: "model", messages: [{ role: "user", content: "Original intent" }], tools: [exclude, keep], stream: true };
+  const response = await config.provider.provider.options.fetch("https://provider.invalid/messages", { method: "POST", body: JSON.stringify(body) });
+  assert.equal(response.status, 200);
+  assert.deepEqual(sent, [{ ...body, tools: [keep] }]);
+  assert.deepEqual(inference.messages, original);
+  const proof = await diagnostic();
+  assert.equal(proof.sdk_guard.tools_count_before, 2);
+  assert.equal(proof.sdk_guard.tools_count, 1);
+  assert.equal(proof.sdk_guard.tool_projection, "play_request_exact_names");
+  const forced = { ...body, tool_choice: { type: "function", function: { name: exclude.function.name } } };
+  assert.equal((await config.provider.provider.options.fetch("https://provider.invalid/messages",
+    { method: "POST", body: JSON.stringify(forced) })).status, 422);
+  assert.equal(sent.length, 1);
+  assert.equal((await diagnostic()).sdk_guard.tool_projection, "blocked");
+});
+
 test("real SDK schema overhead first reclaims historical pairs so current preparation feedback reaches the model", async t => {
   for (const embeddedSystem of [false, true]) {
     const { hooks, transform, diagnostic } = await fixture(t);
@@ -916,4 +985,42 @@ test("unknown old error pairs and index envelopes clear together under a tiny al
   await transform({}, inference);
   assert.deepEqual(inference.messages, once);
   assert.equal((await diagnostic()).projection.historical_tool_history_bytes_after, 0);
+});
+
+test("full dispatch wire narrows exact declared schemas while legacy full remains unchanged", async t => {
+  for (const generic of [false, true]) {
+    const names = ["grove_world_world_read", "grove_world_world_act"];
+    const { hooks, transform, diagnostic } = await fixture(t, { formal_tools: names,
+      ...(generic ? { full_tool_names: names } : {}) });
+    const agent = "shared-grove-executor";
+    const contract = { purpose: "execution", session_id: "same-session", world_write_authorized: true,
+      request_id: "grove-request-" + "a".repeat(32), task_id: "grove-task-" + "b".repeat(32),
+      segment_id: "grove-segment-" + "c".repeat(32) };
+    const original = [message("current", "user", [{ type: "text", text:
+      "[Grove current request contract]\n" + JSON.stringify(contract) }], { agent })];
+    const sent = [];
+    const config = { model: "provider/model", provider: { provider: { options: { fetch: async (_url, init) => {
+      sent.push(JSON.parse(init.body)); return new Response("delegate"); } } } } };
+    await hooks.config(config);
+    await transform({}, { messages: structuredClone(original) });
+    await hooks["chat.headers"]({ agent, sessionID: "same-session", model: { providerID: "provider", id: "model" },
+      message: { id: messageID("current") } });
+    const keep = { name: names[0], description: "Exact public schema", input_schema: {
+      type: "object", required: ["function_id"], properties: { function_id: { type: "string" } } } };
+    const excluded = { name: "grove_world_grove_definition_publish", input_schema: { type: "object" } };
+    const body = { messages: [{ role: "user", content: "My original choices" }], tools: [excluded, keep] };
+    const fetch = config.provider.provider.options.fetch;
+    assert.equal((await fetch("https://provider.invalid/messages", { method: "POST", body: JSON.stringify(body) })).status, 200);
+    assert.deepEqual(sent, [generic ? { ...body, tools: [keep] } : body]);
+    assert.equal((await diagnostic()).sdk_guard.tool_projection, generic ? "full_request_exact_names" : "unchanged");
+    if (generic) {
+      assert.equal((await fetch("https://provider.invalid/messages", { method: "POST", body: JSON.stringify({
+        ...body, tool_choice: { type: "tool", name: excluded.name } }) })).status, 422);
+      assert.equal(sent.length, 1);
+      await transform({}, { messages: [message("current", "user", [{ type: "text", text:
+        "[Grove current request contract]\n" + JSON.stringify({ ...contract, interaction_mode: "play" }) }], { agent })] });
+      assert.equal((await fetch("https://provider.invalid/messages", { method: "POST", body: JSON.stringify(body) })).status, 422);
+      assert.equal(sent.length, 1);
+    }
+  }
 });

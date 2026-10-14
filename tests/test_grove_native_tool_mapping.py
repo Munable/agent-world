@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 
 from agent_world.grove_agent_client import GroveAgentClient, MemoryOperationJournal
+from agent_world.grove_agent_play import GroveAgentPlay
 from agent_world.grove_connector import (EXECUTION_INSTRUCTIONS, GroveSession, MCP_NAME,
     MAX_NATIVE_TOOL_MAPPING_BYTES, MAX_NATIVE_TOOL_MAPPING_ROWS, create_connector_app)
 from agent_world.grove_connector_errors import ConnectorError
@@ -20,6 +21,7 @@ class NativeToolMappingTests(unittest.IsolatedAsyncioTestCase):
         self.session = object.__new__(GroveSession)
         self.session.agent_client = self.client
         self.session.observations = self.client.observations
+        self.session.play = GroveAgentPlay(self.client)
         self.session.opportunity = None
         self.session.catalog = {
             "map.viewport": self.spec({"radius": {"type": "integer", "minimum": 0, "maximum": 4}}),
@@ -45,7 +47,7 @@ class NativeToolMappingTests(unittest.IsolatedAsyncioTestCase):
 
     def test_mapping_uses_actual_native_names_and_only_declared_world_capabilities(self):
         original = deepcopy(self.session.catalog)
-        mapping = self.session.native_tool_mapping()
+        mapping = self.session.native_tool_mapping(interaction_mode="conversation")
         rows = {row["tool"]: row for row in mapping["tools"]}
         self.assertEqual(rows["map_viewport"], {"function_id": "map.viewport", "tool": "map_viewport",
             "native_tool": "grove_world_map_viewport", "access": "read"})
@@ -62,30 +64,40 @@ class NativeToolMappingTests(unittest.IsolatedAsyncioTestCase):
     def test_mapping_is_bounded_and_recomputed_after_real_contract_change(self):
         self.session.catalog = {"grove.long_" + str(index) + "_" + "x" * 160: self.spec({}) for index in range(100)}
         self.declare(list(self.session.catalog))
-        mapping = self.session.native_tool_mapping()
+        mapping = self.session.native_tool_mapping(interaction_mode="conversation")
         self.assertLessEqual(len(mapping["tools"]), MAX_NATIVE_TOOL_MAPPING_ROWS)
         self.assertLessEqual(len(json.dumps(mapping, ensure_ascii=False, separators=(",", ":")).encode()), MAX_NATIVE_TOOL_MAPPING_BYTES)
-        self.assertEqual(mapping["omitted_tools"], len(self.session.tools()) - len(mapping["tools"]))
+        self.assertEqual(mapping["omitted_tools"], len(self.session.tools()) - 3 - len(mapping["tools"]))
         self.declare([])
-        self.assertEqual({row["tool"] for row in self.session.native_tool_mapping()["tools"]},
-            {"world_bootstrap", "execution_checkpoint", HISTORY_TOOL})
+        self.assertEqual({row["tool"] for row in self.session.native_tool_mapping(interaction_mode="conversation")["tools"]},
+            {"world_bootstrap", "execution_checkpoint", HISTORY_TOOL, "play_look", "play_act"})
 
     def test_name_mapping_requires_no_tool_schema_and_intersects_the_current_directory(self):
         for spec in self.session.catalog.values():
             spec.pop("input_schema")
         self.session.tools = Mock(side_effect=AssertionError("Naming cannot construct RPC schemas"))
         self.client.tools = Mock(side_effect=AssertionError("Naming cannot construct SDK schemas"))
-        mapping = self.session.native_tool_mapping()
+        mapping = self.session.native_tool_mapping(interaction_mode="conversation")
         rows = {row["function_id"]: row for row in mapping["tools"] if "function_id" in row}
         self.assertEqual(rows["map.viewport"]["native_tool"], "grove_world_map_viewport")
         self.assertNotIn("grove.undeclared_read", rows)
         self.assertEqual(self.session.native_read_requests([
             {"function_id": "map.viewport", "arguments": {}}]), [])
         self.session.catalog.pop("grove.inspect")
-        rows = {row.get("function_id") for row in self.session.native_tool_mapping()["tools"]}
+        rows = {row.get("function_id") for row in self.session.native_tool_mapping(interaction_mode="conversation")["tools"]}
         self.assertNotIn("grove.inspect", rows)
         self.session.tools.assert_not_called()
         self.client.tools.assert_not_called()
+
+    def test_full_mapping_and_formal_next_read_use_only_generic_dispatch(self):
+        self.assertEqual({row["tool"] for row in self.session.native_tool_mapping()["tools"]},
+            {"capability_read", "world_read", "world_act", "play_look", "play_act",
+                "execution_checkpoint", HISTORY_TOOL})
+        self.session.active_native_request = {"purpose": "execution", "interaction_mode": "full"}
+        self.assertEqual(self.session.native_read_requests([{ "function_id": "grove.inspect",
+            "arguments": {"entity_id": "actual"}}]), [{"function_id": "grove.inspect", "tool": "world_read",
+            "native_tool": "grove_world_world_read", "arguments": {"function_id": "grove.inspect",
+                "arguments": {"entity_id": "actual"}}}])
 
     def test_formal_reads_keep_exact_arguments_and_do_not_admit_writes_unknowns_or_handles(self):
         requests = [

@@ -23,6 +23,22 @@ BUILD_SCHEMA = {"type": "object", "properties": {
 
 
 class AgentObservationsTests(unittest.TestCase):
+    def test_syntax_self_containment_disclosure_keeps_exact_schema_and_rejects_unresolved_refs(self):
+        schema = {"$ref": "#/$defs/selected", "$defs": {"selected": {
+            "type": "object", "properties": {"child": {"$ref": "#/$defs/child"}}},
+            "child": {"type": "string"}}}
+        source = {"result": {"topic": "syntax", "node": "definition", "schema": schema}}
+        actual = companion_projection("grove.rule_catalog", source)
+        self.assertEqual(actual["result"]["schema"], schema)
+        self.assertNotIn("schema_projection", source["result"])
+        self.assertTrue(actual["result"]["schema_projection"]["self_contained"])
+        self.assertEqual(actual["result"]["schema_projection"]["local_definition_count"], 2)
+        for reference in ("https://external.example/schema", "#/$defs/missing", "#named-anchor"):
+            source["result"]["schema"] = {"$ref": reference}
+            actual = companion_projection("grove.rule_catalog", source)
+            self.assertNotIn("schema_projection", actual["result"])
+            self.assertEqual(actual["result"]["schema"], source["result"]["schema"])
+
     def test_first_join_receipt_projects_dense_actual_scene_without_binding_withheld_rows(self):
         player = {"id": "person", "name": "Visitor", "version": 1, "x": 0, "y": 3,
                   "backpack_id": "backpack", "spawn": {"x": 0, "y": 3}}

@@ -1,6 +1,6 @@
 # 世界作者与独立客户端接入
 
-这是当前公开Python SDK API 1／HTTP protocol 0.15及当前0.38.0／world42／state25的Shared Grove Agent／人类接口说明，属于L6表面；本轮本地验证范围见当前研发记录，原8960世界与12个连接器已从同一源码加载，真实Agent创作验收另列当前研发记录。语义以 [FOUNDATION](FOUNDATION.md) 与 [AGENT_INTERACTION](AGENT_INTERACTION.md) 为准。世界作者定义领域对象、规则与动作；此处不规定参与者的目的、关系或体验角色。
+复核：2026-10-15。这是当前公开Python SDK API 1／HTTP protocol 0.15及源码0.39.0／world42／state25的Shared Grove Agent／人类接口说明，属于L6表面；实际加载、运行与真实Agent验证范围见[当前研发记录](SHARED_GROVE.md#当前研发记录)。语义以 [FOUNDATION](FOUNDATION.md) 与 [AGENT_INTERACTION](AGENT_INTERACTION.md) 为准。世界作者定义领域对象、规则与动作；此处不规定参与者的目的、关系或体验角色。
 
 ## 跨世界身份与当前入口
 
@@ -189,6 +189,18 @@ outcome = await client.write(
 
 客户端根据当前呈现补齐声明的版本护栏，生成稳定operation_id并在发送前保存原envelope；宿主将返回的实际事实交付给模型后才用对应观察继续行动。目标、提示词、推理预算、取消和是否继续由外部宿主决定。可选 `before_write(record)`支持同步或异步，在每笔新行动及精确重放前核对用户授权／停止，返回False拒绝发送；世界control凭据不替代用户对宿主的授权。世界保存主动提交的有限授权目标摘要，其他私人上下文留宿主。
 
+普通游玩可另用 `agent_world.grove_agent_play.GroveAgentPlay(client)`：宿主在每次独立请求调用 `begin_request(request_scope)`，把实际 SDK 读取交给 `present(delivered, request_scope=...)`。返回紧凑场景、原提交证据、当前公开字段及正式行动引用；按最终可见内容独立登记观察，不继承原始观察的省略对象、候选或预览；未展开或超出常规8KiB视图的动作仅提供真实补读入口。Agent自行选择 `choice_ref` 与 `parameters` 后调用 `resolve(..., request_scope=...)`，得到原 `function_id, arguments, observation_id`，仍经 `client.write()` 或宿主原执行控制器提交。引用只在原客户端、主体和请求内单次使用，不能替换固定目标、动作或协议参数。4000字目标、原回执或固定任务证据超过紧凑视图时，宿主保留完整 SDK 反馈；这不放宽原输出界限，也不新增猜测参数。
+
+OpenCode reference adapter 的 `play_look(entity_id?, action?, candidate_id?)` 与 `play_act(choice_ref, parameters?)`提供普通游玩；观察、执行段与操作身份由 adapter关联，模型无需手填这些机械字段。完整执行面使用下列按需分派入口，原 SDK 与静态 MCP 原始工具目录继续兼容。普通问答仍为原只读工具面，任何行动仍需当前请求的明确委托。当前模型配置补充本机旧目录缺少的 Go 免费候选与 DeepSeek 正式入口；目录声明不保证上游可用，套餐拒绝不转按量路由。
+
+| 完整执行入口 | 输入与结果 |
+| --- | --- |
+| `capability_read` | `{}`读取当前正式 Agent 合同声明的能力索引 `functions[{function_id,access,version,use}]`；`{function_id}`读取该能力的精确语义 `input_schema`、SDK观察／错误 `output_schema`与协议说明。它只提供能力元数据，不生成 observation_id、世界事实或授权。 |
+| `world_read` | `{function_id, arguments?, base_observation_id?}`调用实际声明的只读能力。arguments缺省为 `{}`，仍须满足该能力schema；成功取得原 SDK 观察，效果证据与准备读取继续按原合同登记。 |
+| `world_act` | `{function_id, arguments, observation_id}`提交实际声明的写能力。arguments仅放该能力schema定义的语义参数，观察放外层；执行段由宿主捕获的原请求关联，不允许参数替换委托或协议字段。仍经原 SDK bind、执行锁、controller、日志及原回执提交。 |
+
+Agent先发现所需能力及其schema，再自行选择参数。正式 `read_requests`中的 function_id／arguments可直接交 `world_read`；发表、成型、触发和结果核验继续分别成立，入口不提供作品配方或自动修好的答案。
+
 构造参数 `world_instance` 是调用方为认证endpoint选择的稳定标识，示例使用world_url；Journal另保存真实bootstrap.universe。不同endpoint、主体或世界实例不共用同一原操作Journal，迁移连接须保持原世界归属，不能仅凭相同世界名称恢复。
 
 未知结果时，`client.pending_operations`给原function／envelope及role／world scope，并保存真实bootstrap.universe和envelope_fingerprint；HTTP／MCP恢复前核对原世界实例与role。`await client.recover()`只查原Receipt；返回unknown仍阻止新写。确需且仍获准重放时用 `await client.recover(replay=True)`，仅重发原envelope。世界代码版本变化关闭新写，须重新discover；原未知envelope仍可在同一世界实例与role下恢复。明确拒绝按结构化错误恢复，观察过期重新读取；已提交Receipt是过去操作证据，下一选择仍读取当前同一对象。ReadbackPending表示原提交已确认但SDK呈现失败，可查询原Receipt并重新读取当前事实，不能重做该行动。
@@ -315,4 +327,8 @@ Agent 面板的历史执行 readback 保留原证据语义。网页当前行动�
 
 连接 exchange 返回的 MCP URL（组合入口通常 `/mcp`），使用相同 bearer。通过 MCP SDK 建立 session／initialize／list_tools；调用 `world.bootstrap`、`world.describe`、`world.discover` 的参数直接为对象。世界动态函数使用与 HTTP invoke 相同的 arguments / operation_id envelope。HTTP 与 MCP 可在同一主体下交替查询回执或重放原操作，不自行把新 session 当新身份。
 
-MCP 错误通过 `isError=true` 与 structuredContent 返回，保留同一结构化错误。GroveAgentClient与OpenCode工具的outputSchema使用成功观察／明确错误的联合结构，因为MCP客户端也会校验isError响应；错误没有observation_id，不能按成功观察schema吞掉真实error／message／details。SDK内部成功结果继续独立严格校验，联合schema不降低成功或授权要求。不能只依据工具调用完成来宣称动作成功；具体世界的公开／私有内容、回应、确认与完成仍按该世界规则处理。
+MCP 错误通过 `isError=true` 与 structuredContent 返回，保留同一结构化错误。GroveAgentClient与OpenCode世界观察工具的outputSchema使用成功观察／明确错误的联合结构，因为MCP客户端也会校验isError响应；错误没有observation_id，不能按成功观察schema吞掉真实error／message／details。capability_read使用独立的能力元数据合同，不把能力目录当现场观察。SDK内部成功观察继续独立严格校验，联合schema不降低成功或授权要求。不能只依据工具调用完成来宣称动作成功；具体世界的公开／私有内容、回应、确认与完成仍按该世界规则处理。
+
+普通宿主委托可向 `/connector/execute` 明确传 `interaction_mode: "play"`；创作或完整任务传 `"full"`，API缺省full保持兼容。模式固定在原任务及请求，`/connector/execute-resume`不接受替换模式。play允许 `play_look`、`play_act`、`execution_checkpoint`、`grove_effect_evidence`、`native_tool_history`五个入口；full执行器声明 `capability_read`、`world_read`、`world_act`、`play_look`、`play_act`、`execution_checkpoint`、`native_tool_history`七个入口。两种模式共享原身份、授权、预算、日志与提交，不按自然语言自动分类或升级工具面。
+
+正式map.viewport／grove.inspect读取关系可把其参数交给play_look；普通视图不完整的选定动作详情可在原SDK硬界限内展开，引用不授予行动权。Reference frontend新委托默认“游玩体验”并传play，可明确选择“创作与复杂任务”传full；选择属于私人宿主委托，不写公共世界事实，接续保持原模式。

@@ -43,6 +43,7 @@ _PREPARATION_METADATA = {
                  "next_cursor", "next", "after", "offset", "has_more", "execution_control", "execution_task",
                  "task_action_summary", "agent_context", "read_requests", "observed_step", "effect_evidence_reads"},
     "entity": {"version", "interaction_revision", "updated_at"},
+    "play_choice": {"choice_ref"},
     "creative": {"world_tick"}, "program": {"event_cursor"}, "process": {"last_tick", "observed_tick"},
     "mechanical_observation": {"observed_tick"}, "mechanical_values": {"observed_tick"},
     "automatic_field_change": {"tick"},
@@ -54,9 +55,11 @@ _PREPARATION_CHILDREN = {
     "response": {"result": "response", "viewport": "response", "selected_inspection": "response",
         "inspection": "response", "entity": "entity", "player": "entity", "entities": "entity",
         "players": "entity", "nearby_entities": "entity", "nearby_players": "entity", "inventory": "entity",
-        "contents": "entity", "resource_nodes": "entity", "water_sources": "entity"},
+        "contents": "entity", "resource_nodes": "entity", "water_sources": "entity",
+        "action_options": "play_choice", "movement_choices": "play_choice"},
     "entity": {"creative": "creative", "state": "state", "simulation": "simulation",
-               "presentation": "presentation", "execution_domain": "execution_domain"},
+               "presentation": "presentation", "execution_domain": "execution_domain",
+               "action_options": "play_choice"},
     "simulation": {"combustion": "combustion"},
     "presentation": {"observation": "presentation_observation"},
     "state": {"program": "program"}, "program": {"process": "process"},
@@ -97,7 +100,9 @@ def _preparation_facts(value, *, kind="response"):
     omitted = _PREPARATION_METADATA.get(kind, ())
     children = _PREPARATION_CHILDREN.get(kind, {})
     # The shape, not arbitrary descendant field names, identifies each known
-    # runtime block. Everything else remains opaque and unchanged.
+    # runtime block. Random play references are metadata only at the declared
+    # response/entity menu rows; parameter schemas, previews and authored
+    # fields remain opaque, even when their own field is called choice_ref.
     result = {}
     for key, item in value.items():
         if key in omitted:
@@ -324,7 +329,7 @@ class ExecutionController:
         self.request_batch_limit, self.request_limit = max_requests, MAX_TASK_REQUESTS
         self.world_call_limit = max_world_calls
         self.ports = ports
-        self.state = {"status": "idle", "goal": "", "max_actions": 0, "actions_count": 0,
+        self.state = {"status": "idle", "goal": "", "interaction_mode": "full", "max_actions": 0, "actions_count": 0,
             "control_status": "idle", "delegation_active": False,
             "grant_version": None, "grant_id": None, "receipts": [], "receipt_history_complete": True,
             "receipt_history_scope": RECEIPT_HISTORY_SCOPE, "readback": None,
@@ -479,6 +484,10 @@ class ExecutionController:
         """Restore the same task/session authority, without reopening a goal."""
         if isinstance(saved, dict):
             self.state.update(deepcopy(saved))
+            interaction_mode = saved.get("interaction_mode", "full")
+            if not isinstance(interaction_mode, str) or interaction_mode not in {"play", "full"}:
+                raise ValueError("invalid saved interaction mode")
+            self.state["interaction_mode"] = interaction_mode
             # Old completeness flags covered only physical object operations.
             # Broader retained writes remain valid, but their whole history
             # cannot be inferred from that old flag or a saved summary cache.
@@ -590,8 +599,11 @@ class ExecutionController:
               worker_busy: bool, catalog: dict) -> dict:
         self.ensure_admission()
         self.ensure_persistence_ready()
-        if not isinstance(body, dict) or set(body) - {"goal", "max_actions", "max_requests", "context_entity_id", "compact_history"}:
+        if not isinstance(body, dict) or set(body) - {"goal", "max_actions", "max_requests", "context_entity_id", "compact_history", "interaction_mode"}:
             raise ConnectorError("InvalidArguments", "Expected an explicit goal and bounded action grant.")
+        interaction_mode = body.get("interaction_mode", "full")
+        if not isinstance(interaction_mode, str) or interaction_mode not in {"play", "full"}:
+            raise ConnectorError("InvalidArguments", "interaction_mode 需要明确选择 play 或 full。")
         goal, maximum = body.get("goal"), body.get("max_actions", 32)
         if not isinstance(goal, str) or not 1 <= len(goal.strip()) <= 4000:
             raise ConnectorError("InvalidGoal", "执行目标需要 1–4000 字。")
@@ -616,7 +628,7 @@ class ExecutionController:
         if self.state.get("task_id"):
             self.archive = (self.archive + [self.snapshot()])[-8:]
         # Preserve the public state shape and the fixed per-request budget.
-        self.state.update(status="starting", goal=goal.strip(), max_actions=maximum, actions_count=0,
+        self.state.update(status="starting", goal=goal.strip(), interaction_mode=interaction_mode, max_actions=maximum, actions_count=0,
             delegation_active=False, grant_version=None, grant_id=None, control_status=None,
             receipts=[], receipt_history_complete=True, receipt_history_scope=RECEIPT_HISTORY_SCOPE,
             readback=None, readback_actual=False, error=None, action_entity_ids=[],
@@ -1464,8 +1476,16 @@ class ExecutionController:
 
     async def checkpoint(self, arguments: dict, *, schema: dict, write_busy=False):
         self.ensure_persistence_ready()
-        if not Draft202012Validator(schema).is_valid(arguments):
-            raise ConnectorError("InvalidCheckpoint", "执行检查点需要本任务标识、状态、真实发现及原回执引用。")
+        failures = list(Draft202012Validator(schema).iter_errors(arguments))
+        if failures:
+            # Give actionable formal constraints without echoing private prose
+            # or repairing the Agent's report on its behalf.
+            diagnostics = [{"path": list(error.absolute_path), "constraint": error.validator,
+                "limit": deepcopy(error.validator_value),
+                **({"allowed_fields": sorted(error.schema.get("properties", {}))}
+                   if error.validator == "additionalProperties" else {})} for error in failures[:4]]
+            raise ConnectorError("InvalidCheckpoint", "检查点输入不符合已声明 schema；请按具体字段约束修改原报告。",
+                world_details={"schema_errors": diagnostics})
         # Diagnose the actual stop boundary before mismatched report IDs. An
         # ID error alone neither means control was reclaimed nor permits a
         # replacement ID, new grant or automatic resubmission.

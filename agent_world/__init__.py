@@ -40,7 +40,7 @@ def __getattr__(name):
 def __dir__():
     return sorted(set(globals()) | set(_EXPORT_MODULES))
 
-__version__ = "0.38.0"
+__version__ = "0.39.0"
 __all__ = [
     "WorldRuntime",
     "WorldDefinition",

@@ -344,6 +344,41 @@ class GroveAgentClient:
         return agent_mcp_schema(schema, function=function, access=item.get("access"),
                                 guard_paths=item.get("guard_paths"))
 
+    def present_derived_view(self, source, payload):
+        """Register a trusted client's final visible view without inherited facts.
+
+        This is an internal presentation boundary, not a model tool. The source
+        must be this client's registered delivery and the original receipt
+        envelope remains exact. The common fact collector registers only the
+        final payload; the raw observation stays available to consumers that
+        actually received it, but is never a binding base for this view.
+        """
+        if not isinstance(source, dict) or not isinstance(payload, dict):
+            raise AgentClientError("InvalidDerivedObservation", "A source delivery and final view are required.", 422)
+        meta = source.get("agent_observation")
+        observation_id = source.get("observation_id")
+        if (not isinstance(meta, dict) or not isinstance(observation_id, str) or
+                meta.get("scope") != "client_presented" or meta.get("role_id") != self.role_id or
+                meta.get("world_instance") != self.world_instance or
+                self.observations.role_id != self.role_id):
+            raise AgentClientError("DerivedObservationSourceMismatch", "The source delivery belongs to another client scope.", 409)
+        try:
+            registered_function = self.observations.source_function(observation_id)
+        except Exception as exc:
+            raise AgentClientError("DerivedObservationSourceMismatch", "The source observation is unavailable in this client.", 409) from exc
+        if meta.get("source_function") != registered_function or payload.get("agent_observation") != meta:
+            raise AgentClientError("DerivedObservationSourceMismatch", "The final view differs from its registered role/world/function source.", 409)
+        for key in ("operation_id", "function_id", "function_version", "world_id", "snapshot_seq",
+                    "commit_seq", "ok", "read_only", "replayed", "intent_fingerprint", "confirmed_outcome"):
+            if (key in source) != (key in payload) or source.get(key) != payload.get(key):
+                raise AgentClientError("DerivedObservationReceiptMismatch", "A derived view cannot change or omit its original receipt envelope.", 409)
+        final = deepcopy(payload)
+        final.pop("observation_id", None)
+        # No base_id: omitted source entities, candidates and previews must not
+        # become action guards through old chat identifiers or hidden state.
+        return self.present(registered_function, final, _already_projected=True,
+            preflight=self.observations.preflight_id == observation_id)
+
     def validate_bootstrap(self, payload):
         """Validate an adapter's authenticated bootstrap without discovering tools."""
         self._check_bootstrap_scope(payload, recovery=self._world_id is None)

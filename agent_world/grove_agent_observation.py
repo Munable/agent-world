@@ -11,6 +11,7 @@ from copy import deepcopy
 import json
 import re
 import secrets
+from urllib.parse import unquote
 
 from .grove_connector_errors import ConnectorError
 
@@ -622,6 +623,48 @@ def _companion_execution_progress(owner):
             "is unknown. task_action_summary retains totals and coverage; original evidence remains saved."}
 
 
+def _schema_refs_are_local(schema):
+    """Conservatively check local JSON pointers without changing the grammar."""
+    try:
+        json.dumps(schema, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    pending = [schema]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, dict):
+            pending.extend(value.values())
+            if "$ref" not in value:
+                continue
+            reference = value["$ref"]
+            if not isinstance(reference, str) or not reference.startswith("#"):
+                return False
+            try:
+                if re.search(r"%(?![0-9a-fA-F]{2})", reference):
+                    return False
+                pointer = unquote(reference[1:], errors="strict")
+                if pointer and not pointer.startswith("/"):
+                    return False
+                target = schema
+                for token in pointer.split("/")[1:]:
+                    if re.search(r"~(?![01])", token):
+                        return False
+                    token = token.replace("~1", "/").replace("~0", "~")
+                    if isinstance(target, list):
+                        if not re.fullmatch(r"0|[1-9][0-9]*", token):
+                            return False
+                        target = target[int(token)]
+                    else:
+                        target = target[token]
+                if not isinstance(target, (dict, bool)):
+                    return False
+            except (KeyError, IndexError, TypeError, ValueError, UnicodeError):
+                return False
+    return True
+
+
 def companion_projection(function: str, payload: dict) -> dict:
     """Own one mutable copy of an authorized response, then compact its facts."""
     result = deepcopy(payload)
@@ -653,6 +696,12 @@ def companion_projection(function: str, payload: dict) -> dict:
     if function == "grove.rule_catalog":
         value["definitions_projection"] = "Page actual immutable definitions with grove_definition_list, " \
             "then read the chosen grove_definition_read(definition_ref). This static language catalog is not an empty publication list."
+        schema = value.get("schema")
+        if value.get("topic") == "syntax" and isinstance(schema, dict) and _schema_refs_are_local(schema):
+            definitions = schema.get("$defs")
+            value["schema_projection"] = {"scope": "adapter_schema_disclosure", "self_contained": True,
+                "node": value.get("node"), "local_definition_count": len(definitions) if isinstance(definitions, dict) else 0,
+                "meaning": "This schema contains the selected node and its transitive local definitions. Other node reads may overlap; this schema is sufficient to draft this node's own syntax. Still use grove.definition_validate for real compiler/type/dependency checks; syntax is not resources, permission or observed effects."}
         return result
     if function == "map.viewport":
         scene = _companion_scene_index(value)
@@ -1822,6 +1871,7 @@ class AgentObservations:
         self._sequence = sequence
         self._reserve_sequence = reserve_sequence or (lambda sequence: None)
         self._observations: dict[str, dict] = {}
+        self._source_functions: dict[str, str] = {}
         self._preflight_id: str | None = None
 
     @property
@@ -1849,24 +1899,34 @@ class AgentObservations:
         """Detach external readers; internal binding only reads the fixed bundle."""
         return deepcopy(self._require(observation_id))
 
-    def present(self, function, payload, *, base_id=None, preflight=False, action_entity_ids=(), schema_projector=None):
+    def source_function(self, observation_id):
+        """The trusted registration source, never an editable payload field."""
+        self._require(observation_id)
+        return self._source_functions[observation_id]
+
+    def present(self, function, payload, *, base_id=None, preflight=False, action_entity_ids=(),
+                schema_projector=None, _already_projected=False):
         """Create a new fixed bundle solely from this presented response.
 
         No invoke/UI/recovery path calls this. Another parallel tool's unseen
         response cannot alter the bundle selected by an already submitted write.
         """
-        result = companion_projection(function, payload)
+        if _already_projected and base_id is not None:
+            raise ConnectorError("InvalidDerivedObservation", "A final derived view cannot inherit another observation's hidden facts.", 409)
+        result = deepcopy(payload) if _already_projected else companion_projection(function, payload)
         bundle = (self.get(base_id) if base_id is not None else
                   {"versions": {kind: {} for kind in ("player", "entity", "opportunity", "content")},
                    "continuation_bases": {}, "pour_target_slots": {}})
-        if not preflight and function in AGENT_ACTION_FUNCTIONS | {"grove.definition_publish", "execution_checkpoint"}:
+        if not _already_projected and not preflight and function in AGENT_ACTION_FUNCTIONS | {"grove.definition_publish", "execution_checkpoint"}:
             result = _companion_action_projection(result, base_id=base_id, versions=bundle["versions"],
                 entity_ids=action_entity_ids, source=payload)
-        _project_agent_menus(result, schema_projector, source_function=function)
+        if not _already_projected:
+            _project_agent_menus(result, schema_projector, source_function=function)
         # Tool responses and the turn's fresh preflight share the same budget
         # before binding. Complete selected previews remain mandatory facts.
-        result = _companion_fact_budget(function, result)
-        result = _bounded_agent_projection(function, result)
+        if not _already_projected:
+            result = _companion_fact_budget(function, result)
+            result = _bounded_agent_projection(function, result)
         # Protocol context and formal follow-up reads describe the authorized
         # source, not hidden world facts or a replacement binding basis.
         source = payload.get("result", payload)
@@ -1901,6 +1961,18 @@ class AgentObservations:
             for option in values if isinstance(values, list) else []:
                 if not isinstance(option, dict):
                     continue
+                option_target = target
+                # The final play view exposes fixed intent rather than asking
+                # the model to copy protocol arguments. Collect only those
+                # actually visible values; do not consult the original bundle.
+                fixed = option.get("fixed_arguments") if _already_projected else None
+                if isinstance(fixed, dict):
+                    if option_target is None and isinstance(fixed.get("target_id"), str):
+                        option_target = fixed["target_id"]
+                    if (option.get("function_id") == "grove.interact" and option.get("action") == "pour" and
+                            isinstance(option_target, str) and fixed.get("target_id") == option_target and
+                            fixed.get("target_slot") in ("contained", "surface")):
+                        bundle["pour_target_slots"][option_target] = fixed["target_slot"]
                 for candidate in rows(option.get("candidates_index")):
                     if isinstance(candidate, dict):
                         for lot in rows(candidate.get("lot_index")):
@@ -1927,14 +1999,14 @@ class AgentObservations:
                     if isinstance(candidate, dict):
                         remember("player" if candidate.get("kind") == "role" else "entity", candidate)
                         preview = candidate.get("preview")
-                        if (option.get("action") in {"store", "attach"} and isinstance(target, str) and
+                        if (option.get("action") in {"store", "attach"} and isinstance(option_target, str) and
                                 isinstance(candidate.get("id"), str) and isinstance(preview, dict) and
                                 re.fullmatch(r"[0-9a-f]{64}", str(preview.get("version_fingerprint", "")))):
-                            key = json.dumps([target, candidate["id"], option["action"]])
+                            key = json.dumps([option_target, candidate["id"], option["action"]])
                             bundle.setdefault("combination_previews", {})[key] = {
                                 "fingerprint": preview["version_fingerprint"],
                                 "player_version": bundle["versions"]["player"].get(self.role_id),
-                                "target_version": bundle["versions"]["entity"].get(target),
+                                "target_version": bundle["versions"]["entity"].get(option_target),
                                 "item_version": bundle["versions"]["entity"].get(candidate["id"])}
 
         def entity(value):
@@ -2017,6 +2089,7 @@ class AgentObservations:
         self._reserve_sequence(self._sequence)
         observation_id = f"obs{self._sequence}-{secrets.token_hex(4)}"
         self._observations[observation_id] = bundle
+        self._source_functions[observation_id] = function
         result = {"observation_id": observation_id,
                   **{key: result[key] for key in ("operation_id", "function_id", "ok", "commit_seq") if key in result},
                   **result}

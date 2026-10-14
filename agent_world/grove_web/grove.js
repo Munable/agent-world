@@ -265,7 +265,7 @@ function renderExecution(){
   const displayedStatus=unknown?'unknown':status==='completed'&&!goalClaimed?'result_unconfirmed':status,requestLabels={idle:'尚未开始',preparing:'正在读取现场',summarizing:'正在整理会话历史',summary_failed:'会话历史整理失败',running:'推理与行动中',returned:'这一段请求已返回',timed_out:'这一段请求超时',settling:'正在核对原结果',idle_confirmed:'原请求已停止并核对',unsettled:'原请求状态待核对'};
   $('execution-status').textContent=labels[displayedStatus]||displayedStatus;$('execution-status').dataset.status=displayedStatus;
   if(!goalDirty&&typeof execution.goal==='string'&&document.activeElement!==$('execution-goal'))$('execution-goal').value=execution.goal;
-  $('execution-current-goal').textContent=execution.goal?'委托目标：'+execution.goal:'明确给出目标后才允许 Agent 行动。保存想法或普通提问不会授权。';
+  $('execution-current-goal').textContent=execution.goal?'委托目标：'+execution.goal+'（'+(execution.interaction_mode==='play'?'游玩体验':'创作与复杂任务')+'）':'明确给出目标后才允许 Agent 行动。保存想法或普通提问不会授权。';
   const count=Number.isInteger(execution.actions_count)?String(execution.actions_count):'待读取',limit=Number.isInteger(execution.max_actions)?String(execution.max_actions):'待读取';
   const requests=Number.isInteger(execution.requests_used)?String(execution.requests_used):'待读取',requestLimit=Number.isInteger(execution.max_requests)?String(execution.max_requests):'待读取';
   $('execution-budget').textContent=execution.goal?'世界动作 '+count+' / '+limit+(execution.task_id?' · 这个目标模型请求 '+requests+' / '+requestLimit:' · 原请求记录，尚无目标接续额度'):'';
@@ -1204,12 +1204,15 @@ $('chat-form').addEventListener('submit',event=>{event.preventDefault();run(asyn
 $('execution-form').addEventListener('submit',event=>{event.preventDefault();run(async()=>{
   const goal=$('execution-goal').value.trim(),maxActions=Number($('execution-max-actions').value),maxRequests=Number($('execution-max-requests').value);
   if(!goal)return;
+  const interactionMode=$('execution-interaction-mode').value;
+  if(!['play','full'].includes(interactionMode))throw new Error('请选择委托方式。');
   if(goal.length>2000)throw new Error('委托目标最多 2000 字。');
   const limits=executionLimits();if(!limits)throw new Error('执行额度尚未读取，请恢复连接。');
   if(!Number.isInteger(maxActions)||maxActions<1||maxActions>limits.max_actions)throw new Error('动作上限须为 1 至 '+limits.max_actions+' 的整数。');
   if(!Number.isInteger(maxRequests)||maxRequests<1||maxRequests>limits.max_requests)throw new Error('模型请求上限须为 1 至 '+limits.max_requests+' 的整数。');
   stopWalking();const entity=selectedEntity();
-  if(await hostCommand('execute',{goal,max_actions:maxActions,max_requests:maxRequests,compact_history:$('execution-compact-history').checked,...(entity?{context_entity_id:entity.id}:{})})){goalDirty=false;$('execution-compact-history').checked=false;client.saveDraft('grove-goal',goal);announce('目标已交给你的 Agent。它可在总额度内接续执行，你可以随时收回后续行动权。');}
+  // This choice belongs to the private host delegation, never public world facts.
+  if(await hostCommand('execute',{goal,interaction_mode:interactionMode,max_actions:maxActions,max_requests:maxRequests,compact_history:$('execution-compact-history').checked,...(entity?{context_entity_id:entity.id}:{})})){goalDirty=false;$('execution-compact-history').checked=false;client.saveDraft('grove-goal',goal);announce('目标已交给你的 Agent。它可在总额度内接续执行，你可以随时收回后续行动权。');}
 });});
 $('execution-goal').addEventListener('input',()=>{goalDirty=true;if(current())try{client.storage.setItem(client.draftKey('grove-goal'),$('execution-goal').value);}catch{}});
 $('execution-resume').addEventListener('click',()=>run(async()=>{

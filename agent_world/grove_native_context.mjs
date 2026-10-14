@@ -5,7 +5,8 @@ import { readFile, writeFile, rename, lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const HOOK = "experimental.chat.messages.transform", VERSION = 2;
-const AGENTS = new Set(["shared-grove", "shared-grove-executor"]);
+const EXECUTION_AGENTS = new Set(["shared-grove-executor", "shared-grove-play-executor"]);
+const AGENTS = new Set(["shared-grove", ...EXECUTION_AGENTS]);
 const GROVE_AGENTS = new Set([...AGENTS, "shared-grove-blueprint", "compaction"]);
 const SUMMARY_PREFIX = "[Grove历史原生摘要：仅作背景，不证明本轮行动或当前世界状态。"
   + "本轮确认动作只按当前task_action_summary的task_id与coverage判断。原偏好、引用和原文保留如下。]\n";
@@ -32,9 +33,12 @@ function requestContract(message) {
   try {
     const value = JSON.parse(part.text.slice(REQUEST_CONTRACT_PREFIX.length + 1));
     const execution = value.purpose === "execution";
+    const mode = value.interaction_mode ?? "full";
+    const executor = mode === "play" ? "shared-grove-play-executor" : "shared-grove-executor";
     if (!value || value.session_id !== message.info.sessionID || !/^grove-request-[a-f0-9]{32}$/.test(value.request_id) ||
         !["entry", "explain", "execution"].includes(value.purpose) || value.world_write_authorized !== execution ||
-        message.info.agent !== (execution ? "shared-grove-executor" : "shared-grove") ||
+        execution && !["play", "full"].includes(mode) ||
+        message.info.agent !== (execution ? executor : "shared-grove") ||
         execution && (!/^grove-task-[a-f0-9]{32}$/.test(value.task_id) || !/^grove-segment-[a-f0-9]{32}$/.test(value.segment_id))) return null;
     return value;
   } catch { return null; }
@@ -44,6 +48,38 @@ function objectOutput(part) {
     const value = JSON.parse(part.state?.output);
     return value && typeof value === "object" && !Array.isArray(value) ? value : null;
   } catch { return null; }
+}
+
+function requestToolDeclarations(body, allowed, mode) {
+  if (!Array.isArray(body.tools) || allowed.size === 0) throw new Error(mode + "_tools_unavailable");
+  const seen = new Set(), retained = [];
+  for (const tool of body.tools) {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) throw new Error("unsupported_" + mode + "_tool_shape");
+    let name;
+    if (tool.type === "function" && tool.function && typeof tool.function === "object" &&
+        !Array.isArray(tool.function) && typeof tool.function.name === "string" &&
+        tool.function.parameters && typeof tool.function.parameters === "object" && !Array.isArray(tool.function.parameters)) {
+      name = tool.function.name; // OpenAI-compatible Chat Completions.
+    } else if (tool.type === undefined && typeof tool.name === "string" &&
+        tool.input_schema && typeof tool.input_schema === "object" && !Array.isArray(tool.input_schema)) {
+      name = tool.name; // Anthropic Messages.
+    } else throw new Error("unsupported_" + mode + "_tool_shape");
+    if (!name || seen.has(name)) throw new Error("ambiguous_" + mode + "_tool_name");
+    seen.add(name);
+    if (allowed.has(name)) retained.push(tool); // Keep each complete declaration unchanged.
+  }
+  if (retained.length === 0) throw new Error(mode + "_tools_unavailable");
+  const choice = body.tool_choice, names = new Set(retained.map(tool => tool.function?.name ?? tool.name));
+  if (choice !== undefined && !["auto", "none", "required"].includes(choice)) {
+    if (!choice || typeof choice !== "object" || Array.isArray(choice)) throw new Error("unsupported_" + mode + "_tool_choice");
+    const named = choice.type === "function" ? choice.function?.name : choice.type === "tool" ? choice.name : undefined;
+    if (named !== undefined) {
+      if (typeof named !== "string" || !names.has(named)) throw new Error("excluded_" + mode + "_tool_choice");
+    } else if (!["auto", "any", "none"].includes(choice.type) || choice.name !== undefined || choice.function !== undefined) {
+      throw new Error("unsupported_" + mode + "_tool_choice");
+    }
+  }
+  return retained;
 }
 
 // A conservative native inference document, not a wire/token estimate. SDK fetch
@@ -138,9 +174,17 @@ export default async function GroveNativeContext(_input, options = {}) {
       typeof options.model !== "string" || !/^[^/]+\/.+$/.test(options.model) ||
       !Array.isArray(options.machine_context_prefixes) || options.machine_context_prefixes.some(prefix => typeof prefix !== "string" || !prefix) ||
       typeof options.diagnostic_path !== "string" || !options.diagnostic_path.startsWith("/") ||
-      !Array.isArray(options.formal_tools) || options.formal_tools.some(tool => typeof tool !== "string")) throw new Error("Invalid managed Grove context hook");
+      !Array.isArray(options.formal_tools) || options.formal_tools.some(tool => typeof tool !== "string") ||
+      options.play_tool_names !== undefined && (!Array.isArray(options.play_tool_names) ||
+        options.play_tool_names.some(tool => typeof tool !== "string" || !options.formal_tools.includes(tool)) ||
+        new Set(options.play_tool_names).size !== options.play_tool_names.length) ||
+      options.full_tool_names !== undefined && (!Array.isArray(options.full_tool_names) ||
+        options.full_tool_names.some(tool => typeof tool !== "string" || !options.formal_tools.includes(tool)) ||
+        new Set(options.full_tool_names).size !== options.full_tool_names.length)) throw new Error("Invalid managed Grove context hook");
   const slash = options.model.indexOf("/"), providerID = options.model.slice(0, slash), modelID = options.model.slice(slash + 1);
   const tools = new Set([...options.formal_tools, "invalid"]);
+  const playTools = new Set(options.play_tool_names ?? []);
+  const fullTools = new Set(options.full_tool_names ?? []);
   const historyAvailable = tools.has("grove_world_native_tool_history") || tools.has("native_tool_history");
   const runtime = process.env.OPENCODE_EXPERIMENTAL_NATIVE_LLM;
   if (runtime !== undefined && !["false", "0", "no", "off"].includes(runtime.toLowerCase())) throw new Error("Grove SDK guard does not admit the native LLM runtime");
@@ -175,17 +219,43 @@ export default async function GroveNativeContext(_input, options = {}) {
         let body;
         try { body = typeof init?.body === "string" ? JSON.parse(init.body) : null; } catch { body = null; }
         const supported = body && typeof body === "object" && Array.isArray(body.messages) && (init?.method ?? "POST").toUpperCase() === "POST";
-        guard = { ...guard, body_bytes: typeof init?.body === "string" ? bytes(init.body) : 0,
-          body_sha256: typeof init?.body === "string" ? createHash("sha256").update(init.body).digest("hex") : "",
-          system_bytes: supported ? jsonBytes(body.system) : 0, messages_bytes: supported ? jsonBytes(body.messages) : 0,
-          tools_bytes: supported ? jsonBytes(body.tools) : 0 };
         const matched = AGENTS.has(request.agent) && projection?.agent === request.agent &&
           projection.session_id === request.session_id && projection.current_request_message_id === request.current_request_message_id;
+        const playing = request.agent === "shared-grove-play-executor";
+        // An absent full list retains the original full wire contract. A
+        // configured list narrows only this owned executor's current request.
+        const fullExecution = request.agent === "shared-grove-executor" && options.full_tool_names !== undefined;
+        const narrowing = playing || fullExecution, toolMode = playing ? "play" : "full";
+        const toolScopeValid = !narrowing || matched && projection.interaction_mode === toolMode &&
+          projection.request_purpose === "execution" && projection.world_write_authorized === true &&
+          /^grove-request-[a-f0-9]{32}$/.test(projection.request_id) &&
+          /^grove-task-[a-f0-9]{32}$/.test(projection.execution_task_id) &&
+          /^grove-segment-[a-f0-9]{32}$/.test(projection.execution_segment_id);
+        const beforeToolsBytes = supported ? jsonBytes(body.tools) : 0;
+        const beforeToolsCount = supported && Array.isArray(body.tools) ? body.tools.length : 0;
+        let wireInit = init, toolProjectionError = null;
+        if (narrowing && supported && toolScopeValid) {
+          try {
+            const retained = requestToolDeclarations(body, playing ? playTools : fullTools, toolMode);
+            if (retained.length !== body.tools.length) {
+              body = { ...body, tools: retained };
+              wireInit = { ...init, body: JSON.stringify(body) };
+            }
+          } catch (error) { toolProjectionError = error.message; }
+        }
+        guard = { ...guard, body_bytes: typeof wireInit?.body === "string" ? bytes(wireInit.body) : 0,
+          body_sha256: typeof wireInit?.body === "string" ? createHash("sha256").update(wireInit.body).digest("hex") : "",
+          system_bytes: supported ? jsonBytes(body.system) : 0, messages_bytes: supported ? jsonBytes(body.messages) : 0,
+          tools_bytes: supported ? jsonBytes(body.tools) : 0,
+          tools_bytes_before: beforeToolsBytes, tools_count_before: beforeToolsCount,
+          tools_count: supported && Array.isArray(body.tools) ? body.tools.length : 0,
+          tool_projection: narrowing ? supported && toolScopeValid && !toolProjectionError ?
+            playing ? "play_request_exact_names" : "full_request_exact_names" : "blocked" : "unchanged" };
         const projectionUnavailable = AGENTS.has(request.agent) && !matched;
         const recoveryUnavailable = matched && projection.history_recovery_unavailable_parts > 0;
         const sourceUnavailable = matched && projection.history_index_unavailable_parts > 0;
         const historyOver = matched && projection.historical_tool_history_bytes_after > HISTORY_BUDGET;
-        const invalid = !supported || projectionUnavailable || recoveryUnavailable || sourceUnavailable || historyOver;
+        const invalid = !supported || !toolScopeValid || toolProjectionError !== null || projectionUnavailable || recoveryUnavailable || sourceUnavailable || historyOver;
         if (!invalid && matched) {
           const key = envelopeKey(request.session_id, request.agent), previous = sdkEnvelopes.get(key);
           sdkEnvelopes.set(key, { fixedBytes: Math.max(0, guard.body_bytes - guard.messages_bytes),
@@ -195,7 +265,7 @@ export default async function GroveNativeContext(_input, options = {}) {
         // A local policy refusal ends this native POST without manufacturing a
         // model answer. Only an owned execution with complete tool pairs may
         // yield; ordinary responses and oversized first inputs still fail closed.
-        const yielded = !invalid && request.agent === "shared-grove-executor" && projection.request_purpose === "execution" &&
+        const yielded = !invalid && EXECUTION_AGENTS.has(request.agent) && projection.request_purpose === "execution" &&
           projection.world_write_authorized === true && projection.current_terminal_tool_parts > 0 &&
           projection.current_unfinished_tool_parts === 0 && guard.body_bytes >= REQUEST_BUDGET - FIXED_REQUEST_RESERVE;
         const rejected = invalid || !yielded && guard.body_bytes > REQUEST_BUDGET;
@@ -205,6 +275,7 @@ export default async function GroveNativeContext(_input, options = {}) {
           current_unfinished_tool_parts: projection.current_unfinished_tool_parts, body_bytes: guard.body_bytes } : null;
         guard = { ...guard, status: yielded ? "yielded" : rejected ? "blocked" : "sent", segment_yield: segmentYield,
           rejection: yielded ? "execution_segment_budget" : !supported ? "unsupported_sdk_json" :
+          !toolScopeValid ? toolMode + "_request_scope_mismatch" : toolProjectionError !== null ? toolProjectionError :
           projectionUnavailable ? "managed_projection_unavailable" : recoveryUnavailable ? "history_recovery_unavailable" :
           sourceUnavailable ? "history_source_index_unavailable" :
           historyOver ? "historical_messages_over_budget" :
@@ -220,7 +291,7 @@ export default async function GroveNativeContext(_input, options = {}) {
           // Native classifies every 413 as context overflow and may compact.
           // 422 is a nonretryable policy refusal with no overflow fallback.
           { status: 422, headers: { "content-type": "application/json" } });
-        return delegate(url, init);
+        return delegate(url, wireInit);
       };
       ownedFetch = providerOptions.fetch;
       guard = { ...guard, status: "installed", installed_at_ms: Date.now() }; await diagnostic();
@@ -366,6 +437,7 @@ export default async function GroveNativeContext(_input, options = {}) {
       const recoveryUnavailable = !historyAvailable && (existing || historicalBytes(projected) > historyAllowance);
       projection = { session_id: sessionID, agent: current.info.agent, current_request_message_id: current.info.id, observed_at_ms: Date.now(),
         request_purpose: contract?.purpose ?? null, request_id: contract?.request_id ?? null,
+        interaction_mode: contract?.interaction_mode ?? "full",
         execution_task_id: contract?.task_id ?? null, execution_segment_id: contract?.segment_id ?? null,
         world_write_authorized: contract?.world_write_authorized === true,
         request_projection_target_bytes: projectionTarget, sdk_fixed_request_bytes: sdkFixedBytes,

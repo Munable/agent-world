@@ -156,8 +156,8 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
         error = result["structuredContent"]
         self.assertEqual(error["error"], "ObservationRequired")
         self.assertIn("未知", error["message"])
-        self.assertEqual(error["read_requests"][0], {"function_id": "map.viewport", "tool": "map_viewport",
-            "native_tool": "grove_world_map_viewport", "arguments": {}})
+        self.assertEqual(error["read_requests"][0], {"function_id": "map.viewport", "tool": "world_read",
+            "native_tool": "grove_world_world_read", "arguments": {"function_id": "map.viewport", "arguments": {}}})
         self.assertNotIn("observation_id", error)
         self.assertEqual(self.protected(), before)
         self.session.invoke.assert_not_awaited()
@@ -172,8 +172,8 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("reads only", write["properties"]["observation_id"]["description"])
         self.assertIn("returned observation_id", read["properties"]["base_observation_id"]["description"])
         self.assertNotIn("observation_id", read["properties"])
-        self.assertIn("Reads return observation_id", EXECUTION_INSTRUCTIONS)
-        self.assertIn("base_observation_id is read-only", EXECUTION_INSTRUCTIONS)
+        self.assertIn("original returned observation_id for writes", EXECUTION_INSTRUCTIONS)
+        self.assertIn("base_observation_id only extends", EXECUTION_INSTRUCTIONS)
 
     async def test_definition_rejections_offer_formal_syntax_and_validation_without_a_repaired_draft(self):
         self.session.tool_call = AsyncMock()
@@ -189,10 +189,11 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
                 error = result["structuredContent"]
                 self.assertTrue(result["isError"])
                 self.assertEqual(error["message"], "Actual rejection reason")
-                self.assertEqual(error["read_requests"], [{"function_id": "grove.rule_catalog", "tool": "grove_rule_catalog",
-                    "native_tool": "grove_world_grove_rule_catalog", "arguments": {"topic": "program"}}])
-                self.assertEqual(error["validation_hint"]["tool"], "grove_definition_validate")
-                self.assertNotIn("arguments", error["validation_hint"])
+                self.assertEqual(error["read_requests"], [{"function_id": "grove.rule_catalog", "tool": "world_read",
+                    "native_tool": "grove_world_world_read", "arguments": {
+                        "function_id": "grove.rule_catalog", "arguments": {"topic": "program"}}}])
+                self.assertEqual(error["validation_hint"]["tool"], "capability_read")
+                self.assertEqual(error["validation_hint"]["arguments"], {"function_id": "grove.definition_validate"})
                 self.assertIn("resources", error["recovery_meaning"])
                 self.assertNotIn("private_draft_marker", json.dumps(error))
                 self.assertNotIn("never echo my draft", json.dumps(error))
@@ -268,8 +269,8 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["recovery"], "wait_then_retry_same_operation")
         self.assertIn("before commit", error["recovery_meaning"])
         self.assertNotIn("validation_hint", error)
-        self.assertEqual(error["read_requests"][0], {"function_id": "map.viewport", "tool": "map_viewport",
-            "native_tool": "grove_world_map_viewport", "arguments": {}})
+        self.assertEqual(error["read_requests"][0], {"function_id": "map.viewport", "tool": "world_read",
+            "native_tool": "grove_world_world_read", "arguments": {"function_id": "map.viewport", "arguments": {}}})
 
 
 if __name__ == "__main__":

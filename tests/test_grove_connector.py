@@ -731,8 +731,10 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         tools = {'*': False, 'grove_world_*': True, 'invalid': True}
         self.assertEqual(config['permission'], permission)
         self.assertEqual(config['tools'], tools)
-        self.assertEqual(config['agent']['shared-grove-executor']['permission'], permission)
-        self.assertEqual(config['agent']['shared-grove-executor']['tools'], tools)
+        self.assertEqual(config['agent']['shared-grove-executor']['permission'], session.full_execution_permissions())
+        self.assertEqual(config['agent']['shared-grove-executor']['tools'], session.full_execution_tools())
+        self.assertEqual(config['agent']['shared-grove-executor']['permission']['grove_world_*'], 'deny')
+        self.assertFalse(config['agent']['shared-grove-executor']['tools']['grove_world_*'])
         self.assertEqual(config['agent']['shared-grove']['permission'], session.conversation_permissions())
         self.assertEqual(config['agent']['shared-grove']['tools'], session.conversation_tools())
         self.assertEqual(config['agent']['shared-grove']['permission']['grove_world_*'], 'deny')
@@ -1279,7 +1281,7 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             if path.endswith('/message'):
                 supplied = json.loads(body['parts'][1]['text'].split('\n', 1)[1])
                 self.assertNotIn('rule_catalog', supplied)
-                self.assertIn('grove_rule_catalog', supplied['detail_reads']['tools'])
+                self.assertEqual(supplied['detail_reads']['tools'], ['capability_read', 'world_read', 'play_look'])
                 self.assertIn('base_observation_id', supplied['detail_reads']['meaning'])
                 raise httpx.ReadTimeout('test timeout')
             self.fail('The goal loop, not an isolated model turn, settles the native request.')

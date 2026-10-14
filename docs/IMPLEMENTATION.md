@@ -1,10 +1,10 @@
 # L6：当前实现
 
-复核：2026-10-14。本文描述当前源码0.38.0／world42／state25及公开表面；本轮最终Python／Node及实际安装包检查已通过，具体结果见[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)。四次Native创作尝试未形成新实例，GPT公开SDK创作与Native阿岚接续的有界实际链已有回执和同实例变化证据；旧交付结果保留原范围。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-10-15。本文描述当前源码0.39.0／world42／state25及公开表面；运行范围与实际检查见[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)。普通play工具面已有LongCat免费模型一次完成pause操作及同实例读回；严谨创作的旧完整工具声明约38KB，已有6段、22次读取、0写入的受阻轨迹。新七入口完整执行面已接续真实模型；创作任务累计20段仍未提交草稿，尚未通过自然创作与成型验收，不能据接口接线宣称创作完成。此前四次Native创作未形成新实例；GPT公开SDK创作与Native阿岚接续的有界链保留原回执及同实例变化证据。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
-当前源码为0.38.0／world42／state25，版本实际值以源码为准：package 版本来自`pyproject.toml`和`agent_world.__version__`，世界及状态版本来自`shared_grove.world.make_world()`。`simulation.execution`继续从原canonical定义推导读写与休眠计划；`shared_grove.execution`维护持久成员、依赖索引和活动前沿。`domains`保存真实相互作用域及局部活动索引，`scheduling`持久协调同一公共逻辑轮，Runtime current checkpoint以独立逻辑结果组成有限物理持久批次。`events`保存局部消费者待处理序列与共享事件事实，`commit`仍拥有单次行动或单个域任务的候选批次和统一落库。运行实例与新源码的范围分别记录，见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
+当前源码为0.39.0／world42／state25，版本实际值以源码为准：package 版本来自`pyproject.toml`和`agent_world.__version__`，世界及状态版本来自`shared_grove.world.make_world()`。`simulation.execution`继续从原canonical定义推导读写与休眠计划；`shared_grove.execution`维护持久成员、依赖索引和活动前沿。`domains`保存真实相互作用域及局部活动索引，`scheduling`持久协调同一公共逻辑轮，Runtime current checkpoint以独立逻辑结果组成有限物理持久批次。`events`保存局部消费者待处理序列与共享事件事实，`commit`仍拥有单次行动或单个域任务的候选批次和统一落库。运行实例与新源码的范围分别记录，见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
 
 - Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，接手基线为759e221／0.36.0；本轮源码不自动替换原活动服务。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
 - 物件整版本保持持久CAS；服务器交互修订区分自动派生输出和受保护事实变化。固定意图携带实际观察，提交仍裁决当前条件；原操作、资源、拓扑与定义不因暂忙或后续读取而替换。旧实体实际写入时补充修订，旧轮未结算任务通过state24同代次后继接续。
@@ -177,7 +177,9 @@ WorldDefinition当前可声明functions、state rules、state authorizer、state
 
 `GroveAgentClient`从bootstrap正式请求读取合同并分页发现schema，返回真实bootstrap的固定observation_id供明确首次grove.join使用，复用 `AgentObservations`固定实际呈现事实后构造写入护栏。它接收调用方已初始化的HTTP／MCP transport，显式注入OperationJournal与可选before_write授权钩子；不管理模型、会话、目标、预算或停止。原function/envelope及role/world scope在发送前持久保存，未知结果阻止新写；recover默认只查原Receipt，显式replay才重发原envelope。JsonOperationJournal用调用方指定稳定路径，MemoryOperationJournal不提供重启恢复；换transport不换原操作身份，重启后旧observation失效，未决envelope仍可恢复。可执行用法见 [Agent客户端接入](INTEGRATION.md#shared-grove-agent-客户端接入)。
 
-SDK与OpenCode工具共用 `mcp_tool_output_schema`，同时声明成功观察与结构化错误；成功结果仍独立经过严格observation_output_schema校验。错误不生成observation_id，不能按成功schema抹掉error／message／details。OpenCode当前请求的native_tool_mapping取正式Agent合同与实际已声明目录的交集，映射function_id、MCP tool与该adapter的native_tool；错误优先使用世界正式read_requests并转换实际宿主名称，只提供读取入口，不替模型执行、修参数、重试写入或确认效果。这些宿主字段不进入公开SDK或世界事实。
+SDK与OpenCode世界观察工具共用 `mcp_tool_output_schema`，同时声明成功观察与结构化错误；成功结果仍独立经过严格observation_output_schema校验。错误不生成observation_id，不能按成功schema抹掉error／message／details。OpenCode当前请求的native_tool_mapping限定本次模式实际声明的入口；原静态MCP目录与公共SDK继续兼容。错误优先使用世界正式read_requests并转换实际宿主入口，只提供读取关系，不替模型执行、修参数、重试写入或确认效果。这些宿主字段不进入公开SDK或世界事实。
+
+完整Native执行器现在只声明 `capability_read / world_read / world_act / play_look / play_act / execution_checkpoint / native_tool_history`七个入口。capability_read从原Agent合同及发现目录按需交付能力索引或精确schema，使用独立元数据合同，不产生观察或行动权；world_read／world_act分派原正式函数，仍使用原SDK观察绑定、执行控制器、锁、原操作日志与Receipt。游玩模式的五入口及其独立Native Agent保留；两种模式由明确授权选择、固定在原任务和请求，不能由历史文字或模型推断升级。较小声明面减少每次请求的重复schema，能力有效性与实际执行后果仍分别核验，具体输入见[Agent客户端接入](INTEGRATION.md#shared-grove-agent-客户端接入)。
 
 ### 本机固定运行边界
 
