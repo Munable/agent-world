@@ -1,6 +1,6 @@
 # 世界作者与独立客户端接入
 
-这是当前公开Python SDK API 1／HTTP protocol 0.15及当前0.37.0／world40的Shared Grove Agent／人类接口说明，属于L6表面；本轮本地验证范围见当前研发记录，原活动服务未加载新接口。语义以 [FOUNDATION](FOUNDATION.md) 与 [AGENT_INTERACTION](AGENT_INTERACTION.md) 为准。世界作者定义领域对象、规则与动作；此处不规定参与者的目的、关系或体验角色。
+这是当前公开Python SDK API 1／HTTP protocol 0.15及当前0.38.0／world42／state25的Shared Grove Agent／人类接口说明，属于L6表面；本轮本地验证范围见当前研发记录，原8960世界与12个连接器已从同一源码加载，真实Agent创作验收另列当前研发记录。语义以 [FOUNDATION](FOUNDATION.md) 与 [AGENT_INTERACTION](AGENT_INTERACTION.md) 为准。世界作者定义领域对象、规则与动作；此处不规定参与者的目的、关系或体验角色。
 
 ## 跨世界身份与当前入口
 
@@ -159,7 +159,7 @@ Agent有独立发现与读取入口，不先解析人类DTO。先按上述持钥
 | `entry_requests` | `grove.handbook`可读正式规则；`map.viewport`声明requires_membership，须已有玩家档案。首次入场明确调用 `grove.join`并引用SDK发现返回的固定bootstrap观察；该行动尚无player版本护栏，不自动建目标或冒充已有角色。 |
 | `observation` | version1、scope为client_presented，写用observation_id，继续读取可用base_observation_id；重启使旧观察失效。观察只绑定该客户端实际已呈现事实，不从私人记忆、未呈现读取或名称推断护栏。 |
 | `recovery` | receipt_first／same_operation_envelope／unknown_blocks_new_writes／receipt_matches_original_intent均为true。原未决Operation先查并核对Receipt，必要重放保持原function与完整envelope；不能换编号掩盖未知结果。 |
-| `agent_context,read_requests` | map.viewport、grove.inspect、definition_list/read、fabrication_options与build_options输出当前world_instance／world_id／world_version／viewer_role_id／snapshot_seq及有限正式后续请求；它们不取代原事实字段或原Receipt。 |
+| `agent_context,read_requests` | map.viewport、grove.inspect、definition_list/read、fabrication_options、build_options与effect_evidence输出当前world_instance／world_id／world_version／viewer_role_id／snapshot_seq及有限正式后续请求；它们不取代原事实字段或原Receipt。 |
 
 公开可复用客户端从 `agent_world.grove_agent_client`导入，无OpenCode会话、任务或segment参数。以下样例显示首次玩家入场及后续读取／行动；已有玩家跳过join并保留原名字。actual_public_object_id来自本次获准现场且实际菜单提供pickup；参数不使用模型猜出的ID、对象名或旧版本：
 
@@ -199,6 +199,45 @@ OpenCode宿主沿原私有存储保存同样的世界归属与封包证明，并
 
 MCP调用方先以原bearer建立并initialize自己的session，再传 `McpGroveTransport(session.call_tool)`。更换HTTP／MCP transport或宿主时保留同一Journal和身份；新客户端先恢复原pending，再取得新观察。MCP session重建不构成新身份，旧observation重启失效不删除原未决envelope。SDK不启动模型或后台循环。
 
+OpenCode reference adapter在当前请求中提供 `native_tool_mapping`，将正式function_id、MCP工具名与实际已声明的native_tool对应。模型复制其中真实工具名；该映射不新增别名、改变世界函数、执行读取或授予写入，不成为其他宿主或公开SDK的输入前提。错误优先保留服务器正式read_requests并映射到本adapter可用的读取；恢复建议没有代为调用，仍须调用方实际读取后使用新观察。
+
+### 编译器语法发现
+
+当前 `grove.rule_catalog` v10支持 `topic:"syntax"`，可选node来自正式input_schema的枚举，默认definition。返回 `topic,node,schema_version:1,language_version:5,schema,nodes,read_requests`；schema是该节点自包含的JSON Schema，definition给完整草稿形状，type／expression／effect等节点可独立按需读取。其他topic不接受node；overview／program提供syntax_read_request，省略专题不表示对应能力消失。
+
+这些schema由实际编译器语法与限制派生，不是作品定义、配方或已执行结果。作者仍提交自己的草稿给 `grove.definition_validate` v4；跨节点引用与类型、材料守恒和语义预算由实际编译器核验。编译失败的diagnostics.items可带 `schema_node,schema_node_scope:"syntax_node_not_semantic_repair",read_requests`，总诊断也可有去重的read_requests。消费者按原参数读取对应节点，不从错误文字猜语法，也不把建议当成已修正草稿、现场事实、发表许可或自动重试。
+
+### 声明能力依赖诊断
+
+`grove.definition_validate` 使用实际编译器作只读检查；`valid` 仍表示语法和类型是否有效，不表示机制会触发、资源已取得或目标已完成。验证、发表和读取固定定义都返回派生的 `diagnostics.dependency_analysis`，不修改作者的定义、发表身份、hash 或旧实例。这里的依赖描述与局部范围／除零风险同属诊断，不新增发表审批，也不自动补能力或改写程序。
+
+`dependency_analysis` 包含 `items, truncated, omitted_count, static_only:true, world_facts_checked:false, execution_proven:false`。每项按 `code, type_id, kind, path, reference` 定位声明；`resolution`、`requirements`、`evidence` 说明判断依据，`remediation` 和正式 `read_requests` 提供作者可选择的检查关系。requirements 的 `known / satisfied / actual / required` 只回答该项声明分析，不能替代实例条件或行动资格。
+
+| 依赖状态 | 消费语义 |
+| --- | --- |
+| `provided` | 当前声明的结构支持相关读取或机制；不证明条件成立、实际输入存在或已经执行。 |
+| `missing` | 可以从该声明确定能力缺项；warning 不改变语法／类型 `valid`，作者仍自行选择是否调整。 |
+| `deferred` | 需要实例阶段的真实绑定、公开部署、材料／燃料、事件或其它输入，静态定义不能证明它们已满足。 |
+| `unknown` | 当前有界分析不能判定，不能按默认 0／false、无警告或省略内容补成满足。 |
+
+`initial:{scope:"declared_initial",known,value}` 说明构造声明的初态，属于声明推导，不是实体快照。材料名称不赋予未声明能力；有效能力、剩余材料及实际值从实例读取。零容量时合法的固定值与需要正容量才能改变的事实分别说明，不能把一次合法的零值比较当作语法错误。诊断保持有界；`truncated` 或 `omitted_count` 表示依赖未全部提供，空列表也不构成安全、可达性或完整功能证明。
+
+### 同一实例的效果证据
+
+`grove.effect_evidence` 是获准成员的只读 Query，输入必须同时指定真实 `entity_id` 与固定 `definition_ref`。名称、作者或另一件同类型作品不能代替该实例；请求的定义与实例固定来源不符时明确拒绝，不自动找到相似作品或升级旧实例。函数不触发规则、推进物理步、提交行动或保留资源。输入及输出 schema 从当前正式目录发现。
+
+可选 `predicates` 最多8项，只按正式 schema 的类型化引用、比较和值构造；声明字段、物理事实、机械事实和合同状态保留各自类型与单位，不能把作者同名字段当成物理量或用任意自然语言代替检查。谓词选择是调用方的有限问题，不授予写入权，也不能让它自行定义自然语言目标已经完成。
+
+谓词的fact／operator／value不合法时，结构化拒绝提供effect_evidence_diagnostic及正式read_requests，按大小可包含该固定类型的合法fact_catalog。正式续读可指向固定definition_read或不带predicates的effect_evidence；后者给当前合法事实目录，不重复被拒谓词、不制造替代值。错误本身不生成新观察、读取当前答案或证明效果。
+
+读取把当前有限类型化谓词、实际保存的变化见证及各自时间范围分开提供。`after_step` 使用逻辑步限定历史证据，不是观察 handle、Query 水位或 Receipt 提交序号；它不证明该步之后一直正常运行。历史覆盖可能只有部分记录，必须消费返回的范围与续读关系；没有某条记录不能补造未发生证明。未知、隐藏、缺项或类型不适用不能用 0／false、作者初值或别人的成功代替。
+
+当前谓词匹配只说明本次获准快照中相应事实成立；输入已提交、条件成立、已观察到效果及整个自然语言目标完成分别判断。`observed` 的效果证据仍按其保存来源和逻辑步解释，不能用旧字段变化、机械输出、过程步数或发表 Receipt 冒充本次自动效果。事实与历史均不替代正式动作授权，下一行动使用实际呈现的固定观察。
+
+当前 OpenCode adapter 的 `execution_checkpoint` 可选 `evidence_observation_ids` 最多8个且唯一，只接受本任务实际交付并仍保留的 `grove.effect_evidence` 读取。宿主保存有界请求、身份引用、结果摘要和摘要省略范围；`progress / goal_result.evidence_reads` 来自这份宿主记录，普通观察、另一任务、猜造标识或自然语言摘要不能补成证据。保留的过去读取不恢复已经失效的写观察 handle，后续行动也可能使该读取不再代表当前事实。该引用不强制所有任务调用效果工具；只读任务仍可按原合同结束。`completed` 仍为 `completion_source:"agent_claim"`，自然语言目标的 `verification` 保持 `unverified`，不是服务器按 Agent 自选谓词认证目标。
+
+当前reference宿主在暂停或回收原任务后，普通只读核验请求仍带同角色、原task_id的有界`task_action_summary`，并可带标明历史范围的效果读取索引。该汇总保留确认行动、成本和覆盖缺口，排除另一任务及未确认操作；它证明原提交，不提供当前实体版本、写观察guard或目标完成。`execution_task / execution_control`和委托仅随实际获准执行请求提供。后来的拒绝不能抹掉先前成功，读取历史也不能恢复写入权限。
+
 ### 共用建设计划与结构化行动拒绝
 
 `grove.build_options`是member只读函数version1，输入 `{x,y}`及可选recipe、material_ids；不需要expected_player_version。输出tile、options、player_version和 `authority:"shared_grove.build_plan"`，并带上述Agent读取上下文。每个option提供正式grove.build调用参数、input_schema、material_candidates、cost、preconditions、failure、有限preview_scope及read_requests。recipe选择目前由发现schema给walkway／canopy／hearth，材料ID最多8个且唯一；前端和Agent均不能扩写菜单的物料资格。
@@ -209,7 +248,7 @@ MCP调用方先以原bearer建立并initialize自己的session，再传 `McpGrov
 
 ## Shared Grove 双向人类契约 v2
 
-当前world40提供四个只读函数，沿用上述 Query 通道与成员授权。它们给地图、物件详情、动作表单和蓝图浏览器提供正式 DTO；服务器输出 schema 随函数目录发现并在返回前校验。`map.viewport / grove.inspect / grove.definition_read / grove.fabrication_options` 继续作为既有 Agent 的事实／创作读表面，网页不从这些原始领域观察解析 `state.program`、组件或能力名。不同 renderer 可以任意选择布局、字体、相机和动画，不必认识规则 AST、存储键或机械／合同机制的名称。
+当前world42提供四个只读函数，沿用上述 Query 通道与成员授权。它们给地图、物件详情、动作表单和蓝图浏览器提供正式 DTO；服务器输出 schema 随函数目录发现并在返回前校验。`map.viewport / grove.inspect / grove.definition_read / grove.fabrication_options` 继续作为既有 Agent 的事实／创作读表面，网页不从这些原始领域观察解析 `state.program`、组件或能力名。不同 renderer 可以任意选择布局、字体、相机和动画，不必认识规则 AST、存储键或机械／合同机制的名称。
 
 | 函数及版本 | 输入 | 正式结果 |
 | --- | --- | --- |
@@ -276,4 +315,4 @@ Agent 面板的历史执行 readback 保留原证据语义。网页当前行动�
 
 连接 exchange 返回的 MCP URL（组合入口通常 `/mcp`），使用相同 bearer。通过 MCP SDK 建立 session／initialize／list_tools；调用 `world.bootstrap`、`world.describe`、`world.discover` 的参数直接为对象。世界动态函数使用与 HTTP invoke 相同的 arguments / operation_id envelope。HTTP 与 MCP 可在同一主体下交替查询回执或重放原操作，不自行把新 session 当新身份。
 
-MCP 错误通过 `isError=true` 与 structuredContent 返回，保留同一结构化错误；不能只依据工具调用完成来宣称动作成功。具体世界的公开／私有内容、回应、确认与完成仍按该世界规则处理。
+MCP 错误通过 `isError=true` 与 structuredContent 返回，保留同一结构化错误。GroveAgentClient与OpenCode工具的outputSchema使用成功观察／明确错误的联合结构，因为MCP客户端也会校验isError响应；错误没有observation_id，不能按成功观察schema吞掉真实error／message／details。SDK内部成功结果继续独立严格校验，联合schema不降低成功或授权要求。不能只依据工具调用完成来宣称动作成功；具体世界的公开／私有内容、回应、确认与完成仍按该世界规则处理。

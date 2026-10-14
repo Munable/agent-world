@@ -1,10 +1,10 @@
 # L6：当前实现
 
-复核：2026-10-13。本文描述当前源码0.37.0／world40／state25及公开表面；本轮本地实现检查已通过，实际范围见当前研发记录。当前源码范围、模型实验和交付检查统一见[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)，旧交付结果保留原范围。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
+复核：2026-10-14。本文描述当前源码0.38.0／world42／state25及公开表面；本轮最终Python／Node及实际安装包检查已通过，具体结果见[SHARED_GROVE 当前研发记录](SHARED_GROVE.md#当前研发记录)。四次Native创作尝试未形成新实例，GPT公开SDK创作与Native阿岚接续的有界实际链已有回执和同实例变化证据；旧交付结果保留原范围。L6 可以随重构变化，但不得反向覆盖 [L2 系统不变量](INVARIANTS.md)、[L3 领域模型](DOMAIN_MODEL.md) 或 [L4 行为合同](FOUNDATION.md)。
 
 ## 版本与运行形态
 
-当前源码为0.37.0／world40／state25，版本实际值以源码为准：package 版本来自`pyproject.toml`和`agent_world.__version__`，世界及状态版本来自`shared_grove.world.make_world()`。`simulation.execution`继续从原canonical定义推导读写与休眠计划；`shared_grove.execution`维护持久成员、依赖索引和活动前沿。`domains`保存真实相互作用域及局部活动索引，`scheduling`持久协调同一公共逻辑轮，Runtime current checkpoint以独立逻辑结果组成有限物理持久批次。`events`保存局部消费者待处理序列与共享事件事实，`commit`仍拥有单次行动或单个域任务的候选批次和统一落库。运行实例与新源码的范围分别记录，见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
+当前源码为0.38.0／world42／state25，版本实际值以源码为准：package 版本来自`pyproject.toml`和`agent_world.__version__`，世界及状态版本来自`shared_grove.world.make_world()`。`simulation.execution`继续从原canonical定义推导读写与休眠计划；`shared_grove.execution`维护持久成员、依赖索引和活动前沿。`domains`保存真实相互作用域及局部活动索引，`scheduling`持久协调同一公共逻辑轮，Runtime current checkpoint以独立逻辑结果组成有限物理持久批次。`events`保存局部消费者待处理序列与共享事件事实，`commit`仍拥有单次行动或单个域任务的候选批次和统一落库。运行实例与新源码的范围分别记录，见[当前研发记录](SHARED_GROVE.md#当前研发记录)。
 
 - Python package 要求Python 3.11+。当前源码 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支`codex/grove-composable-rules`，接手基线为759e221／0.36.0；本轮源码不自动替换原活动服务。实现、测试及打包输入按每轮实际源码冻结，连接器、Runtime与UI的检查保留各自范围；唯一当前记录见[SHARED_GROVE](SHARED_GROVE.md#当前研发记录)，旧结果不自动适用于新源码。
 - 物件整版本保持持久CAS；服务器交互修订区分自动派生输出和受保护事实变化。固定意图携带实际观察，提交仍裁决当前条件；原操作、资源、拓扑与定义不因暂忙或后续读取而替换。旧实体实际写入时补充修订，旧轮未结算任务通过state24同代次后继接续。
@@ -20,6 +20,8 @@
 `shared_grove.discovery` 维护公开创作身份索引，按作者／名称分页；位置与公开资格每次从当前实体复核。旧实体按保存区块有界回填，目录不携带操作版本或授予远程操作。`simulation.presentation` 从显式声明的 int／bool 字段解析颜色、字样、姿态及数字标记；旧 canonical 定义与摘要不改。Agent 查看容器先获得可见子物索引，子物件完整状态和操作版本需单独 inspect；选中的物件与动作预览保持完整。区域历史通过真实引用按需读取，省略不等于不存在。
 
 原 Native 主会话的推理副本保留当前user及完整工具轮，旧历史连同来源索引至多64KiB，并按当前请求让出空间；正式SDK全JSON硬上限128KiB。执行段已有完整终态工具对时在96KiB边界可信让出，依次封段、确认原会话空闲、排空写入、恢复原回执和读回，再沿原任务接续；首包超限或来源无法核验仍暂停。首次有效准备读取另记并跨段去重，不增加动作、回执或完成证据。普通问答只有读工具，并使用独立宿主请求状态；历史目标仅作背景，不能授予当前控制。分段使用推理副本，不PATCH原Native记录。每次明确接续最多追加8次，原任务累计上限32次，动作额度及已用请求不归零。实际结论见当前研发记录，字节预算不冒充token上限。
+
+宿主允许Agent在确认原操作或实际交付准备读取、并获得新鲜世界读回后提交completed检查点；其 `goal_result.completion_source`为 `agent_claim`，`verification.status`仍为 `unverified`、scope为natural_language_goal。本任务已实际交付的effect_evidence读取引用可以支持声明来源，不能把宿主终态、模型叙述或一次谓词成立当作自然语言目标的服务器裁定。
 
 ## L3 语义到当前代码的映射
 
@@ -112,6 +114,14 @@ schema 8 的新增 nullable access_mode 列保留原数据库 pending／used v1 
 
 `grove.definition_publish / definition_read / definition_list`提供不可变发表与按需读取，`source_definition_ref`固定公开改作来源但不迁移旧实例。`cost`定义经 `generation_context / content_submit`消耗区域资源与机会；`cost_u`定义经 `fabrication_options / grove.fabricate`消耗本人选定真实批次。发表、成型、启用和实际功能后果分别成立；`content_history`按cursor接续原公共贡献与结果。
 
+`simulation.program_diagnostics / program_dependencies`为definition_validate、definition_publish与definition_read提供有界能力依赖诊断。分析限于静态类型引用、声明机制及受信构造初值，明确 `static_only:true, world_facts_checked:false, execution_proven:false`。provided只表示声明支持，deferred的端口、材料或事件仍需现场证据；missing／unknown及截断省略均不能反推执行许可、现场输入可用或效果已经发生。
+
+`simulation.program_schema`从编译器实际语法与限制导出机器JSON Schema；`grove.rule_catalog` v10的syntax专题返回自包含节点schema、schema_version及正式read_requests，node只用于该专题。definition_validate v4与definition_publish v11接受作者自己的草稿，实际编译失败可在diagnostics中附schema_node及语法续读；schema不替代跨节点类型、材料守恒与语义预算的实际编译，不提供自动修好的定义或现场事实。
+
+`worlds/shared_grove/effect_evidence.py`公开 `grove.effect_evidence`，读取时重验精确entity_id与其固定definition_ref，只接受注册事实和该固定类型显式导出的authored字段，不暴露任意程序内部状态。返回同一授权快照的当前谓词、最后一次类型化字段变化与有界公开outcome；当前satisfied不代替effect_observed，后者只有匹配请求窗口的保留迁移才能标observed，否则保持unknown。见证的 `causal_attribution`为not_established，不归因于请求者的行动。history.complete恒为false，公开outcome带覆盖范围、缺失序列和正式cursor续读；after_step限定效果见证判定，不把全部返回历史过滤为该步之后。发表、实例存在、行动Receipt与实际效果继续分别读取。
+
+未知或类型错误的效果谓词通过结构化拒绝保留effect_evidence_diagnostic，并提供有界fact_catalog及正式definition_read／无谓词effect_evidence读取；目录过大时使用正式续读，不猜字段、填当前答案或重复被拒谓词。
+
 `building.build_plan`共同裁定建设预览和真实提交前置，`grove.build_options`只读提供当前菜单、材料候选、有限预览及正式后续读取，不物化地块、不造资源。`grove.build`仍在原事务内重验当前条件、真实转移、最终载荷和域容量。结构化 `failure / precondition / read_requests / recovery`由规则提供，不靠解析拒绝文案恢复；`available`只表示当前已检查条件通过，未检查的最终容量明确为unknown。
 
 ### Commons Reference Application
@@ -163,13 +173,17 @@ WorldDefinition当前可声明functions、state rules、state authorizer、state
 
 ### 可复用Agent客户端与世界引导
 
-`grove.agent_contract`是只读version1函数，bootstrap的world_entry_state.view提供 `agent_contract_request`。合同给当前Agent函数与access、`grove.fixed-observation.v1`写绑定政策、声明schema推导的guard_paths、entry_requests和receipt-first恢复要求；精确input/output schema仍由发现目录给出。map.viewport、grove.inspect、definition_list/read、fabrication_options和build_options原事实结果附 `agent_context / read_requests`，保持Agent自己的事实粒度，不经过人类DTO。
+`grove.agent_contract`是只读version1函数，bootstrap的world_entry_state.view提供 `agent_contract_request`。合同给当前Agent函数与access、`grove.fixed-observation.v1`写绑定政策、声明schema推导的guard_paths、entry_requests和receipt-first恢复要求；精确input/output schema仍由发现目录给出。map.viewport、grove.inspect、definition_list/read、fabrication_options、build_options与effect_evidence原事实结果附 `agent_context / read_requests`，保持Agent自己的事实粒度，不经过人类DTO。
 
 `GroveAgentClient`从bootstrap正式请求读取合同并分页发现schema，返回真实bootstrap的固定observation_id供明确首次grove.join使用，复用 `AgentObservations`固定实际呈现事实后构造写入护栏。它接收调用方已初始化的HTTP／MCP transport，显式注入OperationJournal与可选before_write授权钩子；不管理模型、会话、目标、预算或停止。原function/envelope及role/world scope在发送前持久保存，未知结果阻止新写；recover默认只查原Receipt，显式replay才重发原envelope。JsonOperationJournal用调用方指定稳定路径，MemoryOperationJournal不提供重启恢复；换transport不换原操作身份，重启后旧observation失效，未决envelope仍可恢复。可执行用法见 [Agent客户端接入](INTEGRATION.md#shared-grove-agent-客户端接入)。
+
+SDK与OpenCode工具共用 `mcp_tool_output_schema`，同时声明成功观察与结构化错误；成功结果仍独立经过严格observation_output_schema校验。错误不生成observation_id，不能按成功schema抹掉error／message／details。OpenCode当前请求的native_tool_mapping取正式Agent合同与实际已声明目录的交集，映射function_id、MCP tool与该adapter的native_tool；错误优先使用世界正式read_requests并转换实际宿主名称，只提供读取入口，不替模型执行、修参数、重试写入或确认效果。这些宿主字段不进入公开SDK或世界事实。
 
 ### 本机固定运行边界
 
 已复用的Python环境为 `/Users/mubin/Developer/agent-world/repo/work/latency-runtime`；原依赖、OpenCode可执行文件、各人的profile与Native运行目录保持固定位置。源码在本机活动工作树，数据库、大型验证物及必要证据沿现有DevDisk Agent World目录。使用当前模块命令会加载当前cwd的源码，固定解释器不冻结代码版本；实施中的工作树不得直接重启原库。实际运行范围、原argv及恢复条件见 [当前入口与恢复保护](SHARED_GROVE.md#当前入口与恢复保护)。
+
+本轮发现原活动库state_changes既有损坏，经副本恢复并核对当前状态、其他27张表与221115笔原Operation逐值一致，定义／玩家／实体在升级前后一致；之后的模型行动仍可合法改变现场。恢复候选已同卷原子安装回原world.sqlite3路径，8960使用恢复库；连接器加载范围另由当前研发记录核对。22项历史日志缺口中11项由原WAL找回，另11项metadata journal不可恢复，state journal的history floor为6974378并明确保留history gap，不宣称整段历史无损。原DB、WAL与SHM保留于 [原始归档](/Volumes/DevDisk/DeveloperData/Archives/agent-world/shared-grove/agent-effects-20261014-original/)，不是可重建临时数据。
 
 ## 当前 core tool surface
 
@@ -294,7 +308,7 @@ timeline 复用 View checkpoint，只返回当前 viewer 获准且 subject 当�
 ## 当前明确实现差距
 
 1. **外部系统副作用交付没有通用合同。** Runtime store 内部提交不能自动覆盖支付、第三方 API、文件等外部写入；尚无统一 outbox / delivery / compensation 能力。
-2. **自然创作的完整功能正确性仍有缺口。** 接手基线的新湿润作品没有成功实现自动变色／计次，固定实例与历史结果仍被模型误认；本轮接口和模块收敛的实现检查不补判该自然创作功能缺口。实际范围只在[当前研发记录](SHARED_GROVE.md#当前研发记录)接续。
+2. **有界跨宿主创作与接续已有证据，通用Native自然创作仍有失败。** 接手基线的新湿润作品没有成功实现自动变色／计次，固定实例与历史结果仍被模型误认。本轮新增依赖诊断、机器语法、精确效果读取与正式错误恢复，四次Native尝试仍未形成新实例；GPT公开SDK自选新机制，实际创作并核验0→1；Native阿岚自己接续，读取同实例1→2。途中有授权恢复及目标纠偏。本地实现检查与completed声明不补判该功能缺口，旧失败也不由新接口改判。实际范围只在[当前研发记录](SHARED_GROVE.md#当前研发记录)接续。
 3. **完整美术上传未实现。** 当前方向为既有本地皮肤和新对象共享默认比例fallback，不宣称已建立上传系统。
 
 共同事项模型、第三方／群众公裁等仍属于 [OPEN_DESIGN](OPEN_DESIGN.md) 的产品／领域设计问题，不能因为“尚未实现”就假装它们已经被证明应该进入 Runtime。

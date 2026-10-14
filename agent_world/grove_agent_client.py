@@ -60,6 +60,23 @@ def observation_output_schema():
         "required": ["observation_id", "agent_observation"], "additionalProperties": True}
 
 
+def mcp_tool_output_schema():
+    """Public MCP structured content may be a successful read or a failure.
+
+    MCP clients validate structuredContent even when isError is true. Errors
+    carry no new observation; successful presentation still validates against
+    observation_output_schema directly before reaching this tool boundary.
+    """
+    failure = {"type": "object", "properties": {
+        "error": {"type": "string", "minLength": 1}, "message": {"type": "string"},
+        "retryable": {"type": "boolean"}, "recovery": {"type": "string"},
+        "retry_after_seconds": {"type": "number", "minimum": 0},
+        "details": {"type": "object"}, "execution_outcome": {"type": "object"},
+        "observation_id": False, "agent_observation": False},
+        "required": ["error", "message"], "additionalProperties": True}
+    return {"type": "object", "anyOf": [observation_output_schema(), failure]}
+
+
 def _client_error(exc):
     if isinstance(exc, AgentClientError):
         return exc
@@ -296,7 +313,7 @@ class GroveAgentClient:
 
     def tools(self):
         return [{"name": function.replace(".", "_"), "description": self.catalog[function].get("description", ""),
-                 "inputSchema": self.tool_schema(function), "outputSchema": observation_output_schema()}
+                 "inputSchema": self.tool_schema(function), "outputSchema": mcp_tool_output_schema()}
                 for function in sorted(self._functions)]
 
     def function_for_tool(self, name):
@@ -598,4 +615,4 @@ class GroveAgentClient:
 
 __all__ = ["GroveAgentClient", "AgentClientError", "GroveTransport", "HttpGroveTransport", "McpGroveTransport",
            "OperationJournal", "MemoryOperationJournal", "JsonOperationJournal", "CallbackOperationJournal",
-           "observation_output_schema"]
+           "observation_output_schema", "mcp_tool_output_schema"]

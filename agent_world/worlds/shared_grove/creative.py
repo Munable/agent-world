@@ -17,6 +17,8 @@ from agent_world.simulation.declarations import declaration_semantics, has_event
 from agent_world.simulation.programs import compile_program, evaluate, plan_reaction, program_material_semantics, solve_mechanical
 from agent_world.simulation.program_diagnostics import (program_diagnostics, invalid_diagnostics,
     ProgramEvaluationError, runtime_diagnostic)
+from agent_world.simulation.program_schema import (program_schema, PROGRAM_SCHEMA_NODES,
+    program_schema_node_for_path)
 from agent_world.simulation.facts import FactUnavailable, PUBLIC_FACTS, fact_catalog, snapshot_facts
 from agent_world.simulation.execution import EXECUTION_SEMANTICS, execution_plan
 from agent_world.world_streams import StreamEvent
@@ -42,9 +44,11 @@ REF = {"type": "string", "minLength": 1, "maxLength": 128}
 VERSION = {"type": "integer", "minimum": 1}
 EMPTY = {"type": "object", "additionalProperties": False}
 DELEGATION = {"type": "string", "minLength": 16, "maxLength": 100}
-CATALOG_TOPICS = ("overview", "program", "materials", "components", "mechanical", "events", "contract", "physical", "ports", "presentation", "all")
+CATALOG_TOPICS = ("overview", "program", "syntax", "materials", "components", "mechanical", "events", "contract", "physical", "ports", "presentation", "all")
 CATALOG_ARGS = {"type": "object", "additionalProperties": False,
-                "properties": {"topic": {"type": "string", "enum": list(CATALOG_TOPICS)}}}
+                "properties": {"topic": {"type": "string", "enum": list(CATALOG_TOPICS)},
+                    "node": {"type": "string", "enum": list(PROGRAM_SCHEMA_NODES),
+                        "description": "For topic=syntax only; selects a self-contained machine grammar node. Default definition."}}}
 ACTION_ARGS = {"type": "object", "additionalProperties": False,
     "required": ["action", "target_id", "expected_target_version", "expected_player_version"],
     "properties": {"action": {"type": "string", "minLength": 1, "maxLength": 80},
@@ -403,6 +407,62 @@ def _compile_definition(ctx, raw):
                            imported_interfaces=interfaces)
 
 
+def _definition_diagnostics(definition):
+    """Static advice shares real constructor defaults, never world snapshots."""
+    contexts = {}
+    for type_id, kind in definition["types"].items():
+        components, _ = _initial_components(kind)
+        binding = {"fields": {name: field["default"] for name, field in kind["fields"].items()}}
+        binding.update(_initial_program_modules(kind, lambda symbol: symbol))
+        # This is the constructor before real recipe input is supplied. Its
+        # empty matter cannot establish a formed body's load or buoyancy.
+        entity = {"id": "declared_initial", "state": {"program": binding},
+                  "components": components, "matter": [], "lifecycle": "intact"}
+        context = _context(entity)
+        for name in ("load.local", "load.total", "load.supported", "load.overload", "buoyancy", "can_float"):
+            context["physical"].pop(name, None)
+        context.update(components=components,
+            capacities={name: sm.component_capacity(entity, name) for name in ("absorbent", "buoyant")})
+        contexts[type_id] = context
+
+    def requests(item):
+        result = [{"function_id": "grove.rule_catalog", "arguments": {"topic": topic}}
+                  for topic in item["catalog_topics"]]
+        source = item.get("source")
+        if isinstance(source, dict) and source.get("definition_ref"):
+            result.append({"function_id": "grove.definition_read", "arguments": {"definition_ref": source["definition_ref"]}})
+        external = item.get("reference", {}).get("object") if isinstance(item.get("reference"), dict) else None
+        if isinstance(external, dict) and external.get("id"):
+            result.append({"function_id": "grove.inspect", "arguments": {"entity_id": external["id"]}})
+        return result
+
+    return program_diagnostics(definition, registry=REGISTRY, initial_contexts=contexts, read_requests=requests)
+
+
+def _syntax_read_request(node="definition"):
+    return {"function_id": "grove.rule_catalog", "arguments": {"topic": "syntax", "node": node}}
+
+
+def _invalid_definition_diagnostics(error):
+    diagnostics = invalid_diagnostics(error)
+    reads = []
+    # World-source, permission and admission failures have their own meaning.
+    # Only an actual compiler failure has a syntactic-node recovery entry.
+    if isinstance(error, ValueError):
+        for item in diagnostics["items"]:
+            node = program_schema_node_for_path(item["path"])
+            if node is not None:
+                item["schema_node"] = node
+                item["schema_node_scope"] = "syntax_node_not_semantic_repair"
+                request = _syntax_read_request(node)
+                item["read_requests"] = [request]
+                if request not in reads:
+                    reads.append(request)
+    if reads:
+        diagnostics["read_requests"] = reads
+    return diagnostics
+
+
 def definition_validate(ctx, args):
     """Check without publishing, generating, reserving or altering old definitions."""
     try:
@@ -411,9 +471,11 @@ def definition_validate(ctx, args):
         if sm.encoded_size(definition) > 24576:
             raise ValueError("program: 规则包超过24KiB，请拆成更小的实际能力包。")
     except (ValueError, RuleViolation) as exc:
-        return FunctionOutcome({"valid": False, "diagnostics": invalid_diagnostics(exc),
+        diagnostics = _invalid_definition_diagnostics(exc)
+        return FunctionOutcome({"valid": False, "diagnostics": diagnostics,
+                                "read_requests": diagnostics.get("read_requests", []),
                                 "world_changed": False, "publication_created": False})
-    return FunctionOutcome({"valid": True, "diagnostics": program_diagnostics(definition),
+    return FunctionOutcome({"valid": True, "diagnostics": _definition_diagnostics(definition),
                             "world_changed": False, "publication_created": False,
                             "meaning": "语法和类型有效；风险诊断不证明永久运行安全，也不提供执行许可。"})
 
@@ -425,7 +487,10 @@ def definition_publish(ctx, args):
     try:
         definition = _compile_definition(ctx, args["definition"])
     except ValueError as exc:
-        raise RuleViolation("定义未发表，世界没有改变：" + str(exc)) from exc
+        diagnostics = _invalid_definition_diagnostics(exc)
+        raise RuleViolation("定义未发表，世界没有改变：" + str(exc),
+            details={"diagnostics": diagnostics,
+                     "read_requests": diagnostics.get("read_requests", [])}) from exc
     encoded = json.dumps(definition, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     if len(encoded) > 24576:
         raise RuleViolation("规则包超过24KiB，请拆成更小的实际能力包。")
@@ -443,7 +508,7 @@ def definition_publish(ctx, args):
         return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": True,
                                 "source_definition_ref": source_ref, "source_definition": source,
                                 "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition),
-                                "diagnostics": program_diagnostics(definition)})
+                                "diagnostics": _definition_diagnostics(definition)})
     record = {"definition": definition, "author": ctx.actor_role_id, "hash": digest,
               "published_tick": step(ctx), "published_at": ctx.now, "execution_semantics": EXECUTION_SEMANTICS}
     if source_ref is not None:
@@ -452,7 +517,7 @@ def definition_publish(ctx, args):
     return FunctionOutcome({"definition_ref": ref, "definition": definition, "already_published": False,
                             "source_definition_ref": source_ref, "source_definition": source,
                             "material_semantics": semantics, "declaration_semantics": declaration_semantics(definition),
-                            "diagnostics": program_diagnostics(definition),
+                            "diagnostics": _definition_diagnostics(definition),
                             "instantiate": "cost_u: grove.fabrication_options then grove.fabricate with actual lot sources; cost: grove.content_submit with existing opportunity and builtin piece costs"})
 
 
@@ -472,7 +537,7 @@ def definition_read(ctx, args):
         "execution_plan": execution_plan(value["definition"]),
         "material_semantics": program_material_semantics(value["definition"], args["definition_ref"], materials=REGISTRY.materials),
         "declaration_semantics": declaration_semantics(value["definition"]),
-        "diagnostics": program_diagnostics(value["definition"])})
+        "diagnostics": _definition_diagnostics(value["definition"])})
 
 
 
@@ -498,6 +563,38 @@ def _resolve_material(ctx, reference, symbol):
     raise RuleViolation("导入symbol不是该不可变规则包声明或导入的材料。")
 
 
+def _initial_program_modules(kind, material):
+    result = {}
+    if "mechanical" in kind:
+        result["mechanical"] = {"position": 0, "angle": 0, "speed": 0, "energy": 0,
+                                "enabled": False, "status": "no_source", "available_torque": 0}
+    if "recorder" in kind:
+        result["recorder"] = {"active": False, "started_tick": None, "until_tick": None, "recorded_count": 0}
+    if "contract" in kind:
+        result["contract"] = {"status": "unoffered", "terms_version": 0, "parties": [], "accepted": [],
+            "deadline_tick": None, "delivered": 0, "quantity": kind["contract"]["quantity"],
+            "material": material(kind["contract"]["material"]), "beneficiary": None, "released": 0}
+    return result
+
+
+def _initial_components(kind):
+    components = {"structure": {"max_integrity": 100, "integrity": 100, "support_limit": 1000, "overload_rate": 1}}
+    defaults = {"structure": components["structure"],
+        "container": {"slots": 4, "liquid_capacity": 0, "open": True},
+        "absorbent": {"capacity": 0, "rate": 2}, "buoyant": {"capacity": 0},
+        "combustion": {"rate": 2, "spread": True},
+        "attachment": {"kind": "part", "fits": "container", "max_children": 16}}
+    for name, parameters in kind.get("components", {}).items():
+        components[name] = {**defaults[name], **deepcopy(parameters)}
+    mixture_capacity = None
+    if "container_capacity" in kind or "contract" in kind or any(e["op"] == "react" for r in kind["rules"] for e in r["effects"]):
+        mixture_capacity = kind.get("container_capacity", 100)
+        components.setdefault("container", {"slots": 4, "liquid_capacity": mixture_capacity, "open": True})
+        if "container_capacity" in kind:
+            components["container"]["liquid_capacity"] = mixture_capacity
+    return components, mixture_capacity
+
+
 def object_definition(ctx, spec, *, formation=False):
     pack = definition_read(ctx, {"definition_ref": spec["definition_ref"]}).result["definition"]
     if spec["type_id"] not in pack["types"]:
@@ -521,36 +618,16 @@ def object_definition(ctx, spec, *, formation=False):
     if "ports" in kind:
         binding["port_bindings"] = {}
         binding["port_binding_version"] = 0
-    if "mechanical" in kind:
-        binding["mechanical"] = {"position": 0, "angle": 0, "speed": 0, "energy": 0,
-                                 "enabled": False, "status": "no_source", "available_torque": 0}
-    if "recorder" in kind:
-        binding["recorder"] = {"active": False, "started_tick": None, "until_tick": None, "recorded_count": 0}
-    if "contract" in kind:
-        binding["contract"] = {"status": "unoffered", "terms_version": 0, "parties": [], "accepted": [],
-                               "deadline_tick": None, "delivered": 0, "quantity": kind["contract"]["quantity"],
-                               "material": _material({"state": {"program": binding}}, kind["contract"]["material"]),
-                               "beneficiary": None, "released": 0}
+    binding.update(_initial_program_modules(kind, lambda symbol: _material({"state": {"program": binding}}, symbol)))
     if "cost_u" in kind and not formation:
         raise RuleViolation("此类型按真实u批次成型；先读取grove.fabrication_options，再提交grove.fabricate。区域份数库存不能代替原材料。")
     matter = ([] if formation else [{"id": "body_" + material, "material": material,
                "quantity": amount * REGISTRY.materials[material].piece_quantity,
                "slot": "body", "role": "structural", "burning": False} for material, amount in kind["cost"].items() if amount])
-    components = {"structure": {"max_integrity": 100, "integrity": 100, "support_limit": 1000, "overload_rate": 1}}
-    component_defaults = {"structure": components["structure"],
-        "container": {"slots": 4, "liquid_capacity": 0, "open": True},
-        "absorbent": {"capacity": 0, "rate": 2}, "buoyant": {"capacity": 0},
-        "combustion": {"rate": 2, "spread": True},
-        "attachment": {"kind": "part", "fits": "container", "max_children": 16}}
-    for name, parameters in kind.get("components", {}).items():
-        components[name] = {**component_defaults[name], **deepcopy(parameters)}
+    components, mixture_capacity = _initial_components(kind)
     capabilities = ["transport"]
-    if "container_capacity" in kind or "contract" in kind or any(e["op"] == "react" for r in kind["rules"] for e in r["effects"]):
-        capacity = kind.get("container_capacity", 100)
-        binding["mixture_capacity"] = capacity
-        components.setdefault("container", {"slots": 4, "liquid_capacity": capacity, "open": True})
-        if "container_capacity" in kind:
-            components["container"]["liquid_capacity"] = capacity
+    if mixture_capacity is not None:
+        binding["mixture_capacity"] = mixture_capacity
         capabilities.append("container")
     elif "container" in components:
         capabilities.append("container")
@@ -1713,13 +1790,21 @@ def _catalog_topic(catalog, topic):
     if topic not in CATALOG_TOPICS:
         raise RuleViolation("未知规则目录专题；使用overview或目录返回的topics。")
     catalog["validation"] = {"function_id": "grove.definition_validate", "input": "{definition:proposed_program,source_definition_ref?:real_original_ref}",
-        "meaning": "Read-only syntax/type validation and bounded local range/zero-divisor advice before publication; "
-                   "valid is not a proof of perpetual safety. Publication/reading also returns derived diagnostics."}
+        "meaning": "Read-only syntax/type validation, bounded local range/zero-divisor advice and typed capability/input dependencies. "
+                   "valid is not a proof of perpetual safety, live input or achieved outcome. Publication/reading return the same derived diagnostics.",
+        "dependency_analysis": {"scope": "static_definition", "initial_scope": "declared_initial",
+            "statuses": ["provided", "missing", "deferred", "unknown"], "maximum_diagnostic_bytes": 8192,
+            "meaning": "Provided means declared support; deferred ports, materials and events need actual world evidence. "
+                "Warnings do not invalidate definitions. Omitted entries are not absent dependencies. "
+                "Read each item.read_requests for formal schemas; revisions are authored choices, never automatic repairs."}}
     metadata = {"topic": topic, "topics": [{"topic": name,
         "read_request": {"function_id": "grove.rule_catalog", "arguments": {"topic": name}}}
         for name in CATALOG_TOPICS],
         "projection": {"scope": "selected_creation_topic", "complete_catalog": topic == "all",
                        "meaning": "Omitted topics remain available through rule_catalog(topic); omissions do not remove capabilities."}}
+    if topic in {"overview", "program", "all"}:
+        metadata["syntax_read_request"] = _syntax_read_request()
+        metadata["syntax_nodes"] = list(PROGRAM_SCHEMA_NODES)
     if topic == "all":
         return {**catalog, **metadata}
     common = ("language_version", "execution_semantics", "definition_directory", "world_tick",
@@ -1765,6 +1850,22 @@ def rule_catalog(ctx, args):
     from agent_world.simulation.programs import (
         MECHANICAL_DEFAULTS, MECHANICAL_RANGES, PROGRAM_KEYS, PROGRAM_REQUIRED_KEYS, TYPE_KEYS, TYPE_REQUIRED_KEYS)
     from agent_world.simulation.presentation import presentation_catalog
+    topic = args.get("topic", "overview")
+    if "node" in args and topic != "syntax":
+        raise RuleViolation("node只用于syntax专题；其他专题不接受此参数。")
+    if topic == "syntax":
+        node = args.get("node", "definition")
+        schema = program_schema(materials=REGISTRY.materials, body_materials=BODY_MATERIALS,
+            max_custom_materials=MAX_CUSTOM_MATERIALS,
+            component_catalog={key: REGISTRY.components[key] for key in PROGRAM_COMPONENTS},
+            fact_catalog={key: fact.type for key, fact in PUBLIC_FACTS.items()}, node=node)
+        return FunctionOutcome({"topic": "syntax", "node": node, "schema_version": 1,
+            "language_version": 5, "schema": schema, "nodes": list(PROGRAM_SCHEMA_NODES),
+            "read_requests": [_syntax_read_request(name) for name in PROGRAM_SCHEMA_NODES],
+            "meaning": "Compiler-derived draft shape, not a definition, recipe or execution result. "
+                "Cross-node references, types, material balance and semantic budgets still require the actual compiler. "
+                "Validation accepts invalid drafts to report diagnostics; this read supplies no world facts or permission.",
+            "world_facts_checked": False, "execution_proven": False})
     object_fields = "|".join(PUBLIC_FACTS)
     physical_fields = "|".join(name.removeprefix("physical.") for name in PUBLIC_FACTS if name.startswith("physical."))
     component_schema = {
@@ -1865,10 +1966,10 @@ def specs():
     return (
         *publication.specs(),
         *fabrication.specs(),
-        FunctionSpec("grove.rule_catalog", rule_catalog, CATALOG_ARGS, version=8, access="read", description="Read creation syntax, shared revision publication/discovery and capability topics. Default overview is compact; select program/materials/components/mechanical/events/contract/physical/ports/presentation, or explicit all for the complete catalog. Omitted topics remain supported. No full-history index."),
-        FunctionSpec("grove.definition_validate", definition_validate, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "source_definition_ref": REF}}, version=2, access="read", authorize=_member, description="Validate a proposed definition and optional real source_definition_ref without saving drafts, publishing or creating matter. Uses the actual compiler and bounded local range/division diagnostics; valid is syntax/type validity, not perpetual safety or execution permission."),
-        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=6, access="read", description="Read one immutable definition and its author/hash, optional source definition with formal read request, direct revisions request, canonical material bindings and bounded diagnostics; existing instances pin the unchanged reference."),
-        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object"}, "source_definition_ref": REF, "delegation": DELEGATION}}, version=9, authorize=_member, description="Compile and publish your own immutable definition, optionally derived from one real published source_definition_ref supplied outside definition. Source participates in publication identity; existing instances/definitions are never upgraded. No drafts, matter, permission or consent are created. Read definition_validate when helpful and discover precise syntax with rule_catalog topics."),
+        FunctionSpec("grove.rule_catalog", rule_catalog, CATALOG_ARGS, version=10, access="read", description="Read compiler-derived machine syntax with topic=syntax and optional node; the returned local JSON Schema is self-contained. Read shared revision publication/discovery and capability topics. Default overview is compact; select program/syntax/materials/components/mechanical/events/contract/physical/ports/presentation, or explicit all for the complete catalog. Omitted topics remain supported. No full-history index."),
+        FunctionSpec("grove.definition_validate", definition_validate, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object", "description": "Own draft, not a fixed example. Machine grammar: grove.rule_catalog(topic=syntax,node=definition); local nodes include type, expression and effect. Invalid drafts remain accepted by validation for diagnostics."}, "source_definition_ref": REF}}, version=4, access="read", authorize=_member, description="Read formal machine grammar through rule_catalog(topic=syntax,node=definition or a local node). Validate a proposed definition and optional real source_definition_ref without saving drafts, publishing or creating matter. Uses the actual compiler plus bounded range and trusted capability dependency diagnostics. Provided/missing/deferred/unknown dependencies and declared initial values are advice; valid is syntax/type validity, not proof of live inputs or effects."),
+        FunctionSpec("grove.definition_read", definition_read, {"type": "object", "additionalProperties": False, "required": ["definition_ref"], "properties": {"definition_ref": REF}}, version=7, access="read", description="Read one immutable definition and its author/hash, optional source definition with formal read request, direct revisions request, canonical material bindings and bounded range/capability dependency diagnostics with formal next reads; existing instances pin the unchanged reference. Declared support is not a live condition or effect."),
+        FunctionSpec("grove.definition_publish", definition_publish, {"type": "object", "additionalProperties": False, "required": ["definition"], "properties": {"definition": {"type": "object", "description": "Own draft, not a fixed example. Machine grammar: grove.rule_catalog(topic=syntax,node=definition); local nodes include type, expression and effect. Invalid drafts remain accepted by validation for diagnostics."}, "source_definition_ref": REF, "delegation": DELEGATION}}, version=11, authorize=_member, description="Discover compiler-derived machine grammar through rule_catalog(topic=syntax,node=definition or a local node). Compile and publish your own immutable definition, optionally derived from one real published source_definition_ref supplied outside definition. Source participates in publication identity; existing instances/definitions are never upgraded. No drafts, matter, permission or consent are created. Publication returns the same bounded capability dependency advice as definition_validate/read; it does not prove a working instance. Discover precise syntax with rule_catalog topics and verify actual instances with effect_evidence."),
         FunctionSpec("grove.rule_action", rule_action, ACTION_ARGS, version=10, authorize=_member, description="Use inspect's formal declared actions, explicit bind_port/unbind_port, qualified fuel lot selection and finite start/stop control. Declared buttons and fuel/start/stop keep the chosen parameters and presented interaction guard: autonomous fields and mechanical outputs need not be chased each second; current real conditions are rechecked on submission. Other participants' edits, material/ownership/structure changes invalidate that guard. Fuel sources, bindings and contracts retain exact observed versions. Bindings do not grant remote writes; active/result contracts pin targets. charge prepares only locally declared material from feedstock; actual lot transfer is interact transfer. Same identity and Runtime receipts for human or delegated Agent."),
         FunctionSpec("grove.control_grant", control_grant, {"type": "object", "additionalProperties": False, "required": ["goal", "max_actions"], "properties": {"goal": {"type": "string", "minLength": 1, "maxLength": 2000}, "max_actions": {"type": "integer", "minimum": 1, "maximum": 64}}}, version=2, authorize=_member, description="Explicitly delegate one bounded goal on the same user identity. Replaces any prior grant; stable grant_id identifies this authorization, max_actions counts committed writes."),
         FunctionSpec("grove.control_revoke", control_revoke, EMPTY, version=2, authorize=_member, description="Reclaim control immediately: future unexecuted delegated writes fail; completed results, receipts and original grant_id remain."),

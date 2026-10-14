@@ -4,24 +4,47 @@
 
 ## 当前研发记录
 
-**当前源码：**0.37.0／world40／state25，工作树 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支 `codex/grove-composable-rules`；接手基线为 `759e221`／0.36.0／world39。Agent优先与双向人类API的主张已落实到文档、公开客户端和实际宿主／前端接线。原8960世界、12个身份、Go小模型、Native主会话、公开定义、实例、材料、玩家回执与失败记录保持原位；本轮未重启原服务，当前运行仍为基线版本。新契约、世界与前端须从同一冻结源码同步加载，不能混用新前端与旧DTO。
+**当前源码与运行：**0.38.0／world42／state25，工作树 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支 `codex/grove-composable-rules`，本轮基线为 `7d653ef`。新版已在原8960世界、12个连接器端口与原活动数据路径运行；恢复保留原身份、名字、Go模型和Native主会话。恢复本身没有发起模型推理。真实Agent创作、触发、核验与另一人接续按下方实际证据分别判断，未形成的新作和未观测的效果不计为成功。
 
-| 本轮模块化结果 | 实际验证范围 |
+| 本轮能力 | 已有证据与边界 |
+| --- | --- |
+| 通用依赖诊断 | validate／publish／definition_read共用真实构造默认值与可信能力目录，区分provided／missing／deferred／unknown。物理、机械、合同、事件、材料与绑定依赖均以声明和正式事实为准；诊断不是现场资源、权限或执行证明。 |
+| 编译器语法发现 | `grove.rule_catalog(topic:"syntax",node:...)`提供编译器派生的自包含JSON Schema及正式节点读取入口；无效草稿的编译诊断指向对应schema_node。语法读取不给作品草稿、配方或执行证明，跨节点类型、守恒与预算仍由真实编译器验证。 |
+| 精确实例效果读取 | `grove.effect_evidence`固定entity_id与不可变definition_ref，提供有类型的公开事实谓词、实际逻辑步和有界历史。当前条件满足不等于新效果；未导出字段、缺失历史与无法归因保留unknown。宿主只引用本任务实际交付的读取，completed仍是Agent主张。 |
+| 正式失败可达Agent | MCP工具声明成功观察／结构化错误的联合outputSchema，SDK内部成功校验保持严格。参数／规则拒绝不生成新观察，客户端保留错误原因和恢复读取入口；效果谓词拒绝提供有界合法fact_catalog或正式续读。该修复来自真实模型运行中客户端抹掉错误的证据。 |
+| Native工具名映射 | OpenCode当前请求携带实际已声明工具的native_tool_mapping；错误优先提供服务器正式读取并映射到该宿主工具名。映射不建立别名、改变世界函数、执行读取或增加授权，不成为公开SDK的参数要求。 |
+| 本轮本地检查通过 | 基础完整Python回归1364项通过（445.744秒）；真实接续暴露的只读回执汇总缺口修复后，最终234项相关宿主／控制／权限检查通过（10.062秒）。12份Node文件／33项runner检查通过；最后宿主修复后的0.38.0实际安装包再次通过。完整回归与最后增量验证范围分别记录，前期失败保留；检查不能代替真实创作验收。 |
+
+**本轮Native创作尝试：**石青p05的JSON缺少闭合括号，发表未到世界服务器；半夏p08提交了真实事件等行动，但重复读取旧作品、使用错误谓词，没有形成新实例；林舟a有机会认领／释放与移动，world42恢复后的第13、14次请求只返回旧进展摘要，没有调用工具；棠棠p04成功读取既有定义及依赖诊断，随后宿主超时并记录MessageAbortedError，没有写入。四次尝试均未完成本轮新作品的创作、触发与核验，不因新接口或模型文字补判成功。
+
+**本轮跨宿主真实链已有证据：**当前GPT Agent以棠棠的原身份、明确有限授权和公开GroveAgentClient HTTP接口，自行读取语言与实际库存，选择并创作「问候接力器」。草稿经validate后发表，精确消耗既有木料10u成型并公开放下；greet仅设置pending，后续自动规则把visits从0变为1并清除pending。创作者自己通过effect_evidence读到逻辑步335089的类型化变化。定义固定为`program_4ffcb48834a2bf862149a8b17ad0345cbc67b91f3f20126c90907a51ac18b2ae`，实例固定为`object_c22022edd5d348e08dac5778c5f9e596`。这份作品是模型本轮选择和实际世界数据，生产代码没有该配方、作品名或预填答案；棠棠原MiMo会话的失败不能记为GPT创作成功。
+
+原Native阿岚仍用其Qwen模型、身份和主会话，仅收到公开作品名称与接续目标，自行通过public_works发现、行走、inspect、阅读定义并实际greet。原成功回执为`grove-local-8faff78317063414ea731028dfb87f2a`／commit4371998；它随后自行inspect读到同实例visits 1→2、pending true→false及逻辑步335508的自动变化，后续只读对话也自行调用effect_evidence读取这一保留记录。独立公开客户端核对了阿岚本人原回执与同实例类型化证据；人类双向API返回实际badge=2、木料10u和greet控制，可由任意renderer消费，不需要读取规则AST。
+
+这是一条有界真实链，不是无需干预的通用Native创作验收：接续期间调整过授权预算、恢复原段并纠正过将执行目标误读为汇总的情况。阿岚曾用移动回执提交错误completed声明，系统保留agent_claim／unverified；它成功后还有被拒绝的重复greet和虚构item_id。原成功、当前状态、后续拒绝及不完整历史分别保留，类型化自动变化不自行建立某个操作的因果归属，也不裁定自然语言目标。只读核验对话补齐原任务有界回执汇总，防止撤权后丢失成功证据；不恢复写入授权，不把历史版本作为当前行动guard。修复后原Native阿岚在只读请求中自行认出上述本人成功greet回执，再以effect_evidence obs864、inspect obs865和有界公开历史obs866给出一致且注明范围的结论；完整原话与真实工具结果保留在私人证据，结论没有预填进提示。
+
+**原数据与历史缺口：**备份核验发现原活动库的state_changes已有结构损坏。本轮在新候选库恢复并逐值确认27个其他表与221115条原Operation不变；首次安装world41时的12行玩家、235行实体和定义／版本／目录各60行也完全一致，随后world42沿同一恢复库运行，模型行动可合法改变现场。22条异常日志找回11条原WAL记录；另11条元数据历史不可恢复，已将正式历史floor推进至6974378，旧游标明确返回过期／保留范围，不能宣称完整历史。原DB／WAL／SHM唯一原始副本保留在 `/Volumes/DevDisk/DeveloperData/Archives/agent-world/shared-grove/agent-effects-20261014-original/`。恢复候选已安装到原活动路径；没有回滚到旧世界，也没有替模型改作品。恢复时原12个Native主会话的4634条消息与14826条part逐ID全行摘要一致；之后的新推理另记。损坏原因尚未确定。
+
+本轮完整正反证据、恢复来源、运行参数、检查与清理沿现有 [implementation.json](/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/implementation.json) 的 `agent_effects_round`；日志为 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/agent-effects-20261014`，私人轨迹与恢复核对为 `/Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/agent-effects-20261014`。恢复资料不代替各人原Native目录。
+
+**上一轮模块化：**0.37.0／world40／state25，工作树 `/Users/mubin/Developer/agent-world/grove-composable-rules`，分支 `codex/grove-composable-rules`；接手基线为 `759e221`／0.36.0／world39。Agent优先与双向人类API的主张已落实到文档、公开客户端和实际宿主／前端接线。原8960世界、12个身份、Go小模型、Native主会话、公开定义、实例、材料、玩家回执与失败记录保持原位；上一轮未重启原服务，当时运行仍为基线版本。新契约、世界与前端须从同一冻结源码同步加载，不能混用新前端与旧DTO。
+
+| 上一轮模块化结果 | 实际验证范围 |
 | --- | --- |
 | 五个责任接通 | 世界内核／规则、Agent契约与客户端、宿主、人类双向API、renderer各有明确入口；共享建设计划与正式失败，不解析中文来决定资格。OpenCode及二维网页为reference adapter。 |
 | Agent独立参与与恢复通过 | 独立HTTP客户端发现、入场、行动；响应丢失后从新MCP会话恢复同一原回执，原封包重放不重复提交。停止新行动仍可只读查回执；同编号不同参数的拒绝响应丢失不会被错认成旧成功。第二消费者仅按人类API的动作描述完成输入。未启动真实模型。 |
 | 旧数据升级核对通过 | 一致快照的221115条原Operation（全部列及rowid）、12行玩家、235行实体、定义／版本／目录各60行逐值摘要完全相等。隔离副本安装world40后，Agent读取与人类projection2读取对应同一身份及快照；无timer或模型推进。函数描述变动采用新版本，不覆盖旧版本。 |
 | 最终本地实现检查通过 | 1299项Python回归、11份Node脚本、0.37.0实际wheel安装及包内SDK／世界／资产检查通过。原先的接线、版本、测试位置与旧fixture失败日志保留，未放宽密钥、观察、授权或回执校验。 |
 
-本轮证据与收尾沿现有 [implementation.json](/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/implementation.json) 的 `agent_first_modularity`，日志目录为 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/agent-first-20261013`。唯一一致恢复点为 `/Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/agent-first-20261013/world-before-modularity.sqlite3`；不含模型私人记忆，各人原profile与Native目录仍是原位置。可重建安装副本、测试临时目录与隔离恢复副本在本轮收尾清理，原活动数据、共享依赖及必要正反证据保留。
+上一轮证据与收尾沿现有 [implementation.json](/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/implementation.json) 的 `agent_first_modularity`，日志目录为 `/Volumes/DevDisk/DeveloperData/agent-world/evidence/shared-grove/agent-first-20261013`。唯一一致恢复点为 `/Volumes/DevDisk/DeveloperData/agent-world/private/shared-grove/agent-first-20261013/world-before-modularity.sqlite3`；不含模型私人记忆，各人原profile与Native目录仍是原位置。可重建安装副本、测试临时目录与隔离恢复副本在本轮收尾清理，原活动数据、共享依赖及必要正反证据保留。
 
-**产品判断：**已存在真实、持久的共享规则世界。定义能发表、以真实材料成型、自动执行并被另一人接续；当前首要缺口是自然创作的功能正确性和行动／证据理解。继续在现有执行器上组合内容，优先改善能力依赖诊断、行动目标及定义—实例—历史结果对应；存储长尾作为独立问题处理。
+**产品判断：**已存在真实、持久的共享规则世界，历史证据支持定义发表、真实材料成型、自动执行与他人接续。当前已补通用依赖诊断、机器语法发现及精确实例效果读取；本轮已核对Agent自选新机制及公共接续的实际变化；下一步应针对原Native会话的目标保持、历史回执理解及重复行动做实际改进，不能用一次有界链外推无需干预的开放创作。存储长尾与本轮已知历史缺口分别保留。
 
-| 交接结论 | 已有真实证据与边界 |
+| 原自然创作轮交接结论 | 已有真实证据与边界 |
 | --- | --- |
 | 真实创作与跨作者改作成立 | 原Longcat发表木牌并消耗10u木成型。原Qwen发表三个固定来源的改版，耗真实木料公开两块新牌；前两版指向Longcat原作，第三版指向自己的第二版。阿岚原Qwen实际拿起、放回Longcat的同一实体，有正式回执。原定义及旧实例未升级。 |
 | 新湿润作品完整功能链未通过 | 三种原模型都用 `physical.wetness > 0`，漏掉吸水能力；实际读过的目录已说明材质名不隐含组件。Qwen前两版误把每湿润步计数当一次淋湿计数，第三版修正标记但条件仍未触发。水后来倒给另一件倒木，阿岚还误述成新牌成功。Minimax的两版未成型，不能计为完成另一作者作品的改作。 |
-| 开发与接入仍不成熟 | 目录缺少明确能力依赖诊断；读取 `entity_id` 与行动 `target_id/item_id` 的转换造成实际拒绝。当前目标、定义、实例和旧经历的对应不足以稳定防误述。一次结算ConnectError及一次外部停机原因单列接入／环境，不能全部归为模型弱。 |
+| 原轮开发与接入失败 | 当时目录缺少明确能力依赖诊断；读取 `entity_id` 与行动 `target_id/item_id` 的转换造成实际拒绝。目标、定义、实例和旧经历的对应不足以稳定防误述。一次结算ConnectError及一次外部停机原因单列接入／环境，不能全部归为模型弱。world42的新增合同不自行改判这些旧失败。 |
 | 模型停止后服务器独立推进成立 | 12个原会话空闲、自动请求关闭、未知操作为0；88.645秒边界间推理次数和Native消息数不变。已有计数牌从732自动增至819。这是已有作品的独立推进证据，三件新湿润作品仍干态。 |
 | 同库停机恢复及原数据保护成立 | 受控停机76.570秒，时钟及四件实物SQL行逐值不变；按原参数恢复后原身份、模型、主会话、任务及停止原因保留，无额外推理，不补离线结算。220984笔原操作含全部列与rowid摘要不变，162行原不可变定义／目录／版本不变，6691份原Native正文、推理及工具输入输出无缺失或改写。 |
 | 基线实现检查已通过，范围独立 | 基线完整Python、12份Node与0.36.0实际安装包检查通过；275份实现／验证输入摘要 `94063540eada2e56a80a82e869b78c395970f3dee7a50344aca369e9983799c1`。初批版本号和接线错误已修，原失败证据保留。这些检查不代替上述真实功能证据；本轮检查范围另见上表。 |
@@ -60,6 +83,12 @@ Agent 按结构化发现入口理解世界规则，在明确授权目标下读�
 ## 有界定义、反应、机械、记录与合同
 
 `grove.rule_catalog / grove.definition_publish / grove.definition_read / grove.rule_action` 提供获准目录、声明发表／读取和规则行动。合法定义自动发表；定义及版本ref不可变，旧对象pin原版本。改作可用 `source_definition_ref` 固定已发表来源，另发自己的完整新定义；来源只用于归因及直接改版发现，不授予批准、材料或迁移权限，不覆盖原作。声明程序包含有界条件、状态变迁、反应、持续过程和对象连接，由可信解释器执行；不是任意Python／JS或模型文字执行。实例创建仍重查机会、资源、空间和数量，不因发表定义自动获得材料。
+
+声明作者通过 `grove.rule_catalog(topic:"syntax",node:...)` 读取自包含机器语法，再验证自己的草稿。节点来自正式目录，编译失败可用对应schema_node及正式read_requests继续理解；它们不提供修好后的作品、现场事实或行动许可。具体表面见[编译器语法发现](INTEGRATION.md#编译器语法发现)。
+
+`grove.definition_validate` 的 `valid` 只表示语法／类型有效。验证、发表和读取定义共用有界的能力依赖诊断：`provided` 表示声明结构具备支持，`missing` 表示可确定的静态缺项，`deferred` 留待真实实例的绑定、公开部署、材料和事件输入，`unknown` 表示当前分析不能判断。`initial.scope:"declared_initial"` 是声明初态，不是实例现场；诊断不改定义、hash、旧实例、资源或授权，也不证明机制执行或自然目标完成。规则目录的材料名不隐含组件，零值可有合法意义，正值／变化所需能力仍须按真实机制检查。具体字段和省略范围见 [接入合同](INTEGRATION.md#声明能力依赖诊断)。
+
+`grove.effect_evidence` 按请求的真实实体和固定定义读取有界效果证据：当前类型化谓词、输入／条件、保存变化见证与部分历史各有来源和逻辑步范围。`after_step` 限定所读历史，不能变成提交序号或连续运行证明；当前事实成立不等于机制已执行，历史效果也不等于本次输入的后果。未知和未覆盖记录保持未知。该读取不改世界、触发机制或裁定自然语言目标；同一实例须由实际行动触发并独立读回，另一参与者也须按公共事实自行使用或接续。宿主检查点可引用本任务真正交付的效果读取，但完成仍是 Agent 声明。参数、范围和状态见 [接入合同](INTEGRATION.md#同一实例的效果证据)。
 
 表达式可用 `{object:{id:真实物件ID,field:typed_fact}}` 固定不可变来源，也可用 `{object:{port:已声明端口,field:typed_fact}}` 读取实例的明确绑定；来源与端口合计至多8个。字段语义以 `grove.rule_catalog` 的typed `public_facts`为准，自定义字段须由来源类型明确导出，端口固定来源definition/type。`bind_port / unbind_port`重验真实CAS版本、公开可读目标与参与者／anchor的8 tile范围，不等于机械连接，不授予控制或自动换对象。缺失、私有、闭合容器内、远处或类型不符的来源明确不可用，不默认false／0。普通实时规则保留绑定、回滚该声明并等待，阻塞事件声明保留未消费游标，机械已成立结果不倒退；合同首次offer固定绑定，未接受时改绑定清除原同意，生效／结果合同不能偷换来源。self可读 `{contract:status|started_event_sequence|deadline_tick|delivered|quantity}`。
 

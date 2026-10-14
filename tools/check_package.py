@@ -107,6 +107,8 @@ def main():
                 "assert any(function.name == 'grove.content_history' for function in GROVE_WORLD.functions)",
                 "assert any(function.name == 'grove.definition_validate' for function in GROVE_WORLD.functions)",
                 "assert any(function.name == 'grove.public_works' for function in GROVE_WORLD.functions)",
+                "import agent_world.simulation.program_dependencies, agent_world.simulation.program_schema, agent_world.worlds.shared_grove.effect_evidence",
+                "assert any(function.name == 'grove.effect_evidence' for function in GROVE_WORLD.functions)",
                 "stone_vessel = composition_definition({'material':'stone','construction':'vessel','size':1,'lining':'cloth'})",
                 "assert {lot['role'] for lot in stone_vessel['matter']} == {'structural','lining'}",
                 "assert {lot['material'] for lot in stone_vessel['matter']} == {'stone','cloth'}",

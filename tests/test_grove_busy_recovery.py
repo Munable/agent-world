@@ -15,6 +15,7 @@ from agent_world.grove_connector import (
     ConnectorManager, GroveSession, DOMAIN_BUSY_MAX_ATTEMPTS, MAX_SECONDS, create_connector_app,
 )
 from agent_world.grove_connector_errors import ConnectorError
+from agent_world.worlds.shared_grove.world import INSPECT_ARGS, VIEW_ARGS
 
 
 def busy():
@@ -309,6 +310,13 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("hidden-object", str(error))
 
     async def test_mcp_busy_error_preserves_uncommitted_original_operation_without_new_observation(self):
+        reads = {"map.viewport": {"access": "read", "version": 1, "input_schema": deepcopy(VIEW_ARGS)},
+            "grove.inspect": {"access": "read", "version": 1, "input_schema": deepcopy(INSPECT_ARGS)}}
+        self.session.catalog.update(reads)
+        self.session.agent_client.configure_catalog(
+            [{"function_id": name, **spec} for name, spec in self.session.catalog.items()],
+            {"contract_version": 1, "functions": [
+                {"function_id": name, "access": "read"} for name in reads]})
         rejected = busy()
         rejected.execution_outcome = {"stage": "definite_rejection", "operation_id": "original-operation",
             "function_id": "grove.rule_action", "world_action_committed": False,
@@ -332,9 +340,12 @@ class GroveBusyRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["details"], rejected.world_details)
         self.assertEqual(json.loads(result["content"][0]["text"]), error)
         self.assertIn("before commit", error["recovery_meaning"])
-        self.assertEqual(error["read_requests"], [{"tool": "map_viewport", "arguments": {}},
-            {"tool": "grove_inspect", "arguments": {"entity_id": "source"}},
-            {"tool": "grove_inspect", "arguments": {"entity_id": "owned-item"}}])
+        self.assertEqual(error["read_requests"], [{"function_id": "map.viewport", "tool": "map_viewport",
+            "native_tool": "grove_world_map_viewport", "arguments": {}},
+            {"function_id": "grove.inspect", "tool": "grove_inspect", "native_tool": "grove_world_grove_inspect",
+                "arguments": {"entity_id": "source"}},
+            {"function_id": "grove.inspect", "tool": "grove_inspect", "native_tool": "grove_world_grove_inspect",
+                "arguments": {"entity_id": "owned-item"}}])
         self.assertNotIn("observation_id", error)
         self.assertEqual(self.session.observations.sequence, 0)
 

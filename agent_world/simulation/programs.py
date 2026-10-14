@@ -51,6 +51,35 @@ PROGRAM_REQUIRED_KEYS = ("key", "name", "version", "types")
 TYPE_KEYS = ("name", "body_material", "cost", "cost_u", "components", "ports", "fields",
              "exports", "container_capacity", "mechanical", "recorder", "contract", "barrier", "rules", "actions", "presentation")
 TYPE_REQUIRED_KEYS = ("name", "body_material")
+# One grammar vocabulary for the compiler and machine-readable drafting schema.
+# These are existing syntax/limits, not additional admission or stored data.
+NODE_SHAPES = {
+    "field": (("type", "default", "min", "max"), ("type", "default")),
+    "material": (("name", "feedstock", "load_per_u", "combustible", "liquid", "uses"),
+                 ("name", "feedstock", "load_per_u", "combustible", "liquid")),
+    "material_import": (("definition_ref", "symbol"), ("definition_ref", "symbol")),
+    "source": (("definition_ref", "type_id"), ("definition_ref", "type_id")),
+    "port": (("label", "fields", "source"), ("fields",)),
+    "reaction": (("op", "inputs", "outputs", "rate", "heat", "channel", "mode"), ("op", "inputs", "outputs")),
+    "set_effect": (("op", "field", "value"), ("op", "field", "value")),
+    "drive_effect": (("op", "enabled"), ("op", "enabled")),
+    "emit_effect": (("op", "name"), ("op", "name")),
+    "mechanical": (("role", "load_field", "speed_field", *MECHANICAL_DEFAULTS), ("role",)),
+    "recorder": (("radius", "window_ticks"), ("radius", "window_ticks")),
+    "contract": (("material", "quantity", "duration_ticks", "completion_when", "delivery_when"),
+                 ("material", "quantity", "duration_ticks")),
+    "rule": (("id", "phase", "when", "effects"), ("id", "phase", "when", "effects")),
+    "action": (("id", "label", "parameters", "effects", "when"), ("id", "label", "effects")),
+    "contact_reaction": (("id", "when", "reaction", "activation"), ("id", "when", "reaction")),
+}
+PROGRAM_LIMITS = {"types": 8, "ports": 8, "port_fields": 8, "exports": 8,
+    "rules": 8, "actions": 8, "effects": 8, "contact_reactions": 8,
+    "material_coefficients": 8, "formation_materials": 8, "sources": 8,
+    "piece_cost": 4, "formation_u": 200, "container_capacity": 200}
+REACTION_RANGES = {"coefficient": (1, 100), "rate": (1, 10), "heat": (-20, 20)}
+RECORDER_RANGES = {"radius": (0, 8), "window_ticks": (1, 3600)}
+CONTRACT_RANGES = {"quantity": (1, 100), "duration_ticks": (1, 3600)}
+MATERIAL_USES = ("hearth_fuel", "mechanical_fuel")
 _RESERVED_ACTIONS = {
     "charge", "fuel", "connect", "disconnect", "start_recording", "stop_recording",
     "read_records", "offer", "accept", "deliver", "release", "start", "stop",
@@ -107,7 +136,7 @@ def _fields(definitions, path):
         _text(name, path + "." + name, 48, _SYMBOL)
         if name in _RESERVED_FIELDS:
             _fail(path + "." + name, "reserved world authority or physical field; declare a separate program field")
-        _mapping(spec, path + "." + name, {"type", "default", "min", "max"}, {"type", "default"})
+        _mapping(spec, path + "." + name, *NODE_SHAPES["field"])
         kind = spec["type"]
         current = {"type": kind, "default": spec["default"]}
         if kind == "boolean":
@@ -130,7 +159,7 @@ def _fields(definitions, path):
 def exported_interface(spec):
     """Derive typed public fields from one immutable type, without changing it."""
     fields = _mapping(spec.get("fields", {}), "type.fields")
-    exports = _list(spec.get("exports", []), "type.exports", 8)
+    exports = _list(spec.get("exports", []), "type.exports", PROGRAM_LIMITS["exports"])
     if any(not isinstance(name, str) or name not in fields for name in exports) or len(set(exports)) != len(exports):
         _fail("type.exports", "requires distinct declared field names")
     return {"authored." + name: _interface_field({key: value for key, value in fields[name].items()
@@ -152,13 +181,13 @@ def _interface_field(value, path):
 
 
 def _source_interface(source, interfaces, path):
-    _mapping(source, path, {"definition_ref", "type_id"}, {"definition_ref", "type_id"})
+    _mapping(source, path, *NODE_SHAPES["source"])
     reference = _text(source["definition_ref"], path + ".definition_ref", 128)
     type_id = _text(source["type_id"], path + ".type_id", 48, _SYMBOL)
     if interfaces is None or reference not in interfaces or type_id not in interfaces[reference]:
         _fail(path, "requires an existing immutable published source type interface")
     interface = _mapping(interfaces[reference][type_id], path + ".resolved")
-    if len(interface) > 8:
+    if len(interface) > PROGRAM_LIMITS["exports"]:
         _fail(path + ".resolved", "source type exports at most 8 fields")
     for name, value in interface.items():
         if not name.startswith("authored.") or not _SYMBOL.fullmatch(name.removeprefix("authored.")):
@@ -214,7 +243,7 @@ def _expression(expr, fields, params, materials, path, expected=None, object_ids
                     object_ids.add(entity_id)
                 if public_field not in object_fields:
                     _fail(at + ".object.field", "must reference a supported public object field; authored fields require a pinned source port")
-                if len(object_ids) > 8:
+                if len(object_ids) > PROGRAM_LIMITS["sources"]:
                     _fail(at + ".object.id", "at most 8 distinct object bindings are allowed per program")
                 return object_fields[public_field]
             if key in {"field", "param", "quantity", "concentration", "mechanical", "event", "contract", "physical"}:
@@ -264,17 +293,17 @@ def _expression(expr, fields, params, materials, path, expected=None, object_ids
 
 def _stoichiometry(value, materials, path):
     _mapping(value, path)
-    if not value or len(value) > 8:
+    if not value or len(value) > PROGRAM_LIMITS["material_coefficients"]:
         _fail(path, "must contain from 1 to 8 material coefficients")
     for material, amount in value.items():
         if material not in materials:
             _fail(path + "." + material, "material is not declared or built in")
-        _integer(amount, path + "." + material, 1, 100)
+        _integer(amount, path + "." + material, *REACTION_RANGES["coefficient"])
     return deepcopy(value)
 
 
 def _reaction(effect, materials, path):
-    _mapping(effect, path, {"op", "inputs", "outputs", "rate", "heat", "channel", "mode"}, {"op", "inputs", "outputs"})
+    _mapping(effect, path, *NODE_SHAPES["reaction"])
     if effect["op"] != "react":
         _fail(path + ".op", "must be react")
     inputs = _stoichiometry(effect["inputs"], materials, path + ".inputs")
@@ -288,30 +317,30 @@ def _reaction(effect, materials, path):
     if not isinstance(mode, str) or mode not in {"exclusive", "independent"}:
         _fail(path + ".mode", "must be exclusive or independent")
     return {"op": "react", "inputs": inputs, "outputs": outputs,
-            "rate": _integer(effect.get("rate", 1), path + ".rate", 1, 10),
-            "heat": _integer(effect.get("heat", 0), path + ".heat", -20, 20),
+            "rate": _integer(effect.get("rate", 1), path + ".rate", *REACTION_RANGES["rate"]),
+            "heat": _integer(effect.get("heat", 0), path + ".heat", *REACTION_RANGES["heat"]),
             "channel": _text(effect.get("channel", "chemistry"), path + ".channel", 80, _KEY), "mode": mode}
 
 
 def _effects(effects, fields, params, materials, path, object_ids, ports=None, *, fact_catalog=None, interface_catalog=None):
     result = []
-    for index, effect in enumerate(_list(effects, path, 8)):
+    for index, effect in enumerate(_list(effects, path, PROGRAM_LIMITS["effects"])):
         at = f"{path}[{index}]"
         _mapping(effect, at)
         op = effect.get("op")
         if op == "set":
-            _mapping(effect, at, {"op", "field", "value"}, {"op", "field", "value"})
+            _mapping(effect, at, *NODE_SHAPES["set_effect"])
             name = effect["field"]
             if not isinstance(name, str) or name not in fields:
                 _fail(at + ".field", "set may only write a declared program field")
             result.append({"op": "set", "field": name, "value": _expression(effect["value"], fields, params, materials, at + ".value", fields[name]["type"], object_ids, ports, fact_catalog=fact_catalog, interface_catalog=interface_catalog)})
         elif op == "drive":
-            _mapping(effect, at, {"op", "enabled"}, {"op", "enabled"})
+            _mapping(effect, at, *NODE_SHAPES["drive_effect"])
             result.append({"op": "drive", "enabled": _expression(effect["enabled"], fields, params, materials, at + ".enabled", "boolean", object_ids, ports, fact_catalog=fact_catalog, interface_catalog=interface_catalog)})
         elif op == "react":
             result.append(_reaction(effect, materials, at))
         elif op == "emit":
-            _mapping(effect, at, {"op", "name"}, {"op", "name"})
+            _mapping(effect, at, *NODE_SHAPES["emit_effect"])
             result.append({"op": "emit", "name": _text(effect["name"], at + ".name", 80)})
         else:
             _fail(at + ".op", "must be set, react, emit or drive")
@@ -389,7 +418,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
         _text(symbol, at, 48, _SYMBOL)
         if symbol in builtin_materials:
             _fail(at, "built-in materials cannot be redefined; choose a new symbol")
-        _mapping(spec, at, {"name", "feedstock", "load_per_u", "combustible", "liquid", "uses"}, {"name", "feedstock", "load_per_u", "combustible", "liquid"})
+        _mapping(spec, at, *NODE_SHAPES["material"])
         if not isinstance(spec["feedstock"], str) or spec["feedstock"] not in builtin_materials:
             _fail(at + ".feedstock", "must be " + _choices(list(builtin_materials)))
         name = _text(spec["name"], at + ".name", 80)
@@ -400,7 +429,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
                      "combustible": _boolean(spec["combustible"], at + ".combustible"),
                      "liquid": _boolean(spec["liquid"], at + ".liquid")}
         if "uses" in spec:
-            uses = _mapping(spec["uses"], at + ".uses", {"hearth_fuel", "mechanical_fuel"})
+            uses = _mapping(spec["uses"], at + ".uses", MATERIAL_USES)
             canonical["uses"] = {use: _boolean(value, at + ".uses." + use) for use, value in uses.items()}
             if any(canonical["uses"].values()) and (not canonical["combustible"] or canonical["liquid"]):
                 _fail(at + ".uses", "fuel uses require combustible non-liquid material")
@@ -417,7 +446,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             _text(symbol, at, 48, _SYMBOL)
             if symbol in materials:
                 _fail(at, "import aliases cannot replace built-in or local materials")
-            _mapping(binding, at, {"definition_ref", "symbol"}, {"definition_ref", "symbol"})
+            _mapping(binding, at, *NODE_SHAPES["material_import"])
             reference = _text(binding["definition_ref"], at + ".definition_ref", 128)
             source_symbol = _text(binding["symbol"], at + ".symbol", 48, _SYMBOL)
             identity = reference + "#" + source_symbol
@@ -436,7 +465,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             result["material_imports"][symbol] = {"definition_ref": reference, "symbol": source_symbol}
             materials[symbol] = physical
     types = _mapping(definition["types"], "program.types")
-    if not 1 <= len(types) <= 8:
+    if not 1 <= len(types) <= PROGRAM_LIMITS["types"]:
         _fail("program.types", "must contain from 1 to 8 types")
     for symbol, spec in types.items():
         at = "program.types." + symbol
@@ -449,7 +478,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
         if "presentation" in spec:
             canonical["presentation"] = compile_presentation(spec["presentation"], canonical["fields"], at + ".presentation")
         if "exports" in spec:
-            canonical["exports"] = deepcopy(_list(spec["exports"], at + ".exports", 8))
+            canonical["exports"] = deepcopy(_list(spec["exports"], at + ".exports", PROGRAM_LIMITS["exports"]))
             exported_interface(canonical)
         if not isinstance(spec["body_material"], str) or spec["body_material"] not in materials:
             _fail(at + ".body_material", "must name an existing local, imported or builtin material")
@@ -457,19 +486,19 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             if not isinstance(spec["body_material"], str) or spec["body_material"] not in body_materials:
                 _fail(at + ".body_material", "must be " + _choices(body_materials))
             cost = _mapping(spec["cost"], at + ".cost", body_materials)
-            canonical["cost"] = {key: _integer(cost.get(key, 0), at + ".cost." + key, 0, 4) for key in body_materials}
+            canonical["cost"] = {key: _integer(cost.get(key, 0), at + ".cost." + key, 0, PROGRAM_LIMITS["piece_cost"]) for key in body_materials}
             if canonical["cost"][spec["body_material"]] < 1:
                 _fail(at + ".cost", "body_material must cost at least one real feedstock piece")
         else:
             cost = _mapping(spec["cost_u"], at + ".cost_u", materials)
-            if not cost or len(cost) > 8 or spec["body_material"] not in cost:
+            if not cost or len(cost) > PROGRAM_LIMITS["formation_materials"] or spec["body_material"] not in cost:
                 _fail(at + ".cost_u", "requires 1..8 actual materials including body_material")
             canonical["cost_u"] = {}
             for material, amount in cost.items():
                 if materials[material]["liquid"]:
                     _fail(at + ".cost_u." + material, "liquid cannot form a rigid body; use actual contained liquids")
-                canonical["cost_u"][material] = _integer(amount, at + ".cost_u." + material, 1, 200)
-            if sum(canonical["cost_u"].values()) > 200:
+                canonical["cost_u"][material] = _integer(amount, at + ".cost_u." + material, 1, PROGRAM_LIMITS["formation_u"])
+            if sum(canonical["cost_u"].values()) > PROGRAM_LIMITS["formation_u"]:
                 _fail(at + ".cost_u", "one formation consumes at most 200u")
         if "components" in spec:
             declared_components = _mapping(spec["components"], at + ".components", component_catalog or {})
@@ -483,14 +512,14 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
         ports = {}
         if "ports" in spec:
             _mapping(spec["ports"], at + ".ports")
-            if len(spec["ports"]) > 8:
+            if len(spec["ports"]) > PROGRAM_LIMITS["ports"]:
                 _fail(at + ".ports", "at most 8 read-only ports")
             for port, value in spec["ports"].items():
                 _text(port, at + ".ports", 48, _SYMBOL)
                 pp = at + ".ports." + port
-                _mapping(value, pp, {"label", "fields", "source"}, {"fields"})
+                _mapping(value, pp, *NODE_SHAPES["port"])
                 interface = _source_interface(value["source"], imported_interfaces, pp + ".source") if "source" in value else {}
-                fields_list = _list(value["fields"], at + ".ports." + port + ".fields", 8)
+                fields_list = _list(value["fields"], at + ".ports." + port + ".fields", PROGRAM_LIMITS["port_fields"])
                 if not fields_list or any(not isinstance(field, str) or field not in fact_catalog and field not in interface for field in fields_list) or len(set(fields_list)) != len(fields_list):
                     _fail(at + ".ports." + port, "fields require 1..8 distinct typed public facts")
                 ports[port] = {"fields": deepcopy(fields_list)}
@@ -501,9 +530,9 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             canonical["ports"] = ports
         fields = canonical["fields"]
         if "container_capacity" in spec:
-            canonical["container_capacity"] = _integer(spec["container_capacity"], at + ".container_capacity", 1, 200)
+            canonical["container_capacity"] = _integer(spec["container_capacity"], at + ".container_capacity", 1, PROGRAM_LIMITS["container_capacity"])
         if "mechanical" in spec:
-            mechanical = _mapping(spec["mechanical"], at + ".mechanical", {"role", "load_field", "speed_field"} | set(MECHANICAL_DEFAULTS), {"role"})
+            mechanical = _mapping(spec["mechanical"], at + ".mechanical", *NODE_SHAPES["mechanical"])
             if not isinstance(mechanical["role"], str) or mechanical["role"] not in {"source", "gear", "actuator"}:
                 _fail(at + ".mechanical.role", "must be source, gear or actuator")
             canonical["mechanical"] = {"role": mechanical["role"]}
@@ -519,24 +548,24 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
                         _fail(at + ".mechanical." + reference, f"referenced field min/max must stay within {minimum}..{maximum}")
                     canonical["mechanical"][reference] = field
         if "recorder" in spec:
-            recorder = _mapping(spec["recorder"], at + ".recorder", {"radius", "window_ticks"}, {"radius", "window_ticks"})
-            canonical["recorder"] = {"radius": _integer(recorder["radius"], at + ".recorder.radius", 0, 8),
-                                     "window_ticks": _integer(recorder["window_ticks"], at + ".recorder.window_ticks", 1, 3600)}
+            recorder = _mapping(spec["recorder"], at + ".recorder", *NODE_SHAPES["recorder"])
+            canonical["recorder"] = {"radius": _integer(recorder["radius"], at + ".recorder.radius", *RECORDER_RANGES["radius"]),
+                                     "window_ticks": _integer(recorder["window_ticks"], at + ".recorder.window_ticks", *RECORDER_RANGES["window_ticks"])}
         if "contract" in spec:
-            contract = _mapping(spec["contract"], at + ".contract", {"material", "quantity", "duration_ticks", "completion_when", "delivery_when"}, {"material", "quantity", "duration_ticks"})
+            contract = _mapping(spec["contract"], at + ".contract", *NODE_SHAPES["contract"])
             if not isinstance(contract["material"], str) or contract["material"] not in materials:
                 _fail(at + ".contract.material", "material is not declared or built in")
-            canonical["contract"] = {"material": contract["material"], "quantity": _integer(contract["quantity"], at + ".contract.quantity", 1, 100),
-                                     "duration_ticks": _integer(contract["duration_ticks"], at + ".contract.duration_ticks", 1, 3600)}
+            canonical["contract"] = {"material": contract["material"], "quantity": _integer(contract["quantity"], at + ".contract.quantity", *CONTRACT_RANGES["quantity"]),
+                                     "duration_ticks": _integer(contract["duration_ticks"], at + ".contract.duration_ticks", *CONTRACT_RANGES["duration_ticks"])}
             for condition in ("completion_when", "delivery_when"):
                 if condition in contract:
                     canonical["contract"][condition] = expression(contract[condition], fields, {}, materials, at + ".contract." + condition, "boolean", object_ids, ports)
         if "barrier" in spec:
             canonical["barrier"] = expression(spec["barrier"], fields, {}, materials, at + ".barrier", "boolean", object_ids, ports)
         rule_ids = set()
-        for index, rule in enumerate(_list(spec.get("rules", []), at + ".rules", 8)):
+        for index, rule in enumerate(_list(spec.get("rules", []), at + ".rules", PROGRAM_LIMITS["rules"])):
             rp = f"{at}.rules[{index}]"
-            _mapping(rule, rp, {"id", "phase", "when", "effects"}, {"id", "phase", "when", "effects"})
+            _mapping(rule, rp, *NODE_SHAPES["rule"])
             rid = _text(rule["id"], rp + ".id", 80, _KEY)
             if rid in rule_ids:
                 _fail(rp + ".id", "duplicate rule id within this type")
@@ -547,9 +576,9 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
                                        "when": expression(rule["when"], fields, {}, materials, rp + ".when", "boolean", object_ids, ports),
                                        "effects": effects(rule["effects"], fields, {}, materials, rp + ".effects", object_ids, ports)})
         action_ids = set()
-        for index, action in enumerate(_list(spec.get("actions", []), at + ".actions", 8)):
+        for index, action in enumerate(_list(spec.get("actions", []), at + ".actions", PROGRAM_LIMITS["actions"])):
             ap = f"{at}.actions[{index}]"
-            _mapping(action, ap, {"id", "label", "parameters", "effects", "when"}, {"id", "label", "effects"})
+            _mapping(action, ap, *NODE_SHAPES["action"])
             aid = _text(action["id"], ap + ".id", 80, _KEY)
             if aid in _RESERVED_ACTIONS:
                 _fail(ap + ".id", "reserved consent or world action; choose a distinct authored action id")
@@ -562,7 +591,7 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
             if "when" in action:
                 compiled["when"] = expression(action["when"], fields, params, materials, ap + ".when", "boolean", object_ids, ports)
             canonical["actions"].append(compiled)
-        if len(ports) + len(_literal_ids(canonical)) > 8:
+        if len(ports) + len(_literal_ids(canonical)) > PROGRAM_LIMITS["sources"]:
             _fail(at + ".ports", "literal objects and ports combined may use at most 8 sources per instance")
         if any(effect["op"] == "drive" for declaration in canonical["rules"] + canonical["actions"] for effect in declaration["effects"]) and canonical.get("mechanical", {}).get("role") != "source":
             _fail(at, "drive controls only this type's existing mechanical source")
@@ -570,9 +599,9 @@ def compile_program(definition, *, materials, body_materials, max_custom_materia
     if "contact_reactions" in definition:
         result["contact_reactions"] = []
         reaction_ids = set()
-        for index, rule in enumerate(_list(definition["contact_reactions"], "program.contact_reactions", 8)):
+        for index, rule in enumerate(_list(definition["contact_reactions"], "program.contact_reactions", PROGRAM_LIMITS["contact_reactions"])):
             at = f"program.contact_reactions[{index}]"
-            _mapping(rule, at, {"id", "when", "reaction", "activation"}, {"id", "when", "reaction"})
+            _mapping(rule, at, *NODE_SHAPES["contact_reaction"])
             activation = rule.get("activation", "material")
             if not isinstance(activation, str) or activation not in {"material", "installed"}:
                 _fail(at + ".activation", "must be material or installed")

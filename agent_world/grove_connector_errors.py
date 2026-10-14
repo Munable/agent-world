@@ -10,7 +10,7 @@ _MAX_WORLD_DETAILS_BYTES = 8192
 _MISSING = object()
 _READ_ARGUMENTS = frozenset({"entity_id", "candidate_id", "action", "definition_ref", "type_id",
     "source_definition_ref", "recipe", "content_id", "author", "author_name", "name", "key",
-    "x", "y", "radius", "limit", "before", "after", "inventory_after", "cursor"})
+    "x", "y", "radius", "limit", "before", "after", "inventory_after", "cursor", "topic", "node"})
 _REQUIRED_FACT_KEYS = frozenset({"minimum", "maximum", "below", "above", "equals", "maximum_radius",
                                "maximum_before_store", "maximum_before_build"})
 
@@ -185,6 +185,9 @@ def _program_diagnostic(value, *, compiler=False):
         safe["detail_omitted"] = value["detail_omitted"]
     if compiler and value.get("severity") in ("warning", "error"):
         safe["severity"] = value["severity"]
+    if (compiler and isinstance(value.get("schema_node"), str)
+            and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", value["schema_node"])):
+        safe["schema_node"] = value["schema_node"]
     for key in ("effect_index", "logical_step", "attempted_value", "min", "max", "inferred_min", "inferred_max"):
         if (type(value.get(key)) is int and abs(value[key]) <= 2**63 - 1
                 and (key not in ("effect_index", "logical_step") or value[key] >= 0)):
@@ -208,6 +211,63 @@ def _compiler_diagnostics(value):
     if type(value.get("omitted_count")) is int and 0 <= value["omitted_count"] <= 2**63 - 1:
         result["omitted_count"] = value["omitted_count"]
     return result
+
+
+def _effect_evidence_diagnostic(value):
+    if not isinstance(value, dict):
+        return None
+    code = value.get("code")
+    if not isinstance(code, str):
+        return None
+    fields = {"unknown_fact": "fact", "predicate_type_mismatch": "value",
+              "predicate_range_mismatch": "value", "predicate_operator_mismatch": "operator"}
+    if code == "definition_reference_mismatch":
+        return {"code": code, "path": "definition_ref"} if value.get("path") == "definition_ref" else None
+    index = value.get("predicate_index")
+    if (code not in fields or type(index) is not int or not 0 <= index < 8
+            or value.get("path") != f"predicates[{index}].{fields[code]}"
+            or _text(value.get("supplied_fact"), 80) is _MISSING or not value["supplied_fact"]):
+        return None
+    safe = {"code": code, "path": value["path"], "predicate_index": index,
+            "supplied_fact": value["supplied_fact"]}
+    if value.get("supplied_operator") in ("eq", "ne", "lt", "lte", "gt", "gte"):
+        safe["supplied_operator"] = value["supplied_operator"]
+    for key in ("expected_type", "supplied_type"):
+        if value.get(key) in ("integer", "boolean", "string"):
+            safe[key] = value[key]
+    operators = value.get("allowed_operators")
+    expected_operators = ["eq", "ne", "lt", "lte", "gt", "gte"] if safe.get("expected_type") == "integer" else ["eq", "ne"]
+    if isinstance(operators, list) and operators == expected_operators:
+        safe["allowed_operators"] = list(operators)
+    if safe.get("expected_type") == "integer" and all(type(value.get(key)) is int
+            and abs(value[key]) <= 2**63 - 1 for key in ("min", "max")) and value["min"] <= value["max"]:
+        safe.update(min=value["min"], max=value["max"])
+    return safe
+
+
+def _effect_fact_catalog(value):
+    if not isinstance(value, dict) or len(value) > 40:
+        return None
+    safe = {}
+    scopes = {"registered_current_fact", "explicit_authored_export", "stored_mechanical_output_not_live_motion"}
+    name_pattern = r"(?:intact|(?:barrier|mechanical|physical)(?:\.[a-z][a-z0-9_]{0,47}){1,3}|authored\.[a-z][a-z0-9_]{0,47})"
+    for name, row in value.items():
+        if (not isinstance(name, str) or len(name) > 80 or not re.fullmatch(name_pattern, name)
+                or not isinstance(row, dict) or row.get("type") not in ("integer", "boolean", "string")
+                or not isinstance(row.get("scope"), str) or row["scope"] not in scopes
+                or (name.startswith("authored.")) != (row["scope"] == "explicit_authored_export")
+                or row["scope"] == "stored_mechanical_output_not_live_motion" and not name.startswith("mechanical.")):
+            return None
+        item = {"type": row["type"], "scope": row["scope"]}
+        if _text(row.get("unit"), 16) is not _MISSING:
+            item["unit"] = row["unit"]
+        if "min" in row or "max" in row:
+            if (row["type"] != "integer" or not all(type(row.get(key)) is int
+                    and abs(row[key]) <= 2**63 - 1 for key in ("min", "max")) or row["min"] > row["max"]):
+                return None
+            item.update(min=row["min"], max=row["max"])
+        safe[name] = item
+    return safe
 
 
 def _include_bounded(result, key, value):
@@ -257,6 +317,8 @@ def public_world_error_details(value):
     _include_bounded(result, "recovery", _recovery(value.get("recovery")))
     _include_bounded(result, "program_diagnostic", _program_diagnostic(value.get("program_diagnostic")))
     _include_bounded(result, "diagnostics", _compiler_diagnostics(value.get("diagnostics")))
+    _include_bounded(result, "effect_evidence_diagnostic", _effect_evidence_diagnostic(value.get("effect_evidence_diagnostic")))
+    _include_bounded(result, "fact_catalog", _effect_fact_catalog(value.get("fact_catalog")))
     return result or None
 
 

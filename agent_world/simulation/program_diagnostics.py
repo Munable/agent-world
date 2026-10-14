@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from .declarations import has_event
+from .program_dependencies import dependency_items
 
 MAX_DIAGNOSTICS = 16
 MAX_DIAGNOSTIC_BYTES = 8192
@@ -135,7 +136,7 @@ def _advance_field(field, interval, declared, fields, issues, path):
     fields[field] = (valid_lo, valid_hi) if valid_lo <= valid_hi else declared[field]
 
 
-def program_diagnostics(definition):
+def program_diagnostics(definition, *, registry=None, initial_contexts=None, read_requests=None):
     """Advise on a canonical compiled definition with explicit bounded scope."""
     items, omitted = [], 0
 
@@ -193,11 +194,30 @@ def program_diagnostics(definition):
                         _interval(effect["enabled"], fields, params, issues, path+".enabled")
                 for issue in issues:
                     append({**location, **issue})
-    return {"items": items, "truncated": omitted > 0, "omitted_count": omitted,
+    result = {"items": items, "truncated": omitted > 0, "omitted_count": omitted,
             "safety_proven": False,
             "analysis_scope": "Local integer intervals and simple field guards only; warnings are not execution permission. "
                 "No reachability, termination, external-fact, resource, multi-object or complete multi-rule safety proof. "
                 "Frozen predicates and prior candidate writes are conservatively distinguished."}
+    dependencies = {"items": [], "truncated": False, "omitted_count": 0,
+        "static_only": True, "world_facts_checked": False, "execution_proven": False,
+        "analysis_scope": "Typed references, declared mechanisms and trusted construction initial contexts. "
+            "Provided means declared support, not a satisfied live condition. Deferred inputs need world evidence. "
+            "No branch reachability, material availability, visibility, event occurrence or outcome proof."}
+    result["dependency_analysis"] = dependencies
+    # Keep actionable missing capabilities before the ordinary declaration
+    # inventory, without sacrificing the existing interval warnings.
+    candidates = list(dependency_items(definition, registry=registry, initial_contexts=initial_contexts))
+    candidates.sort(key=lambda item: item["status"] != "missing")
+    for item in candidates:
+        if read_requests is not None:
+            item["read_requests"] = read_requests(item)
+        if len(dependencies["items"]) >= 24 or _bytes(result) + _bytes(item) > MAX_DIAGNOSTIC_BYTES - 128:
+            dependencies["omitted_count"] += 1
+        else:
+            dependencies["items"].append(item)
+    dependencies["truncated"] = dependencies["omitted_count"] > 0
+    return result
 
 
 def invalid_diagnostics(error):

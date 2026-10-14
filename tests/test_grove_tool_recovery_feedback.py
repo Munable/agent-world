@@ -156,7 +156,8 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
         error = result["structuredContent"]
         self.assertEqual(error["error"], "ObservationRequired")
         self.assertIn("未知", error["message"])
-        self.assertEqual(error["read_requests"][0], {"tool": "map_viewport", "arguments": {}})
+        self.assertEqual(error["read_requests"][0], {"function_id": "map.viewport", "tool": "map_viewport",
+            "native_tool": "grove_world_map_viewport", "arguments": {}})
         self.assertNotIn("observation_id", error)
         self.assertEqual(self.protected(), before)
         self.session.invoke.assert_not_awaited()
@@ -188,7 +189,8 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
                 error = result["structuredContent"]
                 self.assertTrue(result["isError"])
                 self.assertEqual(error["message"], "Actual rejection reason")
-                self.assertEqual(error["read_requests"], [{"tool": "grove_rule_catalog", "arguments": {"topic": "program"}}])
+                self.assertEqual(error["read_requests"], [{"function_id": "grove.rule_catalog", "tool": "grove_rule_catalog",
+                    "native_tool": "grove_world_grove_rule_catalog", "arguments": {"topic": "program"}}])
                 self.assertEqual(error["validation_hint"]["tool"], "grove_definition_validate")
                 self.assertNotIn("arguments", error["validation_hint"])
                 self.assertIn("resources", error["recovery_meaning"])
@@ -266,7 +268,8 @@ class GroveToolRecoveryFeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error["recovery"], "wait_then_retry_same_operation")
         self.assertIn("before commit", error["recovery_meaning"])
         self.assertNotIn("validation_hint", error)
-        self.assertEqual(error["read_requests"][0], {"tool": "map_viewport", "arguments": {}})
+        self.assertEqual(error["read_requests"][0], {"function_id": "map.viewport", "tool": "map_viewport",
+            "native_tool": "grove_world_map_viewport", "arguments": {}})
 
 
 if __name__ == "__main__":

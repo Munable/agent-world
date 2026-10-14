@@ -796,6 +796,89 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.execution['requests_used'], 0)
         self.assertEqual(self.session.host.await_count, 2)
 
+    async def test_read_only_verification_after_pause_or_reclaim_receives_original_task_evidence_without_control(self):
+        for reclaimed in (False, True):
+            with self.subTest(reclaimed=reclaimed):
+                if reclaimed:
+                    self.setUp()
+                self.session.entered = True
+                self.declare_agent_catalog({"map.viewport": {"access": "read"},
+                    "grove.move": {"access": "write", "input_schema": {"type": "object"}}})
+                controller = self.session.execution_controller
+                original = {"function": "grove.fabricate", "operation_id": "original-creation",
+                    "task_id": "original-task", "segment_id": "original-segment", "status": "confirmed",
+                    "commit_seq": 7, "action_entity_ids": ["original-object"], "confirmed_outcome": {
+                        "entity": {"id": "original-object", "name": "Created instance", "version": 77},
+                        "action_result": {"action": "fabricate", "costs": [{"material": "wood", "quantity_u": 3}]}}}
+                other = deepcopy(original) | {"task_id": "other-task", "operation_id": "other-creation"}
+                unconfirmed = deepcopy(original) | {"operation_id": "later-unconfirmed", "status": "committed"}
+                controller.state.update(task_id="original-task", segment_id="original-segment", goal="Create an instance",
+                    status="running", request_status="idle_confirmed", actions_count=1, max_actions=8,
+                    requests_used=1, max_requests=8, control_status="revoked", delegation_active=False,
+                    grant_operation_id="original-grant", receipts=[original, other, unconfirmed],
+                    host_request={"status": "idle_confirmed", "purpose": "execution", "generation": 1},
+                    effect_evidence_reads=[{"task_id": "original-task", "role_id": self.session.role_id,
+                        "function_id": "grove.effect_evidence", "observation_id": "past-effect-read",
+                        "entity_id": "original-object", "definition_ref": "original-ref", "segment_id": "original-segment",
+                        "observed_before_action_count": 1, "summary": {"observed_step": 12}}])
+                if reclaimed:
+                    controller.begin_reclaim()
+                    controller.state["request_status"] = "idle_confirmed"
+                    controller.state["host_request"]["status"] = "idle_confirmed"
+                    controller.record_reclaimed()
+                    controller.finish_reclaim()
+                else:
+                    controller.pause("The last segment paused.")
+                before = {key: deepcopy(controller.state[key]) for key in
+                    ("task_id", "segment_id", "receipts", "effect_evidence_reads", "actions_count", "requests_used", "status")}
+                self.session.current_turn_facts = AsyncMock(return_value={
+                    "player": {"id": self.session.role_id, "version": 3}, "entities": [],
+                    "discovery_projection": {"scope": "authorized_preflight_discovery"}})
+                self.session.invoke = AsyncMock()
+                controller.write = AsyncMock()
+                captured = []
+
+                async def native(method, path, body=None, **kwargs):
+                    self.assertTrue(path.endswith("/message"))
+                    facts = json.loads(body["parts"][1]["text"].split("\n", 1)[1])
+                    captured.append(facts)
+                    owner = self.session.active_native_request
+                    self.assertEqual(owner["purpose"], "explain")
+                    self.assertFalse(owner["world_write_authorized"])
+                    self.assertNotIn("task_id", owner)
+                    self.assertNotIn("segment_id", owner)
+                    with self.assertRaises(ConnectorError) as rejected:
+                        await self.session.tool_call("grove_move", {"dx": 1, "dy": 0,
+                            "observation_id": facts["observation_id"], "execution_segment_id": "original-segment"})
+                    self.assertEqual(rejected.exception.code, "ConversationReadOnly")
+                    return {"info": {"id": "verification-answer", "role": "assistant", "finish": "stop",
+                        "time": {"completed": 1}}, "parts": [{"type": "text", "text": "Original receipts remain evidence."}]}
+
+                self.session.host = AsyncMock(side_effect=native)
+                await self.session.turn("Read the result of my original task.")
+                facts = captured[0]
+                summary = facts["task_action_summary"]
+                self.assertEqual(summary["task_id"], "original-task")
+                self.assertEqual(summary["scope"], "current_task_retained_confirmed_actions")
+                self.assertEqual(summary["confirmed_count"], 1)
+                self.assertEqual(summary["groups"][0]["last_operation_id"], "original-creation")
+                self.assertEqual(summary["material_costs"], [{"material": "wood", "quantity_u": 3}])
+                self.assertEqual(summary["coverage"]["committed_unconfirmed_count"], 1)
+                self.assertNotIn("other-creation", json.dumps(summary))
+                self.assertNotIn("later-unconfirmed", json.dumps(summary))
+                self.assertIn("not current state or goal verification", summary["meaning"])
+                self.assertEqual(facts["effect_evidence_reads"][0]["task_id"], "original-task")
+                self.assertEqual(facts["effect_evidence_reads"][0]["scope"], "historical_delivered_effect_read_reference")
+                for key in ("execution_control", "execution_task", "execution_segment_id", "delegation", "grant_id"):
+                    self.assertNotIn(key, facts)
+                observation = self.session.agent_observation(facts["observation_id"])
+                self.assertNotIn("original-object", observation["versions"]["entity"])
+                self.assertEqual({key: controller.state[key] for key in before}, before)
+                self.assertFalse(controller.active)
+                self.assertFalse(controller.value("delegation_active"))
+                self.session.invoke.assert_not_awaited()
+                controller.write.assert_not_awaited()
+
     async def test_timed_out_ordinary_question_keeps_original_native_gate_closed(self):
         controller = self.session.execution_controller
         original = {key: controller.value(key) for key in ("task_id", "goal", "status", "request_status",
@@ -1543,6 +1626,9 @@ class GroveConnectorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.session.observations.sequence, 0)
             read = error["read_requests"][0]
             self.assertIn(read["tool"], {tool["name"] for tool in self.session.tools()})
+            self.assertEqual(read["function_id"], "map.viewport")
+            self.assertEqual(read["native_tool"], "grove_world_map_viewport")
+            self.assertEqual(read["arguments"], {})
             self.session.tool_call = original_call
             self.session.status = "thinking"
             self.session.invoke = AsyncMock(return_value={"ok": True, "read_only": True, "function_id": "map.viewport",

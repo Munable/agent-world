@@ -97,6 +97,84 @@ class GroveConnectorErrorContracts(unittest.TestCase):
         self.assertNotIn("diagnostics", result)
         self.assertLessEqual(len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()), 8192)
 
+    def test_effect_fact_diagnostic_and_public_type_catalog_survive_without_instance_values(self):
+        source = {"code": "unknown_fact", "effect_evidence_diagnostic": {
+            "code": "unknown_fact", "path": "predicates[1].fact", "predicate_index": 1,
+            "supplied_fact": "repeatedfield:wet_count", "supplied_operator": "gt",
+            "actual": "private-secret", "source_body": "private-secret"},
+            "fact_catalog": {"physical.wetness": {"type": "integer", "unit": "%",
+                "scope": "registered_current_fact", "actual": "private-secret"},
+                "authored.count": {"type": "integer", "min": 0, "max": 100,
+                    "scope": "explicit_authored_export", "default": "private-secret", "value": "private-secret"}},
+            "read_requests": [
+                {"function_id": "grove.definition_read", "arguments": {"definition_ref": "fixed-ref"}},
+                {"function_id": "grove.effect_evidence", "arguments": {"entity_id": "selected", "definition_ref": "fixed-ref"}}]}
+        original = deepcopy(source)
+        result = ConnectorError("RuleViolation", "Unknown registered fact.", 409, world_details=source).public_payload()["details"]
+        self.assertEqual(result["effect_evidence_diagnostic"], {"code": "unknown_fact", "path": "predicates[1].fact",
+            "predicate_index": 1, "supplied_fact": "repeatedfield:wet_count", "supplied_operator": "gt"})
+        self.assertEqual(result["fact_catalog"], {"physical.wetness": {"type": "integer", "unit": "%",
+            "scope": "registered_current_fact"}, "authored.count": {"type": "integer", "min": 0, "max": 100,
+            "scope": "explicit_authored_export"}})
+        self.assertEqual(result["read_requests"], source["read_requests"])
+        self.assertNotIn("private-secret", json.dumps(result))
+        self.assertEqual(source, original)
+
+    def test_effect_predicate_requirements_preserve_only_matching_paths_types_and_ranges(self):
+        diagnostic = {"code": "predicate_type_mismatch", "path": "predicates[0].value", "predicate_index": 0,
+            "supplied_fact": "authored.count", "supplied_operator": "gte", "expected_type": "integer",
+            "supplied_type": "boolean", "min": 0, "max": 100,
+            "allowed_operators": ["eq", "ne", "lt", "lte", "gt", "gte"], "value": "private-secret"}
+        result = public_world_error_details({"effect_evidence_diagnostic": diagnostic})
+        expected = deepcopy(diagnostic)
+        expected.pop("value")
+        self.assertEqual(result["effect_evidence_diagnostic"], expected)
+        for changed in ({"path": "predicates[1].value"}, {"path": "predicates[0].fact"},
+                        {"predicate_index": 8}, {"predicate_index": True}, {"code": "private-secret"},
+                        {"code": {"raw": "private-secret"}}):
+            with self.subTest(changed=changed):
+                self.assertIsNone(public_world_error_details({"effect_evidence_diagnostic": {**diagnostic, **changed}}))
+        mismatch = public_world_error_details({"effect_evidence_diagnostic": {
+            "code": "definition_reference_mismatch", "path": "definition_ref", "actual_ref": "private-secret"}})
+        self.assertEqual(mismatch, {"effect_evidence_diagnostic": {"code": "definition_reference_mismatch", "path": "definition_ref"}})
+
+    def test_effect_catalog_rejects_private_paths_invalid_declarations_and_unbounded_lists(self):
+        for catalog in (
+            {"state.program.private": {"type": "integer", "scope": "registered_current_fact"}},
+            {"authored.count": {"type": "integer", "scope": "registered_current_fact"}},
+            {"authored.count": {"type": "integer", "scope": "explicit_authored_export", "min": 2, "max": 1}},
+            {"authored.flag": {"type": "boolean", "scope": "explicit_authored_export", "min": 0, "max": 1}},
+            {"physical.wetness": {"type": "object", "scope": "registered_current_fact"}},
+            {"physical.wetness": {"type": "integer", "scope": {"raw": "private-secret"}}},
+            {"physical." + f"field_{index}": {"type": "integer", "scope": "registered_current_fact"} for index in range(41)},
+        ):
+            with self.subTest(catalog=catalog):
+                self.assertIsNone(public_world_error_details({"fact_catalog": catalog}))
+
+    def test_syntax_discovery_node_is_bounded_and_does_not_relay_raw_compiler_text(self):
+        source = {"diagnostics": {"items": [{"code": "invalid_definition", "severity": "error",
+            "path": "program.types.body.rules[0]", "schema_node": "rule", "message": "private-secret"}],
+            "safety_proven": False}, "read_requests": [
+                {"function_id": "grove.rule_catalog", "arguments": {"topic": "program_syntax", "node": "rule"}},
+                {"function_id": "grove.rule_catalog", "arguments": {"topic": "program_syntax", "node": {"raw": "private-secret"}}}]}
+        result = public_world_error_details(source)
+        self.assertEqual(result["diagnostics"]["items"][0]["schema_node"], "rule")
+        self.assertEqual(result["read_requests"], [source["read_requests"][0]])
+        self.assertNotIn("private-secret", json.dumps(result))
+        source["diagnostics"]["items"][0]["schema_node"] = "node includes private-secret"
+        self.assertNotIn("schema_node", public_world_error_details(source)["diagnostics"]["items"][0])
+
+    def test_large_type_catalog_cannot_expand_existing_eight_kibibyte_failure_details(self):
+        source = deepcopy(failure("declared_action_preconditions", "Blocked.", "accessible", entity_id="target",
+            actual=False, required=True, instruction="读" * 2048).details)
+        source["fact_catalog"] = {"physical." + "a" * 40 + f"_{index}": {
+            "type": "integer", "scope": "registered_current_fact", "unit": "u" * 16,
+            "min": -(2**63 - 1), "max": 2**63 - 1} for index in range(40)}
+        result = public_world_error_details(source)
+        self.assertNotIn("fact_catalog", result)
+        self.assertEqual(result["failure"]["recovery"]["instruction"], "读" * 2048)
+        self.assertLessEqual(len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()), 8192)
+
 
 if __name__ == "__main__":
     unittest.main()

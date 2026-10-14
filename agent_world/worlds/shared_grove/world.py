@@ -21,7 +21,7 @@ from . import action_contracts as ac
 from . import domains, scheduling
 from .definitions import COMBUSTION_CADENCE_TICKS, COMPONENT_FIELDS, CONSTRUCTIONS, REGISTRY, RULES_VERSION, registry_for, material_import
 
-WORLD_VERSION = 40
+WORLD_VERSION = 42
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 ID = {"type": "string", "minLength": 1, "maxLength": 128}
@@ -1411,7 +1411,7 @@ def _registered_entity_schema():
 
 def make_world(*, publication_budget=None):
     from .generation import generation_specs, generation_state_specs
-    from . import creative, discovery, client_projection
+    from . import creative, discovery, client_projection, effect_evidence
     from .publication import DEFAULT_BUDGET, bind_budget
     budget = DEFAULT_BUDGET if publication_budget is None else publication_budget
     def migrate_creation(ctx):
@@ -1433,6 +1433,10 @@ def make_world(*, publication_budget=None):
         schema["properties"]["delegation"] = creative.DELEGATION
         return schema
     definition = WorldDefinition("shared-grove","溪源",(
+        FunctionSpec("grove.effect_evidence", effect_evidence.make_handler(WORLD_VERSION),
+                     effect_evidence.ARGS, version=2, access="read", authorize=member,
+                     output_schema=effect_evidence.OUTPUT_SCHEMA,
+                     description="Read typed facts and retained effect evidence for one exact entity and its immutable definition. Optional predicates test selected current facts; after_step bounds saved transition evidence. Current truth, publication, creation and an action receipt are distinct from an observed later effect. Partial or absent history remains unknown; this read never certifies a natural-language goal."),
         FunctionSpec("grove.join",join,JOIN_ARGS,description="以当前身份进入或接续溪源。"),
         FunctionSpec("grove.move",move,with_delegation(MOVE_ARGS),authorize=member,description="本人或明确目标委托向四个方向之一走一格，读取失败与后果后接续。"),
         FunctionSpec("grove.inspect",inspect,INSPECT_ARGS,version=15,access="read",authorize=member,description="在同一次读取中返回本人状态、物件材料槽、完整子物件、自动规则当前条件与未知输入、公开部署资格、历史控制请求来源和实际机械读回、反应缺口与历史过程、编译定义的材料身份与反应系数，及显式行动和装入/绑定候选的只读载荷预览。当前条件不是执行证明，携带物件旧速度不是当前公开传动。可选action按实际声明动作名只展开该动作；candidate_id须与action同时给，按input.candidates或choices.items/others的实际id只展开一个完整候选。其他动作和候选明确标为未展开，不提供候选版本或预览；省略筛选则保持全部动作，未知动作或候选明确拒绝。系数与历史过程不证明本次已经消耗或生产。"),

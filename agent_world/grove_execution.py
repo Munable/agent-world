@@ -26,6 +26,9 @@ from .grove_connector_errors import ConnectorError
 
 MAX_ACTION_TARGETS = 4
 MAX_ACTION_SUMMARY_BYTES = 8 * 1024
+MAX_EFFECT_READS = 16
+MAX_EFFECT_READ_BYTES = 4 * 1024
+MAX_EFFECT_READ_LEDGER_BYTES = 16 * 1024
 RECEIPT_HISTORY_SCOPE = "formal_agent_writes"
 MAX_TASK_REQUESTS = 32
 DEFAULT_TASK_REQUESTS = 16
@@ -38,7 +41,7 @@ _PREPARATION_METADATA = {
     "response": {"observation_id", "base_observation_id", "snapshot_seq", "commit_seq", "observed_at",
                  "ok", "world_id", "function_id", "function_version", "clock", "world_tick", "cursor",
                  "next_cursor", "next", "after", "offset", "has_more", "execution_control", "execution_task",
-                 "task_action_summary"},
+                 "task_action_summary", "agent_context", "read_requests", "observed_step", "effect_evidence_reads"},
     "entity": {"version", "interaction_revision", "updated_at"},
     "creative": {"world_tick"}, "program": {"event_cursor"}, "process": {"last_tick", "observed_tick"},
     "mechanical_observation": {"observed_tick"}, "mechanical_values": {"observed_tick"},
@@ -67,7 +70,8 @@ def _preparation_read_signature(function: str, arguments: dict):
     """Identify a semantic query, independent of read handles and cursors."""
     if function not in {"map.viewport", "grove.inspect", "grove.rule_catalog",
             "grove.definition_read", "grove.definition_list", "grove.definition_validate",
-            "grove.fabrication_options", "grove.public_works", "grove.content_history"} or not isinstance(arguments, dict):
+            "grove.fabrication_options", "grove.public_works", "grove.content_history",
+            "grove.effect_evidence"} or not isinstance(arguments, dict):
         return None
     semantic = {key: value for key, value in arguments.items()
                 if key not in {"base_observation_id", "limit", "cursor", "after", "offset"}}
@@ -113,6 +117,56 @@ def _preparation_digest(value):
     except (TypeError, ValueError):
         return None
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _effect_read_record(arguments, delivered):
+    """Retain exact bounded public evidence sections, never an Agent verdict.
+
+    The full response was already delivered to the model. A large section is
+    omitted whole from this local reference, with explicit coverage; retaining
+    a smaller array must not turn it into an apparently complete result.
+    """
+    if not isinstance(arguments, dict) or not isinstance(delivered, dict) or delivered.get("ok") is False:
+        return None
+    observation_id = delivered.get("observation_id")
+    source = delivered.get("agent_observation")
+    value = delivered.get("result", delivered)
+    if (not isinstance(observation_id, str) or not 1 <= len(observation_id) <= 100 or
+            not isinstance(source, dict) or source.get("source_function") != "grove.effect_evidence" or
+            source.get("source_kind") != "query" or source.get("scope") != "client_presented" or
+            not isinstance(source.get("world_instance"), str) or not source["world_instance"] or
+            not isinstance(value, dict) or value.get("ok") is False or
+            not isinstance(value.get("entity_id"), str) or not isinstance(value.get("definition_ref"), str) or
+            value.get("entity_id") != arguments.get("entity_id") or
+            value.get("definition_ref") != arguments.get("definition_ref")):
+        return None
+    digest = _preparation_digest(value)
+    if digest is None:
+        return None
+    record = {"observation_id": observation_id, "function_id": "grove.effect_evidence",
+        "world_instance": source.get("world_instance"), "role_id": source.get("role_id"),
+        "entity_id": value["entity_id"], "definition_ref": value["definition_ref"],
+        "snapshot_seq": delivered.get("snapshot_seq"),
+        "result_sha256": digest, "summary": {key: deepcopy(value[key]) for key in
+            ("entity_id", "definition_ref", "type_id", "entity_version", "observed_step") if key in value},
+        "summary_omitted_sections": [],
+        "meaning": "Actually delivered public read at its observed_step, with exact requested identity. "
+            "Current predicates and historical effect witnesses retain their separate meanings; "
+            "omitted sections are unknown here. This is not goal verification or a write binding."}
+    # Prefer predicate results and the history's declared coverage to catalogs
+    # or full outcomes. Kept branches stay exact, including false/unknown.
+    sections = [("query", {key: deepcopy(arguments[key]) for key in
+        ("entity_id", "definition_ref", "predicates", "after_step", "outcome_before") if key in arguments}),
+        *[(key, value[key]) for key in ("predicates", "history", "stages", "process") if key in value]]
+    for key, section in sections:
+        container = record if key == "query" else record["summary"]
+        container[key] = deepcopy(section)
+        if len(json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")) > MAX_EFFECT_READ_BYTES - 512:
+            container.pop(key)
+            record["summary_omitted_sections"].append(key)
+    record["summary_omitted_sections"].extend(key for key in value if key not in
+        {"entity_id", "definition_ref", "type_id", "entity_version", "observed_step", "predicates", "history", "stages", "process"})
+    return record
 
 
 def _preparation_fingerprints(function: str, query_key: str, delivered: dict):
@@ -280,6 +334,7 @@ class ExecutionController:
             "grant_action_offset": 0, "pending_grant_action_offset": None, "grant_operation_id": None,
             "readback_actions_count": None, "no_progress_segments": 0,
             "preparation_count": 0, "preparation_fingerprints": {},
+            "effect_evidence_reads": [],
             "host_request": {"status": "idle", "purpose": None, "generation": 0},
             "persistence_failure": None,
             "segment_id": "", "checkpoint": None, "goal_result": None, "segments": [], "phase_timings": [],
@@ -569,6 +624,7 @@ class ExecutionController:
             requests_used=0, max_requests=request_budget, request_status="idle", stop_reason="", resume_allowed=False,
             grant_action_offset=0, pending_grant_action_offset=None, grant_operation_id=None,
             readback_actions_count=None, no_progress_segments=0, preparation_count=0, preparation_fingerprints={},
+            effect_evidence_reads=[],
             segment_id="", checkpoint=None, goal_result=None, segments=[], phase_timings=[], settlement=None,
             context_result_reference=None, context_reference_attempted=False, world_results=[],
             history_recovery={"requested": compact, "status": "not_started", "attempts": 0},
@@ -747,6 +803,47 @@ class ExecutionController:
             self.state.update(preparation_fingerprints=previous_fingerprints, preparation_count=previous_count)
             raise
         return True
+
+    def effect_read_delivered(self, arguments: dict, *, owner: dict, delivered: dict) -> bool:
+        """Bind a real read to its admitted task; model reports provide no facts.
+
+        A restarted host preserves these historical references, but observation
+        bundles are still owned by the SDK and cannot be rebuilt from them.
+        """
+        self.ensure_persistence_ready()
+        if (not isinstance(owner, dict) or owner.get("purpose") != "execution" or
+                not self.state.get("task_id") or not self.state.get("segment_id") or
+                owner.get("task_id") != self.state["task_id"] or
+                owner.get("segment_id") != self.state["segment_id"] or
+                not self.active or self.state.get("status") != "running" or
+                self.stopped or self.reclaiming or self.state.get("checkpoint") or self.unresolved):
+            return False
+        record = _effect_read_record(arguments, delivered)
+        if record is None or record.get("role_id") != self.role_id:
+            return False
+        record.update(task_id=self.state["task_id"], segment_id=self.state["segment_id"],
+            observed_before_action_count=self.state["actions_count"])
+        previous = self.state.get("effect_evidence_reads", [])
+        if any(row.get("observation_id") == record["observation_id"] for row in previous if isinstance(row, dict)):
+            return False
+        records = [*previous, record][-MAX_EFFECT_READS:]
+        while len(records) > 1 and len(json.dumps(records, ensure_ascii=False, indent=2).encode("utf-8")) > MAX_EFFECT_READ_LEDGER_BYTES:
+            records.pop(0)
+        self.state["effect_evidence_reads"] = records
+        try:
+            self._persist()
+        except Exception:
+            self.state["effect_evidence_reads"] = previous
+            raise
+        return True
+
+    def effect_read_references(self):
+        """Small current-task index; kept observations remain past reads."""
+        return [{key: deepcopy(row[key]) for key in
+            ("observation_id", "entity_id", "definition_ref", "segment_id", "observed_before_action_count") if key in row}
+            | {"observed_step": row.get("summary", {}).get("observed_step")}
+            for row in self.state.get("effect_evidence_reads", [])
+            if isinstance(row, dict) and row.get("task_id") == self.state.get("task_id")]
 
     def phase(self, phase: str, started: float, *, status="confirmed", error=None):
         value = {"phase": phase, "request": self.state.get("requests_used", 0),
@@ -1390,6 +1487,14 @@ class ExecutionController:
         evidence = arguments["evidence_operation_ids"]
         if any(operation not in confirmed for operation in evidence):
             raise ConnectorError("UnconfirmedEvidence", "报告引用必须属于本任务实际已确认的原操作。", 409)
+        read_ids = arguments.get("evidence_observation_ids", [])
+        retained_reads = {row["observation_id"]: row for row in self.state.get("effect_evidence_reads", [])
+            if isinstance(row, dict) and isinstance(row.get("observation_id"), str) and
+            row.get("task_id") == self.state["task_id"] and row.get("role_id") == self.role_id and
+            row.get("function_id") == "grove.effect_evidence"}
+        if any(identity not in retained_reads for identity in read_ids):
+            raise ConnectorError("UnconfirmedEvidenceRead", "观察引用必须是本任务实际已交付且仍保留的公开效果读取；旧任务、普通观察或未知标识不能作为这份读证据。", 409)
+        evidence_reads = [deepcopy(retained_reads[identity]) for identity in read_ids]
         if arguments["status"] == "completed":
             action_evidence = any(confirmed[operation].get("function") in AGENT_WRITE_FUNCTIONS for operation in evidence)
             if not action_evidence and self.state.get("preparation_count", 0) <= 0:
@@ -1412,15 +1517,21 @@ class ExecutionController:
             if not self.state.get("readback_actual") or self.state.get("readback_actions_count") != self.state["actions_count"] or self.state.get("control_status") not in {"active", "exhausted"}:
                 raise ConnectorError("ReadbackRequired", "最新行动结果尚未核对，不能提交完成声明。", 409)
         world_results = self.world_results(self.state.get("readback"))
+        for record in evidence_reads:
+            record["newer_task_actions_since_read"] = max(0,
+                self.state["actions_count"] - record.get("observed_before_action_count", 0))
+            record["scope"] = "current_task_delivered_public_effect_read"
         previous_report = {key: deepcopy(self.state.get(key)) for key in ("checkpoint", "progress", "goal_result", "status", "world_results")}
         self.state["world_results"] = world_results
         self.state["checkpoint"] = deepcopy(arguments)
         self.state["progress"] = {"summary": arguments["summary"], "next_intent": arguments["next_intent"],
-            "evidence": [deepcopy(confirmed[operation]) for operation in evidence]}
+            "evidence": [deepcopy(confirmed[operation]) for operation in evidence],
+            "evidence_observation_ids": deepcopy(read_ids), "evidence_reads": deepcopy(evidence_reads)}
         if arguments["status"] == "completed":
             self.state["goal_result"] = {"status": "completed", "summary": arguments["summary"],
                 "completion_source": "agent_claim", "verification": {"status": "unverified", "scope": "natural_language_goal"},
                 "evidence_operation_ids": evidence, "actions_count": self.state["actions_count"],
+                "evidence_observation_ids": deepcopy(read_ids), "evidence_reads": deepcopy(evidence_reads),
                 "readback_actual": True, "world_results": deepcopy(world_results),
                 "source": "Agent completion claim after confirmed operations or delivered preparation reads and fresh world readback; no natural-language adjudication"}
             self.state["status"] = "completed"
@@ -1442,4 +1553,6 @@ class ExecutionController:
             "report_meaning": "summary is the Agent's claim; execution_readback is the latest authorized read. Use its observed tick and values in your final response. Future effects remain conditional, not observed completion."}
         if arguments["status"] == "completed":
             result["goal_result"] = deepcopy(self.state["goal_result"])
+        else:
+            result["evidence_reads"] = deepcopy(evidence_reads)
         return result

@@ -17,7 +17,7 @@ READ_FUNCTIONS = frozenset({
     "map.viewport", "grove.inspect", "grove.handbook", "grove.content_history",
     "grove.rule_catalog", "grove.definition_read", "grove.definition_list",
     "grove.definition_validate", "grove.fabrication_options", "grove.build_options",
-    "grove.control_status", "grove.public_works",
+    "grove.control_status", "grove.public_works", "grove.effect_evidence",
 })
 WRITE_FUNCTIONS = frozenset({
     "grove.join", "grove.move", "grove.interact", "grove.build", "grove.generation_context",
